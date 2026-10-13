@@ -14,7 +14,7 @@ moxen config set projectPolicy existing
 moxen config set workspaceMode folder
 moxen config set openMode browser
 moxen config set threadEnvMode local
-moxen config set provider codex
+moxen config set provider opencode/openai
 moxen config set model gpt-6-astra
 moxen config set speedMode fast
 moxen config set thinkingEffort xhigh

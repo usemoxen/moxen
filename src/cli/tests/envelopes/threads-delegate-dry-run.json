@@ -21,7 +21,7 @@
       "title": "Existing project",
       "workspaceRoot": "<root>",
       "defaultModelSelection": {
-        "instanceId": "codex",
+        "instanceId": "opencode",
         "model": "gpt-5.6-sol"
       },
       "createdAt": "<time>",
@@ -45,7 +45,7 @@
       "projectId": "project-existing",
       "title": "Maybe later",
       "modelSelection": {
-        "instanceId": "codex",
+        "instanceId": "opencode",
         "model": "gpt-5.6-sol"
       },
       "runtimeMode": "full-access",
@@ -65,7 +65,7 @@
         "attachments": []
       },
       "modelSelection": {
-        "instanceId": "codex",
+        "instanceId": "opencode",
         "model": "gpt-5.6-sol"
       },
       "titleSeed": "Maybe later",

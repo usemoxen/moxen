@@ -53,6 +53,27 @@ async function started(): Promise<{ driver: ClaudeDriver; transport: FakeTranspo
   return { driver, transport, events };
 }
 
+describe("claude auto-compact window", () => {
+  it("is handed to the session as Claude Code's own setting when the user set one, and left out when not", async () => {
+    const withWindow = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: withWindow, settings: { autoCompactWindow: 300_000 } }).startSession(START));
+    expect(withWindow.created[0]!.options.settings).toEqual({ autoCompactWindow: 300_000 });
+
+    const without = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: without }).startSession(START));
+    expect(without.created[0]!.options.settings).toBeUndefined();
+  });
+
+  it("sits beside the ultracode flag the effort choice sets, in the one settings option", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport, settings: { autoCompactWindow: 500_000 } });
+    await Effect.runPromise(
+      driver.startSession({ ...START, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5", options: [{ id: "effort", value: "ultracode" }] } }),
+    );
+    expect(transport.created[0]!.options.settings).toEqual({ ultracode: true, autoCompactWindow: 500_000 });
+  });
+});
+
 describe("claude streaming output", () => {
   it("asks for token-level events, summarized thinking, prompt suggestions and markdown previews", async () => {
     const { transport } = await started();

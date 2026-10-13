@@ -8,6 +8,7 @@ import { runSidebarStability } from "./render-check/scenarios/sidebarStability.j
 import { runPermissions } from "./render-check/scenarios/permissions.js";
 import { runDiffPanel } from "./render-check/scenarios/diffPanel.js";
 import { runCommandPalette } from "./render-check/scenarios/commandPalette.js";
+import { runThreadSearch } from "./render-check/scenarios/threadSearch.js";
 import { runMessageActions } from "./render-check/scenarios/messageActions.js";
 import { runTimelineAndAnswers } from "./render-check/scenarios/timelineAndAnswers.js";
 import { runWorkFoldGuards } from "./render-check/scenarios/workFoldGuards.js";
@@ -27,7 +28,7 @@ import { runImageTokens } from "./render-check/scenarios/imageTokens.js";
 import { runSettingsAndGit } from "./render-check/scenarios/settingsAndGit.js";
 import { runQueueAndSide } from "./render-check/scenarios/queueAndSide.js";
 import { runSidebarTree } from "./render-check/scenarios/sidebarTree.js";
-import { registerSyntaxParsers } from "./syntax/register.js";
+import { registerSyntaxParsers } from "../core/syntax/register.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -59,6 +60,7 @@ await runModelPicker(setup);
 await runSidebarStability(setup);
 await runPermissions(setup);
 await runDiffPanel(setup);
+await runThreadSearch(setup);
 await runCommandPalette(setup);
 await runMessageActions(setup);
 await runTimelineAndAnswers(setup);

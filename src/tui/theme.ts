@@ -111,7 +111,6 @@ export const STATUS_COLOR: Record<string, string> = {
  */
 const PROVIDER_COLOR_BY_KEYWORD: readonly [keyword: string, color: string][] = [
   ["claude", "#DE7356"],
-  ["codex", "#74AA9C"],
   ["openai", "#74AA9C"],
   ["opencode", "#8B5CF6"],
 ];

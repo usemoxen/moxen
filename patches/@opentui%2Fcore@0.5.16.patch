@@ -1,0 +1,40 @@
+diff --git a/index.bun.js b/index.bun.js
+index 2f632a0997900d97e166b78e8ffbc3e44ead2b12..8b6989603c16bbbb9e7e71e495b95b34f67b045c 100644
+--- a/index.bun.js
++++ b/index.bun.js
+@@ -6851,12 +6851,13 @@ class LineNumberRenderable extends Renderable2 {
+       return;
+     const sources = getLineSources(this.target, Math.trunc(this.target.scrollY) + start, end - start);
+     const gutterWidth = this.gutter.visible ? this.gutter.width : 0;
+-    const contentWidth = this.width - gutterWidth;
++    const contentX = this.x + gutterWidth;
++    const contentWidth = Math.max(this.width - gutterWidth, this.target.x + this.target.width - contentX);
+     for (let i = 0;i < sources.length; i++) {
+       const logicalLine = sources[i];
+       const lineBg = this._lineColorsContent.get(logicalLine);
+       if (lineBg) {
+-        buffer.fillRect(this.x + gutterWidth, y + start + i, contentWidth, 1, lineBg);
++        buffer.fillRect(contentX, y + start + i, contentWidth, 1, lineBg);
+       }
+     }
+   }
+diff --git a/index.node.js b/index.node.js
+index 3a2f5cc86abcb3d6ca5f0aa060f2bce9776d0a74..a643751ea458d6fbba0008f36dfbb4982ad8b180 100644
+--- a/index.node.js
++++ b/index.node.js
+@@ -6850,12 +6850,13 @@ class LineNumberRenderable extends Renderable2 {
+       return;
+     const sources = getLineSources(this.target, Math.trunc(this.target.scrollY) + start, end - start);
+     const gutterWidth = this.gutter.visible ? this.gutter.width : 0;
+-    const contentWidth = this.width - gutterWidth;
++    const contentX = this.x + gutterWidth;
++    const contentWidth = Math.max(this.width - gutterWidth, this.target.x + this.target.width - contentX);
+     for (let i = 0;i < sources.length; i++) {
+       const logicalLine = sources[i];
+       const lineBg = this._lineColorsContent.get(logicalLine);
+       if (lineBg) {
+-        buffer.fillRect(this.x + gutterWidth, y + start + i, contentWidth, 1, lineBg);
++        buffer.fillRect(contentX, y + start + i, contentWidth, 1, lineBg);
+       }
+     }
+   }

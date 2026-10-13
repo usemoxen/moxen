@@ -16,7 +16,7 @@ import { normalizeConfig } from "../../core/config.js";
 import { CliError } from "../../core/errors.js";
 import type { ProviderRuntimeEvent } from "../../core/providers/spi.js";
 import type { TurnDriver, TurnOutcome } from "../../core/threads/execute.js";
-import { createThread, readThread } from "../../core/threads/threads.js";
+import { createThread, readThread, updateThreadMeta } from "../../core/threads/threads.js";
 import { DirectConnection } from "../connection.js";
 import { openClient } from "../client.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
@@ -131,7 +131,7 @@ describe("DirectConnection parked questions", () => {
   async function askingHarness() {
     const driver = new QuestionDriver();
     const harness = await testHarness({
-      drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver },
+      drivers: { claude: () => driver, opencode: () => driver },
     });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
     const workspaceRoot = await realpath(harness.work);
@@ -213,7 +213,7 @@ describe("DirectConnection dispatch", () => {
         threadId: "thread-1",
         projectId: ensured.project.id,
         title: "Hello",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: "main",
@@ -270,14 +270,14 @@ describe("DirectConnection dispatch", () => {
         id: "thread-1",
         projectId: ensured.project.id,
         title: "T",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
 
       await connection.dispatch({ type: "thread.meta.update", threadId: "thread-1", title: "Renamed" });
       await connection.dispatch({
         type: "thread.model-selection.set",
         threadId: "thread-1",
-        modelSelection: { instanceId: "grok", model: "grok-build" },
+        modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" },
       });
       await connection.dispatch({ type: "thread.runtime-mode.set", threadId: "thread-1", runtimeMode: "auto" });
       await connection.dispatch({ type: "thread.snooze", threadId: "thread-1", snoozedUntil: "2030-01-01T00:00:00.000Z" });
@@ -286,7 +286,7 @@ describe("DirectConnection dispatch", () => {
       await connection.dispatch({ type: "thread.unsnooze", threadId: "thread-1" });
       const read = await readThread(harness.store, "thread-1");
       expect(read.thread.title).toBe("Renamed");
-      expect(read.thread.modelSelection).toMatchObject({ instanceId: "grok" });
+      expect(read.thread.modelSelection).toMatchObject({ instanceId: "claudeAgent" });
       expect(read.thread.runtimeMode).toBe("auto");
       expect(read.thread.settledAt).toBeNull();
       expect(read.thread.snoozedUntil).toBeNull();
@@ -350,13 +350,61 @@ describe("DirectConnection subscriptions", () => {
         id: "thread-shell",
         projectId: ensured.project.id,
         title: "Shell",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
       await waitFor("thread row", async () =>
         frames.some((frame) => JSON.stringify(frame).includes("thread-shell")),
       );
     } finally {
       unsubscribe();
+      await connection.close();
+    }
+  });
+
+  it("sends a thread frame when something is written, and none while it sits idle", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      shellPollMs: 20,
+      threadPollMs: 20,
+    });
+    const snapshots: string[] = [];
+    const shellSnapshots: string[] = [];
+    const workspaceRoot = await realpath(harness.work);
+    const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+    await createThread(harness.store, {
+      id: "thread-idle",
+      projectId: ensured.project.id,
+      title: "Before",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+    });
+    const stopThread = connection.subscribeThread(
+      "thread-idle",
+      {},
+      (item) => {
+        if ((item as { kind?: string }).kind === "snapshot") snapshots.push(JSON.stringify(item));
+      },
+      () => undefined,
+    );
+    const stopShell = connection.subscribeShell(
+      {},
+      (item) => {
+        if ((item as { kind?: string }).kind === "snapshot") shellSnapshots.push(JSON.stringify(item));
+      },
+      () => undefined,
+    );
+    try {
+      await waitFor("first snapshots", async () => snapshots.length >= 1 && shellSnapshots.length >= 1);
+      // Many polls with nothing written: nothing new is sent.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect([snapshots.length, shellSnapshots.length]).toEqual([1, 1]);
+      // A write — a rename touches only the thread's record — reaches both.
+      await updateThreadMeta(harness.store, "thread-idle", { title: "After" });
+      await waitFor("renamed", async () => snapshots.some((frame) => frame.includes("After")) && shellSnapshots.some((frame) => frame.includes("After")));
+    } finally {
+      stopThread();
+      stopShell();
       await connection.close();
     }
   });
@@ -409,6 +457,49 @@ describe("DirectConnection subscriptions", () => {
         );
         const frame = frames.find((entry) => JSON.stringify(entry).includes("thread.message-sent"));
         expect(JSON.stringify(frame)).toContain("hel");
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("replays what a running turn streamed before the thread was opened", async () => {
+    // Switching to another thread drops the subscription, but the turn keeps
+    // streaming. Coming back must show the text so far, not just what
+    // arrives after the new subscription.
+    const harness = await testHarness();
+    const transport = new FakeOpencodeTransport();
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { opencode: () => new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } }) },
+      shellPollMs: 30,
+      threadPollMs: 30,
+    });
+    const frames: unknown[] = [];
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await createThread(harness.store, {
+        id: "thread-away",
+        projectId: ensured.project.id,
+        title: "Away",
+        modelSelection: { instanceId: "opencode/anthropic", model: "claude-opus-4-6" },
+      });
+      await connection.dispatch({ type: "thread.turn.start", threadId: "thread-away", message: { text: "hi" } });
+      await waitFor("prompt on the wire", async () => transport.servers[0]?.callsTo("session.prompt").length === 1);
+      // Streamed while nobody has the thread open.
+      await transport.servers[0]?.push({
+        type: "message.part.updated",
+        properties: { sessionID: "opencode-session-1", part: { id: "p-1", type: "text", text: "written while away" } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const unsubscribe = connection.subscribeThread("thread-away", {}, (item) => frames.push(item), () => undefined);
+      try {
+        await waitFor("replayed text", async () =>
+          frames.some((frame) => JSON.stringify(frame).includes("thread.message-sent") && JSON.stringify(frame).includes("written while away")),
+        );
       } finally {
         unsubscribe();
       }
@@ -532,7 +623,7 @@ class RecordingDriver implements TurnDriver {
 
 describe("DirectConnection model and session continuity", () => {
   async function recordingHarness(driver: RecordingDriver) {
-    const harness = await testHarness({ drivers: { codex: () => driver } });
+    const harness = await testHarness({ drivers: { opencode: () => driver } });
     const workspaceRoot = await realpath(harness.work);
     const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
     return { harness, projectId: ensured.project.id };
@@ -556,13 +647,13 @@ describe("DirectConnection model and session continuity", () => {
         threadId: "thread-m",
         projectId,
         title: "Models",
-        modelSelection: { instanceId: "codex", model: "model-a" },
+        modelSelection: { instanceId: "opencode", model: "model-a" },
       });
       await runTurn(connection, harness, "one");
       await connection.dispatch({
         type: "thread.model-selection.set",
         threadId: "thread-m",
-        modelSelection: { instanceId: "codex", model: "model-b" },
+        modelSelection: { instanceId: "opencode", model: "model-b" },
       });
       await runTurn(connection, harness, "two");
 
@@ -576,6 +667,56 @@ describe("DirectConnection model and session continuity", () => {
     }
   });
 
+  it("reads a native subagent after a restart by resuming the thread's OpenCode session", async () => {
+    // OpenCode keeps each subagent as a child session that only a driver holding the parent's can read.
+    class HistoryDriver extends RecordingDriver {
+      readonly subagentHistory = async (threadId: string, agentId: string) =>
+        (await Effect.runPromise(this.hasSession(threadId))) && agentId === "ses_child"
+          ? [
+              { kind: "prompt" as const, id: "u1", at: "2026-09-25T10:00:01.000Z", text: "Map auth" },
+              { kind: "text" as const, id: "t1", at: "2026-09-25T10:00:04.000Z", text: "Auth lives in src/auth.ts" },
+            ]
+          : null;
+    }
+    const first = new HistoryDriver("ses_parent");
+    const harness = await testHarness({ drivers: { opencode: () => first } });
+    const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot: await realpath(harness.work) });
+    const before = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      await before.dispatch({
+        type: "thread.create",
+        threadId: "thread-m",
+        projectId: ensured.project.id,
+        title: "Subagents",
+        modelSelection: { instanceId: "opencode", model: "anthropic/claude-opus-5" },
+      });
+      await before.dispatch({ type: "thread.turn.start", threadId: "thread-m", message: { text: "map the repo" } });
+      await waitFor("the turn", async () => {
+        const read = await readThread(harness.store, "thread-m");
+        return read.turns.length > 0 && read.turns.every((turn) => turn.status === "completed");
+      });
+    } finally {
+      await before.close();
+    }
+
+    // A restart: a new process, a driver with no live session.
+    const second = new HistoryDriver("ses_parent");
+    const after = new DirectConnection({ storeRoot: harness.root, drivers: { opencode: () => second } });
+    try {
+      const transcript = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_child" });
+      expect(second.starts).toHaveLength(1);
+      expect(second.starts[0]?.resumeCursor).toBe("ses_parent");
+      expect(transcript.available).toBe(true);
+      expect(transcript.messages.map((message) => message.text)).toEqual(["Map auth", "Auth lives in src/auth.ts"]);
+
+      // A subagent the thread does not own is still refused by the driver, not invented.
+      const other = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_elsewhere" });
+      expect(other.available).toBe(false);
+    } finally {
+      await after.close();
+    }
+  });
+
   it("hands the next process the provider session the last one ran", async () => {
     const first = new RecordingDriver("native-1");
     const { harness, projectId } = await recordingHarness(first);
@@ -586,7 +727,7 @@ describe("DirectConnection model and session continuity", () => {
         threadId: "thread-m",
         projectId,
         title: "Resume",
-        modelSelection: { instanceId: "codex", model: "model-a" },
+        modelSelection: { instanceId: "opencode", model: "model-a" },
       });
       await runTurn(before, harness, "remember 7");
       expect(first.starts[0]?.resumeCursor).toBeUndefined();
@@ -596,7 +737,7 @@ describe("DirectConnection model and session continuity", () => {
 
     // A new connection with a new driver is what reopening the TUI gets.
     const second = new RecordingDriver("native-2");
-    const after = new DirectConnection({ storeRoot: harness.root, drivers: { codex: () => second } });
+    const after = new DirectConnection({ storeRoot: harness.root, drivers: { opencode: () => second } });
     try {
       await runTurn(after, harness, "what was it?");
       expect(second.starts).toEqual([expect.objectContaining({ threadId: "thread-m", resumeCursor: "native-1" })]);
@@ -631,7 +772,7 @@ describe("DirectConnection model and session continuity", () => {
         threadId: "thread-m",
         projectId,
         title: "MCP",
-        modelSelection: { instanceId: "codex", model: "model-a" },
+        modelSelection: { instanceId: "opencode", model: "model-a" },
       });
       await runTurn(connection, harness, "use the tools");
       const servers = (driver.starts[0] as unknown as { mcpServers: Array<Record<string, unknown>> }).mcpServers;
@@ -723,7 +864,7 @@ describe("DirectConnection capabilities (formerly CLI-only)", () => {
   async function connected(options: { driver?: TurnDriver; config?: Record<string, unknown> } = {}) {
     const driver = options.driver;
     const harness = await testHarness(
-      driver ? { drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } } : {},
+      driver ? { drivers: { claude: () => driver, opencode: () => driver } } : {},
     );
     const connection = new DirectConnection({
       storeRoot: harness.root,
@@ -919,7 +1060,7 @@ describe("DirectConnection capabilities (formerly CLI-only)", () => {
 
 describe("DirectConnection steering", () => {
   async function running(driver: GateDriver) {
-    const harness = await testHarness({ drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } });
+    const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     const first = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Long job" });
     await waitFor("the run to reach the driver", async () => driver.prompts.length === 1);
@@ -968,7 +1109,7 @@ describe("DirectConnection steering", () => {
     const elsewhereDriver = new GateDriver({ steerable: true });
     const elsewhere = new DirectConnection({
       storeRoot: harness.root,
-      drivers: { claude: () => elsewhereDriver, codex: () => elsewhereDriver, grok: () => elsewhereDriver, opencode: () => elsewhereDriver },
+      drivers: { claude: () => elsewhereDriver, opencode: () => elsewhereDriver },
       config: async () => harness.config,
     });
     try {
@@ -990,8 +1131,8 @@ describe("DirectConnection steering", () => {
 });
 
 describe("DirectConnection revert", () => {
-  async function threeTurns(driver: RecordingDriver, instanceId = "codex") {
-    const harness = await testHarness({ drivers: { codex: () => driver, grok: () => driver, claude: () => driver } });
+  async function threeTurns(driver: RecordingDriver, instanceId = "opencode") {
+    const harness = await testHarness({ drivers: { opencode: () => driver, claude: () => driver } });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
     const { threadId } = await connection.dispatch({
@@ -1021,7 +1162,7 @@ describe("DirectConnection revert", () => {
       });
 
       const reverted = await connection.dispatch({ type: "thread.conversation.revert", threadId, turnCount: 1 });
-      expect(reverted).toMatchObject({ keptTurns: 1, removedTurns: 2, providers: ["codex"], accepted: true });
+      expect(reverted).toMatchObject({ keptTurns: 1, removedTurns: 2, providers: ["opencode"], accepted: true });
       expect(driver.rollbacks).toEqual([{ threadId, numTurns: 3 }]);
 
       const kept = turns[0]!.id;
@@ -1064,7 +1205,7 @@ describe("DirectConnection revert", () => {
 
   it("refuses while a turn is in progress", async () => {
     const driver = new GateDriver();
-    const harness = await testHarness({ drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } });
+    const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     try {
       const first = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Long job" });
@@ -1072,20 +1213,6 @@ describe("DirectConnection revert", () => {
         connection.dispatch({ type: "thread.conversation.revert", threadId: first.threadId, turnCount: 0 }),
       ).rejects.toMatchObject({ code: "THREAD_BUSY" });
       await driver.release();
-    } finally {
-      await connection.close();
-    }
-  });
-
-  it("refuses up front when a provider cannot forget, changing nothing", async () => {
-    const driver = new RecordingDriver("native-g");
-    const { harness, connection, threadId } = await threeTurns(driver, "grok");
-    try {
-      await expect(connection.dispatch({ type: "thread.conversation.revert", threadId, turnCount: 1 })).rejects.toMatchObject({
-        code: "REVERT_UNSUPPORTED",
-      });
-      expect(driver.rollbacks).toEqual([]);
-      expect(await harness.store.readTurns(threadId)).toHaveLength(3);
     } finally {
       await connection.close();
     }
@@ -1099,7 +1226,7 @@ describe("DirectConnection revert", () => {
     const record = (await harness.store.readThreadRecord(threadId))!;
     await harness.store.writeThreadRecord({ ...record, providerSessions: {} });
     const fresh = new RecordingDriver("native-2");
-    const later = new DirectConnection({ storeRoot: harness.root, drivers: { codex: () => fresh }, config: async () => harness.config });
+    const later = new DirectConnection({ storeRoot: harness.root, drivers: { opencode: () => fresh }, config: async () => harness.config });
     try {
       const reverted = await later.dispatch({ type: "thread.conversation.revert", threadId, turnCount: 2 });
       expect(reverted).toMatchObject({ removedTurns: 1, providers: [] });
@@ -1122,7 +1249,7 @@ describe("DirectConnection images", () => {
 
   it("saves them with the message and sends them to the provider — queued turns included", async () => {
     const driver = new GateDriver();
-    const harness = await testHarness({ drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } });
+    const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     try {
       const first = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Busy" });
@@ -1234,6 +1361,52 @@ describe("DirectConnection settings", () => {
     }
   });
 
+  it("runs a provider's own updater and returns what it reported", async () => {
+    const harness = await testHarness();
+    const asked: string[] = [];
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      updateProvider: async (provider) => {
+        asked.push(provider);
+        return { provider, before: "2.1.280", after: "2.1.292", updated: true, output: "Updated" };
+      },
+    });
+    try {
+      const result = await connection.dispatch({ type: "provider.update", provider: "claude" });
+      expect(result).toEqual({ provider: "claude", before: "2.1.280", after: "2.1.292", updated: true, output: "Updated" });
+      expect(asked).toEqual(["claude"]);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("reads the newest provider versions through the configured Claude binary, and asks nothing when the check is off", async () => {
+    const harness = await testHarness();
+    const asked: Array<string | undefined> = [];
+    const latest = async (binary?: string) => {
+      asked.push(binary);
+      return { claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null } };
+    };
+    let config = { ...harness.config, providers: { claude: { binaryPath: "/opt/claude" } } };
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, latestVersions: latest, config: async () => config });
+    try {
+      expect(await connection.query({ type: "provider.latest" })).toEqual({
+        enabled: true,
+        claude: { latest: "2.1.293", channel: "latest" },
+        opencode: { latest: "2.0.24", channel: null },
+      });
+      expect(asked).toEqual(["/opt/claude"]);
+
+      config = { ...config, updates: { checkLatest: false } } as typeof config;
+      const off = await connection.query({ type: "provider.latest" });
+      expect(off).toEqual({ enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null } });
+      expect(asked).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("refuses a bad value without writing anything", async () => {
     const harness = await testHarness();
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
@@ -1299,7 +1472,7 @@ describe("DirectConnection git and forge", () => {
         threadId: "git-thread",
         projectId: ensured.project.id,
         title: "Git",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
       const overview = await connection.query({ type: "git.overview", threadId: "git-thread" });
       expect(overview.isRepository).toBe(true);
@@ -1323,7 +1496,7 @@ describe("DirectConnection git and forge", () => {
         threadId: "forge-thread",
         projectId: ensured.project.id,
         title: "Forge",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
       const detection = await connection.query({ type: "forge.detect", threadId: "forge-thread" });
       expect(detection.kind).toBeNull();
@@ -1360,7 +1533,7 @@ describe("DirectConnection continue in a new thread", () => {
         threadId: "old-thread",
         projectId: ensured.project.id,
         title: "Auth audit",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
         runtimeMode: "auto-accept-edits",
       });
       const scheduledFor = new Date(Date.now() + 3_600_000).toISOString();
@@ -1374,7 +1547,7 @@ describe("DirectConnection continue in a new thread", () => {
         runtimeMode: string;
       };
       expect(inspected.projectId).toBe(ensured.project.id);
-      expect(inspected.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-5.4" });
+      expect(inspected.modelSelection).toMatchObject({ instanceId: "opencode", model: "gpt-5.4" });
       expect(inspected.runtimeMode).toBe("auto-accept-edits");
 
       // The handoff is the new thread's first message, waiting for its time.
@@ -1414,11 +1587,11 @@ describe("DirectConnection side questions", () => {
         threadId: "btw-thread",
         projectId: ensured.project.id,
         title: "Btw",
-        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
       await expect(
         connection.dispatch({ type: "thread.side-question", threadId: "btw-thread", question: "what did we decide?" }),
-      ).rejects.toThrow(/\/btw needs a provider .* codex cannot/);
+      ).rejects.toThrow(/\/btw needs a provider .* opencode cannot/);
       const read = await connection.query({ type: "thread.read", threadId: "btw-thread" });
       expect((read.thread as unknown as { messages: unknown[] }).messages).toEqual([]);
     } finally {

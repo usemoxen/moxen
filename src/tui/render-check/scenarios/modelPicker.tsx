@@ -4,6 +4,7 @@ import { testRender } from "@opentui/react/test-utils";
 
 import type { ClientApi } from "../../../server/api.js";
 import { App, client } from "../fixtures.js";
+import { SIDEBAR_WIDTH } from "../../app/constants.js";
 import { fail } from "../helpers.js";
 
 /** Footer model segment in the thread view: the "Claude Opus 5" label that
@@ -103,8 +104,28 @@ export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
     if (!emptyFrame.includes("Claude Opus 5")) fail("empty-workspace picker missing the enabled model");
     if (emptyFrame.includes("Grok")) fail("empty-workspace picker offered a disabled provider");
     if (emptyFrame.includes("Claude Old")) fail("empty-workspace picker offered a hidden model");
-    await act(async () => empty.mockInput.pressEscape());
+    // No model yet: the creating view keeps the monitoring lattice. Picking
+    // Opus eases its scene in — half-block raster, no lattice dots left.
+    if (creatingFrame.includes("▀")) fail("the creating view painted a model scene with no model picked");
+    const pickerRows = emptyFrame.split("\n");
+    const opusRow = pickerRows.findIndex((line) => line.includes("Claude Opus 5"));
+    await act(async () => {
+      await empty.mockMouse.click(pickerRows[opusRow]?.indexOf("Claude Opus 5") ?? 50, opusRow);
+    });
+    // The scene blooms in over 1.4 s; wait it out before reading the field.
+    await new Promise((resolve) => setTimeout(resolve, 1700));
     await empty.flush();
+    const sceneFrame = empty.captureCharFrame();
+    console.log("--- creating view with Opus picked (scene) ---");
+    console.log(sceneFrame);
+    if (!sceneFrame.includes("Claude Opus 5")) fail("picking Opus in the creating view did not take");
+    if (!sceneFrame.includes("▀")) fail("the creating view did not paint the Opus scene");
+    // The sidebar keeps its lattice by design; only the creating pane changes.
+    const creatingPane = sceneFrame
+      .split("\n")
+      .map((line) => line.slice(SIDEBAR_WIDTH))
+      .join("\n");
+    if (creatingPane.includes("·       ·       ·")) fail("the monitoring lattice stayed under the Opus scene");
     // The palette acts on a thread; the creating view has none yet.
     await act(async () => empty.mockInput.pressKey("p", { ctrl: true }));
     await empty.flush();

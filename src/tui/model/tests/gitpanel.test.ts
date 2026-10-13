@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
-import { ago, checksGlance, handOffTarget, openRequestPrompt } from "../gitpanel.js";
+import { ago, baseChoices, checksGlance, handOffTarget, openRequestPrompt, readOpenRequestPrompt, resolveBase } from "../gitpanel.js";
 
 function provider(instanceId: string, driver: string, extra: Partial<ProviderSummary> = {}): ProviderSummary {
   return {
@@ -22,6 +22,54 @@ function provider(instanceId: string, driver: string, extra: Partial<ProviderSum
     ...extra,
   };
 }
+
+describe("readOpenRequestPrompt", () => {
+  it("reads back every prompt it sends, and nothing that only starts like one", () => {
+    for (const ask of [
+      { kind: "github", draft: false, branch: "test-opencode-v1", base: "opencode-v2", cold: false },
+      { kind: "github", draft: true, branch: null, base: "main", cold: true },
+      { kind: "gitlab", draft: true, branch: "feat/x", base: "develop", cold: false },
+      // Sent before the base was asked for.
+      { kind: "github", draft: false, branch: "opencode-v2", base: null, cold: false },
+    ] as const) {
+      expect(readOpenRequestPrompt(openRequestPrompt(ask))).toEqual(ask);
+    }
+    expect(readOpenRequestPrompt("Open a pull request for `main`.\nAnd make it quick.")).toBeNull();
+    expect(readOpenRequestPrompt("open a PR please")).toBeNull();
+  });
+});
+
+describe("base choices", () => {
+  const branch = (name: string, remote = false) => ({ name, current: false, remote, upstream: null, ahead: null, behind: null, lastCommitDate: null, lastCommitSubject: null });
+  const overview = {
+    isRepository: true,
+    root: "/repo",
+    status: { branch: "test-opencode-v1", detached: false, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 },
+    branches: [branch("opencode-v2"), branch("test-opencode-v1"), branch("main"), branch("origin/main", true)],
+    commits: [],
+    branch: "test-opencode-v1",
+    defaultBranch: "main",
+  };
+
+  it("offers the local branches but the proposed one, the default first", () => {
+    expect(baseChoices(overview)).toEqual(["main", "opencode-v2"]);
+    expect(baseChoices(null)).toEqual([]);
+  });
+
+  it("keeps a pick while it is still a choice, else falls back to the default", () => {
+    expect(resolveBase(null, ["main", "opencode-v2"])).toBe("main");
+    expect(resolveBase("opencode-v2", ["main", "opencode-v2"])).toBe("opencode-v2");
+    expect(resolveBase("gone", ["main", "opencode-v2"])).toBe("main");
+    expect(resolveBase(null, [])).toBeNull();
+  });
+
+  it("names the base in the prompt and passes it to the forge CLI", () => {
+    const github = openRequestPrompt({ kind: "github", draft: false, branch: "test-opencode-v1", base: "opencode-v2", cold: false });
+    expect(github).toContain("Open a pull request for `test-opencode-v1` into `opencode-v2`.");
+    expect(github).toContain("`gh pr create --base opencode-v2`");
+    expect(openRequestPrompt({ kind: "gitlab", draft: true, branch: "x", base: "develop", cold: false })).toContain("`glab mr create --target-branch develop --draft`");
+  });
+});
 
 describe("openRequestPrompt", () => {
   it("asks for a draft through the forge's own CLI, and tells a cold agent to read the branch first", () => {

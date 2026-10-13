@@ -8,7 +8,7 @@ function thread(overrides: Partial<StoredThread> = {}): StoredThread {
     id: "thread-1",
     projectId: "project-1",
     title: "Thread",
-    modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
     runtimeMode: "full-access",
     interactionMode: "default",
     env: { mode: "local", path: "/repo", branch: "main" },
@@ -51,7 +51,7 @@ describe("toThreadEnvelope", () => {
   it("projects catalog rows without ledgers", () => {
     const projected = toThreadEnvelope(thread(), [turn()]);
     expect(projected.latestTurn).toMatchObject({ turnId: "turn-1", state: "completed" });
-    expect(projected.session).toMatchObject({ status: "idle", providerName: "codex", activeTurnId: null });
+    expect(projected.session).toMatchObject({ status: "idle", providerName: "opencode", activeTurnId: null });
     expect(projected.branch).toBe("main");
     expect(projected.worktreePath).toBeNull();
     expect(projected.proposedPlans).toEqual([]);

@@ -8,6 +8,7 @@ import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { SidePanelFrame, SideTabBar } from "../../features/sidepanel/sidepanel.js";
 import { describeSettings, DEFAULTS_FOR_RENDER_CHECK } from "./settingsFixture.js";
 import type { ForgeDetection, ForgeRequest, ForgeRequestStatus, GitOverview, MergeStrategy } from "../../../server/api.js";
+import { baseChoices, resolveBase } from "../../model/gitpanel.js";
 import type { SideTab } from "../../model/sidepanel.js";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import { fail } from "../helpers.js";
@@ -43,6 +44,7 @@ const PROVIDERS: ProviderSummary[] = [
 
 async function runSettings(): Promise<void> {
   const written: Array<{ key: string; value: string }> = [];
+  const updated: string[] = [];
   const snapshot = {
     path: "/home/dev/.config/moxen/config.json",
     exists: true,
@@ -56,6 +58,15 @@ async function runSettings(): Promise<void> {
         saving={null}
         error={null}
         onSet={(key, value) => written.push({ key, value })}
+        // Claude Code older than the floor, OpenCode current: both statuses show.
+        versions={{
+          claude: { ok: false, installed: true, version: "2.1.280 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
+          opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
+        }}
+        // What the registry says: Claude Code at 2.1.293, OpenCode at 2.0.24 (the installed one is behind it).
+        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null } }}
+        updating={new Set()}
+        onUpdate={(provider) => updated.push(provider)}
         providers={PROVIDERS}
         screenWidth={80}
         screenHeight={34}
@@ -81,6 +92,11 @@ async function runSettings(): Promise<void> {
     if (!frame.includes(expected)) fail(`settings page is missing "${expected}"`);
   }
   if (frame.includes("Tool permissions")) fail("settings page shows another section's settings under General");
+  // The first setting sits on its tab's row, not one below it (the tab and the card are side by side).
+  const generalRows = frame.split("\n");
+  const tabRow = generalRows.findIndex((row) => /^\s*▌?\s*General\s/.test(row) && row.includes("│"));
+  const firstRow = generalRows.findIndex((row) => row.includes("Unknown folders"));
+  if (tabRow < 0 || firstRow !== tabRow) fail(`the first setting is on row ${firstRow}, its tab on row ${tabRow}: they should line up`);
 
   // Tab moves to the next section: Turns.
   await act(async () => setup.mockInput.pressTab());
@@ -100,6 +116,18 @@ async function runSettings(): Promise<void> {
   console.log("--- settings page, duration choices ---");
   console.log(ttl);
   if (!ttl.includes("5 minutes") || !ttl.includes("● 2 minutes")) fail("a duration setting did not open its presets with the current one marked");
+  // The choices view has a way back that can be clicked, not only esc.
+  const ttlRows = ttl.split("\n");
+  const backRow = ttlRows.findIndex((row) => row.includes("← back"));
+  if (backRow < 0) fail("the choices view has no back button");
+  await act(async () => setup.mockMouse.click(ttlRows[backRow]!.indexOf("← back") + 1, backRow));
+  await setup.flush();
+  const backed = setup.captureCharFrame();
+  if (backed.includes("● 2 minutes") || !backed.includes("Idle session lifetime")) fail("clicking back did not return to the settings list");
+  const reopened = backed.split("\n");
+  const reopenRow = reopened.findIndex((row) => row.includes("Idle session lifetime"));
+  await act(async () => setup.mockMouse.click(reopened[reopenRow]!.indexOf("Idle") + 1, reopenRow));
+  await setup.flush();
   await act(async () => setup.mockInput.pressArrow("down"));
   await act(async () => setup.mockInput.pressEnter());
   await setup.flush();
@@ -130,6 +158,35 @@ async function runSettings(): Promise<void> {
   console.log(claude);
   if (!claude.includes("Claude executable")) fail("the Claude Code tab does not show its settings");
   if (!claude.includes("next start")) fail("settings page does not mark restart-only settings");
+  // The update card: the version, where it stands against the floor, and the button.
+  if (!claude.includes("2.1.280") || !claude.includes("Older than the 2.1.292")) fail("the Claude Code tab does not say its install is older than the floor");
+  if (!claude.includes("[ Update ]") || !claude.includes("claude update")) fail("the Claude Code tab has no update button naming what it runs");
+  await act(async () => setup.mockInput.pressKey("u"));
+  await setup.flush();
+  if (updated.join() !== "claude") fail(`pressing u on the Claude Code tab updated ${JSON.stringify(updated)}`);
+
+  // The last row is below the fold in a page this short: move down to it.
+  for (let step = 0; step < 8; step += 1) await act(async () => setup.mockInput.pressArrow("down"));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+  await setup.flush();
+  const claudeEnd = setup.captureCharFrame();
+  console.log("--- settings page, Claude Code tab, last row ---");
+  console.log(claudeEnd);
+  if (!claudeEnd.includes("Auto-compact window") || !claudeEnd.includes("100,000")) fail("the Claude Code tab does not offer the auto-compact window");
+
+  // OpenCode has its own pane now, with the same card.
+  await act(async () => setup.mockInput.pressTab());
+  await setup.flush();
+  const opencode = setup.captureCharFrame();
+  console.log("--- settings page, OpenCode tab ---");
+  console.log(opencode);
+  if (!opencode.includes("OpenCode executable")) fail("the OpenCode tab does not show its settings");
+  if (!opencode.includes("2.0.22")) fail("the OpenCode tab does not show its installed version");
+  // Behind the registry's newest: it says so, and the button names the version it goes to.
+  if (!opencode.includes("2.0.24 is available")) fail("the OpenCode tab does not say a newer version is available");
+  if (!opencode.includes("[ Update to 2.0.24 ]")) fail("the OpenCode update button does not name the version it updates to");
+  await act(async () => setup.mockInput.pressTab({ shift: true }));
+  await setup.flush();
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
   const rows = setup.captureCharFrame().split("\n");
@@ -148,6 +205,7 @@ const OVERVIEW: GitOverview = {
   isRepository: true,
   root: "/work/moxen",
   branch: "feature/git-panel",
+  defaultBranch: "main",
   status: { branch: "feature/git-panel", detached: false, staged: 1, unstaged: 3, untracked: 2, conflicted: 0 },
   branches: [
     {
@@ -169,6 +227,16 @@ const OVERVIEW: GitOverview = {
       behind: 0,
       lastCommitDate: "2026-09-24T09:00:00.000Z",
       lastCommitSubject: "Re-layer into core",
+    },
+    {
+      name: "opencode-v2",
+      current: false,
+      remote: false,
+      upstream: null,
+      ahead: null,
+      behind: null,
+      lastCommitDate: "2026-09-23T09:00:00.000Z",
+      lastCommitSubject: "Move the OpenCode driver to v2",
     },
   ],
   commits: [
@@ -279,6 +347,7 @@ async function runGit(): Promise<void> {
   const merged: { number: number; strategy: MergeStrategy }[] = [];
   const opened: string[] = [];
   const asked: boolean[] = [];
+  const picked: string[] = [];
   let setStatus: ((next: ForgeRequestStatus | null) => void) | null = null;
   let setOpener: ((next: RequestOpener) => void) | null = null;
   function Harness() {
@@ -286,6 +355,8 @@ async function runGit(): Promise<void> {
     const [status, changeStatus] = useState<ForgeRequestStatus | null>(STATUS);
     const [opener, changeOpener] = useState<RequestOpener>({ label: "the agent" });
     const [commit, setCommit] = useState<OpenCommit | null>(null);
+    const [pickedBase, setPickedBase] = useState<string | null>(null);
+    const choices = baseChoices(OVERVIEW);
     setStatus = changeStatus;
     setOpener = changeOpener;
     const scrollRef = useRef<ScrollBoxRenderable | null>(null);
@@ -307,6 +378,12 @@ async function runGit(): Promise<void> {
             selectedBranch={null}
             now={now}
             opener={opener}
+            base={resolveBase(pickedBase, choices)}
+            baseChoices={choices}
+            onPickBase={(next) => {
+              picked.push(next);
+              setPickedBase(next);
+            }}
             onSelectBranch={() => {}}
             onRefresh={() => {}}
             onAgentOpen={(draft) => asked.push(draft)}
@@ -403,7 +480,22 @@ async function runGit(): Promise<void> {
   console.log("--- side panel: git tab, no PR yet ---");
   console.log(none);
   if (!none.includes("No PR for feature/git-panel yet.")) fail("git tab does not say the branch has no PR");
-  const noneRows = none.split("\n");
+  // Where it merges is asked, the repository's default first: pick another.
+  const baseRows = none.split("\n");
+  const intoRow = baseRows.findIndex((row) => row.includes("into main ▾"));
+  if (intoRow < 0) fail("git tab does not show the base branch, defaulting to main");
+  await act(async () => setup.mockMouse.click(baseRows[intoRow]!.indexOf("main"), intoRow));
+  await setup.flush();
+  const choosing = setup.captureCharFrame();
+  console.log("--- side panel: git tab, choosing the base ---");
+  console.log(choosing);
+  const choiceRows = choosing.split("\n");
+  const v2Row = choiceRows.findIndex((row) => row.includes("  opencode-v2") && !row.includes("Move the"));
+  if (v2Row < 0 || !choosing.includes("● main")) fail("git tab does not list the bases to choose from");
+  await act(async () => setup.mockMouse.click(choiceRows[v2Row]!.indexOf("opencode-v2"), v2Row));
+  await setup.flush();
+  if (picked.join(",") !== "opencode-v2" || !setup.captureCharFrame().includes("into opencode-v2 ▾")) fail(`picking a base sent ${JSON.stringify(picked)}`);
+  const noneRows = setup.captureCharFrame().split("\n");
   const draftRow = noneRows.findIndex((row) => row.includes("open a draft PR") && row.includes("Have the agent"));
   if (draftRow < 0) fail("git tab does not offer to have the agent open a draft PR");
   await act(async () => setup.mockMouse.click(noneRows[draftRow]!.indexOf("Have") + 1, draftRow));
@@ -423,6 +515,9 @@ async function runGit(): Promise<void> {
           <GitTab
             overview={OVERVIEW}
             forge={{ ...FORGE, kind: null, installed: false, authenticated: false, reason: "gh is not installed." }}
+            base="main"
+            baseChoices={["main"]}
+            onPickBase={() => {}}
             requests={[]}
             status={null}
             commitChecks={{}}

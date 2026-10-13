@@ -4,7 +4,7 @@ import { useRef } from "react";
 
 import { useHover } from "../../hooks/useHover.js";
 import { clockTime } from "../../model/turns.js";
-import { queuedSummary, type QueuedMessage } from "../../model/thread.js";
+import { queuedLabel, queuedSummary, type QueuedMessage } from "../../model/thread.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 
 /** Rows shown at once; a longer queue scrolls inside the panel, like Tasks. */
@@ -67,11 +67,11 @@ export function QueuedPanel({
     const extra = item.attachments > 0 ? ` +${item.attachments} image${item.attachments === 1 ? "" : "s"}` : "";
     // Cancel is 3 cells, the when-label and its gap follow the text.
     const textWidth = Math.max(4, rowWidth - 4 - when.length - 2 - extra.length - 3);
-    const firstLine = item.text.split("\n")[0]?.trim() ?? "";
+    const firstLine = queuedLabel(item);
     return (
       <box key={item.turnId} style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${index + 1}. `}</text>
-        <text fg={COLOR.text} bg={SURFACE.panel}>{truncate(firstLine || "(image only)", textWidth)}</text>
+        <text fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel}>{truncate(firstLine || "(image only)", textWidth)}</text>
         <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{extra}</text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         <text fg={item.reason === "usage-hold" ? COLOR.warn : COLOR.faint} bg={SURFACE.panel} selectable={false}>

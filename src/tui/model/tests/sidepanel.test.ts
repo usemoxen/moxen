@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityEnvelope, MessageEnvelope, ThreadEnvelope } from "../../../core/types.js";
-import { agentThreads, contextShares, effectiveContextBreakdown, estimateContextBreakdown, nativeSubagents, planUsageGauges } from "../sidepanel.js";
+import { agentThreads, contextShares, effectiveContextBreakdown, estimateContextBreakdown, nativeSubagents, planUsageGauges, subagentPreview } from "../sidepanel.js";
 import type { ContextUsage } from "../thread.js";
 
 function thread(id: string, extra: Partial<ThreadEnvelope> = {}): ThreadEnvelope {
@@ -290,5 +290,12 @@ describe("effectiveContextBreakdown", () => {
     const estimated = effectiveContextBreakdown(live, usage({ usedTokens: 500, maxTokens: 1000 }), [message("m1", "user", "hello world")], []);
     expect(estimated?.estimated).toBe(true);
     expect(estimated?.categories.length).toBeGreaterThan(0);
+  });
+});
+
+describe("subagentPreview", () => {
+  it("strips markdown marks so a report reads as plain prose", () => {
+    const report = "I have everything I need. Here is the factual report.\n\n---\n\n# Moxen-chat Electron app: process model\n\n- **IPC** surface, `frame` transform\n> quoted";
+    expect(subagentPreview(report)).toBe("I have everything I need. Here is the factual report. Moxen-chat Electron app: process model IPC surface, frame transform quoted");
   });
 });

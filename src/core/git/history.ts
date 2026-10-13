@@ -68,6 +68,11 @@ export interface GitOverview {
   readonly commits: readonly GitCommit[];
   /** The branch `commits` was read from — the checked-out one unless asked otherwise. */
   readonly branch: string | null;
+  /**
+   * The branch work merges into by default: the remote's HEAD (`origin/HEAD`
+   * → `main`), else a local `main` or `master`. Null when there is no telling.
+   */
+  readonly defaultBranch: string | null;
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string | null> {
@@ -298,14 +303,21 @@ export interface GitOverviewOptions {
 export async function readOverview(cwd: string, options: GitOverviewOptions = {}): Promise<GitOverview> {
   const root = await gitRoot(cwd);
   if (root === null) {
-    return { isRepository: false, root: null, status: null, branches: [], commits: [], branch: null };
+    return { isRepository: false, root: null, status: null, branches: [], commits: [], branch: null, defaultBranch: null };
   }
   if (options.autoFetch === true) await fetch(cwd);
-  const [status, branches] = await Promise.all([readStatus(cwd), readBranches(cwd)]);
+  const [status, branches, remoteHead] = await Promise.all([
+    readStatus(cwd),
+    readBranches(cwd),
+    git(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]),
+  ]);
+  const fromRemote = remoteHead?.trim().replace(/^origin\//u, "") || null;
+  const local = (name: string) => branches.some((entry) => !entry.remote && entry.name === name);
+  const defaultBranch = fromRemote ?? (local("main") ? "main" : local("master") ? "master" : null);
   const branch = options.branch ?? status?.branch ?? null;
   const commits = await readCommits(cwd, {
     ...(branch ? { branch } : {}),
     ...(options.limit !== undefined ? { limit: options.limit } : {}),
   });
-  return { isRepository: true, root, status, branches, commits, branch };
+  return { isRepository: true, root, status, branches, commits, branch, defaultBranch };
 }

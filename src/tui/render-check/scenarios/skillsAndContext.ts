@@ -4,14 +4,15 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import { emitLiveRef } from "../fixtures.js";
 import { fail } from "../helpers.js";
 
-/** The `$` skill mention popup, and the context-usage footer segment /
-    card triggered by a live provider-thread.updated event. */
+/** The skill popup (a `/` that starts the message, for Claude), and the
+    context-usage footer segment / card triggered by a live
+    provider-thread.updated event. */
 export async function runSkillsAndContext(setup: TestRendererSetup): Promise<void> {
-  // Focus the composer and type a `$` mention: the skill picker floats above
-  // the composer, live-filtered by the query typed after `$`.
+  // Focus the composer and start the message with `/` (Claude's trigger): the
+  // skill picker floats above the composer, live-filtered by what follows.
   await act(async () => setup.mockMouse.click(60, 19));
   await setup.flush();
-  await act(async () => setup.mockInput.pressKey("$"));
+  await act(async () => setup.mockInput.pressKey("/"));
   await setup.flush();
   console.log("--- skill picker (unfiltered — names must stay full-width even with long descriptions) ---");
   const unfiltered = setup.captureCharFrame();
@@ -19,11 +20,14 @@ export async function runSkillsAndContext(setup: TestRendererSetup): Promise<voi
   // Skills come from the provider's own inventory (`skills.list`).
   if (!unfiltered.includes("xlsx")) fail("skill picker is empty: the provider's inventory never reached it");
   if (unfiltered.includes("agent-only-skill")) fail("skill picker offers an agent-only skill");
+  // The picker names each skill the way it will be typed: /name, whatever the provider.
+  if (!unfiltered.includes("/xlsx")) fail("skill picker does not show skills as /name");
+  if (unfiltered.includes("$xlsx")) fail("skill picker still shows a $ prefix");
   for (const char of ["p", "d"]) {
     await act(async () => setup.mockInput.pressKey(char));
     await setup.flush();
   }
-  console.log("--- skill picker (filtered on $pd) ---");
+  console.log("--- skill picker (filtered on /pd) ---");
   console.log(setup.captureCharFrame());
 
   // Enter inserts the highlighted skill and closes the picker instead of
@@ -35,6 +39,17 @@ export async function runSkillsAndContext(setup: TestRendererSetup): Promise<voi
   console.log(inserted);
   // Claude runs a skill as `/name`, not Codex's `$name`.
   if (!inserted.includes("/pdf")) fail("picked skill was not inserted with Claude's / prefix");
+
+  // A `/` anywhere but the start of the message is text (a path, a URL): no picker.
+  for (const char of ["s", "e", "e", " ", "/"]) {
+    await act(async () => setup.mockInput.pressKey(char));
+    await setup.flush();
+  }
+  if (setup.captureCharFrame().includes("xlsx")) fail("the skill picker opened on a / in the middle of the message");
+  for (let index = 0; index < 5; index += 1) {
+    await act(async () => setup.mockInput.pressBackspace());
+    await setup.flush();
+  }
 
   // A live provider-thread.updated event (Claude Code only, per the driver)
   // carries `contextUsage` and surfaces the context-window footer segment.

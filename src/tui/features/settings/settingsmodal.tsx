@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
+import { StyledText, fg } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 
 import { ModalShell } from "../../ui/modalshell.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
-import { settingControl, settingValueLabel, type SettingControl } from "../../model/settings.js";
+import { splitInlineCode } from "../../model/inlinecode.js";
+import { providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, type LatestView, type ProviderCheckView, type SettingControl } from "../../model/settings.js";
+import type { LatestVersions, UpdatableProvider } from "../../../core/catalog/update.js";
 import {
   SECTION_LABEL,
   SETTING_SECTIONS,
@@ -51,6 +54,10 @@ export function SettingsModal({
   saving,
   error,
   onSet,
+  versions,
+  latest,
+  updating,
+  onUpdate,
   providers,
   screenWidth,
   screenHeight,
@@ -65,6 +72,13 @@ export function SettingsModal({
   saving: string | null;
   error: string | null;
   onSet: (key: string, value: string) => void;
+  /** Each updatable provider's install, from the doctor query; null until it answers. */
+  versions: { readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView } | null;
+  /** The newest release of each, from the registry; null until it answers. */
+  latest: LatestVersions | null;
+  /** The providers whose updater is running now. */
+  updating: ReadonlySet<UpdatableProvider>;
+  onUpdate: (provider: UpdatableProvider) => void;
   /** The provider catalog: what the model defaults offer. Null while it loads. */
   providers: readonly ProviderSummary[] | null;
   screenWidth: number;
@@ -96,6 +110,9 @@ export function SettingsModal({
         control: settingControl(view.descriptor, view.value, snapshot.settings, providers),
       }));
   }, [snapshot, tab, providers]);
+
+  /** The provider the open tab is about, when it can be updated from here. */
+  const updatable = updatableProviderOf(tab);
 
   const safe = items.length === 0 ? -1 : Math.min(index, items.length - 1);
   const current = safe >= 0 ? items[safe] : undefined;
@@ -160,6 +177,10 @@ export function SettingsModal({
       onClose();
       return;
     }
+    if (key.name === "u" && !key.ctrl && !key.meta && updatable !== null) {
+      onUpdate(updatable);
+      return;
+    }
     if (key.name === "tab") {
       stepTab(key.shift ? -1 : 1);
       return;
@@ -192,7 +213,7 @@ export function SettingsModal({
   const inner = Math.max(40, width - 4);
   const paneWidth = Math.max(24, inner - TAB_WIDTH - 3);
 
-  const hint =
+  const base =
     picking !== null
       ? "↑↓ choose · enter picks · esc back"
       : current?.control.kind === "text"
@@ -200,6 +221,7 @@ export function SettingsModal({
         : current?.control.kind === "toggle"
           ? "enter switches · tab next section · esc closes"
           : "enter opens the choices · tab next section · esc closes";
+  const hint = picking === null && updatable !== null ? `u updates · ${base}` : base;
 
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
@@ -219,7 +241,7 @@ export function SettingsModal({
             </text>
           </box>
           <box style={{ flexDirection: "row", flexGrow: 1, marginTop: 1 }}>
-            <box style={{ flexDirection: "column", width: TAB_WIDTH, flexShrink: 0, paddingTop: 1 }}>
+            <box style={{ flexDirection: "column", width: TAB_WIDTH, flexShrink: 0 }}>
               {sections.map((section) => (
                 <SectionTab key={section} label={SECTION_LABEL[section]} active={section === tab} width={TAB_WIDTH} onSelect={() => switchTab(section)} />
               ))}
@@ -232,9 +254,10 @@ export function SettingsModal({
             >
               {pickItem !== undefined && picking !== null ? (
                 <>
+                  <BackButton onBack={() => setPicking(null)} />
                   <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }}>
                     <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{pickItem.descriptor.label}</text>
-                    <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word">{pickItem.descriptor.description}</text>
+                    <text content={prose(pickItem.descriptor.description, COLOR.dim)} bg={SURFACE.raised} wrapMode="word" />
                   </box>
                   <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                     {pickOptions.length <= 1 && pickItem.descriptor.kind.type === "string" && providers === null ? (
@@ -255,11 +278,23 @@ export function SettingsModal({
                   </scrollbox>
                 </>
               ) : (
+                <>
+                  {updatable === null ? null : (
+                    <ProviderUpdateCard
+                      provider={updatable}
+                      check={versions?.[updatable]}
+                      latest={latest === null ? undefined : { enabled: latest.enabled, ...latest[updatable] }}
+                      updating={updating.has(updatable)}
+                      width={paneWidth}
+                      onUpdate={() => onUpdate(updatable)}
+                    />
+                  )}
                 <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {items.map((item, itemIndex) => (
                     <SettingCard
                       key={item.descriptor.key}
                       item={item}
+                      first={itemIndex === 0}
                       active={itemIndex === safe}
                       editing={editing === item.descriptor.key}
                       pending={saving === item.descriptor.key}
@@ -275,6 +310,7 @@ export function SettingsModal({
                     />
                   ))}
                 </scrollbox>
+                </>
               )}
             </box>
           </box>
@@ -291,6 +327,72 @@ export function SettingsModal({
         </>
       )}
     </ModalShell>
+  );
+}
+
+/** Prose whose `backticked` parts read as code: a colour of their own, and no backticks printed. */
+function prose(text: string, base: string): StyledText {
+  return new StyledText(splitInlineCode(text).map((segment) => fg(segment.code ? COLOR.command : base)(segment.text)));
+}
+
+/** Back out of a setting's choices to the list: the click twin of esc and the left arrow. */
+function BackButton({ onBack }: { onBack: () => void }) {
+  const { hovered, handlers } = useHover();
+  return (
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onBack} selectable={false} {...handlers}>
+      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{"← back"}</text>
+    </box>
+  );
+}
+
+const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode" };
+const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade" };
+
+/**
+ * Where a provider's install stands, and the button that runs its own updater
+ * (`claude update`, `opencode upgrade`): the version, whether it meets what
+ * Moxen needs, and what pressing it does. Sessions already running are never
+ * restarted; the result lands in a toast.
+ */
+function ProviderUpdateCard({
+  provider,
+  check,
+  latest,
+  updating,
+  width,
+  onUpdate,
+}: {
+  provider: UpdatableProvider;
+  check: ProviderCheckView | undefined;
+  latest: LatestView | undefined;
+  updating: boolean;
+  width: number;
+  onUpdate: () => void;
+}) {
+  const { hovered, handlers } = useHover();
+  const line = providerVersionLine(check, latest);
+  const tone = line.tone === "warn" ? COLOR.warn : line.tone === "update" ? COLOR.accent : line.tone === "ok" ? COLOR.added : COLOR.dim;
+  const button = updating ? "[ Updating… ]" : line.button;
+  // Nothing newer to go to: the button says so and steps back, though pressing it still runs the updater.
+  const buttonColor = updating || line.settled ? COLOR.dim : hovered ? COLOR.bright : COLOR.accent;
+  return (
+    <box
+      style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, width }}
+      backgroundColor={SURFACE.panel}
+      selectable={false}
+    >
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.panel}>
+        <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>{PROVIDER_NAME[provider]}</text>
+          <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`  ${line.version ?? "—"}`}</text>
+        </box>
+        <box {...(updating ? {} : { onMouseDown: onUpdate, ...handlers })} backgroundColor={SURFACE.panel}>
+          <text fg={buttonColor} bg={SURFACE.panel} selectable={false}>{button}</text>
+        </box>
+      </box>
+      <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line.status}</text>
+      <text content={prose(`Runs \`${PROVIDER_UPDATER[provider]}\`. Sessions already running keep the old build until they restart.`, COLOR.dim)} bg={SURFACE.panel} wrapMode="word" selectable={false} />
+    </box>
   );
 }
 
@@ -315,6 +417,7 @@ function valueText(item: SettingItem): string {
 
 function SettingCard({
   item,
+  first,
   active,
   editing,
   pending,
@@ -323,6 +426,8 @@ function SettingCard({
   onSubmit,
 }: {
   item: SettingItem;
+  /** The top card sits flush with the first tab beside it; the others are spaced from the one above. */
+  first: boolean;
   active: boolean;
   editing: boolean;
   pending: boolean;
@@ -350,7 +455,7 @@ function SettingCard({
   return (
     <box
       id={`settings-row-${descriptor.key}`}
-      style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1 }}
+      style={{ flexDirection: "column", flexShrink: 0, marginTop: first ? 0 : 1, paddingLeft: 1, paddingRight: 1 }}
       backgroundColor={bg}
       {...(editing ? {} : { onMouseDown: onActivate })}
       selectable={false}
@@ -379,9 +484,7 @@ function SettingCard({
           />
         </box>
       ) : null}
-      <text fg={COLOR.dim} bg={bg} wrapMode="word" selectable={false}>
-        {editing ? "enter saves · esc cancels" : descriptor.description}
-      </text>
+      <text content={prose(editing ? "enter saves · esc cancels" : descriptor.description, COLOR.dim)} bg={bg} wrapMode="word" selectable={false} />
     </box>
   );
 }

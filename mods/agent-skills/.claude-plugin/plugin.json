@@ -1,0 +1,5 @@
+{
+  "name": "agent-skills",
+  "version": "0.1.0",
+  "description": "Serves skills from .agents/skills (project and home) and Moxen's bundled skills to Claude Code, without copying them into .claude/skills."
+}

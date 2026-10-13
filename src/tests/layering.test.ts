@@ -49,7 +49,10 @@ const DEPTH: Record<Layer, number> = { core: 0, server: 1, cli: 2, tui: 2 };
  * thread envelope) are pure rules over values a client already holds —
  * no store, no drivers — so a client may apply them to what `ClientApi`
  * returned. `catalog/direct` is *not*: it probes live providers, so it is
- * an operation.
+ * an operation. `core/syntax` is the vendored tree-sitter grammars plus
+ * their loader: data and registration shared by every presentation client
+ * (the TUI today, the desktop next), not a domain operation, so clients
+ * may import it directly.
  */
 const KERNEL_PREFIXES = [
   "src/core/types",
@@ -59,8 +62,10 @@ const KERNEL_PREFIXES = [
   "src/core/catalog/summary",
   "src/core/catalog/permissions",
   "src/core/catalog/selection",
+  "src/core/catalog/update",
   "src/core/threads/views",
   "src/core/attachments",
+  "src/core/syntax",
   "src/core/infra/",
 ];
 

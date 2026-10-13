@@ -16,4 +16,5 @@ export type PickerName =
   | "background-tasks"
   | "settings"
   | "schedule"
+  | "search"
   | null;

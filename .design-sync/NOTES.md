@@ -71,7 +71,7 @@ ships the real components anyway, compiled for a browser through a DOM shim.
 
 - The TUI highlights `<code>`, `<diff>` and markdown fences with tree-sitter:
   opentui's bundled grammars (javascript, typescript, markdown(+inline), zig)
-  plus the repo's `src/tui/syntax` parsers. `pkg/treesitter-assets.ts`
+  plus the repo's `src/core/syntax` parsers. `pkg/treesitter-assets.ts`
   collects exactly those (via `getParsers()` and opentui's own descriptor
   list) into one script per grammar (`dist/tree-sitter/<ft>.js`: base64
   wasm + queries, 20 files, ~25 MB) and a registry bundled into the shim.

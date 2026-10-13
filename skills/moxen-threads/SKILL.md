@@ -1,6 +1,6 @@
 ---
 name: moxen-threads
-description: Work with Moxen threads. Use when the task needs moxen threads create, list, inspect, read, send, settle, unsettle, snooze, unsnooze, interrupt, delegate, task-status, or task-cancel, or must identify the right thread id before messaging it.
+description: Work with Moxen threads. Use when the task needs moxen threads create, list, inspect, read, send, settle, unsettle, snooze, unsnooze, or interrupt, or must identify the right thread id before messaging it.
 ---
 
 # Work with Moxen threads
@@ -183,38 +183,20 @@ mean the turn was left alone — do not retry automatically.
 
 ## Delegate a sub-agent task, poll it, cancel it
 
-V1 has no server-side sub-agent primitive. Delegation is emulated on the client: the child is a
-new thread in the parent's project. It receives only the task prompt, with no parent history. The
-CLI polls the child until its latest turn is `completed`, `interrupted`, or `error`.
+Delegation is done with the `moxen` MCP tools, which every top-level Moxen session has loaded —
+not with the CLI. The child is an ordinary Moxen thread, in a git worktree of its own by default.
 
-```bash
-printf '%s' "$TASK" | moxen --json threads delegate --thread "$PARENT_THREAD_ID" --stdin --open none
-moxen --json threads task-status --thread "$PARENT_THREAD_ID" --task "$CHILD_THREAD_ID"
-moxen --json threads task-cancel --thread "$PARENT_THREAD_ID" --task "$CHILD_THREAD_ID"
-```
+- `models` — the providers, models and efforts you can delegate to, with each provider's usage.
+- `delegate` — `task` (everything the child needs: it sees none of your conversation), and
+  optionally `title`, `provider`, `model`, `effort`, `isolation` (`worktree` | `shared`), `fork`.
+  Returns at once with a `taskId`.
+- `task_status` — `taskId`, and `waitMs` (up to 45 000). Reports `running`, or the final report and
+  the branch holding the work.
+- `task_cancel` — `taskId`. Stops a running task; its thread and worktree are kept.
 
-```powershell
-moxen --json threads delegate --thread "$PARENT_THREAD_ID" --prompt-file <path-to-task.txt> --open none
-moxen --json threads task-status --thread "$PARENT_THREAD_ID" --task "$CHILD_THREAD_ID"
-moxen --json threads task-cancel --thread "$PARENT_THREAD_ID" --task "$CHILD_THREAD_ID"
-```
+You do not poll: when a task settles, Moxen writes a `<task-notification>` into your thread. Load
+the `moxen-orchestrate` skill when one delegation grows into a planned multi-task effort — per-task
+model selection, fan-out with merging, adversarial checks, cost-aware routing. Do not build that by
+hand from these primitives.
 
-`delegate` waits by default, up to `--timeout-ms` (default 600000). A wait timeout ends the wait,
-but does not cancel the child: the command still exits 0, with `data.task.waitTimedOut: true`.
-Keep `data.task.taskId` (the child thread id) and poll again with `task-status`. Pass `--no-wait`
-to return right after dispatch. Pass `--dry-run` to preview the `thread.create` and
-`thread.turn.start` pair without running them. The child inherits the parent's project, model
-selection, runtime mode, and interaction mode, unless `--provider`, `--model`, `--speed`, or
-`--thinking-effort` override them.
-
-`task-status` reports `status` (`running`, `completed`, `failed`, `interrupted`), `workState`
-(`working` or `result_available`), and `summary` (the child's latest assistant text, if any). A
-task id from another project is rejected with `TASK_NOT_FOUND`.
-
-`task-cancel` interrupts the child's active turn through the real `thread.turn.interrupt` path.
-Cancelling a terminal task is a no-op: it dispatches nothing. When no interrupt can dispatch, it
-returns `TASK_CANCEL_UNSUPPORTED` (exit code 4), instead of faking a cancellation.
-
-When one delegation grows into a planned multi-task effort — per-task model selection, fan-out
-with merging, adversarial checks, cost-aware routing — load the `moxen-orchestrate` skill instead.
-Do not build that by hand from these primitives.
+Delegated threads do not get these tools: a child cannot delegate or hand off further.

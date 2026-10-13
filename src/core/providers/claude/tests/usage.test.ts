@@ -91,3 +91,10 @@ describe("claude usage", () => {
     ]);
   });
 });
+
+describe("untyped rate limit events", () => {
+  it("surface as the extra-usage window, not as an unlabelled bar", () => {
+    const { windows } = mapRateLimitEvent({ status: "rejected", resetsAt: 1_793_491_200 });
+    expect(windows).toMatchObject([{ id: "overage", label: "Extra usage", usedPercent: 100, exhausted: true }]);
+  });
+});

@@ -1,8 +1,6 @@
 import { CliError } from "../errors.js";
 import { binaryOnPath } from "../infra/process.js";
 import { parseClaudeModels } from "../providers/claude/catalog.js";
-import { CODEX_DEFAULT_MODEL_SLUG } from "../providers/codex/config.js";
-import { GROK_DEFAULT_MODEL_SLUG } from "../providers/grok/config.js";
 import type {
   CliConfig,
   ModelSelection,
@@ -32,13 +30,10 @@ export interface InstallationDefaultOptions {
  * specific names one — flags, config `provider`/`model`, the project's
  * default and the thread's own selection all win over it.
  *
- * `MOXEN_DEFAULT_MODEL` pins it outright. Otherwise it is the first
- * provider installed here, in a fixed order — Claude, Grok, Codex — on
- * *that provider's own* default, never a model slug of ours that ages with
- * every release: Claude's bundled catalog default, Grok's `grok-build`
- * (keep the session's model) and `codex-default` (send none, so the
- * app-server applies its configured default). OpenCode routes to many
- * providers, so picking one would be a guess; it is never chosen here.
+ * `MOXEN_DEFAULT_MODEL` pins it outright. Otherwise it is Claude's bundled
+ * catalog default when Claude Code is installed, never a model slug of ours
+ * that ages with every release. OpenCode routes to many providers, so
+ * picking one would be a guess; it is never chosen here.
  *
  * With none installed there is no model to fall back to, and saying so
  * beats addressing a provider that cannot start.
@@ -63,13 +58,11 @@ export function defaultModelSelection(options: InstallationDefaultOptions = {}):
     const model = models.find((candidate) => candidate.isDefault === true) ?? models[0];
     if (model) return { instanceId: "claudeAgent", model: model.slug };
   }
-  if (installed("grok")) return { instanceId: "grok", model: GROK_DEFAULT_MODEL_SLUG };
-  if (installed("codex")) return { instanceId: "codex", model: CODEX_DEFAULT_MODEL_SLUG };
   throw new CliError(
     "NO_DEFAULT_MODEL",
-    "No model is configured and no provider CLI (claude, grok, codex) is installed. " +
+    "No model is configured and Claude Code is not installed. " +
       "Install one, or name a model: moxen config set provider <instance> and moxen config set model <model>.",
-    { exitCode: 3, details: { checked: ["claude", "grok", "codex"] } },
+    { exitCode: 3, details: { checked: ["claude"] } },
   );
 }
 

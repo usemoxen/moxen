@@ -114,7 +114,7 @@ async function waitFor(label: string, check: () => Promise<boolean>): Promise<vo
 /** A server running the turn, and every CLI call going to it. */
 async function servedQuestion() {
   const driver = new AskingDriver();
-  const harness = await testHarness({ drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } });
+  const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
   const endpoint = testEndpoint();
   const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
   const server = await serve({ endpoint, api, onClose: () => api.close() });
@@ -167,7 +167,7 @@ describe("parked questions from the CLI", () => {
     setClientFactory(async () =>
       new DirectConnection({
         storeRoot: harness.root,
-        drivers: { claude: () => stranger, codex: () => stranger, grok: () => stranger, opencode: () => stranger },
+        drivers: { claude: () => stranger, opencode: () => stranger },
         config: async () => harness.config,
       }),
     );

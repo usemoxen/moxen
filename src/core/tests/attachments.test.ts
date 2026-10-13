@@ -18,6 +18,18 @@ describe("extractMentions", () => {
     expect(parsed.text).toBe("mail user@example.com @ alone");
   });
 
+  it("leaves @words that are not images alone, code included", () => {
+    // The Objective-C that once failed a whole message as "attachment not found: property(nonatomic".
+    const code = "declare it as @property(nonatomic, strong) NSString *name; and mark it @Override, see @param x and @notes.md";
+    const parsed = extractMentions(code);
+    expect(parsed.paths).toEqual([]);
+    expect(parsed.text).toBe(code);
+    // An image mentioned among them still attaches, and only it is rewritten.
+    const mixed = extractMentions("@property(nonatomic) matches @shots/a.WEBP now");
+    expect(mixed.paths).toEqual(["shots/a.WEBP"]);
+    expect(mixed.text).toBe("@property(nonatomic) matches a.WEBP now");
+  });
+
   it("strips trailing punctuation from the path", () => {
     const parsed = extractMentions("see @shot.png, ok?");
     expect(parsed.paths).toEqual(["shot.png"]);

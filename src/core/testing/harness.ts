@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 
 import { DEFAULT_CONFIG } from "../config.js";
 import { CliError } from "../errors.js";
+import type { McpServerSpec } from "../mcp.js";
 import type { ProviderRuntimeEvent } from "../providers/spi.js";
 import { runProcess } from "../infra/process.js";
 import { openThreadStore, type ThreadStore } from "../threads/store.js";
@@ -44,7 +45,14 @@ class HarnessDriver implements TurnDriver {
   constructor(
     private readonly behavior: "completing" | "pending" | "failing",
     private readonly onStartSession?: (input: Record<string, unknown>) => void,
+    private readonly onSendTurn?: (input: { threadId: string; prompt: string }) => void,
+    private readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void,
   ) {}
+
+  /** Like the drivers that can: a session already running is given the servers of the day. */
+  async updateMcpServers(threadId: string, servers: readonly McpServerSpec[]): Promise<void> {
+    if (this.sessions.has(threadId)) this.onUpdateMcpServers?.(threadId, servers);
+  }
 
   hasSession(threadId: string): Effect.Effect<boolean, CliError> {
     return Effect.succeed(this.sessions.has(threadId));
@@ -62,6 +70,7 @@ class HarnessDriver implements TurnDriver {
     return Effect.tryPromise({
       try: async () => {
         if (this.behavior === "failing") throw new Error("harness driver cannot start turns");
+        this.onSendTurn?.({ threadId: input.threadId, prompt: input.prompt });
         this.turn += 1;
         const turnId = `driver-turn-${this.turn}`;
         this.prompts.set(turnId, input.prompt);
@@ -124,13 +133,17 @@ export interface TestHarnessOptions {
   readonly failTurns?: boolean;
   /** Sees every `startSession` input (instructions, MCP servers, working directory). */
   readonly onStartSession?: (input: Record<string, unknown>) => void;
+  /** Sees every prompt as the provider receives it (instruction updates included). */
+  readonly onSendTurn?: (input: { threadId: string; prompt: string }) => void;
+  /** Sees the MCP servers a live session is given at each send (`updateMcpServers`). */
+  readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void;
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   if (options.drivers) return options.drivers;
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
-  const factory = (): TurnDriver => new HarnessDriver(behavior, options.onStartSession);
-  return { claude: factory, codex: factory, grok: factory, opencode: factory };
+  const factory = (): TurnDriver => new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers);
+  return { claude: factory, opencode: factory };
 }
 
 export async function testHarness(options: TestHarnessOptions = {}) {
@@ -141,7 +154,7 @@ export async function testHarness(options: TestHarnessOptions = {}) {
   process.env.MOXEN_STORE_ROOT = root;
   // The installation default otherwise depends on which provider CLIs this
   // machine has; the goldens must not.
-  process.env.MOXEN_DEFAULT_MODEL = "codex/gpt-5.4";
+  process.env.MOXEN_DEFAULT_MODEL = "opencode/gpt-5.4";
   // Anything that loads the config itself (the server connection) must
   // see defaults, never the developer's own config file.
   process.env.MOXEN_CONFIG = path.join(root, "config.json");

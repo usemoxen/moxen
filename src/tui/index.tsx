@@ -5,7 +5,7 @@ import { CliError } from "../core/errors.js";
 import type { CliConfig } from "../core/types.js";
 import { App } from "./app/app.js";
 import { openClient } from "../server/client.js";
-import { registerSyntaxParsers } from "./syntax/register.js";
+import { registerSyntaxParsers } from "../core/syntax/register.js";
 import { SURFACE } from "./theme.js";
 import { MinSizeGate } from "./ui/terminalgate.js";
 

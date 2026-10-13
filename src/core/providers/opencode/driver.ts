@@ -1,6 +1,6 @@
 /**
  * OpenCode driver: `ProviderAdapter` over `opencode serve` + the generated
- * v2 client (serve-first; see the providers table in ARCHITECTURE.md).
+ * v2 client (serve-first; see docs/providers.md).
  *
  * One server per working directory (shared across that cwd's threads),
  * one native session per thread, one SSE `event.subscribe` pump per
@@ -25,8 +25,10 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
 import { CliError } from "../../errors.js";
+import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolation.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
 import type { InteractionMode, ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../types.js";
+import { isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
   ContextBreakdown,
@@ -41,12 +43,14 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  SideAnswer,
+  SideQuestionInput,
   SubagentHistoryItem,
   ThreadId,
   TokenUsageDelta,
   TurnId,
 } from "../spi.js";
-import { outOfProcessWithChecklist, type McpServerSpec } from "../../mcp.js";
+import { mcpSignature, outOfProcessWithChecklist, type McpServerSpec } from "../../mcp.js";
 import { opencodeContextBreakdown } from "./context.js";
 import {
   isOpencodeAuthErrorText,
@@ -73,8 +77,19 @@ export interface OpenCodeDriverOptions {
   readonly settings?: Partial<OpencodeSettings>;
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: OpencodeTransport;
+  /**
+   * Moxen's bundled skills folder, offered to every server this driver spawns
+   * (see `buildServerConfigContent`). Null leaves servers as they were;
+   * production passes `locateBundledSkills()`, tests stay off.
+   */
+  readonly bundledSkillsDir?: string | null;
   /** Silence budget per turn before it fails loudly (default 10 minutes, mirroring the Grok watchdog). */
   readonly stallTimeoutMs?: number;
+  /**
+   * The silence budget while a tool call is in flight (default 6× `stallTimeoutMs`): a build, a Code Mode
+   * script or a subagent can work for a long time without the server saying a word about it.
+   */
+  readonly toolStallTimeoutMs?: number;
   /** How long an interrupt waits for the server to confirm before settling the turn itself (default 3 s). */
   readonly interruptAckTimeoutMs?: number;
 }
@@ -115,11 +130,17 @@ interface OpenCodeTurn {
   usage: TokenUsageDelta;
   /** When the server last said anything about this turn; the stall watchdog measures silence from here. */
   lastActivityAt: number;
+  /** Tool calls started and not yet finished: while any is, silence is the tool working, not a stall. */
+  readonly activeTools: Set<string>;
+  /** The thinking summary each reasoning part has shown so far, so a cumulative part is sent on as its delta. */
+  reasoningTexts?: Map<string, string>;
   /** Set once an interrupt is on its way: the server's idle then acknowledges it rather than completes the turn. */
   interrupting: boolean;
   /** The server has confirmed the interrupt (recorded even when it beats the HTTP reply, before anyone waits). */
   interruptAcked: boolean;
   interruptAck: (() => void) | null;
+  /** A `/compact` turn: it asks the server to compact instead of prompting, and ends when the compaction does. */
+  compacting?: boolean;
 }
 
 type ParkedKind = "permission" | "question";
@@ -136,6 +157,8 @@ interface OpenCodeSession {
   readonly threadId: ThreadId;
   nativeSessionId: string;
   readonly workingDirectory: string;
+  /** Set when the session runs in its own worktree: a permission that reaches the checkout it came from is rejected, even in full access. */
+  readonly isolation: WorktreeIsolation | null;
   closed: boolean;
   /** Catalog instance id (`opencode` or `opencode/<provider>`); supplies the provider for bare model slugs. */
   instanceId: string;
@@ -156,6 +179,10 @@ interface OpenCodeSession {
   parked: Map<string, ParkedOpenCode>;
   /** Latest context-window reading, taken when a turn goes idle. */
   context: ContextWindowUsage | null;
+  /** Output arriving before this is the tail of a run we just interrupted, not a run the server started itself. */
+  ignoreOutputUntil?: number;
+  /** Every message id whose parts this session has handled: late updates to a finished message are not a new run. */
+  seenMessageIds?: Set<string>;
   startedAt: string;
 }
 
@@ -275,7 +302,11 @@ export function opencodeContextOf(
   const limit = providerId && modelId ? settings?.limits.get(`${providerId}/${modelId}`) : undefined;
   return {
     usedTokens: used,
-    maxTokens: limit && limit.context > 0 ? limit.context : null,
+    // The window the model can actually be given: some are served with an input
+    // cap well under their context (Space Bunny: 1M context, 512k input), and
+    // OpenCode compacts against that cap — a bar out of the bigger number would
+    // show a compaction at "half full".
+    maxTokens: limit && limit.context > 0 ? (limit.input && limit.input < limit.context ? limit.input : limit.context) : null,
     cachedInputTokens: cacheRead,
     autoCompactThreshold: limit ? opencodeCompactionThreshold(limit, settings?.buffer ?? null) : null,
     compactsAutomatically: settings ? settings.autoCompact : null,
@@ -396,8 +427,23 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     type: "native" as const,
   };
 
+  /**
+   * The servers this thread should have now, for a session already running:
+   * the ones that are new or changed are added to the server. A server taken
+   * out of the config stays registered with the OpenCode server until it
+   * stops, since v2's API has no way to remove one at runtime.
+   */
+  readonly updateMcpServers = async (threadId: ThreadId, servers: readonly McpServerSpec[]): Promise<void> => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return;
+    if (mcpSignature(servers) === mcpSignature(session.mcpServers)) return;
+    session.mcpServers = servers;
+    await this.registerMcpServers(await this.connectionFor(session), servers);
+  };
+
   private readonly settings: OpencodeSettings;
   private readonly baseEnv: NodeJS.ProcessEnv;
+  private readonly bundledSkillsDir: string | null;
   /**
    * Child sessions OpenCode's `subagent` tool started, by session id. Kept
    * after they stop so the call's later updates (which still name the
@@ -406,6 +452,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly children = new Map<string, OpenCodeChild>();
   private readonly transport: OpencodeTransport;
   private readonly stallTimeoutMs: number;
+  private readonly toolStallTimeoutMs: number;
+  /** How long after an interrupt the server's trailing output is still the aborted run's. */
+  private readonly interruptTailMs = 3_000;
   private readonly interruptAckTimeoutMs: number;
   private readonly stallTimers = new Map<TurnId, ReturnType<typeof setTimeout>>();
   private readonly sessions = new Map<ThreadId, OpenCodeSession>();
@@ -421,7 +470,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.settings = normalizeOpencodeSettings(options.settings);
     this.baseEnv = options.env ?? process.env;
     this.transport = options.transport ?? new SpawnOpencodeTransport();
+    this.bundledSkillsDir = this.settings.bundledSkills ? (options.bundledSkillsDir ?? null) : null;
     this.stallTimeoutMs = options.stallTimeoutMs ?? OPENCODE_STALL_TIMEOUT_MS;
+    this.toolStallTimeoutMs = options.toolStallTimeoutMs ?? this.stallTimeoutMs * 6;
     this.interruptAckTimeoutMs = options.interruptAckTimeoutMs ?? 3000;
   }
 
@@ -457,7 +508,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     return null;
   }
 
-  private async connectionForSession(threadId: ThreadId, workingDirectory: string): Promise<OpencodeServerConnection> {
+  private async connectionForSession(
+    threadId: ThreadId,
+    workingDirectory: string,
+    moxenSkills: "project" | "served" | "none" = "served",
+  ): Promise<OpencodeServerConnection> {
     const key = workingDirectory;
     const existing = this.connections.get(key);
     if (existing) {
@@ -471,6 +526,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       settings: this.settings,
       workingDirectory,
       env: this.baseEnv,
+      // The server is one per directory and its config is fixed at spawn: whoever starts it decides.
+      ...(this.bundledSkillsDir && moxenSkills === "served" ? { skillsDirs: [this.bundledSkillsDir] } : {}),
     });
     this.connections.set(key, pending);
     try {
@@ -674,13 +731,34 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     };
   };
 
-  /** The reading taken when the last turn went idle. */
-  readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
-    this.sessions.get(threadId)?.context ?? null;
+  /**
+   * The latest reading. While a turn runs it is taken fresh off the server —
+   * every finished step moves it — instead of waiting for the idle that ends
+   * the turn, so a long turn's context indicator climbs as it goes.
+   */
+  readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> => {
+    const session = this.sessions.get(threadId);
+    if (!session) return null;
+    if (this.openTurn(session)) await this.refreshContext(session);
+    return session.context;
+  };
+
+  /** Re-read the session's context from its newest messages; the last reading stands when the server says nothing. */
+  private async refreshContext(session: OpenCodeSession): Promise<void> {
+    try {
+      const connection = await this.connectionFor(session);
+      const messages = await connection.sessionMessages(session.nativeSessionId, { tail: IDLE_READ_ITEMS });
+      const settings = await this.contextSettingsFor(session).catch(() => null);
+      session.context = opencodeContextOf(messages, settings) ?? session.context;
+    } catch {
+      // Advisory, like every context reading.
+    }
+  }
 
   /** The reading above, broken down by estimate from the session's messages. */
   readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {
     const session = this.sessions.get(threadId);
+    if (session && this.openTurn(session)) await this.refreshContext(session);
     if (!session?.context) return null;
     const connection = await this.connectionFor(session);
     // Only what the model still sees: nothing before the last compaction.
@@ -694,7 +772,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.attempt("OPENCODE_SPAWN_FAILED", `Could not start an OpenCode session for thread ${input.threadId}`, async () => {
       const existing = this.sessions.get(input.threadId);
       if (existing && !existing.closed) return this.describeSession(existing);
-      const connection = await this.connectionForSession(input.threadId, input.workingDirectory);
+      const connection = await this.connectionForSession(input.threadId, input.workingDirectory, input.moxenSkills);
       await this.registerMcpServers(connection, input.mcpServers ?? []);
       // OpenCode keeps sessions on disk, so the previous one — from this
       // process or an earlier one — is reattached with its history rather
@@ -708,6 +786,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         threadId: input.threadId,
         nativeSessionId,
         workingDirectory: input.workingDirectory,
+        isolation: input.isolation ?? null,
         closed: false,
         instanceId: input.modelSelection?.instanceId ?? "opencode",
         modelSlug: input.modelSelection?.model ?? null,
@@ -731,6 +810,18 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   readonly resumeCursor = (threadId: ThreadId): string | null =>
     this.sessions.get(threadId)?.nativeSessionId ?? null;
+
+  /**
+   * `/btw` through OpenCode's own `session.generate`: the session's context
+   * and model, a single reply, nothing written to its history. It runs beside
+   * the thread's turn, so no fork is needed.
+   */
+  readonly sideQuestion = async (input: SideQuestionInput): Promise<SideAnswer> => {
+    const connection = await this.connectionForSession(`btw:${input.cursor ?? "none"}` as ThreadId, input.workingDirectory);
+    const text = await connection.generate(input.cursor, input.question);
+    if (!text) throw new CliError("SIDE_QUESTION_FAILED", "The side question came back empty.");
+    return { text, withContext: input.cursor !== null };
+  };
 
   readonly sessionTitle = async (cursor: string, workingDirectory: string): Promise<string | null> =>
     await (await this.connectionForSession(`title:${cursor}` as ThreadId, workingDirectory)).sessionTitle(cursor);
@@ -781,9 +872,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         credentialHint: null,
         usage: emptyUsage(),
         lastActivityAt: Date.now(),
+        activeTools: new Set(),
         interrupting: false,
         interruptAcked: false,
         interruptAck: null,
+        ...(isCompactCommand(input.prompt) ? { compacting: true } : {}),
       };
       session.turns.set(turn.id, turn);
       try {
@@ -792,7 +885,10 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         await this.registerMcpServers(connection, session.mcpServers);
         turn.credentialHint = await this.missingCredentialHint(model, connection);
         await this.applySessionState(session, connection, model, input.interactionMode, turn.credentialHint);
-        await connection.prompt({
+        if (turn.compacting) {
+          // Accepted, not done: `session.compaction.ended` (see `onCompacted`) ends the turn.
+          await connection.summarizeSession(session.nativeSessionId);
+        } else await connection.prompt({
           sessionID: session.nativeSessionId,
           messageID: userMessageId,
           text: input.prompt,
@@ -891,6 +987,10 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         const connection = await this.connectionFor(session);
         if (turn) await this.cancelQueuedInput(session, connection, turn);
         await connection.abortSession(session.nativeSessionId);
+        // The parent's turn is waiting on its subagents (a foreground call
+        // returns only when its child does), and aborting the parent does not
+        // reach them: they would run on, unseen. Stop them with it.
+        await this.stopChildren(session, connection);
       } catch (cause) {
         if (!session.closed) throw cause;
       }
@@ -908,7 +1008,44 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
           };
         });
       }
-      if (!turn || this.openTurn(session) === turn) this.settleOpenTurn(session, "interrupted", "Interrupted.");
+      if (!turn || this.openTurn(session) === turn) {
+        // What the aborted run still has in flight is not a new run.
+        session.ignoreOutputUntil = Date.now() + this.interruptTailMs;
+        this.settleOpenTurn(session, "interrupted", "Interrupted.");
+      }
+    });
+
+  /**
+   * Abort a native subagent's own session — OpenCode's server runs it apart
+   * from its parent's — and report it stopped: nothing else will, as an
+   * aborted child ends without the idle its background form is watched by.
+   */
+  private async stopChild(connection: OpencodeServerConnection, childId: string, child: OpenCodeChild): Promise<void> {
+    child.stopped = true;
+    await connection.abortSession(childId).catch(() => undefined);
+    this.publishSubagent(child, childId, this.openTurn(child.parent)?.id ?? null, "stopped", null);
+  }
+
+  private async stopChildren(session: OpenCodeSession, connection: OpencodeServerConnection): Promise<void> {
+    const running = [...this.children].filter(([, child]) => child.parent === session && !child.stopped);
+    await Promise.all(running.map(([childId, child]) => this.stopChild(connection, childId, child)));
+  }
+
+  /**
+   * Stop one native subagent without touching its parent: the parent's call
+   * waiting on it comes back with whatever the child had, and carries on.
+   */
+  readonly stopBackgroundTask = (threadId: ThreadId, taskId: string): Effect.Effect<void, CliError> =>
+    this.attempt("OPENCODE_TASK_STOP_FAILED", `Could not stop subagent ${taskId}`, async () => {
+      const session = this.requireSession(threadId);
+      const child = this.children.get(taskId);
+      if (!child || child.parent !== session || child.stopped) {
+        throw new CliError("BACKGROUND_TASK_NOT_FOUND", `No subagent ${taskId} is running on thread ${threadId}.`, {
+          exitCode: 3,
+          details: { threadId, taskId },
+        });
+      }
+      await this.stopChild(await this.connectionFor(session), taskId, child);
     });
 
   async awaitTurn(threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<OpenCodeTurnOutcome> {
@@ -1189,9 +1326,14 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     }
     const session = this.sessionForNative(nativeSessionId);
     if (!session) {
+      // A subagent working is its parent's turn working: the parent's call is waiting on it.
+      const child = this.children.get(nativeSessionId);
+      const waiting = child ? this.openTurn(child.parent) : null;
+      if (waiting) waiting.lastActivityAt = Date.now();
       this.onChildEvent(nativeSessionId, event, serverKey);
       return;
     }
+    if (!this.openTurn(session)) this.adoptBackgroundTurn(session, event);
     const active = this.openTurn(session);
     if (active) active.lastActivityAt = Date.now();
     switch (event.type) {
@@ -1220,8 +1362,116 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       case "session.error":
         this.onSessionError(session, event);
         break;
+      case "session.compacted":
+        this.onCompacted(session, event);
+        break;
       default:
         break;
+    }
+  }
+
+  /**
+   * The server finished compacting the session. Said in the transcript
+   * whoever asked (a `/compact` turn, or the server's own threshold); a
+   * `/compact` turn ends here, since a bare compaction may never run a
+   * model step to go idle on.
+   */
+  private onCompacted(session: OpenCodeSession, event: OpencodeSubscribedEvent): void {
+    const open = this.openTurn(session);
+    const summary = asString(event.properties.summary);
+    this.publish({
+      type: "session.notice",
+      provider: this.provider,
+      threadId: session.threadId,
+      turnId: open?.id ?? null,
+      notice: "compacted",
+      title: event.properties.reason === "auto" ? "Conversation compacted automatically" : "Conversation compacted",
+      detail: summary,
+    });
+    if (open?.compacting) this.settleOpenTurn(session, "completed", "");
+  }
+
+  /**
+   * Whether a message is one of our own prompts (or steers): its parts are our
+   * words coming back, never the model's.
+   */
+  private isOwnMessage(session: OpenCodeSession, messageId: string): boolean {
+    for (const turn of session.turns.values()) {
+      if (turn.userMessageId === messageId || turn.steerMessageIds.has(messageId)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The server went on working with no turn of ours open: a background
+   * subagent finished and woke its parent, or the loop took another step after
+   * an idle. Its output used to be dropped here — a reply that stopped
+   * partway, with the rest (and its tool calls) never shown. It becomes a turn
+   * the provider started on its own, the way Claude Code's wake-ups do.
+   */
+  private adoptBackgroundTurn(session: OpenCodeSession, event: OpencodeSubscribedEvent): void {
+    if (event.type !== "message.part.updated" || session.closed) return;
+    if (session.ignoreOutputUntil !== undefined && Date.now() < session.ignoreOutputUntil) return;
+    const part = asRecord(event.properties.part);
+    const kind = asString(part?.type);
+    const messageId = asString(part?.messageID);
+    if (!part || (kind !== "text" && kind !== "reasoning" && kind !== "tool") || !messageId || this.isOwnMessage(session, messageId)) return;
+    // A step the session has not seen: the loop going on. The trailing updates of a message it already
+    // handled arrive after its turn settles too, and are not.
+    if (session.seenMessageIds?.has(messageId)) return;
+    const turn: OpenCodeTurn = {
+      id: `turn-${randomUUID()}`,
+      prompt: "",
+      userMessageId: "",
+      steerMessageIds: new Set(),
+      status: "running",
+      text: "",
+      error: null,
+      partTexts: new Map(),
+      lastTextMessageId: null,
+      credentialHint: null,
+      usage: emptyUsage(),
+      lastActivityAt: Date.now(),
+      activeTools: new Set(),
+      interrupting: false,
+      interruptAcked: false,
+      interruptAck: null,
+    };
+    session.turns.set(turn.id, turn);
+    this.armStallTimer(session, turn);
+    this.publish({ type: "turn.started", provider: this.provider, threadId: session.threadId, turnId: turn.id, origin: "background" });
+  }
+
+  /**
+   * The model's thinking summary: a `running` row as it starts, its text as
+   * it streams, and a `completed` row with the whole of it and how long it
+   * took. Without this a normal thread showed no thinking at all — only a
+   * subagent's, read back from its stored messages.
+   */
+  private onReasoningPart(session: OpenCodeSession, turn: OpenCodeTurn, partId: string, part: Record<string, unknown>): void {
+    const shown = (turn.reasoningTexts ??= new Map());
+    const text = typeof part.text === "string" ? part.text : "";
+    const time = asRecord(part.time) ?? {};
+    const start = typeof time.start === "number" ? time.start : null;
+    const end = typeof time.end === "number" ? time.end : null;
+    const startedAt = new Date(start ?? Date.now()).toISOString();
+    const base = { provider: this.provider, threadId: session.threadId, turnId: turn.id, reasoningId: partId } as const;
+    const previous = shown.get(partId);
+    if (previous === undefined) {
+      this.publish({ type: "reasoning.updated", ...base, status: "running", text: "", startedAt, durationMs: null });
+    }
+    const delta = text.startsWith(previous ?? "") ? text.slice((previous ?? "").length) : text;
+    shown.set(partId, text);
+    if (delta) this.publish({ type: "reasoning.delta", ...base, text: delta });
+    if (asString(asRecord(part.state)?.status) === "completed") {
+      this.publish({
+        type: "reasoning.updated",
+        ...base,
+        status: "completed",
+        text,
+        startedAt,
+        durationMs: start !== null && end !== null ? Math.max(0, end - start) : null,
+      });
     }
   }
 
@@ -1233,6 +1483,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     // Our own prompt streams back as parts of the user message; never
     // accumulate those into the assistant text.
     const messageId = asString(part.messageID);
+    if (messageId) (session.seenMessageIds ??= new Set()).add(messageId);
     if (messageId === turn.userMessageId || (messageId && turn.steerMessageIds.has(messageId))) return;
     const partId = asString(part.id) ?? `part-${turn.partTexts.size}`;
     const kind = asString(part.type) ?? "unknown";
@@ -1277,6 +1528,10 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       }
       return;
     }
+    if (kind === "reasoning") {
+      this.onReasoningPart(session, turn, partId, part);
+      return;
+    }
     if (kind === "tool") {
       const tool = asString(part.tool ?? part.name) ?? "tool";
       // The part's own `state.status` is the lifecycle, not the channel it
@@ -1284,6 +1539,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // publishing a flat `updated` left subscribers unable to tell a
       // started call from a finished one.
       const status = asString(asRecord(part.state)?.status);
+      const callId = asString(part.callID) ?? asString(part.id);
+      if (callId !== null) {
+        if (status === "completed" || status === "error") turn.activeTools.delete(callId);
+        else turn.activeTools.add(callId);
+      }
       this.publish({
         type: status === "completed" || status === "error"
           ? "tool.execute.completed"
@@ -1327,6 +1587,14 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     }
     if (finished && !child.background && !child.stopped) {
       child.stopped = true;
+      // A call that ends in error was cut short — OpenCode answers "Subagent cancelled (sessionID: …)" — and
+      // that says nothing of the child session behind it, which can run on, its tool calls still appearing under
+      // a row that reads finished. Make "stopped" true.
+      if (status !== "completed") {
+        void this.connectionFor(session)
+          .then((connection) => connection.abortSession(childId))
+          .catch(() => undefined);
+      }
       this.publishSubagent(child, childId, turnId, "stopped", status === "completed" ? subagentReport(asString(state.output)) : null);
     }
   }
@@ -1375,11 +1643,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const connection = this.liveConnections.get(serverKey);
     if (!connection) return;
     try {
-      if (!this.children.has(childId)) {
+      let parent = this.children.get(childId)?.parent ?? null;
+      if (!parent) {
         const parentId = (await connection.getSession(childId))?.parentID;
-        if (!parentId || !this.sessionForNative(parentId)) return;
+        parent = parentId ? this.sessionForNative(parentId) : null;
+        if (!parent) return;
       }
-      if (event.type === "permission.asked") await connection.replyToPermission(childId, requestId, "once");
+      if (event.type === "permission.asked") {
+        // A subagent works in its parent's checkout, so it is held to the parent's isolation.
+        await connection.replyToPermission(childId, requestId, this.reachesProtectedCheckout(parent, event) ? "reject" : "once");
+      }
       else await connection.rejectQuestion(childId, requestId);
     } catch {
       // Best effort: the child's own call fails or times out as it would have.
@@ -1411,9 +1684,29 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     return subagentHistoryItems(await connection.sessionMessages(agentId));
   };
 
+  /** Whether a permission request is for a path in the checkout this session's worktree was cut from. */
+  private reachesProtectedCheckout(session: OpenCodeSession, event: OpencodeSubscribedEvent): boolean {
+    if (!session.isolation) return false;
+    const patterns = event.properties.patterns;
+    return permissionEscapes(
+      session.isolation,
+      {
+        action: asString(event.properties.permission) ?? "",
+        resources: Array.isArray(patterns) ? patterns.filter((pattern): pattern is string => typeof pattern === "string") : [],
+      },
+      session.workingDirectory,
+    );
+  }
+
   private onPermissionAsked(session: OpenCodeSession, event: OpencodeSubscribedEvent): void {
     const nativeId = asString(event.properties.id);
     if (!nativeId || session.parked.has(nativeId)) return;
+    if (this.reachesProtectedCheckout(session, event)) {
+      void this.connectionFor(session)
+        .then((connection) => connection.replyToPermission(session.nativeSessionId, nativeId, "reject"))
+        .catch(() => undefined);
+      return;
+    }
     if (session.runtimeMode === "full-access") {
       // Full access means no prompts. v2 still asks by default for paths
       // outside the project and for `.env` reads; allow them once, never
@@ -1637,16 +1930,22 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       const open = current.turns.get(turn.id);
       if (!open || open.status !== "running") return;
       // Any event since the timer was armed is proof of life: wait out the rest of the silence budget.
+      // A tool call still in flight is the server doing the work the turn asked for, however quietly, so it
+      // gets the longer budget.
+      const budget = open.activeTools.size > 0 ? this.toolStallTimeoutMs : this.stallTimeoutMs;
       const silentFor = Date.now() - open.lastActivityAt;
-      if (silentFor < this.stallTimeoutMs) {
-        this.armStallTimer(current, open, this.stallTimeoutMs - silentFor);
+      if (silentFor < budget) {
+        this.armStallTimer(current, open, budget - silentFor);
         return;
       }
       this.settleOpenTurn(
         current,
         "failed",
-        `No response from the provider for ${Math.round(this.stallTimeoutMs / 60000)} minutes — ` +
-          "the turn was failed. Check authentication and network, then retry.",
+        open.activeTools.size > 0
+          ? `A tool call has been running with no word from the provider for ${Math.round(budget / 60000)} minutes — ` +
+              "the turn was failed. Stop it and retry if it should have finished."
+          : `No response from the provider for ${Math.round(budget / 60000)} minutes — ` +
+              "the turn was failed. Check authentication and network, then retry.",
       );
     }, delayMs);
     (timer as { unref?: () => void }).unref?.();

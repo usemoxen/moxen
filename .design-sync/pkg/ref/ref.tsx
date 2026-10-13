@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 const HERE = import.meta.dir;
 
 const { act } = await import("react");
-const { registerSyntaxParsers } = await import("../../../src/tui/syntax/register.ts");
+const { registerSyntaxParsers } = await import("../../../src/core/syntax/register.ts");
 await registerSyntaxParsers();
 const { testRender } = await import("@opentui/react/test-utils");
 const OUT = resolve(HERE, "../../.cache/ref");

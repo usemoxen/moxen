@@ -242,6 +242,54 @@ describe("delegated threads in the sidebar", () => {
     expect(orphaned.settled.map((row) => row.thread.id)).toEqual(["done"]);
   });
 
+  it("hides a settled task while its parent is live, and nests it once the parent settles", () => {
+    const options = { settledExpanded: true, settledLimit: 10, now: NOW };
+    const family = (parentSettled: boolean) =>
+      shellWith([
+        thread("parent", parentSettled ? { settledAt: ago(5_000) } : {}),
+        thread("done-task", { parentThreadId: "parent", settledAt: ago(5_000), createdAt: ago(60_000) }),
+        thread("live-task", { parentThreadId: "parent", createdAt: ago(50_000) }),
+      ]);
+    // Active parent: the settled task is in neither list, and not counted.
+    const live = buildSidebarSections(family(false), options);
+    expect(live.active.map((row) => row.thread.id)).toEqual(["parent", "live-task"]);
+    expect(live.settled).toEqual([]);
+    expect(live.settledTotal).toBe(0);
+    // The parent settled (its live task keeps it as a header): the settled task is still hidden.
+    const header = buildSidebarSections(shellWith([
+      thread("parent", { settledAt: ago(5_000) }),
+      thread("done-task", { parentThreadId: "parent", settledAt: ago(5_000), createdAt: ago(60_000) }),
+      thread("live-task", { parentThreadId: "parent", createdAt: ago(50_000) }),
+    ]), options);
+    expect(header.active.map((row) => row.thread.id)).toEqual(["parent", "live-task"]);
+    expect(header.settled).toEqual([]);
+    // Everything settled: one family, the task nested under its parent.
+    const all = buildSidebarSections(
+      shellWith([
+        thread("parent", { settledAt: ago(5_000) }),
+        thread("done-task", { parentThreadId: "parent", settledAt: ago(5_000), createdAt: ago(60_000) }),
+      ]),
+      options,
+    );
+    expect(all.settledTotal).toBe(1);
+    expect(all.settled.map((row) => [row.thread.id, row.depth])).toEqual([["parent", 0], ["done-task", 1]]);
+  });
+
+  it("counts and pages settled families, not the delegated tasks inside them", () => {
+    const tasks = Array.from({ length: 30 }, (_, index) =>
+      thread(`task-${index}`, { parentThreadId: "loop", settledAt: ago(5_000), createdAt: ago(60_000 - index) }),
+    );
+    const shell = shellWith([thread("loop", { settledAt: ago(5_000) }), ...tasks, thread("other", { settledAt: ago(9_000) })]);
+    const sections = buildSidebarSections(shell, { settledExpanded: true, settledLimit: 1, now: NOW });
+    // Two families, however many tasks one holds.
+    expect(sections.settledTotal).toBe(2);
+    // The page is one family: the parent with every task nested under it.
+    expect(sections.settled.map((row) => row.thread.id)).toEqual(["loop", ...tasks.map((task) => task.id)]);
+    expect(sections.settled.slice(1).every((row) => row.depth === 1)).toBe(true);
+    // Collapsed, the section shows only its count.
+    expect(buildSidebarSections(shell, { settledExpanded: false, settledLimit: 1, now: NOW }).settled).toEqual([]);
+  });
+
   it("lists native subagents after the delegated threads, the connectors running through both", () => {
     const native = (agentId: string, status: "running" | "completed", startedAgo: number, description: string | null = null) => ({
       agentId,

@@ -348,6 +348,57 @@ describe("opencode driver", () => {
     ]);
   });
 
+  it("runs a /compact turn as a native compaction and ends it when the server does", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "k" } });
+    drivers.push(driver);
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    const server = transport.servers[0]!;
+    // Asked of the server, never typed at the model.
+    expect(server.callsTo("session.compact")).toHaveLength(1);
+    expect(server.callsTo("session.prompt")).toHaveLength(0);
+
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await server.pushRaw({
+      type: "session.compaction.ended",
+      data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept: the plan." },
+    });
+    await expect(outcome).resolves.toMatchObject({ status: "completed", error: null });
+    await waitFor("the compacted notice", () => events.some((event) => event.type === "session.notice"));
+    expect(events.find((event) => event.type === "session.notice")).toMatchObject({
+      notice: "compacted",
+      title: "Conversation compacted",
+      detail: "Kept: the plan.",
+      turnId: sent.turnId,
+    });
+    // The turn is over: the next one starts clean.
+    await expect(Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go on" }))).resolves.toBeDefined();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  it("fails a /compact turn when the server's compaction fails", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "  /compact " }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await transport.servers[0]!.pushRaw({
+      type: "session.compaction.failed",
+      data: { sessionID: "opencode-session-1", reason: "manual", error: { type: "provider", message: "too long" } },
+    });
+    await expect(outcome).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("does not treat a /compact with text after it as the command", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact keep the plan" }));
+    expect(transport.servers[0]!.callsTo("session.compact")).toHaveLength(0);
+    expect(transport.servers[0]!.callsTo("session.prompt")).toHaveLength(1);
+  });
+
   it("compacts natively and wraps transport failures", async () => {
     const { transport, driver } = start();
     await startSession(driver);
@@ -535,6 +586,29 @@ describe("opencode driver", () => {
     });
   });
 
+  it("reads the context fresh while a turn runs, instead of holding the last idle's reading", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    await Effect.runPromise(
+      driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", modelSelection: { instanceId: "opencode", model: "opencode/muse" } }),
+    );
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const server = transport.servers[0]!;
+    const step = (input: number) => [
+      { info: { id: "msg_u", role: "user" }, parts: [] },
+      { info: { id: "msg_a", role: "assistant", parentID: "msg_u", providerID: "opencode", modelID: "muse", tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [] },
+    ];
+    // Two steps of one still-running turn: the reading follows the server each time it is asked.
+    server.messages = step(10_000);
+    expect((await driver.contextUsage("thread-1"))?.usedTokens).toBe(10_000);
+    server.messages = step(60_000);
+    expect((await driver.contextUsage("thread-1"))?.usedTokens).toBe(60_000);
+    // Nothing readable: the last reading stands.
+    server.messages = [{ info: { id: "msg_u", role: "user" }, parts: [] }];
+    expect((await driver.contextUsage("thread-1"))?.usedTokens).toBe(60_000);
+  });
+
   it("steers the running turn, and settles only once the steer is answered", async () => {
     const transport = new FakeOpencodeTransport();
     const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
@@ -647,6 +721,19 @@ describe("opencode driver", () => {
     expect(server.callsTo("session.switchAgent").map((call) => (call.args as { agent: string }).agent)).toEqual(["plan", "build"]);
   });
 
+  it("answers /btw through session.generate on the thread's session, without touching it", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    const answer = await driver.sideQuestion({ cursor: "ses_old", workingDirectory: "/repo", question: "why?" });
+    expect(answer).toEqual({ text: "Because of the second step.", withContext: true });
+    expect(transport.servers[0]!.callsTo("session.generate")).toMatchObject([{ args: { sessionID: "ses_old", prompt: "why?" } }]);
+    expect(transport.servers[0]!.callsTo("session.fork")).toEqual([]);
+
+    const bare = await driver.sideQuestion({ cursor: null, workingDirectory: "/repo", question: "hi" });
+    expect(bare.withContext).toBe(false);
+  });
+
   it("leaves a session on the user's own agent alone in default mode", async () => {
     const transport = new FakeOpencodeTransport({ sessionState: { agent: "reviewer" } });
     const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
@@ -654,6 +741,28 @@ describe("opencode driver", () => {
     await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", resumeCursor: "ses_old" }));
     await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "a", interactionMode: "default" }));
     expect(transport.servers[0]!.callsTo("session.switchAgent")).toEqual([]);
+  });
+
+  it("offers moxen's bundled skills to the servers it spawns, when given and allowed", async () => {
+    const run = async (options: { bundledSkillsDir?: string | null; settings?: { bundledSkills: boolean } }) => {
+      const transport = new FakeOpencodeTransport({ commands: [] });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, ...options });
+      drivers.push(driver);
+      await driver.skillInventory("/repo");
+      return transport.ensureCalls[0]!;
+    };
+    expect((await run({ bundledSkillsDir: "/pkg/skills" })).skillsDirs).toEqual(["/pkg/skills"]);
+    // Installed in the project already, or a delegated task: the bundled folder is not offered a second time.
+    for (const moxenSkills of ["project", "none"] as const) {
+      const transport = new FakeOpencodeTransport({ commands: [] });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, bundledSkillsDir: "/pkg/skills" });
+      drivers.push(driver);
+      await Effect.runPromise(driver.startSession({ threadId: `t-${moxenSkills}`, workingDirectory: `/repo-${moxenSkills}`, moxenSkills }));
+      expect(transport.ensureCalls[0]!.skillsDirs).toBeUndefined();
+    }
+    // Off unless production passes the folder, and off when the setting says so.
+    expect((await run({})).skillsDirs).toBeUndefined();
+    expect((await run({ bundledSkillsDir: "/pkg/skills", settings: { bundledSkills: false } })).skillsDirs).toBeUndefined();
   });
 
   it("lists skills and commands from the directory's server", async () => {
@@ -855,6 +964,79 @@ describe("opencode driver", () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 
+    const startChild = async (server: Awaited<ReturnType<typeof running>>["server"]) => {
+      await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));
+      await server.pushRaw(call("session.tool.called", { input }));
+      await server.pushRaw(call("session.tool.progress", { metadata: { sessionID: CHILD, status: "running" } }));
+    };
+
+    it("aborts the child behind a call that came back cancelled, so a row that says stopped is stopped", async () => {
+      const { server, fiber, subagents } = await running();
+      await startChild(server);
+      // OpenCode's own answer to a foreground call it cut short.
+      await server.pushRaw({
+        type: "session.tool.failed",
+        data: { sessionID: PARENT, assistantMessageID: "msg_parent", id: "call_sub", error: { type: "aborted", message: `Subagent cancelled (sessionID: ${CHILD})` } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(subagents()).toMatchObject([{ status: "started" }, { agentId: CHILD, status: "stopped" }]);
+      expect(server.aborted).toEqual([CHILD]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("does not abort a child whose call finished normally", async () => {
+      const { server, fiber, subagents } = await running();
+      await startChild(server);
+      await server.pushRaw(
+        call("session.tool.success", {
+          content: [{ type: "text", text: `<subagent sessionID="${CHILD}" state="completed">\nDone\n</subagent>` }],
+          metadata: { sessionID: CHILD, status: "completed" },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(subagents().map((event) => event.status)).toEqual(["started", "stopped"]);
+      expect(server.aborted).toEqual([]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("stops a thread's running subagents with its turn, instead of leaving them to run on unseen", async () => {
+      const { driver, server, fiber, subagents } = await running();
+      await startChild(server);
+      expect(subagents().map((event) => event.status)).toEqual(["started"]);
+      await Effect.runPromise(driver.interruptTurn("thread-1"));
+      // The parent and the child it was waiting on are both aborted, and Moxen hears the child stopped.
+      expect(server.aborted).toEqual([PARENT, CHILD]);
+      expect(subagents()).toMatchObject([{ status: "started" }, { agentId: CHILD, status: "stopped" }]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("leaves a subagent that already finished alone when the turn is interrupted", async () => {
+      const { driver, server, fiber, subagents } = await running();
+      await startChild(server);
+      await server.pushRaw(
+        call("session.tool.success", {
+          content: [{ type: "text", text: `<subagent sessionID="${CHILD}" state="completed">\nDone\n</subagent>` }],
+          metadata: { sessionID: CHILD, status: "completed" },
+        }),
+      );
+      await Effect.runPromise(driver.interruptTurn("thread-1"));
+      expect(server.aborted).toEqual([PARENT]);
+      expect(subagents().map((event) => event.status)).toEqual(["started", "stopped"]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("stops one subagent on its own, without touching its parent", async () => {
+      const { driver, server, fiber, subagents } = await running();
+      await startChild(server);
+      await Effect.runPromise(driver.stopBackgroundTask("thread-1", CHILD));
+      expect(server.aborted).toEqual([CHILD]);
+      expect(subagents()).toMatchObject([{ status: "started" }, { agentId: CHILD, status: "stopped" }]);
+      // Once stopped it is no longer there to stop, and an unknown one never was.
+      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", CHILD))).rejects.toThrow(/No subagent/);
+      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", "ses_nope"))).rejects.toThrow(/No subagent/);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
     it("answers a subagent's own prompts itself: permissions allowed, questions dismissed", async () => {
       const { server, fiber, subagents } = await running({ parents: { ses_late: PARENT, ses_stranger: "ses_other_client" } });
       await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));
@@ -944,6 +1126,23 @@ describe("opencode MCP injection", () => {
         { name: "docs", config: { type: "remote", url: "https://docs.example/mcp", headers: { Authorization: "Bearer t" } } },
         { name: "fs", config: { type: "local", command: ["npx", "-y", "fs-mcp"], environment: { ROOT: "/" } } },
       ]);
+    } finally {
+      await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  });
+
+  it("adds a server that appears in the config while the session lives, and only that one", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", mcpServers: [MCP[0]!] }));
+      const added = { name: "git", type: "stdio" as const, command: "git-mcp", args: [], env: {} };
+      await driver.updateMcpServers("thread-1", [MCP[0]!, added]);
+      expect(transport.servers[0]!.callsTo("mcp.add").map((call) => (call.args as { name: string }).name)).toEqual(["docs", "git"]);
+      // The same set again, and a thread with no session: nothing more is sent.
+      await driver.updateMcpServers("thread-1", [added, MCP[0]!]);
+      await driver.updateMcpServers("elsewhere", []);
+      expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(2);
     } finally {
       await Effect.runPromise(driver.stopAll()).catch(() => undefined);
     }
@@ -1193,6 +1392,139 @@ describe("opencode driver on OpenCode v2", () => {
     expect(second.callsTo("mcp.add")).toHaveLength(1);
   });
 
+  describe("a run the server starts on its own, after the turn settled", () => {
+    const text = (messageID: string, value: string) => ({
+      type: "message.part.updated",
+      properties: { sessionID: REAL_SESSION, part: { id: `part-${messageID}`, messageID, type: "text", text: value } },
+    });
+    async function settledTurn() {
+      const transport = new FakeOpencodeTransport({ sessionID: REAL_SESSION });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      const server = transport.servers[0]!;
+      const first = driver.awaitTurn("thread-1", sent.turnId);
+      await server.push(text("msg_a1", "first answer"));
+      await server.push({ type: "session.idle", properties: { sessionID: REAL_SESSION } });
+      await first;
+      const started = () => events.flatMap((event) => (event.type === "turn.started" ? [event] : []));
+      return { driver, server, fiber, started, events };
+    }
+
+    it("shows the model's thinking: a running row, its text as it streams, then the whole of it and how long it took", async () => {
+      const { server, fiber, events } = await settledTurn();
+      const reasoning = (type: string, data: Record<string, unknown>, created: number) => ({
+        type,
+        created,
+        data: { sessionID: REAL_SESSION, assistantMessageID: "msg_a2", ordinal: 0, ...data },
+      });
+      // The thinking of a step the server takes after the first turn: it arrives as a turn of its own.
+      await server.pushRaw(reasoning("session.reasoning.started", {}, 1_000));
+      await server.pushRaw(reasoning("session.reasoning.delta", { delta: "Let me " }, 1_100));
+      await server.pushRaw(reasoning("session.reasoning.delta", { delta: "look." }, 1_200));
+      await server.pushRaw(reasoning("session.reasoning.ended", { text: "Let me look." }, 3_500));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const rows = events.flatMap((event) => (event.type === "reasoning.updated" ? [[event.status, event.text, event.durationMs] as const] : []));
+      expect(rows).toEqual([
+        ["running", "", null],
+        ["completed", "Let me look.", 2_500],
+      ]);
+      expect(events.flatMap((event) => (event.type === "reasoning.delta" ? [event.text] : []))).toEqual(["Let me ", "look."]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("takes up a new step after the idle as a turn of its own, instead of dropping the rest of the reply", async () => {
+      const { driver, server, fiber, started } = await settledTurn();
+      expect(started()).toEqual([]);
+      // The loop goes on (a background subagent finished and woke it): a message nobody has seen.
+      await server.push(text("msg_a2", "the rest of the work"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(started()).toMatchObject([{ origin: "background", threadId: "thread-1" }]);
+      const outcome = driver.awaitTurn("thread-1", started()[0]!.turnId);
+      await server.push({ type: "session.idle", properties: { sessionID: REAL_SESSION } });
+      await expect(outcome).resolves.toMatchObject({ status: "completed", text: "the rest of the work" });
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("does not mistake a late update to a message it already handled for a new run", async () => {
+      const { server, fiber, started } = await settledTurn();
+      await server.push(text("msg_a1", "first answer, final"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(started()).toEqual([]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("does not take the tail of an interrupted run for a new one", async () => {
+      const transport = new FakeOpencodeTransport({ sessionID: REAL_SESSION });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, interruptAckTimeoutMs: 20 });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      await Effect.runPromise(driver.interruptTurn("thread-1"));
+      await transport.servers[0]!.push(text("msg_late", "words from the run that was cut"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events.some((event) => event.type === "turn.started")).toBe(false);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+  });
+
+  describe("the silence watchdog and work the server does quietly", () => {
+    const toolPart = (status: string) => ({
+      type: "message.part.updated",
+      properties: { sessionID: REAL_SESSION, part: { id: "call_exec", callID: "call_exec", messageID: "m", type: "tool", tool: "execute", state: { status, input: {} } } },
+    });
+    async function turn(options: { stallTimeoutMs: number; toolStallTimeoutMs?: number }) {
+      const transport = new FakeOpencodeTransport({ sessionID: REAL_SESSION });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, ...options });
+      drivers.push(driver);
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "x" }));
+      const outcome = driver.awaitTurn("thread-1", sent.turnId);
+      let settled = false;
+      void outcome.then(() => (settled = true));
+      return { transport, outcome, settled: () => settled };
+    }
+
+    it("does not fail a turn that is waiting on a tool call, however long the call is quiet", async () => {
+      const { transport, outcome, settled } = await turn({ stallTimeoutMs: 60, toolStallTimeoutMs: 400 });
+      await transport.servers[0]!.push(toolPart("running"));
+      // Well past the plain silence budget, with the call still in flight.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled()).toBe(false);
+      // The call ends and the server goes quiet for real: now the plain budget applies.
+      await transport.servers[0]!.push(toolPart("completed"));
+      await expect(outcome).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("No response from the provider") });
+    });
+
+    it("still fails a tool call that never ends, on the longer budget", async () => {
+      const { transport, outcome } = await turn({ stallTimeoutMs: 40, toolStallTimeoutMs: 150 });
+      await transport.servers[0]!.push(toolPart("running"));
+      await expect(outcome).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("A tool call has been running") });
+    });
+
+    it("counts a subagent's own events as its parent's turn still working", async () => {
+      const { transport, outcome, settled } = await turn({ stallTimeoutMs: 120 });
+      const server = transport.servers[0]!;
+      // The parent's call names its child, then the parent says nothing while the child works.
+      await server.pushRaw({ type: "session.tool.input.started", data: { sessionID: REAL_SESSION, assistantMessageID: "m", id: "call_sub", name: "subagent" } });
+      await server.pushRaw({ type: "session.tool.called", data: { sessionID: REAL_SESSION, assistantMessageID: "m", id: "call_sub", input: { agent: "general", description: "Sleep", prompt: "p" } } });
+      await server.pushRaw({ type: "session.tool.progress", data: { sessionID: REAL_SESSION, assistantMessageID: "m", id: "call_sub", metadata: { sessionID: "ses_kid", status: "running" } } });
+      for (let index = 0; index < 5; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await server.pushRaw({ type: "session.tool.called", data: { sessionID: "ses_kid", id: `kid_${index}`, input: { pattern: "*" } } });
+      }
+      // 250 ms of child work against a 120 ms budget, and the parent's turn is still running.
+      expect(settled()).toBe(false);
+      await server.pushRaw({ type: "session.tool.success", data: { sessionID: REAL_SESSION, assistantMessageID: "m", id: "call_sub", content: [{ type: "text", text: "done" }], metadata: { sessionID: "ses_kid", status: "completed" } } });
+      await expect(outcome).resolves.toMatchObject({ status: "failed" });
+    });
+  });
+
   it("re-arms the silence watchdog on activity, so a long but chatty turn is not failed", async () => {
     const transport = new FakeOpencodeTransport({ sessionID: REAL_SESSION });
     const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, stallTimeoutMs: 120 });
@@ -1249,6 +1581,15 @@ describe("opencode auto-compaction threshold", () => {
     });
     expect(opencodeContextOf(messages, null)).toMatchObject({ maxTokens: null, autoCompactThreshold: null, compactsAutomatically: null });
     expect(opencodeContextOf([{ info: { role: "user" } }], settings)).toBeNull();
+  });
+
+  it("sizes the window by the input cap when the model has one under its context", () => {
+    const messages = [{ info: { role: "assistant", providerID: "p", modelID: "m", tokens: { input: 400_000, output: 1_000, cache: { read: 0, write: 0 } } } }];
+    // Space Bunny Free: 1M context but 512k input; OpenCode compacts at 472k, so the bar reads out of 512k.
+    const capped = opencodeContextOf(messages, { limits: new Map([["p/m", { context: 1_048_576, input: 524_288, output: 524_288 }]]), autoCompact: true, buffer: null });
+    expect(capped).toMatchObject({ maxTokens: 524_288, autoCompactThreshold: 524_288 - 52_428 });
+    // An input limit at or over the context changes nothing.
+    expect(opencodeContextOf(messages, { limits: new Map([["p/m", { context: 200_000, input: 200_000, output: 8_000 }]]), autoCompact: true, buffer: null })).toMatchObject({ maxTokens: 200_000 });
   });
 });
 

@@ -62,7 +62,7 @@
         "projectId": "<id-1>",
         "title": "Isolated change",
         "modelSelection": {
-          "instanceId": "codex",
+          "instanceId": "opencode",
           "model": "gpt-5.4"
         },
         "runtimeMode": "full-access",
@@ -83,7 +83,7 @@
           "attachments": []
         },
         "modelSelection": {
-          "instanceId": "codex",
+          "instanceId": "opencode",
           "model": "gpt-5.4"
         },
         "titleSeed": "Isolated change",

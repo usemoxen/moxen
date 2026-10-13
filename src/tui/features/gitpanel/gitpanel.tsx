@@ -153,7 +153,7 @@ function RunList({ runs, width }: { runs: readonly ForgeCheckRun[]; width: numbe
 
 /** Who opens a request when the agent is asked: the thread's own, or another while it is at its limit. */
 export interface RequestOpener {
-  /** "the agent", or e.g. "Codex (Claude is at its limit)"; null when nobody can. */
+  /** "the agent", or e.g. "OpenCode (Claude is at its limit)"; null when nobody can. */
   readonly label: string | null;
 }
 
@@ -171,6 +171,9 @@ export function GitTab({
   selectedBranch,
   now,
   opener,
+  base,
+  baseChoices,
+  onPickBase,
   onSelectBranch,
   onRefresh,
   onAgentOpen,
@@ -194,6 +197,10 @@ export function GitTab({
   selectedBranch: string | null;
   now: number;
   opener: RequestOpener;
+  /** The branch a new request merges into, and the others it could. */
+  base: string | null;
+  baseChoices: readonly string[];
+  onPickBase: (base: string) => void;
   onSelectBranch: (branch: string | null) => void;
   onRefresh: () => void;
   /** Ask an agent to open the request (a draft, or ready for review). */
@@ -210,6 +217,7 @@ export function GitTab({
   const [showAllBranches, setShowAllBranches] = useState(false);
   const [showAllCommits, setShowAllCommits] = useState(false);
   const [armedMerge, setArmedMerge] = useState<number | null>(null);
+  const [pickingBase, setPickingBase] = useState(false);
 
   if (commit !== null) return <CommitView commit={commit} width={width} now={now} onBack={onCloseCommit} onOpenUrl={onOpenUrl} />;
 
@@ -318,6 +326,30 @@ export function GitTab({
           <Row>
             <text fg={COLOR.dim} selectable={false}>{truncate(`  No ${noun.short} for ${checkedOut ?? "this checkout"} yet.`, width)}</text>
           </Row>
+          {/* Where it merges: asked here, not guessed by the agent. */}
+          <Row {...(baseChoices.length > 1 ? { onClick: () => setPickingBase((open) => !open) } : {})}>
+            <text fg={COLOR.dim} selectable={false}>{"  into "}</text>
+            <text fg={base === null ? COLOR.faint : COLOR.bright} selectable={false}>
+              {truncate(base ?? "the default branch", Math.max(4, width - 10))}
+            </text>
+            {baseChoices.length > 1 ? <text fg={COLOR.dim} selectable={false}>{pickingBase ? " ▴" : " ▾"}</text> : null}
+          </Row>
+          {pickingBase
+            ? baseChoices.map((choice) => (
+                <Row
+                  key={choice}
+                  active={choice === base}
+                  onClick={() => {
+                    onPickBase(choice);
+                    setPickingBase(false);
+                  }}
+                >
+                  <text fg={choice === base ? COLOR.bright : COLOR.text} selectable={false}>
+                    {truncate(`    ${choice === base ? "● " : "  "}${choice}`, width)}
+                  </text>
+                </Row>
+              ))
+            : null}
           {opener.label === null ? (
             <Row>
               <text fg={COLOR.faint} selectable={false}>{truncate("  No agent has usage left to open one.", width)}</text>

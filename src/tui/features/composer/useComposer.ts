@@ -84,6 +84,12 @@ export function useComposer(
     setComposerResetCounter((count) => count + 1);
   };
 
+  /** Puts text back in a thread's composer (a reverted prompt), force-syncing the buffer like a clear does. */
+  const restoreDraft = (id: string, value: string) => {
+    writeDraft(id, value);
+    setComposerResetCounter((count) => count + 1);
+  };
+
   const writePending = (id: string, next: ImageAttachmentUpload[]) => {
     setPendings((current) => {
       if (next.length === 0) {
@@ -179,6 +185,7 @@ export function useComposer(
     copyDraft,
     setDraft,
     resetDraft,
+    restoreDraft,
     writePending,
     setPending,
     editDraftExternally,

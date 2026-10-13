@@ -7,9 +7,9 @@
  * promise-chain mutex (the enforceable replacement for a racy
  * dispatch-then-poll preflights: one active turn per session). Record
  * writes are atomic (tmp file + rename). Zero new dependencies.
- * See ARCHITECTURE.md §9.
+ * See docs/threads.md.
  */
-import { appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -163,6 +163,50 @@ export class ThreadStore {
     const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
     await writeFile(tmp, `${JSON.stringify(thread)}\n`, "utf8");
     await rename(tmp, file);
+  }
+
+  /**
+   * A token that changes whenever anything stored for the thread does: its
+   * record and each ledger, by identity, size and modification time (a write
+   * replaces the record's file and appends to or rewrites a ledger, and each
+   * moves at least one of them). Cheap — five stats — so a watcher can ask
+   * "did anything change?" instead of reading and parsing megabytes of
+   * ledger every time it looks.
+   */
+  async threadVersion(threadId: string): Promise<string> {
+    const files = [this.threadFile(threadId), ...(["turns", "messages", "activity", "checkpoints"] as const).map((name) => ledgerFile(this.root, threadId, name))];
+    const parts = await Promise.all(
+      files.map(async (file) => {
+        try {
+          const info = await stat(file);
+          return `${info.ino}:${info.size}:${info.mtimeMs}`;
+        } catch {
+          return "-";
+        }
+      }),
+    );
+    return parts.join("|");
+  }
+
+  /**
+   * The thread-list counterpart of `threadVersion`: one token over every
+   * thread's record and turns plus the delegations ledger — everything the
+   * sidebar's rows are built from — for the price of a stat each.
+   */
+  async shellVersion(): Promise<string> {
+    const statOf = async (file: string): Promise<string> => {
+      try {
+        const info = await stat(file);
+        return `${info.ino}:${info.size}:${info.mtimeMs}`;
+      } catch {
+        return "-";
+      }
+    };
+    const ids = await this.listThreadIds().catch(() => []);
+    const parts = await Promise.all(
+      ids.map(async (id) => `${id}=${await statOf(this.threadFile(id))},${await statOf(ledgerFile(this.root, id, "turns"))}`),
+    );
+    return [await statOf(this.delegationsFile()), ...parts.sort()].join("|");
   }
 
   async listThreadIds(): Promise<string[]> {

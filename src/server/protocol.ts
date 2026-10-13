@@ -17,13 +17,13 @@
  *   It is the only place allowed to guess at an unknown shape.
  *
  * Deliberately hand-written rather than schema-library-generated. Nothing
- * in the tree uses `effect/Schema` today, and ARCHITECTURE.md already
- * carries Effect's release churn as a standing risk; a discriminated union
- * plus these decoders costs less and breaks in more obvious ways.
+ * in the tree uses `effect/Schema` today; a discriminated union plus these
+ * decoders costs less and breaks in more obvious ways.
  */
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
+import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
   CancelledTask,
   ChecklistStep,
@@ -40,6 +40,7 @@ import type {
   ThreadListQuery,
   WorkspaceQuery,
 } from "../core/threads/operations.js";
+import type { ThreadSearch, ThreadSearchQuery } from "../core/threads/search.js";
 import type { ModelRequest } from "../core/catalog/selection.js";
 import type { SettingView } from "../core/configschema.js";
 import type { GitBranch, GitCommit, GitCommitDetail, GitOverview, GitWorktreeStatus } from "../core/git/history.js";
@@ -140,7 +141,8 @@ export type CommandBody =
     }
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
   | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
-  | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string }
+  /** `stop`: end the family's running work first instead of refusing to settle past it. */
+  | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string; readonly stop?: boolean }
   | { readonly type: "thread.unsettle"; readonly threadId: string; readonly reason?: string }
   | { readonly type: "thread.snooze"; readonly threadId: string; readonly snoozedUntil: string }
   | { readonly type: "thread.unsnooze"; readonly threadId: string }
@@ -196,6 +198,8 @@ export type CommandBody =
    * `value` is always text — the schema's parser owns the conversion.
    */
   | { readonly type: "settings.set"; readonly key: string; readonly value: string }
+  /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
+  | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
   /**
    * Continue a thread in a new one: same project, model and modes, opened
    * with a handoff written from the old thread's ledger. `scheduledFor`
@@ -273,6 +277,7 @@ export interface CommandResults {
   "project.ensure": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
   "settings.set": SettingsSnapshot & Accepted;
+  "provider.update": ProviderUpdate;
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
   "forge.request.create": { readonly url: string | null } & Accepted;
@@ -301,6 +306,11 @@ export type Query =
   | { readonly type: "projects.list" }
   | ({ readonly type: "project.resolve" } & WorkspaceQuery)
   | ({ readonly type: "threads.list" } & ThreadListQuery)
+  /**
+   * Find threads by what is in them — title, messages, tool calls — settled
+   * ones included, active first. Read-only, so a transport may retry it.
+   */
+  | ({ readonly type: "threads.search" } & ThreadSearchQuery)
   | { readonly type: "thread.inspect"; readonly threadId: string }
   | {
       readonly type: "thread.read";
@@ -337,7 +347,7 @@ export type Query =
   | { readonly type: "thread.subagent"; readonly threadId: string; readonly agentId: string }
   /**
    * The latest subscription usage windows each provider reported, keyed by
-   * driver kind (`claude`, `codex`, …): the account's limits, shared by
+   * driver kind (`claude`, `opencode`): the account's limits, shared by
    * every thread on it. Empty until a session reports.
    */
   | { readonly type: "usage.limits" }
@@ -353,6 +363,8 @@ export type Query =
    * actually honours.
    */
   | { readonly type: "settings.read" }
+  /** The newest Claude Code and OpenCode the registry offers (read when `updates.checkLatest` is on). */
+  | { readonly type: "provider.latest" }
   /**
    * The Git panel's whole first paint for a thread's working directory:
    * status, branches and one branch's commits. Keyed by thread rather
@@ -393,6 +405,7 @@ export interface QueryResults {
   "projects.list": { readonly projects: readonly StoredProject[] };
   "project.resolve": { readonly workspace: WorkspaceResolution; readonly project: StoredProject | null };
   "threads.list": ThreadList;
+  "threads.search": ThreadSearch;
   "thread.inspect": { readonly project: StoredProject | null; readonly thread: ThreadInspection };
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
@@ -406,6 +419,7 @@ export interface QueryResults {
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
+  "provider.latest": LatestVersions;
   "git.overview": GitOverview;
   "git.commit.diff": { readonly sha: string; readonly diff: string | null };
   "forge.detect": ForgeDetection;
@@ -695,6 +709,13 @@ export function decodeCommand(value: unknown): Command {
         ...(asString(record.turnId) ? { turnId: asString(record.turnId) as string } : {}),
       };
     case "thread.settle":
+      return {
+        ...meta,
+        type,
+        threadId: threadId(),
+        ...(asString(record.reason) ? { reason: asString(record.reason) as string } : {}),
+        ...(record.stop === true ? { stop: true } : {}),
+      };
     case "thread.unsettle":
       return {
         ...meta,
@@ -887,6 +908,12 @@ export function decodeCommand(value: unknown): Command {
         // thing that decides what "false" or "120" means for a key.
         value: typeof record.value === "string" ? record.value : String(record.value ?? ""),
       };
+    case "provider.update":
+      return {
+        ...meta,
+        type,
+        provider: requireEnum(record.provider, type, "provider", UPDATABLE_PROVIDERS),
+      };
     default:
       throw unknownCommand(type);
   }
@@ -919,6 +946,17 @@ function optionalNumber<K extends string>(record: Record<string, unknown>, key: 
     throw new CliError("INVALID_THREAD_OPTION", `${command} ${key} must be a number.`, { exitCode: 2 });
   }
   return { [key]: value } as { [P in K]?: number };
+}
+
+/** One of the known values; absent or anything else is refused. */
+function requireEnum<V extends string>(value: unknown, command: string, field: string, allowed: readonly V[]): V {
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} requires ${field} to be one of ${allowed.join(", ")}.`, {
+      exitCode: 2,
+      details: { [field]: value },
+    });
+  }
+  return value as V;
 }
 
 /** A known value or absent; anything else is refused rather than defaulted. */
@@ -972,6 +1010,17 @@ export function decodeQuery(value: unknown): Query {
         ...optionalEnum(record, "workspaceMode", ["repo", "folder"] as const, type),
         ...optionalEnum(record, "status", ["active", "settled", "snoozed", "all"] as const satisfies readonly ThreadListStatus[], type),
       };
+    case "threads.search":
+      return {
+        type,
+        query: requireField(record.query, type, "query"),
+        ...optionalString(record, "projectId"),
+        ...optionalString(record, "cwd"),
+        ...optionalEnum(record, "workspaceMode", ["repo", "folder"] as const, type),
+        ...optionalEnum(record, "status", ["active", "settled", "snoozed", "all"] as const satisfies readonly ThreadListStatus[], type),
+        ...optionalNumber(record, "limit", type),
+        ...optionalNumber(record, "hitsPerThread", type),
+      };
     case "thread.inspect":
       return { type, threadId: requireThreadId(record.threadId) };
     case "thread.read":
@@ -999,6 +1048,7 @@ export function decodeQuery(value: unknown): Query {
     case "doctor":
     case "usage.limits":
     case "settings.read":
+    case "provider.latest":
       return { type };
     case "git.overview":
       return {

@@ -20,6 +20,7 @@ export async function runSidePanelTabs(): Promise<void> {
   const now = Date.parse("2026-09-25T10:00:00.000Z");
   let showTab: ((tab: SideTab) => void) | null = null;
   const opened: string[] = [];
+  const stopped: string[] = [];
   function Harness() {
     const [tab, setTab] = useState<SideTab>("agents");
     showTab = setTab;
@@ -63,6 +64,7 @@ export async function runSidePanelTabs(): Promise<void> {
               ]}
               now={now}
               onOpen={(threadId) => opened.push(threadId)}
+              onStopSubagent={(agentId) => stopped.push(agentId)}
             />
           ) : (
             <ContextTab
@@ -117,6 +119,13 @@ export async function runSidePanelTabs(): Promise<void> {
   await act(async () => setup.mockMouse.click(rows[openRow]!.indexOf("GPT-5.5") + 1, openRow));
   await setup.flush();
   if (opened[0] !== "child-1") fail("clicking a delegated thread did not open that thread");
+
+  // Only the running subagent offers a stop, and it stops that one.
+  const stopRows = rows.flatMap((row, y) => (/\bstop\b/.test(row) ? [y] : []));
+  if (stopRows.length !== 1) fail(`expected one subagent stop action, found ${stopRows.length}`);
+  await act(async () => setup.mockMouse.click(rows[stopRows[0]!]!.indexOf("stop") + 1, stopRows[0]!));
+  await setup.flush();
+  if (stopped.join() !== "a2") fail("clicking stop did not stop the running subagent");
 
   await act(async () => showTab?.("context"));
   await setup.flush();

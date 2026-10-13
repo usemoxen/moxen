@@ -7,7 +7,7 @@
  * `opencode serve` ourselves and always give it a password, because v2 puts
  * every `/api/*` route behind HTTP Basic auth. Version gating keeps the API
  * surface we call (OpenCode v2, `@opencode/client`) in reach.
- * See the providers table in ARCHITECTURE.md.
+ * See docs/providers.md.
  */
 import { randomBytes } from "node:crypto";
 
@@ -25,6 +25,8 @@ export interface OpencodeSettings {
   /** Password for an external server (never inherited from env there). */
   readonly serverPassword: string;
   readonly minVersion: string;
+  /** Tell a spawned server about moxen's bundled skills (its config's `skills` list). */
+  readonly bundledSkills: boolean;
 }
 
 export function normalizeOpencodeSettings(raw: Partial<OpencodeSettings> = {}): OpencodeSettings {
@@ -34,6 +36,7 @@ export function normalizeOpencodeSettings(raw: Partial<OpencodeSettings> = {}): 
     serverUrl: raw.serverUrl?.trim() ?? "",
     serverPassword: raw.serverPassword ?? "",
     minVersion: raw.minVersion?.trim() ? raw.minVersion.trim() : OPENCODE_MIN_VERSION,
+    bundledSkills: raw.bundledSkills ?? true,
   };
 }
 
@@ -65,11 +68,15 @@ export function resolveSpawnedServerPassword(
  * let the server update itself under us). Every other user key is kept as is.
  * Permissions are deliberately not injected: v2's default (allow all) matches
  * what moxen has always run with.
+ * `skillsDirs` (moxen's bundled skills) are added to the config's `skills`
+ * list, after any the user already named and once each: OpenCode reads that
+ * list as extra skill sources next to `.agents/skills` and `.claude/skills`,
+ * and combines the lists of every config it finds.
  * Unparseable content is replaced, not merged — a corrupt config would
  * break the server boot either way, and replacing keeps the failure
  * legible at our layer instead of deep in the server.
  */
-export function buildServerConfigContent(existing: string | undefined): string {
+export function buildServerConfigContent(existing: string | undefined, skillsDirs: readonly string[] = []): string {
   let parsed: Record<string, unknown> = {};
   if (existing && existing.trim().length > 0) {
     try {
@@ -81,27 +88,12 @@ export function buildServerConfigContent(existing: string | undefined): string {
       parsed = {};
     }
   }
-  return JSON.stringify({ ...parsed, share: "disabled", update: "disable" });
+  const named = Array.isArray(parsed.skills) ? (parsed.skills as unknown[]).filter((entry): entry is string => typeof entry === "string") : [];
+  const skills = [...named, ...skillsDirs.filter((dir) => !named.includes(dir))];
+  return JSON.stringify({ ...parsed, ...(skills.length > 0 ? { skills } : {}), share: "disabled", update: "disable" });
 }
 
-export function parseSemver(raw: string): [number, number, number] | null {
-  const match = raw.trim().replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
-  if (!match?.[1] || !match[2] || !match[3]) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-/** Negative when `have < want`. Unparseable `have` reads as too old. */
-export function compareSemver(have: string, want: string): number {
-  const parsedHave = parseSemver(have);
-  const parsedWant = parseSemver(want);
-  if (!parsedHave) return -1;
-  if (!parsedWant) return 0;
-  for (let index = 0; index < 3; index += 1) {
-    const delta = (parsedHave[index] ?? 0) - (parsedWant[index] ?? 0);
-    if (delta !== 0) return delta < 0 ? -1 : 1;
-  }
-  return 0;
-}
+export { compareSemver, parseSemver } from "../semver.js";
 
 const AUTH_ERROR_PATTERNS: ReadonlyArray<RegExp> = [
   /401/,

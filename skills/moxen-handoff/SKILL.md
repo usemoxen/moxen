@@ -111,7 +111,7 @@ moxen --json handover `
 - `--checkout current` uses the existing checkout in place. `--checkout worktree` creates a
   worktree and runs the project's setup script. Use it only when you want isolation, on a repo
   with a current branch.
-- `--permission full-access` is the normal choice. For Claude or Codex, use `--permission auto`.
+- `--permission full-access` is the normal choice. For Claude, use `--permission auto`.
 - Drop `--thinking-effort` only when the model has no `effort` descriptor.
 - To validate without writing any state, add `--open none --dry-run`.
 

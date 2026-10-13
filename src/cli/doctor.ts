@@ -29,7 +29,7 @@ export async function doctor(config: CliConfig, configPath: string, configExists
     ok:
       checks.git.ok &&
       checks.store.ok &&
-      (providers.claude.ok || providers.codex.ok || providers.opencode.ok || providers.grok.ok),
+      (providers.claude.ok || providers.opencode.ok),
     checks,
   };
 }

@@ -1,17 +1,18 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
+import { openRequestPrompt } from "../../model/gitpanel.js";
 import { emitLiveRef } from "../fixtures.js";
 import { fail } from "../helpers.js";
 
 /** A live activity row, as the server appends it. */
-function activityFrame(id: string, kind: string, summary: string, payload: Record<string, unknown>) {
+function activityFrame(id: string, kind: string, summary: string, payload: Record<string, unknown>, turnId = "turn-2") {
   return {
     kind: "event",
     event: {
       type: "thread.activity-appended",
       payload: {
-        activity: { id, kind, summary, tone: "info", turnId: "turn-2", createdAt: new Date().toISOString(), payload },
+        activity: { id, kind, summary, tone: "info", turnId, createdAt: new Date().toISOString(), payload },
       },
     },
   };
@@ -219,6 +220,59 @@ export async function runProviderInterruptions(setup: TestRendererSetup): Promis
   if (!compacted.includes("Conversation compacted automatically")) fail("compaction notice did not render");
   if (compacted.includes("Kept: the render-check plan")) fail("compaction summary showed before the row was expanded");
 
+  // `/compact` typed by the user: one quiet line with the summary folded, not
+  // a "you" card over a "Worked for…" fold with the summary dumped open.
+  await act(async () => {
+    emitLiveRef.current?.({
+      kind: "event",
+      event: {
+        type: "thread.message-sent",
+        payload: {
+          message: {
+            id: "compact-1",
+            role: "user",
+            text: "/compact",
+            turnId: "turn-compact",
+            streaming: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
+    emitLiveRef.current?.(
+      activityFrame(
+        "notice-compact",
+        "notice",
+        "Conversation compacted",
+        { notice: "compacted", provider: "opencode", detail: "## Objective\n- Ship the compact card." },
+        "turn-compact",
+      ),
+    );
+  });
+  await setup.flush();
+  await jumpToBottom();
+  const compactCard = setup.captureCharFrame();
+  console.log("--- timeline: /compact turn ---");
+  console.log(compactCard);
+  if (!compactCard.includes("Conversation compacted  ·")) fail("a /compact turn did not render as its own compaction line");
+  if (compactCard.includes("/compact")) fail("a /compact turn still showed the command as a prompt card");
+  if (compactCard.includes("## Objective")) fail("the compaction summary showed before it was asked for");
+  if (!compactCard.includes("▸ summary")) fail("the compaction line offered no way to read the summary");
+  if (!compactCard.includes("───")) fail("the compaction line was not set in a rule");
+
+  // Opened, the summary reads as markdown: the heading drawn, not its `##`.
+  const cardRows = compactCard.split("\n");
+  const cardRow = cardRows.findIndex((line) => line.includes("Conversation compacted  ·"));
+  await act(async () => setup.mockMouse.click(cardRows[cardRow]!.indexOf("▸ summary") + 1, cardRow));
+  await setup.flush();
+  await jumpToBottom();
+  const opened = setup.captureCharFrame();
+  console.log("--- timeline: /compact summary opened ---");
+  console.log(opened);
+  if (!opened.includes("Ship the compact card")) fail("the compaction summary did not open");
+  if (opened.includes("## Objective")) fail("the compaction summary showed raw markdown instead of rendering it");
+
   // A delegated task settled: moxen writes it into the thread, drawn as a
   // card rather than a "you" prompt holding the raw notification text.
   await act(async () => {
@@ -270,6 +324,34 @@ export async function runProviderInterruptions(setup: TestRendererSetup): Promis
     fail("task notification card did not show what the task changed and where");
   }
   if (notified.includes("<task-notification>")) fail("the raw notification text leaked into the transcript");
+
+  // The Git tab asked the agent to open a PR: a card, not the steps it reads.
+  await act(async () => {
+    emitLiveRef.current?.({
+      kind: "event",
+      event: {
+        type: "thread.message-sent",
+        payload: {
+          message: {
+            id: "open-pr-1",
+            role: "user",
+            text: openRequestPrompt({ kind: "github", draft: false, branch: "test-opencode-v1", base: "opencode-v2", cold: false }),
+            turnId: "turn-10",
+            streaming: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
+  });
+  await setup.flush();
+  await jumpToBottom();
+  const asked = setup.captureCharFrame();
+  console.log("--- timeline: asked the agent to open a PR ---");
+  console.log(asked);
+  if (!asked.includes("Open a PR  ·  test-opencode-v1 → opencode-v2  ·  ready for review")) fail("the open-PR ask did not render as a card naming its base");
+  if (asked.includes("Push the branch (set its upstream")) fail("the open-PR prompt's raw steps leaked into the transcript");
 
   // A predicted next prompt: offered in the empty composer, Tab takes it.
   // An earlier scenario leaves "/pdf" in the draft; a non-empty draft offers

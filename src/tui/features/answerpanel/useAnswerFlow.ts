@@ -89,13 +89,38 @@ export function useAnswerFlow(
     const draft: AnswerDraft = {
       ...answerDraft,
       selected: update.selected === undefined ? answerDraft.selected : { ...answerDraft.selected, [questionId]: update.selected },
-      custom: update.custom === undefined ? answerDraft.custom : { ...answerDraft.custom, [questionId]: update.custom },
+      // A fresh pick replaces an earlier custom answer (revisited via goToQuestion): custom text wins on resolve.
+      custom:
+        update.custom !== undefined
+          ? { ...answerDraft.custom, [questionId]: update.custom }
+          : update.selected !== undefined && answerDraft.custom[questionId] !== undefined
+            ? Object.fromEntries(Object.entries(answerDraft.custom).filter(([id]) => id !== questionId))
+            : answerDraft.custom,
     };
     const request = pendingAnswerRequests.find((candidate) => candidate.requestId === draft.requestId);
     if (request === undefined) {
       return;
     }
-    if (draft.index + 1 < request.questions.length) {
+    // Questions can be revisited in any order (tabs, arrows), so "next" is the
+    // nearest question still without an answer — after this one first, then
+    // from the top — and the request is sent from the last question once
+    // none is left.
+    const total = request.questions.length;
+    const unanswered = (index: number) => resolveAnswerQuestion(request.questions[index]!, draft) === null;
+    for (let step = 1; step < total; step += 1) {
+      const next = (draft.index + step) % total;
+      if (unanswered(next)) {
+        setAnswerDraft({ ...draft, index: next });
+        return;
+      }
+    }
+    if (unanswered(draft.index)) {
+      setError("answer every question before submitting");
+      return;
+    }
+    // Everything is answered. Changing an earlier answer walks on toward the
+    // last question rather than sending the request from the middle.
+    if (draft.index + 1 < total) {
       setAnswerDraft({ ...draft, index: draft.index + 1 });
       return;
     }
@@ -146,6 +171,15 @@ export function useAnswerFlow(
       });
   };
 
+  /** Jumps to another question of the request; every answer so far is kept. */
+  const goToQuestion = (index: number) => {
+    setAnswerDraft((draft) => {
+      if (draft === null || index === draft.index) return draft;
+      const total = pendingAnswerRequests.find((candidate) => candidate.requestId === draft.requestId)?.questions.length ?? 0;
+      return index < 0 || index >= total ? draft : { ...draft, index };
+    });
+  };
+
   /** Toggles one multi-select option without leaving the modal. */
   const toggleAnswerOption = (draft: NonNullable<typeof answerDraft>, questionId: string, value: string) => {
     const current = draft.selected[questionId] ?? [];
@@ -191,6 +225,7 @@ export function useAnswerFlow(
     resolveAnswerQuestion,
     answerCurrentQuestion,
     toggleAnswerOption,
+    goToQuestion,
     dismissAnswerRequest,
   };
 }

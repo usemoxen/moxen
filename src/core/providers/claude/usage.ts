@@ -5,7 +5,7 @@
  * from result messages is a running total — replaced, never summed.
  * Quota windows: `get_usage` probe → Session (5h) + Weekly (7d) + per-model
  * Weekly rows; live `rate_limit_event`s land on the same ids. Absent
- * windows on a successful probe = API-key account. See ARCHITECTURE.md §5.
+ * windows on a successful probe = API-key account. See docs/providers.md.
  */
 import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
 
@@ -51,8 +51,18 @@ export function addFrameUsage(totals: UsageTotals, usage: ApiUsageShape | null |
 const FIVE_HOUR_MINS = 5 * 60;
 const WEEK_MINS = 7 * 24 * 60;
 
+/**
+ * The SDK names five window kinds (session, weekly and its per-model and
+ * overage-included variants) and `overage`: the monthly extra-usage spend
+ * cap. An event that names none is that cap too (it arrives untyped, at 100%,
+ * resetting at the start of next month) — it used to surface as a bar labelled
+ * "unknown".
+ */
+const EXTRA_USAGE = "overage";
+
 function windowIdForType(rateLimitType: string, overageIncludedName?: string): string {
   if (rateLimitType === "five_hour") return "session";
+  if (rateLimitType === "unknown") return EXTRA_USAGE;
   if (rateLimitType === "seven_day") return "weekly";
   if (rateLimitType === "seven_day_overage_included") {
     const slug = (overageIncludedName ?? "overage").toLowerCase().replace(/[^a-z0-9]+/g, "_");
@@ -63,6 +73,7 @@ function windowIdForType(rateLimitType: string, overageIncludedName?: string): s
 
 function labelForType(rateLimitType: string, overageIncludedName?: string): string {
   if (rateLimitType === "five_hour") return "Session";
+  if (rateLimitType === EXTRA_USAGE || rateLimitType === "unknown") return "Extra usage";
   if (rateLimitType === "seven_day") return "Weekly";
   if (rateLimitType === "seven_day_overage_included") {
     return `Weekly – ${overageIncludedName ?? "overage"}`;

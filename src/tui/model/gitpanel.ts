@@ -1,5 +1,5 @@
 import type { ProviderSummary, ProviderUsageLimits } from "../../core/catalog/summary.js";
-import type { ForgeCheckRun, ForgeChecks, ForgeKind } from "../../server/api.js";
+import type { ForgeCheckRun, ForgeChecks, ForgeKind, GitOverview } from "../../server/api.js";
 
 /**
  * The pure half of the Git tab: what an agent is asked when it opens a
@@ -21,15 +21,20 @@ export function openRequestPrompt(input: {
   kind: ForgeKind | null;
   draft: boolean;
   branch: string | null;
+  /** The branch it merges into; null leaves it to the forge (the repository's default). */
+  base?: string | null;
   /** Another agent, from nothing: no conversation to draw on. */
   cold: boolean;
 }): string {
   const noun = requestNoun(input.kind);
-  const cli = input.kind === "gitlab" ? "glab mr create" : "gh pr create";
+  const base = input.base ?? null;
+  const baseFlag = base === null ? "" : input.kind === "gitlab" ? ` --target-branch ${base}` : ` --base ${base}`;
+  const cli = `${input.kind === "gitlab" ? "glab mr create" : "gh pr create"}${baseFlag}`;
   const draftFlag = input.draft ? " --draft" : "";
   const branch = input.branch === null ? "the current branch" : `\`${input.branch}\``;
+  const into = base === null ? "" : ` into \`${base}\``;
   const lines = [
-    `Open a ${input.draft ? "draft " : ""}${noun.long} for ${branch}.`,
+    `Open a ${input.draft ? "draft " : ""}${noun.long} for ${branch}${into}.`,
     "",
     input.cold
       ? "You are picking this up without the conversation that did the work. First read what the branch holds: `git status`, `git log` and `git diff` against the base branch it will merge into."
@@ -42,6 +47,55 @@ export function openRequestPrompt(input: {
     `If a ${noun.short} for this branch already exists, do not open another; say so and give its URL.`,
   ];
   return lines.join("\n");
+}
+
+/** What an `openRequestPrompt` asked for, read back off a sent message. */
+export interface OpenRequestAsk {
+  readonly kind: ForgeKind;
+  readonly draft: boolean;
+  /** Null: "the current branch". */
+  readonly branch: string | null;
+  /** Null: left to the forge (prompts from before the base was asked for). */
+  readonly base: string | null;
+  readonly cold: boolean;
+}
+
+/**
+ * The Git tab's "have the agent open it" prompt, recognised in the
+ * transcript so it draws as a card instead of a "you" block of
+ * instructions the user never typed. Only an exact match counts: the
+ * prompt is rebuilt from what its first line names and compared whole,
+ * so a message of the user's own that merely starts the same way stays
+ * theirs.
+ */
+export function readOpenRequestPrompt(text: string): OpenRequestAsk | null {
+  const head = /^Open a (draft )?(pull|merge) request for (?:`([^`\n]+)`|the current branch)(?: into `([^`\n]+)`)?\.\n/u.exec(text);
+  if (head === null) return null;
+  const kind: ForgeKind = head[2] === "merge" ? "gitlab" : "github";
+  const draft = head[1] !== undefined;
+  const branch = head[3] ?? null;
+  const base = head[4] ?? null;
+  for (const cold of [false, true]) {
+    if (openRequestPrompt({ kind, draft, branch, base, cold }) === text) return { kind, draft, branch, base, cold };
+  }
+  return null;
+}
+
+/**
+ * The branches a request can merge into: local ones other than the branch
+ * being proposed, the repository's default first.
+ */
+export function baseChoices(overview: GitOverview | null): string[] {
+  if (overview === null) return [];
+  const head = overview.status?.branch ?? null;
+  const names = overview.branches.filter((entry) => !entry.remote && entry.name !== head).map((entry) => entry.name);
+  const first = overview.defaultBranch;
+  return first !== null && names.includes(first) ? [first, ...names.filter((name) => name !== first)] : names;
+}
+
+/** The base a request targets: the one picked, while it is still a choice, else the first choice. */
+export function resolveBase(picked: string | null, choices: readonly string[]): string | null {
+  return picked !== null && choices.includes(picked) ? picked : (choices[0] ?? null);
 }
 
 /** A usage window at (or past) its limit. */

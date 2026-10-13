@@ -83,12 +83,11 @@ export async function runWorkFoldGuards(setup: TestRendererSetup): Promise<void>
   console.log("--- summary toggled (guard marked) ---");
   console.log(setup.captureCharFrame());
 
-  // A second request arrives inline; esc dismisses it without answering.
+  // A second request arrives inline; the × in its header dismisses it without answering.
   await act(async () => {
     emitLiveRef.current?.(userInputRequestedFrame("que_live2"));
   });
   await setup.flush();
-  await act(async () => setup.mockInput.pressEscape());
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   console.log("--- answer dismissed ---");

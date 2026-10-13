@@ -32,6 +32,8 @@ export async function runQuestionPreview(): Promise<void> {
       width={90}
       suspended={false}
       pickedValues={[]}
+      tabs={[{ header: "Direction", answered: false }]}
+      onGoto={() => {}}
       onToggleOption={() => {}}
       onPickOption={() => {}}
       onCustom={() => {}}

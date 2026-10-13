@@ -54,6 +54,7 @@ export function PickerModal({
   filter,
   onFilterChange,
   filterable,
+  prefiltered = false,
   emptyLabel,
   screenWidth,
   screenHeight,
@@ -68,6 +69,8 @@ export function PickerModal({
   filter: string;
   onFilterChange: (value: string) => void;
   filterable: boolean;
+  /** The rows already answer the filter (the server searched), so none is hidden by it here. */
+  prefiltered?: boolean;
   emptyLabel: string;
   screenWidth: number;
   screenHeight: number;
@@ -89,7 +92,7 @@ export function PickerModal({
 
   const visible = useMemo(() => {
     if (body.kind !== "list") return [];
-    const query = filter.trim().toLowerCase();
+    const query = prefiltered ? "" : filter.trim().toLowerCase();
     const rows: PickerRow[] = [];
     for (const section of body.sections) {
       for (const row of section.rows) {
@@ -102,7 +105,7 @@ export function PickerModal({
       }
     }
     return rows;
-  }, [body, filter]);
+  }, [body, filter, prefiltered]);
 
   const visibleSections = useMemo(() => {
     if (body.kind !== "list") return [];
@@ -122,22 +125,22 @@ export function PickerModal({
       onClose();
       return;
     }
-    if (visible.length === 0) {
-      if (filterable && key.name === "backspace") onFilterChange(filter.slice(0, -1));
-      return;
-    }
-    if (key.name === "return" || key.name === "kpenter") {
-      const row = visible[safe];
-      if (row !== undefined && row.disabled !== true) row.onPick();
-      return;
-    }
-    if (key.name === "up") {
-      setIndex((current) => (current - 1 + visible.length) % visible.length);
-      return;
-    }
-    if (key.name === "down") {
-      setIndex((current) => (current + 1) % visible.length);
-      return;
+    // With no rows there is nothing to pick or move over, but typing must still
+    // work: it is how an empty search (or a filter that matched nothing) gets text.
+    if (visible.length > 0) {
+      if (key.name === "return" || key.name === "kpenter") {
+        const row = visible[safe];
+        if (row !== undefined && row.disabled !== true) row.onPick();
+        return;
+      }
+      if (key.name === "up") {
+        setIndex((current) => (current - 1 + visible.length) % visible.length);
+        return;
+      }
+      if (key.name === "down") {
+        setIndex((current) => (current + 1) % visible.length);
+        return;
+      }
     }
     if (!filterable) return;
     if (key.name === "backspace") {

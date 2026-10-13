@@ -609,7 +609,7 @@ export function originalShellSnapshot(): unknown {
  * `userInputActivityRow` means these steps fail if the writer stops
  * producing what the panel reads.
  */
-export function userInputRequestedFrame(requestId: string): unknown {
+export function userInputRequestedFrame(requestId: string, questionCount = 1): unknown {
   const row = userInputActivityRow({
     type: "user-input.request.opened",
     provider: "claude",
@@ -618,17 +618,15 @@ export function userInputRequestedFrame(requestId: string): unknown {
     raw: {
       toolName: "AskUserQuestion",
       input: {
-        questions: [
-          {
-            header: "Direction",
-            question: "Which direction?",
-            multiSelect: false,
-            options: [
-              { label: "Forward", description: "keep going" },
-              { label: "Sideways", description: "take a detour" },
-            ],
-          },
-        ],
+        questions: Array.from({ length: questionCount }, (_, index) => ({
+          header: index === 0 ? "Direction" : `Direction ${index + 1}`,
+          question: index === 0 ? "Which direction?" : `Which direction, step ${index + 1}?`,
+          multiSelect: false,
+          options: [
+            { label: "Forward", description: "keep going" },
+            { label: "Sideways", description: "take a detour" },
+          ],
+        })),
       },
     },
   } as UserInputRuntimeEvent);
@@ -639,7 +637,7 @@ export function userInputRequestedFrame(requestId: string): unknown {
       type: "thread.activity-appended",
       payload: {
         activity: {
-          id: "aq-live-1",
+          id: `aq-live-${requestId}`,
           kind: row.kind,
           tone: "info",
           summary: row.summary,
@@ -697,6 +695,15 @@ export const client: ClientApi = {
   query: (async (query: { type: string; instanceId?: string }) => {
     if (query.type === "skills.list") {
       return query.instanceId === "claudeAgent" ? CLAUDE_SKILLS : { trigger: "/", skills: [], commands: [] };
+    }
+    if (query.type === "threads.search") {
+      const hit = { kind: "message", snippet: "the webhook retry loop never stops", source: "user", turnId: null, at: null };
+      const entry = (threadId: string, title: string, status: string) => ({ threadId, projectId: "p", title, status, updatedAt: null, hitCount: 2, hits: [hit] });
+      return {
+        query: "webhook",
+        total: 2,
+        threads: [entry("t-active", "Fix the webhook handler", "active"), entry("t-old", "Billing refactor", "settled")],
+      };
     }
     if (query.type === "thread.background.output") {
       return { available: true, lines: ["watching build.log", "...still going"] };

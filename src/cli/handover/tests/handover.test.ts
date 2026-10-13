@@ -36,7 +36,7 @@ describe("createHandoverThread", () => {
     expect(createThread.projectId).toBe(result.project.id);
     expect(createThread.branch).toBe("main");
     expect(createThread.modelSelection).toMatchObject({
-      instanceId: "codex",
+      instanceId: "opencode",
       model: "gpt-5.4",
     });
     expect(createThread.modelSelection.options).toBeUndefined();
@@ -131,7 +131,7 @@ describe("createHandoverThread", () => {
     const result = await createHandoverThread(harness.config, {
       cwd: harness.work,
       prompt: "Handover",
-      provider: "codex",
+      provider: "opencode",
       model: "gpt-5.3-codex",
       speedMode: "fast",
       thinkingEffort: "high",
@@ -144,7 +144,7 @@ describe("createHandoverThread", () => {
     const createThread = result.thread.createCommand;
     const turn = result.thread.command;
     expect(createThread.modelSelection).toMatchObject({
-      instanceId: "codex",
+      instanceId: "opencode",
       model: "gpt-5.3-codex",
     });
     expect(createThread.modelSelection.options).toEqual(
@@ -199,7 +199,7 @@ describe("createHandoverThread", () => {
 
     expect(result.projectCommand).toMatchObject({ defaultModelSelection: null });
     expect(result.thread.command).toMatchObject({
-      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
     });
     expect(result.worktree).toMatchObject({ startFromOrigin: true });
   });
@@ -215,7 +215,7 @@ describe("createHandoverThread", () => {
       id: "project-existing",
       title: "Existing project",
       workspaceRoot: await realpath(harness.work),
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       defaultThreadEnvMode: "local",
     });
     harness.config.threadEnvMode = "auto";

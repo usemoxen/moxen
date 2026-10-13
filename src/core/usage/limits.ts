@@ -1,6 +1,6 @@
 /**
  * The latest subscription usage windows each provider reported (Claude's
- * session and weekly limits, Codex's primary/secondary, Grok's), merged
+ * session and weekly limits), merged
  * from every `rate-limits.updated` event the drivers publish: the start-up
  * probe gives the full set, live events refresh one window at a time.
  *
@@ -41,7 +41,9 @@ export function persistUsageLimits(storeRoot: string): void {
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, RecordedProvider>;
     for (const [provider, entry] of Object.entries(raw)) {
-      if (!recorded.has(provider) && entry && Array.isArray(entry.windows)) recorded.set(provider, entry);
+      if (recorded.has(provider) || !entry || !Array.isArray(entry.windows)) continue;
+      // Claude's extra-usage cap was once recorded as "unknown"; it is `overage` now, and the old row would never age out beside it.
+      recorded.set(provider, { ...entry, windows: entry.windows.filter((window) => window.id !== "unknown") });
     }
   } catch {
     // No file yet, or unreadable: start empty.

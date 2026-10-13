@@ -64,6 +64,30 @@ describe("toolActivityRow", () => {
     expect(view(done!)).toMatchObject({ running: false });
   });
 
+  it("reads an OpenCode subagent call an interrupt aborted as stopped, and one that failed as failed", () => {
+    const subagent = (errorType: string, error: string) =>
+      toolActivityRow(
+        event({
+          provider: "opencode",
+          type: "tool.execute.completed",
+          tool: "subagent",
+          raw: {
+            callID: "call_sub",
+            tool: "subagent",
+            state: { status: "error", input: { agent: "general", description: "Sleep 30 seconds" }, error, errorType },
+          },
+        }),
+      )!;
+    const aborted = subagent("aborted", "Step interrupted");
+    expect((aborted.payload.data as { state: { stopped?: boolean } }).state.stopped).toBe(true);
+    expect(view(aborted)).toMatchObject({ kind: "agent", subject: "Sleep 30 seconds", state: "stopped", running: false });
+    const failed = subagent("tool.execution", "Unable to start the subagent");
+    expect((failed.payload.data as { state: { stopped?: boolean } }).state.stopped).toBeUndefined();
+    expect(view(failed)).toMatchObject({ kind: "agent", state: "failed" });
+    // The two differ in the ledger too: a stopped call is a different row from a failed one.
+    expect(aborted.signature).not.toBe(failed.signature);
+  });
+
   it("maps a Claude PowerShell call to the same command row as Bash", () => {
     const row = toolActivityRow(
       event({
@@ -81,90 +105,6 @@ describe("toolActivityRow", () => {
       event({ provider: "claude", tool: "Read", raw: { toolUseId: "toolu_2", input: { file_path: "/repo/src/app.ts" } } }),
     );
     expect(view(row!)).toMatchObject({ kind: "read", path: "src/app.ts" });
-  });
-
-  it("maps a Codex commandExecution item, including its exit code", () => {
-    const row = toolActivityRow(
-      event({
-        provider: "codex",
-        type: "tool.execute.completed",
-        raw: {
-          item: {
-            id: "item_1",
-            type: "commandExecution",
-            command: "bun test",
-            cwd: "/repo",
-            exitCode: 1,
-            durationMs: 1200,
-            aggregatedOutput: "1 failed",
-            status: "completed",
-          },
-        },
-      }),
-    );
-    expect(view(row!)).toMatchObject({
-      kind: "command",
-      command: "bun test",
-      exit: 1,
-      failed: true,
-      running: false,
-    });
-  });
-
-  it("maps a Codex fileChange item to a file row carrying the real diff", () => {
-    const row = toolActivityRow(
-      event({
-        provider: "codex",
-        type: "tool.execute.completed",
-        raw: {
-          item: {
-            id: "item_2",
-            type: "fileChange",
-            status: "completed",
-            changes: [{ path: "/repo/src/app.ts", kind: "edit", diff: "@@ -1 +1 @@\n-old\n+new\n" }],
-          },
-        },
-      }),
-    );
-    const mapped = view(row!);
-    expect(mapped.kind).toBe("file");
-    // The provider's own patch must reach the renderer, not just sit in
-    // `files[]` — asserting only the path let a dropped diff pass.
-    expect(mapped).toMatchObject({ path: "src/app.ts", running: false, added: 1, removed: 1 });
-    expect((mapped as { diff: string | null }).diff).toContain("+new");
-  });
-
-  it("ignores Codex items that are not tool calls", () => {
-    expect(toolActivityRow(event({ provider: "codex", raw: { item: { id: "i", type: "reasoning" } } }))).toBeNull();
-    expect(toolActivityRow(event({ provider: "codex", raw: {} }))).toBeNull();
-  });
-
-  it("maps a Grok ACP tool call, taking the path from its locations", () => {
-    const row = toolActivityRow(
-      event({
-        provider: "grok",
-        tool: "read",
-        raw: {
-          toolCallId: "call_7",
-          title: "Reading app.ts",
-          kind: "read",
-          status: "in_progress",
-          locations: [{ path: "/repo/src/app.ts" }],
-          rawInput: {},
-        },
-      }),
-    );
-    expect(view(row!)).toMatchObject({ kind: "read", path: "src/app.ts", running: true });
-  });
-
-  it("maps a Grok execute call to a command row", () => {
-    const row = toolActivityRow(
-      event({
-        provider: "grok",
-        raw: { toolCallId: "call_8", kind: "execute", status: "completed", rawInput: { command: "ls" } },
-      }),
-    );
-    expect(view(row!)).toMatchObject({ kind: "command", command: "ls", running: false });
   });
 
   it("maps an OpenCode tool part, reading status from the part's own state", () => {
@@ -313,7 +253,6 @@ describe("toolActivityRow", () => {
   it("returns null rather than throwing on a shape it cannot read", () => {
     expect(toolActivityRow(event({ provider: "claude", raw: undefined }))).toBeNull();
     expect(toolActivityRow(event({ provider: "claude", raw: { input: {} } }))).toBeNull();
-    expect(toolActivityRow(event({ provider: "grok", raw: { status: "completed" } }))).toBeNull();
     expect(toolActivityRow(event({ provider: "opencode", raw: { tool: "bash" } }))).toBeNull();
   });
 });

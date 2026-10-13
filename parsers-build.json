@@ -1,0 +1,244 @@
+{
+  "parsers": [
+    {
+      "filetype": "svelte",
+      "repo": "tree-sitter-grammars/tree-sitter-svelte",
+      "ref": "v1.0.2",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "dart",
+      "repo": "UserNobody14/tree-sitter-dart",
+      "ref": "be07cf7118d3dba06236a3f19541685a68209934",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "graphql",
+      "aliases": [
+        "gql"
+      ],
+      "repo": "bkegley/tree-sitter-graphql",
+      "ref": "5e66e961eee421786bdda8495ed1db045e06b5fe",
+      "highlights": "queries/graphql/highlights.scm"
+    },
+    {
+      "filetype": "dockerfile",
+      "aliases": [
+        "containerfile"
+      ],
+      "repo": "camdencheek/tree-sitter-dockerfile",
+      "ref": "v0.2.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "cmake",
+      "repo": "uyha/tree-sitter-cmake",
+      "ref": "v0.7.5",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "nix",
+      "repo": "nix-community/tree-sitter-nix",
+      "ref": "v0.3.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "proto",
+      "aliases": [
+        "protobuf"
+      ],
+      "repo": "coder3101/tree-sitter-proto",
+      "ref": "0.6.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "clojure",
+      "aliases": [
+        "clj",
+        "cljs",
+        "cljc"
+      ],
+      "repo": "sogaiu/tree-sitter-clojure",
+      "ref": "v0.0.13",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "erlang",
+      "aliases": [
+        "erl",
+        "hrl"
+      ],
+      "repo": "WhatsApp/tree-sitter-erlang",
+      "ref": "0.21.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "elm",
+      "repo": "elm-tooling/tree-sitter-elm",
+      "ref": "v5.9.4",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "glsl",
+      "aliases": [
+        "vert",
+        "frag"
+      ],
+      "repo": "tree-sitter-grammars/tree-sitter-glsl",
+      "ref": "v0.2.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "astro",
+      "repo": "virchau13/tree-sitter-astro",
+      "ref": "213f6e6973d9b456c6e50e86f19f66877e7ef0ee",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "prisma",
+      "repo": "victorhqc/tree-sitter-prisma",
+      "ref": "v1.6.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "templ",
+      "repo": "vrischmann/tree-sitter-templ",
+      "ref": "v1.0.0",
+      "highlights": "queries/templ/highlights.scm"
+    },
+    {
+      "filetype": "just",
+      "aliases": [
+        "justfile"
+      ],
+      "repo": "IndianBoy42/tree-sitter-just",
+      "ref": "v0.2.0",
+      "highlights": "queries/just/highlights.scm"
+    },
+    {
+      "filetype": "mermaid",
+      "aliases": [
+        "mmd"
+      ],
+      "repo": "monaqa/tree-sitter-mermaid",
+      "ref": "90ae195b31933ceb9d079abfa8a3ad0a36fee4cc",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "solidity",
+      "aliases": [
+        "sol"
+      ],
+      "repo": "JoranHonig/tree-sitter-solidity",
+      "ref": "v1.2.13",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "rescript",
+      "aliases": [
+        "res"
+      ],
+      "repo": "rescript-lang/tree-sitter-rescript",
+      "ref": "v6.0.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "gleam",
+      "repo": "gleam-lang/tree-sitter-gleam",
+      "ref": "v1.1.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "fish",
+      "repo": "ram02z/tree-sitter-fish",
+      "ref": "3.7.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "ini",
+      "aliases": [
+        "conf",
+        "cfg"
+      ],
+      "repo": "justinmk/tree-sitter-ini",
+      "ref": "v1.4.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "typst",
+      "aliases": [
+        "typ"
+      ],
+      "repo": "uben0/tree-sitter-typst",
+      "ref": "v0.11.0",
+      "highlights": "queries/typst/highlights.scm"
+    },
+    {
+      "filetype": "fortran",
+      "aliases": [
+        "f90",
+        "f95"
+      ],
+      "repo": "stadelmanma/tree-sitter-fortran",
+      "ref": "v0.6.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "pascal",
+      "aliases": [
+        "pas"
+      ],
+      "repo": "Isopod/tree-sitter-pascal",
+      "ref": "v0.10.2",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "racket",
+      "aliases": [
+        "rkt"
+      ],
+      "repo": "6cdh/tree-sitter-racket",
+      "ref": "v0.25.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "tcl",
+      "repo": "tree-sitter-grammars/tree-sitter-tcl",
+      "ref": "850a72ab6436e06645b33b11cfa60cbdb04b1f01",
+      "highlights": "queries/tcl/highlights.scm"
+    },
+    {
+      "filetype": "d",
+      "repo": "gdamore/tree-sitter-d",
+      "ref": "v0.9.1",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "ada",
+      "repo": "briot/tree-sitter-ada",
+      "ref": "0a4c27dc1308a9d2742de22e5fcfc0c137b3d3f3",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "wgsl",
+      "repo": "szebniok/tree-sitter-wgsl",
+      "ref": "40259f3c77ea856841a4e0c4c807705f3e4a2b65",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "ejs",
+      "aliases": [
+        "erb"
+      ],
+      "repo": "tree-sitter/tree-sitter-embedded-template",
+      "ref": "v0.25.0",
+      "highlights": "queries/highlights.scm"
+    },
+    {
+      "filetype": "properties",
+      "repo": "tree-sitter-grammars/tree-sitter-properties",
+      "ref": "v0.3.0",
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

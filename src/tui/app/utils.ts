@@ -23,3 +23,21 @@ export function clock(value: string): string {
   const date = new Date(parsed);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
+
+/**
+ * Where a launch lands. Production opens on the new-thread screen, the latest
+ * thread only lending its project and model — unless a thread is working or
+ * waiting on the user, which is where they were: that one opens on its
+ * transcript instead. (Landing on the new-thread screen over a thread that is
+ * asking a question drew the question on top of "What should we build?".)
+ * The most recent such thread wins, a top-level one over a task under it.
+ */
+export function launchTarget(
+  active: ReadonlyArray<{ thread: { id: string }; status: string; waiting: boolean; depth: number }>,
+  fallbackId: string | null,
+): { threadId: string | null; transcript: boolean } {
+  const busy = (row: { status: string; waiting: boolean }): boolean => row.status === "running" || row.status === "blocked" || row.waiting;
+  const ongoing = active.find((row) => row.depth === 0 && busy(row)) ?? active.find(busy);
+  if (ongoing !== undefined) return { threadId: ongoing.thread.id, transcript: true };
+  return { threadId: active[0]?.thread.id ?? fallbackId, transcript: false };
+}

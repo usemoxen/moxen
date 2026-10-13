@@ -83,6 +83,18 @@ export function subagentTitle(transcript: SubagentTranscript | null, fallback: s
 }
 
 /** Where the subagent stands, for the bar under its conversation. */
+/**
+ * What the chat pane's timeline is told about the run on screen while a
+ * subagent's transcript stands in for the thread's: the subagent's own status
+ * and start, never the thread's. An idle parent (it ended its turn after
+ * launching the subagent) would otherwise have the last group read "Worked"
+ * with a fixed time while the subagent beneath it is still going.
+ */
+export function subagentRun(transcript: SubagentTranscript | null): { status: "running" | "idle"; startedAt: string | null } {
+  const agent = transcript?.agent ?? null;
+  return { status: agent?.status === "running" ? "running" : "idle", startedAt: agent?.startedAt ?? null };
+}
+
 export function subagentState(transcript: SubagentTranscript | null, now: number): string {
   if (transcript === null) return "loading…";
   if (!transcript.available || (transcript.messages.length === 0 && transcript.activities.length === 0)) return "no transcript to show";

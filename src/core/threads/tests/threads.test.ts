@@ -24,6 +24,7 @@ import {
   updateThreadMeta,
 } from "../threads.js";
 import { toThreadEnvelope } from "../project.js";
+import { isStoppedBySettle } from "../operations.js";
 
 const MODEL = { instanceId: "claude", model: "test-model" };
 
@@ -215,7 +216,7 @@ describe("settlement and snooze", () => {
     expect(threadStatus(unsettled)).toBe("active");
   });
 
-  it("settles and unsettles a whole family from any member, all or nothing", async () => {
+  it("settles a thread with its descendants only, all or nothing", async () => {
     const store = await testStore();
     const make = async (title: string, parentThreadId?: string) => {
       const created = await createThread(store, { projectId: "p", title, modelSelection: MODEL });
@@ -227,12 +228,13 @@ describe("settlement and snooze", () => {
     };
     const root = await make("root");
     const child = await make("child", root.id);
+    const sibling = await make("sibling", root.id);
     const grandchild = await make("grandchild", child.id);
     const other = await make("other");
     const statuses = async () =>
-      (await Promise.all([root, child, grandchild, other].map((t) => inspectThread(store, t.id)))).map((t) => threadStatus(t));
+      (await Promise.all([root, child, sibling, grandchild, other].map((t) => inspectThread(store, t.id)))).map((t) => threadStatus(t));
 
-    // A running grandchild blocks settling from the root, the child or itself — and nothing is written.
+    // A running grandchild blocks settling its ancestors and itself — and nothing is written.
     const sent = await sendTurn(store, grandchild.id, { prompt: "work" });
     for (const start of [root, child, grandchild]) {
       const error = await settleThread(store, start.id).catch((caught: unknown) => caught as CliError);
@@ -240,12 +242,70 @@ describe("settlement and snooze", () => {
       expect((error as CliError).details).toMatchObject({ threadId: start.id, blockedThreadIds: [grandchild.id] });
     }
     expect(await statuses()).not.toContain("settled");
+    // A sibling's work is not its business: the sibling settles on its own.
+    await settleThread(store, sibling.id);
+    expect(await statuses()).toEqual(["active", "active", "settled", "active", "active"]);
+    await unsettleThread(store, sibling.id);
 
     await completeTurn(store, grandchild.id, sent.turn.id);
+    // A task settles with what it spawned, never reaching up to its parent or across to its siblings.
     expect((await settleThread(store, child.id)).id).toBe(child.id);
-    expect(await statuses()).toEqual(["settled", "settled", "settled", "active"]);
-    await unsettleThread(store, grandchild.id);
-    expect(await statuses()).toEqual(["active", "active", "active", "active"]);
+    expect(await statuses()).toEqual(["active", "settled", "active", "settled", "active"]);
+    // Waking it wakes the same subtree.
+    await unsettleThread(store, child.id);
+    expect(await statuses()).toEqual(["active", "active", "active", "active", "active"]);
+    // The parent settles everything beneath it.
+    await settleThread(store, root.id);
+    expect(await statuses()).toEqual(["settled", "settled", "settled", "settled", "active"]);
+  });
+
+  it("stops a family's running and queued work before settling it, when asked to", async () => {
+    const store = await testStore();
+    const root = await createThread(store, { projectId: "p", title: "root", modelSelection: MODEL });
+    const child = await createThread(store, { projectId: "p", title: "child", modelSelection: MODEL });
+    await store.appendDelegation({ id: "d-child", parentThreadId: root.id, childThreadId: child.id, prompt: "child", status: "running", createdAt: child.createdAt, updatedAt: child.createdAt });
+    const running = await sendTurn(store, child.id, { prompt: "work" });
+    const queued = await sendTurn(store, child.id, { prompt: "more", delivery: "queue" });
+    expect(queued.delivery).toBe("queued");
+
+    // Without `stop` it still refuses, and nothing is interrupted.
+    expect(await codeOf(() => settleThread(store, root.id))).toBe("THREAD_SETTLE_BLOCKED");
+    expect((await store.readTurns(child.id)).map((turn) => turn.status)).toEqual(["running", "queued"]);
+
+    const settled = await settleThread(store, root.id, { stop: true });
+    expect(threadStatus(settled)).toBe("settled");
+    expect(threadStatus(await inspectThread(store, child.id))).toBe("settled");
+    expect((await store.readTurns(child.id)).map((turn) => [turn.id, turn.status])).toEqual([
+      [running.turn.id, "interrupted"],
+      [queued.turn.id, "interrupted"],
+    ]);
+  });
+
+  it("stopping a task to settle it leaves its running parent alone", async () => {
+    const store = await testStore();
+    const root = await createThread(store, { projectId: "p", title: "root", modelSelection: MODEL });
+    const child = await createThread(store, { projectId: "p", title: "child", modelSelection: MODEL });
+    await store.appendDelegation({ id: "d-child", parentThreadId: root.id, childThreadId: child.id, prompt: "child", status: "running", createdAt: child.createdAt, updatedAt: child.createdAt });
+    const parentTurn = await sendTurn(store, root.id, { prompt: "orchestrate" });
+    const childTurn = await sendTurn(store, child.id, { prompt: "work" });
+
+    await settleThread(store, child.id, { stop: true });
+    expect((await store.readTurns(child.id)).map((turn) => [turn.id, turn.status])).toEqual([[childTurn.turn.id, "interrupted"]]);
+    expect((await store.readTurns(root.id)).map((turn) => [turn.id, turn.status])).toEqual([[parentTurn.turn.id, "running"]]);
+    expect(threadStatus(await inspectThread(store, root.id))).toBe("active");
+  });
+
+  it("does not tell a parent about a task that settling stopped, but does for any other stop", async () => {
+    const store = await testStore();
+    const task = await createThread(store, { projectId: "p", title: "task", modelSelection: MODEL });
+    // Stopped some other way (the stop button, a crash): the parent's agent should know.
+    expect(isStoppedBySettle(task, "interrupted")).toBe(false);
+    const settled = await settleThread(store, task.id);
+    expect(isStoppedBySettle(settled, "interrupted")).toBe(true);
+    // Work that finished (or failed) on its own is reported, settled afterwards or not.
+    expect(isStoppedBySettle(settled, "completed")).toBe(false);
+    expect(isStoppedBySettle(settled, "failed")).toBe(false);
+    expect(isStoppedBySettle(null, "interrupted")).toBe(false);
   });
 
   it("snoozes into the future and treats expiry as active", async () => {
@@ -337,7 +397,7 @@ describe("per-turn model", () => {
     const next = { instanceId: "claude", model: "next-model" };
     await updateThreadMeta(store, thread.id, { modelSelection: next });
     const second = await sendTurn(store, thread.id, { prompt: "two" });
-    const override = { instanceId: "codex", model: "gpt-override" };
+    const override = { instanceId: "opencode", model: "gpt-override" };
     await completeTurn(store, thread.id, second.turn.id, { text: "done" });
     const third = await sendTurn(store, thread.id, { prompt: "three", modelSelection: override });
 

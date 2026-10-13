@@ -15,6 +15,8 @@
  * prints (`runtime`, `auth`, `dispatch`, `verification`, `opened`) are its
  * own compatibility surface and stay there.
  */
+import { locateBundledSkills } from "../providers/bundledskills.js";
+import { prepareProjectSkills } from "../skills/projectskills.js";
 import * as Effect from "effect/Effect";
 import { mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -53,10 +55,11 @@ import type {
 } from "../types.js";
 import type { ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
-import { buildRuntimeInstructions, projectInstructions } from "./instructions.js";
+import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
+import { buildRuntimeInstructions, planInstructions, projectInstructions, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
-import { readThread } from "./threads.js";
+import { readThread, threadStatus } from "./threads.js";
 import {
   adoptProviderTitle,
   createThread,
@@ -124,15 +127,39 @@ export interface OperationContext {
 }
 
 
+/** Runtime instructions the model has not seen yet: put before the next prompt, then recorded as delivered. */
+interface InstructionsUpdate {
+  readonly text: string;
+  /** Record the update as delivered; called once the provider has accepted the prompt that carried it. */
+  readonly delivered: () => Promise<void>;
+}
+
+/** The part of a session setup `ensureDriverSession` takes. */
+function sessionStart(setup: { mcpServers: McpServerSpec[]; instructions: string; store: ThreadStore; moxenSkills: "project" | "served" | "none" }) {
+  return { mcpServers: setup.mcpServers, instructions: setup.instructions, store: setup.store, moxenSkills: setup.moxenSkills };
+}
+
+/** The prompt a turn sends the provider: what was typed, with any instruction update ahead of it. */
+function promptWithUpdate(prompt: string, setup: { instructionsUpdate: InstructionsUpdate | null }): string {
+  return withInstructionsUpdate(prompt, setup.instructionsUpdate?.text ?? null);
+}
+
 /**
  * What a session on this thread starts with beyond its model: the MCP
  * servers and the runtime instructions. Both are read per session start,
  * like config, so an edit applies to the next session without a restart.
+ *
+ * The instructions a session *starts with* are the ones its conversation
+ * began with, not the current ones: rewriting the system prompt of a
+ * conversation with history would have the provider read all of it afresh.
+ * A change since then comes back as `instructionsUpdate`, to ride ahead of
+ * the next prompt (`planInstructions`).
  */
 async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
-): Promise<{ mcpServers: McpServerSpec[]; instructions: string; store: ThreadStore }> {
+  instanceId: string = thread.modelSelection.instanceId,
+): Promise<{ mcpServers: McpServerSpec[]; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; moxenSkills: "project" | "served" | "none" }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
@@ -156,17 +183,53 @@ async function sessionSetup(
     return built !== undefined && sameEndpoint(outOfProcess(built), spec) ? built : spec;
   });
   const user = [ctx.config.instructions, fromProject].filter((entry): entry is string => Boolean(entry));
+  const current = buildRuntimeInstructions({
+    instanceId: thread.modelSelection.instanceId,
+    env: thread.env,
+    delegation,
+    userInstructions: user,
+  });
+  // What this provider's conversation was given. With no history behind it (no session handle yet) there
+  // is nothing cached to protect, so the current text starts it.
+  const key = driverKey(instanceId);
+  const history = thread.providerSessions?.[key] !== undefined;
+  const plan = planInstructions(history ? thread.instructionState?.[key] : undefined, current);
+  const record = async (state: InstructionState): Promise<void> => {
+    await ctx.store.withThreadLock(thread.id, async () => {
+      const fresh = await ctx.store.readThreadRecord(thread.id);
+      if (!fresh) return;
+      await ctx.store.writeThreadRecord({ ...fresh, instructionState: { ...fresh.instructionState, [key]: state } });
+    });
+  };
+  const recorded = thread.instructionState?.[key];
+  if (recorded?.baseline !== plan.next.baseline || recorded?.delivered !== plan.next.delivered) await record(plan.next);
   return {
     mcpServers,
-    instructions: buildRuntimeInstructions({
-      instanceId: thread.modelSelection.instanceId,
-      env: thread.env,
-      delegation,
-      userInstructions: user,
-    }),
+    instructions: plan.systemPrompt,
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
+    moxenSkills: await moxenSkillsMode(ctx, thread, delegation !== null),
+    instructionsUpdate:
+      plan.update === null
+        ? null
+        : { text: plan.update, delivered: () => record({ baseline: plan.next.baseline, delivered: plan.update! }) },
   };
+}
+
+/**
+ * How moxen's own skills reach a session (`ProviderSessionStartInput.moxenSkills`).
+ * A delegated task gets none: it has none of the tools they describe. Otherwise
+ * they are put in the project's own skills folder when it has one, which the
+ * provider reads itself; with no such folder (or the setting off) the provider is
+ * pointed at the bundled folder instead. Never both, so no skill loads twice.
+ */
+async function moxenSkillsMode(ctx: OperationContext, thread: StoredThread, isDelegated: boolean): Promise<"project" | "served" | "none"> {
+  if (isDelegated) return "none";
+  if (ctx.config.installSkills === false) return "served";
+  const workingDirectory = thread.env.path.trim();
+  if (workingDirectory === "") return "served";
+  const prepared = await prepareProjectSkills({ workingDirectory, bundledDir: locateBundledSkills() });
+  return prepared.target === null ? "served" : "project";
 }
 
 /** Whether two out-of-process specs reach the same server the same way. */
@@ -208,9 +271,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   }
   const selection = turn.modelSelection ?? thread.modelSelection;
   let driver: TurnDriver;
+  let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
     driver = ctx.driverFor(selection.instanceId);
-    await ensureDriverSession(driver, thread, { modelSelection: selection, ...(await sessionSetup(ctx, thread)) });
+    setup = await sessionSetup(ctx, thread, selection.instanceId);
+    await ensureDriverSession(driver, thread, { modelSelection: selection, ...sessionStart(setup) });
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
     await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
@@ -222,7 +287,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     driver,
     threadId,
     storeTurnId: turn.id,
-    prompt: message.text,
+    prompt: promptWithUpdate(message.text, setup),
+    ...(setup.instructionsUpdate ? { afterSend: setup.instructionsUpdate.delivered } : {}),
     ...(images.length > 0 ? { images } : {}),
     modelSelection: selection,
     workingDirectory: thread.env.path,
@@ -354,8 +420,8 @@ export interface StartedTurn extends SendTurnResult {
   readonly run: Promise<void> | null;
   /**
    * For a steer/inject: whether the running provider turn received the
-   * text. False when it could not — the provider has no mid-turn input
-   * (Grok), or the turn runs in another process — and the message is only
+   * text. False when it could not — the provider has no mid-turn input,
+   * or the turn runs in another process — and the message is only
    * recorded. Absent for other deliveries.
    */
   readonly steerDelivered?: boolean;
@@ -393,16 +459,18 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   if (!fresh) return { ...sent, run: null };
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
-  const startFailure = await sessionSetup(ctx, sent.thread)
-    .then((setup) => ensureDriverSession(driver, sent.thread, { modelSelection: turnModel, ...setup }))
-    .then(
-    () => null,
-    (cause: unknown) => cause,
-  );
-  if (startFailure !== null) {
+  let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
+  let startFailure: unknown = null;
+  try {
+    setup = await sessionSetup(ctx, sent.thread, turnModel.instanceId);
+    await ensureDriverSession(driver, sent.thread, { modelSelection: turnModel, ...sessionStart(setup) });
+  } catch (cause) {
+    startFailure = cause;
+  }
+  if (startFailure !== null || setup === null) {
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
-    const message = startFailure instanceof Error ? startFailure.message : String(startFailure);
+    const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
@@ -410,12 +478,19 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     const decoded = decodeDataUrl(upload.dataUrl);
     return decoded ? [{ name: upload.name, mimeType: decoded.mimeType, data: decoded.data }] : [];
   });
+  // MCP servers added, changed or removed in config since the session started: a live session takes them now,
+  // not at its next start. A server that will not connect is the provider's to report, never a reason to fail the send.
+  await driver.updateMcpServers?.(sent.thread.id, setup.mcpServers).catch(() => undefined);
+  // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
+  const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
+  const delivered = [setup.instructionsUpdate?.delivered, rules ? async () => rules.commit() : undefined].filter((step): step is () => Promise<void> => step !== undefined);
   const run = executeTurn({
     store,
     driver,
     threadId: thread.id,
     storeTurnId: sent.turn.id,
-    prompt: driverPrompt ?? input.prompt.trim(),
+    prompt: withRuleUpdate(promptWithUpdate(driverPrompt ?? input.prompt.trim(), setup), rules?.text ?? null),
+    ...(delivered.length > 0 ? { afterSend: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
     ...(images.length > 0 ? { images } : {}),
     // Always the turn's own model, so a live session switches when the
     // thread's model changed since it started.
@@ -476,7 +551,7 @@ export interface RevertOptions {
  * answers from a history the thread no longer shows. So every provider
  * that saw a dropped turn is rolled back first — by the prompts it
  * received, which a steer makes more than one per turn — and only then is
- * the ledger cut. A provider that cannot roll back (Grok) refuses the
+ * the ledger cut. A provider that cannot roll back would refuse the
  * whole revert before anything changes.
  */
 export async function revertThread(
@@ -522,13 +597,6 @@ export async function revertThread(
     entry.prompts += prompts;
     byDriver.set(key, entry);
   }
-  if (byDriver.has("grok")) {
-    throw new CliError(
-      "REVERT_UNSUPPORTED",
-      "Grok cannot roll back its side of the conversation, so a revert would leave it remembering turns the thread no longer shows.",
-      { exitCode: 4, details: { threadId, provider: "grok" } },
-    );
-  }
   // The files' target: the worktree as it was before the first dropped turn.
   // Checked before anything changes, so a revert that cannot restore files
   // leaves the conversation alone too.
@@ -558,7 +626,7 @@ export async function revertThread(
     }
     await ensureDriverSession(driver, thread, {
       modelSelection: entry.selection,
-      ...(await sessionSetup(ctx, thread)),
+      ...sessionStart(await sessionSetup(ctx, thread, entry.instanceId)),
     });
     await Effect.runPromise(driver.rollbackThread(threadId, entry.prompts));
     rolledBack.push(key);
@@ -570,7 +638,13 @@ export async function revertThread(
       const sessions = { ...current.providerSessions };
       if (cursor) sessions[key] = cursor;
       else delete sessions[key];
-      await store.writeThreadRecord({ ...current, providerSessions: sessions });
+      // The provider forgot the dropped turns, and an instruction update may have ridden one of them: the model
+      // has certainly seen only what the conversation began with, so the next prompt carries any update again.
+      const state = current.instructionState?.[key];
+      const instructionState = state
+        ? { ...current.instructionState, [key]: { baseline: state.baseline, delivered: state.baseline } }
+        : current.instructionState;
+      await store.writeThreadRecord({ ...current, providerSessions: sessions, ...(instructionState ? { instructionState } : {}) });
     });
   }
 
@@ -1162,6 +1236,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     };
   }
   const task = taskOf(child);
+  if (isStoppedBySettle(record, task.status)) return null;
   return {
     taskId: childThreadId,
     title: child.title,
@@ -1177,8 +1252,18 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
 }
 
 /**
+ * Settling a task stops it on purpose, and the person who settled it knows:
+ * telling its parent it "was stopped" would only wake an agent about work that
+ * was put away. A task stopped any other way (the stop button, a crash)
+ * still reaches the parent, as does one that finished on its own.
+ */
+export function isStoppedBySettle(child: StoredThread | null, status: TaskNotification["status"]): boolean {
+  return status === "interrupted" && child !== null && threadStatus(child) === "settled";
+}
+
+/**
  * Send the parent its settled tasks: into its running turn when the
- * provider takes input mid-turn (Claude, Codex, OpenCode) and this process
+ * provider takes input mid-turn (Claude, OpenCode) and this process
  * holds that session; otherwise as a turn of its own, queued behind any
  * running one. It wakes a settled parent — the work is the parent's own.
  */

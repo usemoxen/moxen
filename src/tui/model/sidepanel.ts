@@ -328,3 +328,19 @@ export function planUsageGauges(
   }
   return gauges;
 }
+
+/**
+ * A subagent's last message as a short preview: the report is markdown
+ * (`---` rules, `# headings`, `**bold**`), which reads as noise squeezed into
+ * two panel lines. Strip the marks and run the lines together.
+ */
+export function subagentPreview(text: string): string {
+  return text
+    .replace(/^\s*(?:[-*_]{3,}|={3,})\s*$/gm, " ")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*(?:[-*+]|\d+\.)\s+/gm, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}

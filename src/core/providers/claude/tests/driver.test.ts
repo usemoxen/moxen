@@ -79,6 +79,33 @@ describe("claude driver turns", () => {
     expect(transport.created[1]!.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   });
 
+  it("loads the agent-skills mod into a session, and points it at moxen's own skills, only when asked and allowed", async () => {
+    const skillsMod = { path: "/pkg/mods/agent-skills", bundledSkillsDir: "/pkg/skills" };
+    const on = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: on, skillsMod }).startSession(START));
+    expect(on.created[0]!.options.plugins).toEqual([{ type: "local", path: "/pkg/mods/agent-skills" }]);
+    expect(on.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBe("/pkg/skills");
+
+    // Off by default, so a session without it is exactly what it was.
+    const absent = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: absent }).startSession(START));
+    expect(absent.created[0]!.options.plugins).toBeUndefined();
+    expect(absent.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBeUndefined();
+
+    // Installed in the project already, or a delegated task: nothing points the mod at the bundled folder.
+    for (const moxenSkills of ["project", "none"] as const) {
+      const quiet = new FakeTransport([[initMessage()]]);
+      await Effect.runPromise(new ClaudeDriver({ transport: quiet, skillsMod }).startSession({ ...START, moxenSkills }));
+      expect(quiet.created[0]!.options.plugins).toEqual([{ type: "local", path: "/pkg/mods/agent-skills" }]);
+      expect(quiet.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBeUndefined();
+    }
+
+    // The setting turns it off even where the package has the mod.
+    const off = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: off, skillsMod, settings: { agentSkills: false } }).startSession(START));
+    expect(off.created[0]!.options.plugins).toBeUndefined();
+  });
+
   it("takes the final answer from the result, not every interim note", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
@@ -691,6 +718,39 @@ describe("claude MCP injection", () => {
     const driver = new ClaudeDriver({ transport, sessionApi: new FakeSessionApi() });
     await Effect.runPromise(driver.startSession(START));
     expect(transport.created[0]!.options.mcpServers).toBeUndefined();
+  });
+});
+
+describe("claude MCP changes on a live session", () => {
+  async function live(servers = MCP) {
+    const transport = new FakeTransport([[initMessage({ session_id: "session-1" })]]);
+    const driver = new ClaudeDriver({ transport, sessionApi: new FakeSessionApi() });
+    await Effect.runPromise(driver.startSession({ ...START, mcpServers: servers }));
+    return { driver, query: transport.created[0]! };
+  }
+
+  it("hands the SDK the whole new set when one was added, removed or changed", async () => {
+    const { driver, query } = await live();
+    const added = { name: "git", type: "stdio" as const, command: "git-mcp", args: [], env: {} };
+    await driver.updateMcpServers("thread-1", [...MCP, added]);
+    expect(Object.keys(query.mcpServerSets[0]!)).toEqual(["docs", "fs", "git"]);
+    // A server taken out of the config goes too: the SDK replaces the set it was given.
+    await driver.updateMcpServers("thread-1", [MCP[0]!, added]);
+    expect(Object.keys(query.mcpServerSets[1]!)).toEqual(["docs", "git"]);
+    await driver.updateMcpServers("thread-1", []);
+    expect(query.mcpServerSets[2]).toEqual({});
+  });
+
+  it("does nothing when the set is the same, in any order", async () => {
+    const { driver, query } = await live();
+    await driver.updateMcpServers("thread-1", [...MCP].reverse());
+    expect(query.mcpServerSets).toEqual([]);
+  });
+
+  it("does nothing for a thread with no live session", async () => {
+    const { driver, query } = await live();
+    await driver.updateMcpServers("elsewhere", []);
+    expect(query.mcpServerSets).toEqual([]);
   });
 });
 

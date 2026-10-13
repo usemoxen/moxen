@@ -4,7 +4,7 @@
  * In-process pub/sub with a bounded replay buffer, so the TUI, the CLI,
  * and scheduled senders can subscribe late and still see the same truth.
  * Transport-agnostic: carries `ProviderRuntimeEvent`s today, thread-store
- * lifecycle events from Stage 1 on. See ARCHITECTURE.md §9.
+ * lifecycle events from Stage 1 on. See docs/threads.md.
  */
 import type { ProviderRuntimeEvent } from "../providers/spi.js";
 

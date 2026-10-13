@@ -34,8 +34,15 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     await setup.mockMouse.click(header.x, header.y);
   });
   await setup.flush();
+  // ModalShell fades in; look once it is up.
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+  await setup.flush();
   console.log("--- assistant message actions (open) ---");
-  console.log(setup.captureCharFrame());
+  const assistantActions = setup.captureCharFrame();
+  console.log(assistantActions);
+  // Only a user prompt is a revert point; an agent reply offers Copy alone.
+  if (!assistantActions.includes("Copy")) fail("assistant message actions did not open");
+  if (assistantActions.includes("Revert")) fail("assistant message actions offer a revert");
 
   // An agent question arrives mid-run: dismiss the open modal first (pending
   // answers wait for a free UI), then the inline panel replaces the composer.
@@ -46,7 +53,29 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   });
   await setup.flush();
   console.log("--- answer panel (inline) ---");
-  console.log(setup.captureCharFrame());
+  const inline = setup.captureCharFrame();
+  console.log(inline);
+  if (!inline.includes("dismisses")) fail("the inline answer panel did not open");
+
+  // Esc is not the panel's: its listener is global, so it would take esc from
+  // whichever pane has focus. The × in the header dismisses instead.
+  await act(async () => setup.mockInput.pressEscape());
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+  await setup.flush();
+  if (!setup.captureCharFrame().includes("dismisses")) fail("esc dismissed the answer panel");
+  const lines = setup.captureCharFrame().split("\n");
+  const header = lines.findIndex((line) => line.includes("◈") && line.includes("×"));
+  if (header === -1) fail("the answer panel has no × in its header");
+  await act(async () => setup.mockMouse.click(lines[header]!.lastIndexOf("×"), header));
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await setup.flush();
+  if (setup.captureCharFrame().includes("dismisses")) fail("clicking × did not dismiss the answer panel");
+  console.log("--- answer panel (dismissed with ×) ---");
+  // A fresh question for the single-select pick below.
+  await act(async () => {
+    emitLiveRef.current?.(userInputRequestedFrame("que_live1b"));
+  });
+  await setup.flush();
 
   // Single-select: picking the first option submits and restores the composer.
   await act(async () => setup.mockMouse.click(60, 21));
@@ -111,5 +140,35 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
 
   // Backdrop-dismiss restores the closed state the answer flow below expects.
   await act(async () => setup.mockMouse.click(130, 24));
+  await setup.flush();
+
+  // A two-question request: tabs name the questions, answering moves on, and
+  // either arrow (or a tab click) revisits one with its answer still in place.
+  await act(async () => {
+    emitLiveRef.current?.(userInputRequestedFrame("que_live2", 2));
+  });
+  await setup.flush();
+  const firstStep = setup.captureCharFrame();
+  if (!firstStep.includes("1 Direction") || !/\s2\s/.test(firstStep.split("\n").find((line) => line.includes("1 Direction")) ?? "")) fail("two-question request did not open with a tab per question");
+  if (!firstStep.includes("←→ questions")) fail("the hint does not mention the arrows");
+  await act(async () => setup.mockInput.pressKey("2"));
+  await setup.flush();
+  const secondStep = setup.captureCharFrame();
+  console.log("--- answer panel (question 2/2) ---");
+  console.log(secondStep);
+  if (!secondStep.includes("Which direction, step 2?")) fail("answering did not advance to question 2");
+  if (!secondStep.split("\n").some((line) => line.includes("1✓") && line.includes("2 Direction 2"))) fail("the answered question's tab has no ✓");
+  await act(async () => setup.mockInput.pressArrow("left"));
+  await setup.flush();
+  const backStep = setup.captureCharFrame();
+  console.log("--- answer panel (back on question 1) ---");
+  console.log(backStep);
+  if (!backStep.includes("Which direction?")) fail("← did not return to question 1");
+  if (!/●\s+2\. Sideways/.test(backStep)) fail("going back lost the answer already given");
+  await act(async () => setup.mockInput.pressArrow("right"));
+  await setup.flush();
+  if (!setup.captureCharFrame().includes("Which direction, step 2?")) fail("→ did not move on to question 2");
+  // Dismiss so later scenarios start from a clean composer.
+  await act(async () => setup.mockInput.pressKey("ESCAPE"));
   await setup.flush();
 }

@@ -24,10 +24,6 @@ Inside a Moxen session you have the `moxen` MCP tools. They are always loaded:
 - `task_status` — where a task stands, and its report once it has finished. Waits up to `waitMs`.
 - `task_cancel` — stop a running task. Its thread and worktree are kept.
 
-Outside a session (a script, another agent) the CLI does the same:
-`moxen --json providers list`, `moxen --json threads delegate --thread <parent> ...`,
-`moxen --json threads task-status --thread <parent> --task <id>`. See `moxen-threads`.
-
 ## You are told when a task finishes
 
 You do not poll. When a delegated task settles, Moxen writes a message into your thread:
@@ -52,11 +48,11 @@ that is taking longer than it should.
 Discovery is not optional, and it comes before the plan: all three steps, every time, before the
 first `delegate`.
 
-1. **What exists.** Call `models`, then read `.moxen/model-notes.md` (below).
-2. **What is left.** Check usage for *every* provider you might use — `moxen --json providers list`
-   reports `usageLimits` per provider (session and weekly windows, `usedPercent`, `resetsAt`); if
-   `moxen` is not on PATH, read `~/.moxen/threads/usage-limits.json`. A provider at or near 100% is
-   out of the plan, not a retry. `null` means no data, not unlimited. Prefer headroom for work that
+1. **What exists.** Call `models` (it also carries usage, step 2), then read `.moxen/model-notes.md` (below).
+2. **What is left.** Check usage for *every* provider you might use — the `models` result carries
+   `usageLimits` per provider (session and weekly windows, `usedPercent`, `resetsAt`). A provider at
+   or near 100% is out of the plan, not a retry. A provider with no `usageLimits` has no data, which
+   is not the same as unlimited. Prefer headroom for work that
    is not urgent, and size the fan-out to what is left.
 3. **What each model is good for.** Research every model you intend to use whose notes are missing
    or stale — **including the family you run on**. Your own model's name can be newer than your

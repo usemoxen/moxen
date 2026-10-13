@@ -14,21 +14,20 @@ import path from "node:path";
 
 import { commandExists, runProcess } from "../infra/process.js";
 import { readStoredAuthTypes } from "../providers/opencode/catalog.js";
-import { compareSemver, OPENCODE_MIN_VERSION } from "../providers/opencode/config.js";
+import { CLAUDE_CODE_MIN_VERSION } from "../providers/claude/version.js";
+import { OPENCODE_MIN_VERSION } from "../providers/opencode/config.js";
+import { compareSemver, parseVersionNumber } from "../providers/semver.js";
 
 export interface ProviderCheck {
   readonly ok: boolean;
   readonly installed: boolean;
   readonly version: string | null;
   readonly login: string;
-  /** Set when the provider has a version floor (OpenCode: v2+). */
+  /** Set when the provider has a version floor (OpenCode: v2+; Claude Code: the release our Agent SDK is built against). */
   readonly minVersion?: string;
 }
 
-/** The `x.y.z` in a `--version` line such as `opencode v2.0.19`, or null. */
-export function parseVersionNumber(line: string | null): string | null {
-  return line?.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/)?.[0] ?? null;
-}
+export { parseVersionNumber };
 
 /** Whether a `--version` line meets `minVersion`; unparseable reads as too old. */
 export function meetsMinVersion(line: string | null, minVersion: string): boolean {
@@ -41,9 +40,7 @@ export interface Diagnosis {
   readonly git: { readonly ok: boolean };
   readonly providers: {
     readonly claude: ProviderCheck;
-    readonly codex: ProviderCheck;
     readonly opencode: ProviderCheck;
-    readonly grok: ProviderCheck;
   };
   readonly store: { readonly ok: boolean; readonly path: string };
   readonly auth: {
@@ -71,21 +68,19 @@ async function probeProvider(binary: string, login: string, minVersion?: string)
 }
 
 /**
- * `opencodeBinaryPath`: the `opencode` executable to probe and ask for stored
- * credentials. No setting feeds it today (the driver is built with defaults
- * too), so callers pass nothing and `opencode` on PATH is used.
+ * `opencodeBinaryPath` / `claudeBinaryPath`: the executables the drivers are
+ * configured with (`providers.<name>.binaryPath`), probed here too so the check
+ * and the sessions look at the same binary; unset, the one on PATH.
  */
-export async function diagnose(storeRoot: string, opencodeBinaryPath?: string): Promise<Diagnosis> {
-  const [git, claude, codex, opencode, grok] = await Promise.all([
+export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string): Promise<Diagnosis> {
+  const [git, claude, opencode] = await Promise.all([
     commandExists("git"),
-    probeProvider("claude", "inherit from `claude auth login`"),
-    probeProvider("codex", "inherit from `codex login`"),
+    probeProvider(claudeBinaryPath ?? "claude", "inherit from `claude auth login`", CLAUDE_CODE_MIN_VERSION),
     probeProvider(
       opencodeBinaryPath ?? "opencode",
       "`opencode auth login` (openai, xai and more built in) or provider API keys",
       OPENCODE_MIN_VERSION,
     ),
-    probeProvider("grok", "inherit from `grok login`"),
   ]);
   const storeWritable = await access(path.dirname(storeRoot), constants.W_OK)
     .then(() => true)
@@ -97,7 +92,7 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string): 
   return {
     node: { ok: true, version: process.version },
     git: { ok: git },
-    providers: { claude, codex, opencode, grok },
+    providers: { claude, opencode },
     store: { ok: storeWritable, path: storeRoot },
     auth: { ok: authProviders.length > 0, path: path.join(dataDir, "opencode", "opencode.db"), providers: authProviders, types },
   };

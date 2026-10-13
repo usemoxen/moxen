@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
-import { applyThreadFrame, detectUsageLimit, emptyThreadState, isUsageContinue, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedMessages, queuedSummary } from "../thread.js";
+import { applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
 function activity(id: string, kind: string, payload: Record<string, unknown>, turnId = "turn-1"): ActivityEnvelope {
   return { id, tone: "info", kind, summary: kind, turnId, createdAt: `2026-09-25T10:00:0${id.length % 10}.000Z`, payload } as unknown as ActivityEnvelope;
@@ -165,6 +165,13 @@ describe("waiting messages", () => {
     ]);
     expect(items[0]).toMatchObject({ turnId: "t-queued", text: "first queued", attachments: 0, scheduledFor: null });
   });
+
+  it("labels a queued task notification by what settled, not by its tag", () => {
+    const task = { taskId: "t1", source: "moxen" as const, title: "Analyze SFU", status: "completed", durationMs: null, model: null, branch: null, headline: null, filesChanged: null, additions: null, deletions: null };
+    expect(queuedLabel({ text: "<task-notification>\nA task…", tasks: [task] })).toBe("Analyze SFU finished");
+    expect(queuedLabel({ text: "<task-notification>", tasks: [task, { ...task, taskId: "t2" }] })).toBe("2 delegated tasks settled");
+    expect(queuedLabel({ text: "  run the tests\nthen lint" })).toBe("run the tests");
+  });
 });
 
 describe("prompt suggestions", () => {
@@ -278,6 +285,11 @@ describe("continuing after a usage limit", () => {
     expect(isUsageContinue(prompt("b", "t", USAGE_CONTINUE_PROMPT))).toBe(true);
     expect(isUsageContinue(prompt("c", "t", "Continue the task"))).toBe(false);
     expect(isUsageContinue(null)).toBe(false);
+    // The bare /compact command, and nothing that merely starts with it.
+    expect(isCompactPrompt(prompt("c", "t", "/compact"))).toBe(true);
+    expect(isCompactPrompt(prompt("d", "t", "  /compact\n"))).toBe(true);
+    expect(isCompactPrompt(prompt("e", "t", "/compact keep the plan"))).toBe(false);
+    expect(isCompactPrompt(null)).toBe(false);
   });
 });
 
@@ -374,6 +386,73 @@ describe("native subagent notices", () => {
     expect(timeline(state({ activities: [activities[3]!] })).some((entry) => entry.activityKind === "turn.background")).toBe(true);
     // No wake-up after it: the Agent row says it finished, no card.
     expect(timeline(state({ activities: activities.slice(0, 3) })).some((entry) => entry.kind === "user")).toBe(false);
+  });
+});
+
+describe("native subagent notices from OpenCode", () => {
+  const at = (second: number) => `2026-09-25T10:00:${String(second).padStart(2, "0")}.000Z`;
+  const row = (id: string, kind: string, payload: Record<string, unknown>, second: number, turnId = "turn-1") =>
+    ({ ...activity(id, kind, payload, turnId), createdAt: at(second) }) as ActivityEnvelope;
+  // A background `subagent` call (it names its child in its result), the child's own rows, then the parent woken.
+  const launch = row(
+    "a",
+    "tool-call.completed",
+    {
+      toolCallId: "call_sub",
+      status: "completed",
+      data: { tool: "subagent", state: { input: { agent: "explore", description: "Map auth", background: true }, output: '<subagent sessionID="ses_kid" state="running">' } },
+    },
+    1,
+  );
+  const child = (status: string, second: number, lastMessage: string | null) =>
+    row(`s-${status}`, "subagent", { toolCallId: "subagent:ses_kid", agentId: "ses_kid", agentType: "explore", status, lastMessage }, second);
+  const woke = row("w", "turn.background", {}, 41, "turn-2");
+
+  it("opens the turn a finished background subagent woke with its card", () => {
+    const activities = [launch, child("started", 2, null), child("stopped", 40, "Auth lives in src/auth."), woke];
+    const notice = timeline(state({ activities })).find((entry) => entry.kind === "user");
+    expect(notice?.turnId).toBe("turn-2");
+    expect(taskNotifications(notice!.message)).toEqual([
+      { taskId: "ses_kid", source: "native", title: "explore · Map auth", status: "completed", durationMs: 38_000, model: null, branch: null, headline: "Auth lives in src/auth.", filesChanged: null, additions: null, deletions: null },
+    ]);
+    expect(timeline(state({ activities })).some((entry) => entry.activityKind === "turn.background")).toBe(false);
+  });
+
+  it("finds the child in the wording a live v2 server sends, and cards a wake that came just before the child's row", () => {
+    // As recorded from a live run: the result is prose with the id in parentheses, in `detail`.
+    const live = row(
+      "a2",
+      "tool-call.completed",
+      {
+        toolCallId: "call_live",
+        status: "completed",
+        detail: "The subagent is working in the background (sessionID: ses_kid). You will be notified automatically when it finishes.",
+        data: { tool: "subagent", state: { input: { agent: "explore", description: "Map auth", background: true } } },
+      },
+      1,
+    );
+    // The server wakes the parent the moment the child ends; the driver's own "stopped" row (it reads the child's last word first) can land after it.
+    const earlyWake = row("w2", "turn.background", {}, 39, "turn-2");
+    const activities = [live, child("started", 2, null), earlyWake, child("stopped", 40, "Auth lives in src/auth.")];
+    const notice = timeline(state({ activities })).find((entry) => entry.kind === "user");
+    expect(notice?.turnId).toBe("turn-2");
+    expect(taskNotifications(notice!.message)).toMatchObject([{ taskId: "ses_kid", title: "explore · Map auth", status: "completed" }]);
+  });
+
+  it("says stopped when the child ended with no last word, and shows no card without a wake-up", () => {
+    const stopped = [launch, child("started", 2, null), child("stopped", 40, null), woke];
+    expect(taskNotifications(timeline(state({ activities: stopped })).find((entry) => entry.kind === "user")!.message)?.[0]).toMatchObject({ status: "interrupted" });
+    expect(timeline(state({ activities: [launch, child("started", 2, null), child("stopped", 40, "done")] })).some((entry) => entry.kind === "user")).toBe(false);
+  });
+
+  it("leaves a foreground subagent to its own call row", () => {
+    const foreground = row(
+      "f",
+      "tool-call.completed",
+      { toolCallId: "call_fg", status: "completed", data: { tool: "subagent", state: { input: { agent: "explore", description: "Map auth" }, output: '<subagent sessionID="ses_kid" state="completed">' } } },
+      1,
+    );
+    expect(timeline(state({ activities: [foreground, child("started", 2, null), child("stopped", 40, "done"), woke] })).some((entry) => entry.kind === "user")).toBe(false);
   });
 });
 

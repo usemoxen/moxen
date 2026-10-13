@@ -4,7 +4,7 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
-import { COLOR, SPINNER_FRAMES, SURFACE, truncate } from "../../theme.js";
+import { COLOR, markdownSyntaxStyle, SPINNER_FRAMES, SURFACE, truncate } from "../../theme.js";
 import type { SideQuestion } from "./useSideQuestion.js";
 
 /**
@@ -62,7 +62,8 @@ export function SideQuestionModal({
         ) : entry.status === "failed" ? (
           <text fg={COLOR.danger} bg={SURFACE.raised}>{entry.error ?? "No answer."}</text>
         ) : (
-          <text fg={COLOR.text} bg={SURFACE.raised}>{entry.answer ?? ""}</text>
+          // `selectable`: `<markdown>` is not by default, and the answer is what gets dragged.
+          <markdown content={entry.answer ?? ""} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
         )}
       </scrollbox>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>

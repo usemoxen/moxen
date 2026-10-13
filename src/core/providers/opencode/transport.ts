@@ -171,6 +171,12 @@ export interface OpencodeServerConnection {
   abortSession(sessionID: string): Promise<void>;
   /** `session.fork`: a copy of the session, up to (excluding) `beforeMessageID` when given. */
   forkSession(sessionID: string, beforeMessageID?: string): Promise<OpencodeSessionState>;
+  /**
+   * `session.generate` (OpenCode's own `/btw`): text from the session's
+   * context and model that never enters its history. Without a session,
+   * `generate.text` answers with no context.
+   */
+  generate(sessionID: string | null, prompt: string): Promise<string>;
   /** `session.compact`, on the session's own model (v2 takes none: switch it first). */
   summarizeSession(sessionID: string): Promise<void>;
   replyToPermission(sessionID: string, requestID: string, reply: "once" | "always" | "reject"): Promise<void>;
@@ -189,6 +195,8 @@ export interface EnsureOpencodeServerInput {
   readonly settings: OpencodeSettings;
   readonly workingDirectory: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** Extra skill folders for a spawned server (moxen's bundled skills); an external server is not ours to configure. */
+  readonly skillsDirs?: readonly string[];
 }
 
 export interface OpencodeTransport {
@@ -505,6 +513,14 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
     return sessionStateOf("session.fork", data);
   }
 
+  async generate(sessionID: string | null, prompt: string): Promise<string> {
+    const data =
+      sessionID !== null
+        ? await request("session.generate", () => this.client.session.generate({ sessionID, prompt }))
+        : await request("generate.text", () => this.client.generate.text({ prompt }));
+    return asString(asRecord(data)?.text)?.trim() ?? "";
+  }
+
   async summarizeSession(sessionID: string): Promise<void> {
     await request("session.compact", () => this.client.session.compact({ sessionID }));
   }
@@ -677,7 +693,7 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
     const password = resolveSpawnedServerPassword(settings, baseEnv);
     const childEnv: NodeJS.ProcessEnv = {
       ...baseEnv,
-      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT),
+      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, input.skillsDirs),
       OPENCODE_PASSWORD: password,
       OPENCODE_SERVER_PASSWORD: password,
       OPENCODE_DISABLE_AUTOUPDATE: "1",

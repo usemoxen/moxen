@@ -51,6 +51,16 @@ function elapsed(entries: readonly TimelineEntry[], waits: readonly WaitSpan[]):
   return { durationMs: workingMs(waits, first, last), startedAt: new Date(first).toISOString() };
 }
 
+/** Whether an entry is something the turn *did* — a tool call, a thought, a subagent, another message — rather than bookkeeping. */
+function landsAfterText(entry: TimelineEntry): boolean {
+  if (entry.kind === "assistant") return true;
+  if (entry.kind !== "activity" || entry.activity === null) return false;
+  const kind = entry.activity.kind;
+  if (kind === "reasoning" || kind === "subagent") return true;
+  const payload = entry.activity.payload as Record<string, unknown> | null | undefined;
+  return typeof payload?.toolCallId === "string";
+}
+
 /**
  * The transcript keeps a turn's prompt and closing reply visible and folds
  * everything between them into one "worked for" row; this groups the flat
@@ -124,6 +134,12 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
         current = open(entry);
       } else {
         demoteStaleReply(current, entry);
+        // A message sent mid-turn comes after whatever was streaming: that
+        // text stays where it was written, not under the new prompt.
+        if (current.live !== null && current.live.id !== entry.id) {
+          current.work.push(current.live);
+          current.live = null;
+        }
         if (current.work.length > 0 || current.reply !== null || current.live !== null) current.nudges.push(entry);
       }
       current.prompts.push(entry);
@@ -134,6 +150,15 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
       // null-turn prompts flush into it via `open` above. Entries with no
       // turnId of their own (system rows) still ride along.
       current = open(entry);
+    }
+    // Streaming text is the *last* thing the turn has shown. Once a tool call,
+    // a thought or another message lands after it, the model has moved on and
+    // the text is finished: it takes its place among the work instead of
+    // staying pinned under it with a caret (the stored note replaces it, by
+    // id, when it arrives).
+    if (current.live !== null && entry.id !== current.live.id && !(entry.kind === "assistant" && entry.streaming) && landsAfterText(entry)) {
+      current.work.push(current.live);
+      current.live = null;
     }
     if (entry.kind === "turn-diff") {
       // A diff belongs to its own turn: a foreign group (e.g. one opened by

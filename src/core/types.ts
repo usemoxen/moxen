@@ -31,18 +31,32 @@ export interface CliConfig {
    * work while nobody is watching.
    */
   autoContinueAtUsageLimit?: boolean;
+  /**
+   * Put moxen's own skills into a project that already has a `.claude` or
+   * `.agents` folder (`core/skills/projectskills.ts`). On unless set to false;
+   * off, the providers are pointed at the bundled folder instead.
+   */
+  installSkills?: boolean;
   /** TUI presentation; ignored by the CLI, which has no panels. */
   ui?: UiConfig;
   git?: GitConfig;
   forge?: ForgeConfig;
   /** Per-provider settings, read when that provider's driver is built. */
   providers?: ProvidersConfig;
+  updates?: UpdatesConfig;
+}
+
+export interface UpdatesConfig {
+  /** Ask the npm registry for the newest Claude Code and OpenCode when the settings page opens. On by default. */
+  checkLatest?: boolean;
 }
 
 export type BackdropMode = "animated" | "static" | "off";
 
 export interface UiConfig {
   backdrop?: BackdropMode;
+  /** Each model's own scene behind the new-thread view; off keeps the monitoring field. On by default. */
+  modelScenes?: boolean;
   defaultSidePanel?: "context" | "git" | "agents" | "background";
   contextRefreshSeconds?: number;
   usageRefreshSeconds?: number;
@@ -67,6 +81,14 @@ export interface ForgeConfig {
 
 export interface ProvidersConfig {
   claude?: ClaudeProviderConfig;
+  opencode?: OpencodeProviderConfig;
+}
+
+/** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
+export interface OpencodeProviderConfig {
+  binaryPath?: string;
+  /** Tell spawned OpenCode servers about moxen's bundled skills. */
+  bundledSkills?: boolean;
 }
 
 export interface ClaudeProviderConfig {
@@ -76,6 +98,10 @@ export interface ClaudeProviderConfig {
   thinkingDisplay?: "summarized" | "omitted";
   promptSuggestions?: boolean;
   partialMessages?: boolean;
+  /** Serve skills from `.agents/skills` (and moxen's bundled ones) to Claude Code with the `agent-skills` mod. */
+  agentSkills?: boolean;
+  /** Tokens at which Claude Code auto-compacts (100000 to 1000000); unset leaves its own default for the model. */
+  autoCompactWindow?: number;
 }
 
 export interface RuntimeState {

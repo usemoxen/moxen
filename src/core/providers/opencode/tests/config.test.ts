@@ -69,6 +69,14 @@ describe("opencode config", () => {
     expect(JSON.parse(buildServerConfigContent("[1]"))).toEqual({ share: "disabled", update: "disable" });
   });
 
+  it("adds moxen's skills folder to the server config's skills list, once and after the user's own", () => {
+    expect(JSON.parse(buildServerConfigContent(undefined, ["/pkg/skills"]))).toEqual({ skills: ["/pkg/skills"], share: "disabled", update: "disable" });
+    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ skills: ["~/mine", "/pkg/skills"] }), ["/pkg/skills"])).skills).toEqual(["~/mine", "/pkg/skills"]);
+    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ skills: ["~/mine", 7] }), ["/pkg/skills"])).skills).toEqual(["~/mine", "/pkg/skills"]);
+    // With nothing to add, a config without `skills` stays without it.
+    expect(JSON.parse(buildServerConfigContent(undefined, []))).not.toHaveProperty("skills");
+  });
+
   it("compares semver with unparseable reading as too old", () => {
     expect(parseSemver("v1.18.30")).toEqual([1, 18, 30]);
     expect(parseSemver("nope")).toBeNull();

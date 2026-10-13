@@ -24,6 +24,7 @@
   "files": [
     "dist",
     "skills",
+    "mods",
     "README.md",
     "LICENSE"
   ],
@@ -33,17 +34,20 @@
     "test:watch": "vitest",
     "check": "bun run typecheck && bun run test",
     "check:tui": "bun src/tui/render-check.tsx",
-    "update:tree-sitter-assets": "bun ./scripts/update-tree-sitter-assets.ts --config ./parsers-config.json --assets ./src/tui/syntax --output ./src/tui/syntax/parsers.ts"
+    "tui:mock": "bun src/tui/mock.tsx",
+    "test:inventory": "bun ./scripts/test-inventory.ts",
+    "update:docs": "bun ./scripts/update-docs.ts",
+    "update:tree-sitter-assets": "bun ./scripts/update-tree-sitter-assets.ts --config ./parsers-config.json --assets ./src/core/syntax --output ./src/core/syntax/parsers.ts && bun ./scripts/fetch-tree-sitter-licenses.ts"
   },
   "private": true,
   "engines": {
     "bun": ">=1.3.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.280",
-    "@opencode/client": "2.0.20",
-    "@opentui/core": "^0.5.11",
-    "@opentui/react": "^0.5.11",
+    "@anthropic-ai/claude-agent-sdk": "0.3.292",
+    "@opencode/client": "2.0.24",
+    "@opentui/core": "0.5.16",
+    "@opentui/react": "0.5.16",
     "commander": "^14.0.1",
     "diff": "9.0.0",
     "effect": "4.0.0-rc.115",
@@ -56,5 +60,8 @@
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
-  "packageManager": "bun@1.3.13"
+  "packageManager": "bun@1.3.13",
+  "patchedDependencies": {
+    "@opentui/core@0.5.16": "patches/@opentui%2Fcore@0.5.16.patch"
+  }
 }

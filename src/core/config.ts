@@ -12,12 +12,14 @@ import type {
   ForgeConfig,
   GitConfig,
   InteractionMode,
+  OpencodeProviderConfig,
   OpenMode,
   ProjectPolicy,
   RuntimeMode,
   ProvidersConfig,
   SpeedMode,
   ThreadEnvMode,
+  UpdatesConfig,
   UiConfig,
   WorkspaceMode,
 } from "./types.js";
@@ -160,16 +162,24 @@ export function normalizeConfig(raw: unknown): CliConfig {
     if (value === null) throw new CliError("INVALID_CONFIG", "autoContinueAtUsageLimit must be true or false.");
     if (value) result.autoContinueAtUsageLimit = true;
   }
+  if (input.installSkills !== undefined) {
+    const raw: unknown = input.installSkills;
+    const value = raw === true || raw === "true" ? true : raw === false || raw === "false" ? false : null;
+    if (value === null) throw new CliError("INVALID_CONFIG", "installSkills must be true or false.");
+    if (!value) result.installSkills = false;
+  }
   if (input.mcpServers !== undefined) {
     const servers = parseMcpServers(input.mcpServers, "config") as Record<string, McpServerEntry>;
     if (Object.keys(servers).length > 0) result.mcpServers = servers;
   }
-  const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds"]);
+  const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "modelScenes", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds"]);
   if (ui) result.ui = ui;
   const git = normalizeSection<GitConfig>(input.git, "git", ["historyLimit", "autoFetch"]);
   if (git) result.git = git;
   const forge = normalizeSection<ForgeConfig>(input.forge, "forge", ["enabled", "ghPath", "glabPath"]);
   if (forge) result.forge = forge;
+  const updates = normalizeSection<UpdatesConfig>(input.updates, "updates", ["checkLatest"]);
+  if (updates) result.updates = updates;
   const providers = normalizeProviders(input.providers);
   if (providers) result.providers = providers;
   return applyEnvironmentOverrides(result);
@@ -221,18 +231,26 @@ function checkTyped(kind: string, value: unknown, label: string): unknown {
 function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
   if (raw === undefined) return undefined;
   const input = asSection(raw, "providers");
-  if (input.claude === undefined) return undefined;
-  const claude = normalizeSection<ClaudeProviderConfig>(input.claude, "providers.claude", [
-    "binaryPath",
-    "homePath",
-    "thinkingDisplay",
-    "promptSuggestions",
-    "partialMessages",
-  ]);
-  const launchArgs = asSection(input.claude, "providers.claude").launchArgs;
-  const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
-  if (!claude && !args) return undefined;
-  return { claude: { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}) } };
+  const result: ProvidersConfig = {};
+  if (input.claude !== undefined) {
+    const claude = normalizeSection<ClaudeProviderConfig>(input.claude, "providers.claude", [
+      "binaryPath",
+      "homePath",
+      "thinkingDisplay",
+      "promptSuggestions",
+      "partialMessages",
+      "agentSkills",
+      "autoCompactWindow",
+    ]);
+    const launchArgs = asSection(input.claude, "providers.claude").launchArgs;
+    const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
+    if (claude || args) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}) };
+  }
+  if (input.opencode !== undefined) {
+    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills"]);
+    if (opencode) result.opencode = opencode;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function envOverride(name: string): string | undefined {

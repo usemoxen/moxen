@@ -27,6 +27,22 @@ function parts(events: ReadonlyArray<OpencodeSubscribedEvent>, kind: string): Ar
 describe("v2 event translation, against a real shell turn", () => {
   const events = run(new OpencodeEventTranslator(), SHELL_TURN_EVENTS);
 
+  it("turns the model's thinking into reasoning parts that run, grow, then complete with their whole text", () => {
+    const reasoning = parts(events, "reasoning");
+    // Each stretch folds into one row by part id: running, then (when it streamed) growing, then completed.
+    const byId = new Map<string, Array<Record<string, any>>>();
+    for (const part of reasoning) byId.set(part.id, [...(byId.get(part.id) ?? []), part]);
+    expect(byId.size).toBeGreaterThan(0);
+    for (const stretch of byId.values()) {
+      expect(stretch[0]!.state.status).toBe("running");
+      expect(stretch.at(-1)!.state.status).toBe("completed");
+      expect(stretch.slice(1, -1).every((part) => part.state.status === "running")).toBe(true);
+    }
+    const first = [...byId.values()][0]!;
+    expect(first.at(-1)!.text).toContain("The user wants me to run a simple shell command");
+    expect(first.at(-1)!.time.end).toBeGreaterThan(first.at(-1)!.time.start);
+  });
+
   it("accumulates text deltas into cumulative parts and reconciles with the ended text", () => {
     const texts = parts(events, "text");
     expect(texts.map((part) => part.text)).toEqual([
@@ -68,14 +84,13 @@ describe("v2 event translation, against a real shell turn", () => {
     });
   });
 
-  it("ends the turn with one idle, and drops reasoning, steps, usage and inbox events", () => {
+  it("ends the turn with one idle, and drops steps, usage and inbox events", () => {
     expect(events.filter((event) => event.type === "session.idle")).toEqual([
       { type: "session.idle", properties: { sessionID: SESSION } },
     ]);
     expect(events.at(-1)?.type).toBe("session.idle");
     const kinds = new Set(events.map((event) => event.type));
     expect([...kinds].sort()).toEqual(["message.part.updated", "permission.asked", "permission.replied", "session.idle"]);
-    expect(parts(events, "reasoning")).toEqual([]);
   });
 
   it("passes a permission reply through with its session and request", () => {
@@ -197,6 +212,23 @@ describe("v2 turn end", () => {
     expect(translator.translate({ type: "session.execution.succeeded", data: { sessionID: SESSION } })).toEqual([]);
   });
 
+  it("maps a finished compaction to session.compacted, and only a requested one's failure to session.error", () => {
+    const translator = new OpencodeEventTranslator();
+    expect(
+      translator.translate({ type: "session.compaction.ended", data: { sessionID: SESSION, reason: "auto", text: "Summary." } }),
+    ).toEqual([{ type: "session.compacted", properties: { sessionID: SESSION, reason: "auto", summary: "Summary." } }]);
+    const failed = (reason: string) =>
+      translator.translate({
+        type: "session.compaction.failed",
+        data: { sessionID: SESSION, reason, error: { type: "provider", message: "too long" } },
+      });
+    expect(failed("manual")).toEqual([
+      { type: "session.error", properties: { sessionID: SESSION, error: { message: "too long", name: "provider" } } },
+    ]);
+    // The run's own failure follows an automatic one; reporting it twice would fail two turns.
+    expect(failed("auto")).toEqual([]);
+  });
+
   it("maps a failed execution to session.error carrying the error type as its name", () => {
     const events = run(new OpencodeEventTranslator(), EXECUTION_FAILED_EVENTS);
     expect(events).toEqual([
@@ -234,6 +266,34 @@ describe("v2 tool failures", () => {
       callID: "call_fb6ddc6b1d774052a7383943",
       state: { status: "error", error: "Unable to execute command: echo second" },
     });
+  });
+
+  it("tells a call an interrupt cut short from one that failed on its own", () => {
+    const failed = parts(run(new OpencodeEventTranslator(), TOOL_FAILED_EVENTS), "tool");
+    // The first failed to run; the second was the user dismissing a question mid-call.
+    expect(failed[0]).toMatchObject({ state: { errorType: "tool.execution" } });
+    expect(failed[1]).toMatchObject({ state: { status: "error", errorType: "aborted" } });
+  });
+
+  it("lets a call that has ended stay ended: a straggling event does not start it over blank", () => {
+    const data = { sessionID: SESSION, assistantMessageID: "msg_1", id: "call_web" };
+    const translator = new OpencodeEventTranslator();
+    const emitted = run(translator, [
+      { type: "session.tool.input.started", data: { ...data, name: "websearch" } },
+      { type: "session.tool.called", data: { ...data, input: { query: "moxen" } } },
+      { type: "session.tool.success", data: { ...data, content: [{ type: "text", text: "3 results" }] } },
+      // Late: a progress update and a repeated result for the call that already ended.
+      { type: "session.tool.progress", data: { ...data, metadata: { late: true } } },
+      { type: "session.tool.success", data: { ...data, content: [{ type: "text", text: "3 results" }] } },
+    ]);
+    const tools = parts(emitted, "tool");
+    // Nothing after the first result: no blank `tool` row to overwrite the finished one.
+    expect(tools.map((part) => [part.tool, part.state.status])).toEqual([
+      ["websearch", "pending"],
+      ["websearch", "running"],
+      ["websearch", "completed"],
+    ]);
+    expect(tools.at(-1)!.state.input).toEqual({ query: "moxen" });
   });
 
   it("joins the text items of tool content", () => {

@@ -56,8 +56,48 @@ describe("detectFiletype", () => {
     ["main.c", "c"],
     ["lib.hpp", "cpp"],
     ["lib.cc", "cpp"],
+    ["App.swift", "swift"],
+    ["Program.cs", "csharp"],
+    ["Main.scala", "scala"],
+    ["init.lua", "lua"],
+    ["mix.exs", "elixir"],
+    ["Main.hs", "haskell"],
+    ["main.ml", "ocaml"],
+    ["analysis.R", "r"],
+    ["solver.jl", "julia"],
+    ["script.pl", "perl"],
+    ["logo.xml", "xml"],
+    ["fix.patch", "diff"],
+    ["ci.yml", "yaml"],
+    ["AppDelegate.m", "objc"],
+    ["View.mm", "objc"],
+    ["Makefile", "make"],
+    ["rules.mk", "make"],
+    ["kernel.cu", "cuda"],
+    ["defs.bzl", "starlark"],
+    ["main.bicep", "bicep"],
+    ["App.svelte", "svelte"],
+    ["main.dart", "dart"],
+    ["Dockerfile", "dockerfile"],
+    ["schema.graphql", "graphql"],
+    ["flake.nix", "nix"],
+    ["CMakeLists.txt", "cmake"],
+    ["justfile", "just"],
+    ["Kconfig", "kconfig"],
+    ["shader.frag", "glsl"],
+    ["main.odin", "odin"],
+    ["service.proto", "proto"],
+    ["build.zig", "zig"],
+    ["C:\\repo\\src\\App.swift", "swift"],
   ])("maps %s to %s", (file, expected) => {
     expect(detectFiletype(file)).toBe(expected);
+  });
+
+  it("names no grammar for a language the bundle does not have", () => {
+    // OpenTUI's own table knows these; nothing is loaded for them.
+    expect(detectFiletype("App.vue")).toBeUndefined();
+    expect(detectFiletype("main.hcl")).toBeUndefined();
+    expect(detectFiletype("README")).toBeUndefined();
   });
 });
 

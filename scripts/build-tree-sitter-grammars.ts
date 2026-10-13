@@ -1,0 +1,160 @@
+/**
+ * Builds the tree-sitter grammars that publish no `.wasm` release, from the
+ * pinned sources in `parsers-build.json`, into `src/core/syntax/<filetype>/`, and
+ * regenerates `src/core/syntax/builtParsers.ts` (the sibling of the generated
+ * `parsers.ts`, same shape, so compiled binaries still embed every asset).
+ *
+ *   bun scripts/build-tree-sitter-grammars.ts [filetype ...]
+ *
+ * Needs the `tree-sitter` CLI (0.25+, which fetches its own wasi-sdk) and `git`.
+ * Every grammar is pinned to a tag or commit; only the grammar's committed
+ * `src/parser.c` is compiled — `tree-sitter generate` is never run, so no
+ * grammar-side JavaScript executes here.
+ */
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+
+interface BuildEntry {
+  filetype: string;
+  aliases?: string[];
+  repo: string;
+  ref: string;
+  highlights: string;
+}
+
+const root = path.resolve(import.meta.dir, "..");
+const syntaxDir = path.join(root, "src", "core", "syntax");
+const only = new Set(process.argv.slice(2));
+const config = JSON.parse(await readFile(path.join(root, "parsers-build.json"), "utf8")) as { parsers: BuildEntry[] };
+const fetched = JSON.parse(await readFile(path.join(root, "parsers-config.json"), "utf8")) as { parsers: Array<{ filetype: string }> };
+/** Filetypes whose `highlights.scm` another grammar may inherit (`; inherits: c`). */
+const available = new Set([...fetched.parsers.map((parser) => parser.filetype), ...config.parsers.map((parser) => parser.filetype)]);
+
+function run(command: string, args: string[], cwd?: string): string {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed:\n${result.stderr || result.stdout}`);
+  return result.stdout;
+}
+
+if (spawnSync("tree-sitter", ["--version"]).status !== 0) {
+  throw new Error("The `tree-sitter` CLI is not on PATH (brew install tree-sitter-cli, or a release from github.com/tree-sitter/tree-sitter).");
+}
+
+const built: Array<BuildEntry & { parents: string[] }> = [];
+const failed: string[] = [];
+
+for (const entry of config.parsers) {
+  const dir = path.join(syntaxDir, entry.filetype);
+  const wasmPath = path.join(dir, `tree-sitter-${entry.filetype}.wasm`);
+  const queryPath = path.join(dir, "highlights.scm");
+  const wanted = only.size === 0 || only.has(entry.filetype);
+  try {
+    if (wanted) {
+      const work = await mkdtemp(path.join(tmpdir(), `moxen-ts-${entry.filetype}-`));
+      try {
+        run("git", ["init", "-q"], work);
+        run("git", ["fetch", "-q", "--depth", "1", `https://github.com/${entry.repo}`, entry.ref], work);
+        run("git", ["checkout", "-q", "FETCH_HEAD"], work);
+        if (!existsSync(path.join(work, "src", "parser.c"))) throw new Error("no committed src/parser.c");
+        await mkdir(dir, { recursive: true });
+        run("tree-sitter", ["build", "--wasm", "-o", wasmPath, work]);
+        const query = await readFile(path.join(work, entry.highlights), "utf8");
+        await writeFile(
+          queryPath,
+          `; Query from: https://github.com/${entry.repo}/blob/${entry.ref}/${entry.highlights}\n${query.endsWith("\n") ? query : `${query}\n`}`,
+        );
+      } finally {
+        await rm(work, { recursive: true, force: true });
+      }
+    }
+    const query = await readFile(queryPath, "utf8");
+    const parents = [...query.matchAll(/^;\s*inherits:\s*([\w,\s]+)$/gm)].flatMap((match) => match[1]!.split(",").map((name) => name.trim()).filter(Boolean));
+    const missing = parents.filter((parent) => !available.has(parent));
+    if (missing.length > 0) throw new Error(`inherits ${missing.join(", ")}, which is not vendored`);
+    built.push({ ...entry, parents });
+    console.log(`${wanted ? "built " : "kept  "} ${entry.filetype.padEnd(11)} ${entry.repo}@${entry.ref.slice(0, 10)}${parents.length > 0 ? `  (+ ${parents.join(", ")} queries)` : ""}`);
+  } catch (error) {
+    failed.push(entry.filetype);
+    console.error(`FAILED ${entry.filetype}: ${String(error).split("\n")[0]}`);
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const descriptors = built.map((entry) => ({
+  filetype: entry.filetype,
+  ...(entry.aliases ? { aliases: entry.aliases } : {}),
+  queries: { highlights: [...entry.parents.map((parent) => `${parent}/highlights.scm`), `${entry.filetype}/highlights.scm`] },
+  wasm: `${entry.filetype}/tree-sitter-${entry.filetype}.wasm`,
+}));
+const assets = [...new Set(descriptors.flatMap((descriptor) => [...descriptor.queries.highlights, descriptor.wasm]))];
+const loaders = assets.map((asset) => `  ${JSON.stringify(asset)}: () => import(${JSON.stringify(`./${asset}`)} as string, { with: { type: "file" } }),`).join("\n");
+
+await writeFile(
+  path.join(syntaxDir, "builtParsers.ts"),
+  `// This file is generated by scripts/build-tree-sitter-grammars.ts - DO NOT EDIT MANUALLY
+// Run 'bun scripts/build-tree-sitter-grammars.ts' to regenerate it from parsers-build.json
+
+import { resolveBundledFilePath } from "@opentui/core"
+import type { FiletypeParserOptions } from "@opentui/core"
+
+interface FileImportModule {
+  readonly default: string
+}
+
+const bundledAssetLoaders: Record<string, () => Promise<FileImportModule>> = {
+${loaders}
+}
+
+interface BuiltParserDescriptor {
+  readonly filetype: string
+  readonly aliases?: readonly string[]
+  readonly queries: { readonly highlights: readonly string[] }
+  readonly wasm: string
+}
+
+const builtParserDescriptors: readonly BuiltParserDescriptor[] = ${JSON.stringify(descriptors, null, 2)}
+
+/** Asset paths (relative to this directory) of every built grammar: queries, then wasm. */
+export const builtParserAssetPaths: readonly string[] = [
+  ...new Set(builtParserDescriptors.flatMap((parser) => [...parser.queries.highlights, parser.wasm])),
+]
+
+let cachedParsers: Promise<FiletypeParserOptions[]> | undefined
+
+export function getBuiltParsers(): Promise<FiletypeParserOptions[]> {
+  cachedParsers ??= Promise.all(builtParserDescriptors.map(resolveBuiltParser))
+  return cachedParsers
+}
+
+async function resolveBuiltParser(parser: BuiltParserDescriptor): Promise<FiletypeParserOptions> {
+  return {
+    filetype: parser.filetype,
+    ...(parser.aliases ? { aliases: [...parser.aliases] } : {}),
+    queries: { highlights: await Promise.all(parser.queries.highlights.map(resolveParserAsset)) },
+    wasm: await resolveParserAsset(parser.wasm),
+  }
+}
+
+function resolveParserAsset(relativePath: string): Promise<string> {
+  const loadBundledFile = bundledAssetLoaders[relativePath]
+  if (!loadBundledFile) {
+    throw new Error(\`Unknown parser asset: \${JSON.stringify(relativePath)}\`)
+  }
+  return resolveBundledFilePath(
+    relativePath,
+    loadBundledFile,
+    new URL(\`./\${relativePath}\`, import.meta.url),
+    import.meta.url,
+    { loadBundledFileFallback: true, useAssetRoot: false },
+  )
+}
+`,
+);
+
+// A grammar that failed is dropped from parsers-build.json's output, not from the config:
+// the failure is printed, the config keeps it for the next run.
+console.log(`\n${built.length} built grammars registered${failed.length > 0 ? `, ${failed.length} failed: ${failed.join(", ")}` : ""}`);
+process.exit(failed.length > 0 ? 1 : 0);

@@ -77,7 +77,7 @@ export interface CommandSummary {
  * What a provider can be asked to run by name in one working directory:
  * its skills and its slash commands, as the provider itself resolves them
  * (user, project and plugin scopes included). `trigger` is how a prompt
- * invokes one — `$name` for Codex, `/name` everywhere else.
+ * invokes one — `/name`.
  */
 export interface SkillInventory {
   trigger: "$" | "/";
@@ -304,7 +304,7 @@ export function extractProviders(response: unknown): ProviderSummary[] {
 /**
  * Providers the model picker may offer: only `enabled` instances. A disabled
  * provider still lists its models over `server.getConfig` (same as the CLI's
- * `models list`), but selecting it fails — offering it would show Claude/Grok
+ * `models list`), but selecting it fails — offering it would show Claude/OpenCode
  * rows on a fresh install where they were never enabled.
  */
 export function offerableProviders(providers: readonly ProviderSummary[]): ProviderSummary[] {

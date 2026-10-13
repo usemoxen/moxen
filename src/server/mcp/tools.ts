@@ -14,6 +14,9 @@ import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import type { ClientApi } from "../api.js";
 
 export const MAX_WAIT_MS = 45_000;
+/** A checklist is a plan at a glance, not a log: past this it stops being read. */
+export const MAX_TODOS = 15;
+export const MAX_TODO_CHARS = 160;
 const POLL_MS = 1_000;
 
 export interface McpTool {
@@ -39,7 +42,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       properties: {
         task: { type: "string", description: "Everything the subagent needs: it sees none of your conversation." },
         title: { type: "string", description: "Short title for the subagent's thread." },
-        provider: { type: "string", description: "Provider instance id (claudeAgent, codex, grok, opencode…); defaults to yours. The models tool lists them." },
+        provider: { type: "string", description: "Provider instance id (claudeAgent, opencode/<provider>…); defaults to yours. The models tool lists them." },
         model: { type: "string", description: "Model slug on that provider; defaults to yours." },
         effort: { type: "string", description: "Reasoning effort for that model (one of its efforts in the models tool); defaults to the model's own." },
         isolation: {
@@ -78,7 +81,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "models",
     description:
       "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
-      "here, and only models the user has not hidden. Pass provider to list just that one.",
+      "here, and only models the user has not hidden, plus each provider's usage limits (session and weekly windows) when known. " +
+      "Pass provider to list just that one.",
     inputSchema: {
       type: "object",
       properties: {
@@ -108,19 +112,26 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
 export const TODOS_TOOL: McpTool = {
   name: "todos",
   description:
-    "Your task checklist, shown to the user as the thread's Tasks panel. Use it for multi-step work: " +
-    "send the whole list every time (it replaces the last one), marking one item in_progress as you start it " +
-    "and completed as soon as it is done.",
+    "Your task checklist, shown to the user as the thread's Tasks panel. For work of three or more steps. " +
+    "Every call sends the whole list (it replaces the last one). Each item is one short, concrete outcome to check off, not an activity. " +
+    "Keep exactly one item in_progress while you work. Mark an item completed as soon as it is done and checked, " +
+    "and in that same call mark the next one in_progress. Update the list when the plan changes. " +
+    `At most ${MAX_TODOS} items, each at most ${MAX_TODO_CHARS} characters.`,
   inputSchema: {
     type: "object",
     properties: {
       todos: {
         type: "array",
+        maxItems: MAX_TODOS,
         items: {
           type: "object",
           properties: {
-            content: { type: "string", description: "The step, imperative and short." },
-            status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+            content: { type: "string", maxLength: MAX_TODO_CHARS, description: "One concrete, checkable outcome, imperative and short." },
+            status: {
+              type: "string",
+              enum: ["pending", "in_progress", "completed"],
+              description: "pending: not started. in_progress: what you are doing now (exactly one). completed: done and checked.",
+            },
           },
           required: ["content", "status"],
           additionalProperties: false,
@@ -131,6 +142,54 @@ export const TODOS_TOOL: McpTool = {
     additionalProperties: false,
   },
 };
+
+const TODO_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "completed"]);
+
+/**
+ * A checklist worth showing: every item a real, distinct, short outcome, and at
+ * most one underway. A list that breaks these is refused with what to change —
+ * the model fixes it and resends — instead of landing in the Tasks panel as noise.
+ * What is merely unhelpful (nothing marked in progress) is recorded, with a note.
+ */
+export function checkTodos(raw: readonly unknown[]): { plan: Array<{ step: string; status: string }>; note: string | null } {
+  if (raw.length > MAX_TODOS) {
+    throw new CliError("INVALID_TOOL_INPUT", `At most ${MAX_TODOS} items: you sent ${raw.length}. Group related steps, or keep only the ones still ahead of you.`);
+  }
+  const plan = raw.map((entry, index) => {
+    const record = (entry !== null && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+    const step = typeof record.content === "string" ? record.content.trim().replace(/\s+/g, " ") : "";
+    const status = typeof record.status === "string" ? record.status : "";
+    if (step === "") throw new CliError("INVALID_TOOL_INPUT", `Item ${index + 1} has no content. Each item is one short sentence saying what will be done.`);
+    if (step.length > MAX_TODO_CHARS) {
+      throw new CliError("INVALID_TOOL_INPUT", `Item ${index + 1} is ${step.length} characters; keep it to ${MAX_TODO_CHARS}. Put the detail in your work, not in the checklist.`);
+    }
+    if (!TODO_STATUSES.has(status)) {
+      throw new CliError("INVALID_TOOL_INPUT", `Item ${index + 1} has status "${status}"; use pending, in_progress or completed.`);
+    }
+    return { step, status };
+  });
+  const seen = new Set<string>();
+  for (const item of plan) {
+    const key = item.step.toLowerCase();
+    if (seen.has(key)) throw new CliError("INVALID_TOOL_INPUT", `"${item.step}" is listed twice. Each item should be a distinct step.`);
+    seen.add(key);
+  }
+  const underway = plan.filter((item) => item.status === "in_progress");
+  if (underway.length > 1) {
+    throw new CliError(
+      "INVALID_TOOL_INPUT",
+      `${underway.length} items are in_progress; exactly one should be. Keep the one you are doing now and mark the rest pending (or completed, if they are done).`,
+    );
+  }
+  const open = plan.filter((item) => item.status !== "completed").length;
+  const note =
+    open > 0 && underway.length === 0
+      ? "No item is in_progress. Mark the step you are starting in_progress, so the Tasks panel shows what you are doing."
+      : plan.length > 0 && open === 0
+        ? "Every item is completed. If that is the end of the work, no further call is needed; if more steps are ahead, add them."
+        : null;
+  return { plan, note };
+}
 
 const TERMINAL: ReadonlySet<DelegatedTaskStatus> = new Set(["completed", "failed", "interrupted"]);
 
@@ -169,12 +228,9 @@ export async function callMoxenTool(
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
-        const plan = todos.map((entry) => {
-          const record = (entry !== null && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
-          return { step: record.content, status: record.status };
-        });
+        const { plan, note } = checkTodos(todos);
         const recorded = await api.dispatch({ type: "thread.plan.set", threadId: parentThreadId, plan: plan as never });
-        return ok({ recorded: recorded.steps });
+        return ok({ recorded: recorded.steps, ...(note === null ? {} : { note }) });
       }
       case "task_cancel": {
         const taskId = argString(args, "taskId", true)!;
@@ -276,6 +332,7 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
       return {
         provider: provider.instanceId,
         name: provider.displayName ?? provider.instanceId,
+        ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
         models: visible.slice(0, MAX_MODELS_PER_PROVIDER).map((model) => {
           const efforts = model.efforts.find((descriptor) => descriptor.id === "effort")?.choices.map((choice) => choice.id) ?? [];
           return { model: model.slug, name: model.name, ...(efforts.length > 0 ? { efforts } : {}) };

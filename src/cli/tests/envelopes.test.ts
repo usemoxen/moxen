@@ -163,13 +163,13 @@ async function seeded(options: Parameters<typeof testHarness>[0] = {}) {
     id: "project-existing",
     title: "Existing project",
     workspaceRoot: await realpath(harness.work),
-    defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
   });
   await createThread(harness.store, {
     id: "thread-existing",
     projectId: "project-existing",
     title: "Existing thread",
-    modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     runtimeMode: "full-access",
     interactionMode: "default",
     env: { mode: "local", path: await realpath(harness.work), branch: "main" },

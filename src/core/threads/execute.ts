@@ -26,8 +26,8 @@ import { recordUsageWindows, standingLimit } from "../usage/limits.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { ClaudeDriver } from "../providers/claude/driver.js";
-import { CodexDriver } from "../providers/codex/driver.js";
-import { GrokDriver } from "../providers/grok/driver.js";
+import { locateSkillsMod } from "../providers/claude/skillsmod.js";
+import { locateBundledSkills } from "../providers/bundledskills.js";
 import { OpenCodeDriver } from "../providers/opencode/driver.js";
 import type {
   ContextBreakdown,
@@ -52,6 +52,8 @@ import {
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
 import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { captureRuleBaseline, refreshRuleBaseline } from "./rulefiles.js";
+import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
@@ -91,6 +93,12 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string): Effect.Effect<void, CliError>;
+  /**
+   * The MCP servers this thread should have now, given to a session that is
+   * already running (it was started with the set of its day). A no-op when
+   * nothing changed. Absent where a session's servers cannot change after it starts.
+   */
+  updateMcpServers?(threadId: string, servers: readonly McpServerSpec[]): Promise<void>;
   /** Skills and slash commands the provider resolves for `workingDirectory`. */
   skillInventory?(workingDirectory: string): Promise<SkillInventory>;
   /**
@@ -112,17 +120,17 @@ export interface TurnDriver extends ProviderSessionTitles {
    * Copy a native session whole (its handle, as `resumeCursor` gives it) into
    * a new one, for a delegated task that starts from its parent's
    * conversation. Resolves to the copy's handle. Absent where the provider
-   * cannot fork (Codex, Grok).
+   * cannot fork.
    */
   forkSession?(cursor: string, workingDirectory: string): Promise<string>;
-  /** Drop the provider's last `numTurns` prompts. All four drivers have it; Grok's always refuses. */
+  /** Drop the provider's last `numTurns` prompts. */
   rollbackThread?(threadId: string, numTurns: number): Effect.Effect<unknown, CliError>;
   /**
    * A side question (`/btw`): answered on a throwaway copy of the thread's
    * provider context, with no tools, and never recorded in the thread or
    * its provider session. Runs alongside a turn in flight. Absent where the
    * provider cannot copy a session into a tool-less one-shot (Claude has
-   * it; Codex and Grok cannot fork, and OpenCode's fork keeps its tools).
+   * it, and OpenCode answers through `session.generate`).
    */
   sideQuestion?(input: SideQuestionInput): Promise<SideAnswer>;
 }
@@ -138,8 +146,6 @@ export interface TurnOutcome {
 
 export interface TurnDriverFactories {
   readonly claude?: () => TurnDriver;
-  readonly codex?: () => TurnDriver;
-  readonly grok?: () => TurnDriver;
   readonly opencode?: () => TurnDriver;
 }
 
@@ -186,14 +192,12 @@ export function driverForInstance(
   const existing = cache.get(key);
   if (existing) return existing;
   let driver: TurnDriver | undefined;
-  if (key === "codex") driver = factories.codex?.() ?? new CodexDriver();
-  else if (key === "grok") driver = factories.grok?.() ?? new GrokDriver();
   // Provider settings are read here, once, because the driver owns the
   // spawned process: an already-running session cannot be moved to a
   // different binary or config directory. The schema says as much
   // (`restartRequired`), so a change applies to the next server start.
-  else if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver(providers?.claude ? { settings: providers.claude } : {});
-  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver();
+  if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver({ ...(providers?.claude ? { settings: providers.claude } : {}), skillsMod: locateSkillsMod() });
+  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}), bundledSkillsDir: locateBundledSkills() });
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
       details: { instanceId },
@@ -209,17 +213,96 @@ type EventSubscriber = (event: ProviderRuntimeEvent) => void;
 
 const pumps = new WeakMap<TurnDriver, Map<string, Set<EventSubscriber>>>();
 
+/**
+ * Text the provider has streamed for a turn that is not in the store yet: an
+ * assistant message still being written and the reasoning summary of a
+ * thought still running. Both are live-only (the store gets them whole, when
+ * they finish), so a client that opens the thread mid-turn — switching back
+ * from another thread — would otherwise see only what arrives after it
+ * subscribed. Fed by the pump, so it fills whether or not anyone is watching.
+ */
+export interface LiveTurnText {
+  readonly provider: ProviderRuntimeEvent["provider"];
+  readonly messages: ReadonlyArray<{ readonly id: string; readonly turnId: string | null; readonly text: string; readonly firstAt: string }>;
+  readonly reasoning: ReadonlyArray<{ readonly id: string; readonly turnId: string | null; readonly text: string }>;
+}
+
+interface LiveBuffer {
+  provider: ProviderRuntimeEvent["provider"];
+  messages: Map<string, { turnId: string | null; text: string; firstAt: string }>;
+  reasoning: Map<string, { turnId: string | null; text: string }>;
+}
+
+/** A single streamed message or thought past this is the model looping; the store keeps the real text. */
+const LIVE_TEXT_MAX_CHARS = 200_000;
+
+const liveBuffers = new WeakMap<TurnDriver, Map<string, LiveBuffer>>();
+
+function trackLiveText(buffers: Map<string, LiveBuffer>, event: ProviderRuntimeEvent): void {
+  switch (event.type) {
+    case "message.part.updated": {
+      if (event.text.length === 0) return;
+      const buffer = buffers.get(event.threadId) ?? { provider: event.provider, messages: new Map(), reasoning: new Map() };
+      buffers.set(event.threadId, buffer);
+      const id = event.messageId ?? "message";
+      const entry = buffer.messages.get(id) ?? { turnId: event.turnId, text: "", firstAt: new Date().toISOString() };
+      if (entry.text.length < LIVE_TEXT_MAX_CHARS) entry.text += event.text;
+      buffer.messages.set(id, entry);
+      return;
+    }
+    case "assistant.note":
+      // Stored whole from here on: the store row replaces the stream.
+      buffers.get(event.threadId)?.messages.delete(event.messageId);
+      return;
+    case "reasoning.delta": {
+      if (event.text.length === 0) return;
+      const buffer = buffers.get(event.threadId) ?? { provider: event.provider, messages: new Map(), reasoning: new Map() };
+      buffers.set(event.threadId, buffer);
+      const entry = buffer.reasoning.get(event.reasoningId) ?? { turnId: event.turnId, text: "" };
+      if (entry.text.length < LIVE_TEXT_MAX_CHARS) entry.text += event.text;
+      buffer.reasoning.set(event.reasoningId, entry);
+      return;
+    }
+    case "reasoning.updated":
+      if (event.status === "completed") buffers.get(event.threadId)?.reasoning.delete(event.reasoningId);
+      return;
+    case "turn.started":
+    case "turn.completed":
+    case "turn.failed":
+    case "turn.interrupted":
+      buffers.delete(event.threadId);
+      return;
+    default:
+      return;
+  }
+}
+
+/** What a thread's running turn has streamed so far and the store does not have yet. */
+export function liveTurnText(driver: TurnDriver, threadId: string): LiveTurnText | null {
+  ensureDriverPump(driver);
+  const buffer = liveBuffers.get(driver)?.get(threadId);
+  if (!buffer || (buffer.messages.size === 0 && buffer.reasoning.size === 0)) return null;
+  return {
+    provider: buffer.provider,
+    messages: [...buffer.messages].map(([id, entry]) => ({ id, ...entry })),
+    reasoning: [...buffer.reasoning].map(([id, entry]) => ({ id, ...entry })),
+  };
+}
+
 function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>> {
   const existing = pumps.get(driver);
   if (existing) return existing;
   const subscribers = new Map<string, Set<EventSubscriber>>();
   pumps.set(driver, subscribers);
+  const buffers = new Map<string, LiveBuffer>();
+  liveBuffers.set(driver, buffers);
   const fiber = Effect.runFork(
     Stream.runForEach(driver.streamEvents, (event) =>
       Effect.sync(() => {
         // Plan usage belongs to the account, not the thread: recorded here,
         // once per event, whoever (if anyone) watches the thread.
         if (event.type === "rate-limits.updated") recordUsageWindows(event.provider, event.windows);
+        trackLiveText(buffers, event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) subscriber(event);
       }),
     ),
@@ -230,7 +313,10 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
   void Effect.runPromise(Fiber.join(fiber))
     .catch(() => undefined)
     .finally(() => {
-      if (pumps.get(driver) === subscribers) pumps.delete(driver);
+      if (pumps.get(driver) === subscribers) {
+        pumps.delete(driver);
+        liveBuffers.delete(driver);
+      }
     });
   return subscribers;
 }
@@ -276,7 +362,12 @@ function trackRun(run: Promise<void>): Promise<void> {
   return run;
 }
 
-/** Wait for in-flight runs to settle (abandoned after `timeoutMs`). */
+/**
+ * Wait for in-flight runs to settle. A run still going after `timeoutMs` is
+ * abandoned: forgotten here, so the next flush does not wait out its own
+ * timeout on a run that will never end (a suite with one stuck run paid the
+ * full timeout after every test that followed).
+ */
 export async function flushTurnRunners(timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (activeRuns.size > 0 && Date.now() < deadline) {
@@ -286,6 +377,7 @@ export async function flushTurnRunners(timeoutMs = 5000): Promise<void> {
       new Promise((resolve) => setTimeout(resolve, remaining)),
     ]);
   }
+  activeRuns.clear();
 }
 
 export interface ExecuteTurnArgs {
@@ -305,6 +397,8 @@ export interface ExecuteTurnArgs {
   readonly onEvent?: (event: ProviderRuntimeEvent) => void;
   /** The provider already started this turn itself (a background turn): await it, send nothing. */
   readonly driverTurnId?: string;
+  /** Called once the provider has accepted the prompt: what the prompt carried is now delivered. */
+  readonly afterSend?: () => void | Promise<void>;
   /** A usage limit stopped this turn (`resetsAt` when the provider said): the automatic continue hooks in here. */
   readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
 }
@@ -403,6 +497,8 @@ export async function ensureDriverSession(
     readonly workingDirectory?: string;
     readonly mcpServers?: readonly McpServerSpec[];
     readonly instructions?: string | null;
+    /** How moxen's own skills reach the session (`ProviderSessionStartInput.moxenSkills`). */
+    readonly moxenSkills?: "project" | "served" | "none";
     /** Watch the session for what happens between turns (`watchDriverSession`). */
     readonly store?: ThreadStore;
   } = {},
@@ -412,6 +508,10 @@ export async function ensureDriverSession(
   const selection = options.modelSelection ?? thread.modelSelection;
   const cursor = thread.providerSessions?.[driverKey(selection.instanceId)];
   const cwd = options.workingDirectory?.trim() || thread.env.path.trim() || process.cwd();
+  const isolation = await resolveIsolation(thread.env);
+  const instructions = [options.instructions, isolation ? isolationInstructions(isolation) : null]
+    .filter((part): part is string => typeof part === "string" && part.length > 0)
+    .join("\n\n");
   await Effect.runPromise(
     driver.startSession({
       threadId: thread.id,
@@ -421,9 +521,13 @@ export async function ensureDriverSession(
       interactionMode: thread.interactionMode,
       ...(cursor ? { resumeCursor: cursor } : {}),
       ...(options.mcpServers && options.mcpServers.length > 0 ? { mcpServers: options.mcpServers } : {}),
-      ...(options.instructions ? { instructions: options.instructions } : {}),
+      ...(instructions ? { instructions } : {}),
+      ...(isolation ? { isolation } : {}),
+      ...(options.moxenSkills ? { moxenSkills: options.moxenSkills } : {}),
     }),
   );
+  // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
+  await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
   if (options.store) watchDriverSession(options.store, driver, thread.id, cwd);
 }
 
@@ -492,6 +596,8 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
     });
   };
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
+    // A compaction makes the provider read its rule files again: what it holds now is what is on disk.
+    if (event.type === "session.notice" && event.notice === "compacted") void refreshRuleBaseline(driver, threadId);
     if (event.type === "turn.started" && event.origin === "background") {
       void runBackgroundTurn(store, driver, threadId, event.turnId, cwd);
       return;
@@ -621,7 +727,7 @@ async function syncProviderTitle(store: ThreadStore, driver: TurnDriver, threadI
  * while it runs.
  *
  * Without this the ledger records only lifecycle bookkeeping and the
- * transcript has nothing to show for a turn's work (ARCHITECTURE.md §9). Rows
+ * transcript has nothing to show for a turn's work (docs/threads.md). Rows
  * are append-only — the TUI collapses started/completed onto one card by
  * `toolCallId` — but a provider that streams output deltas would append
  * hundreds per call, so a row is written only when its signature changes.
@@ -917,6 +1023,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     // Persisted as soon as the turn is under way, not only at settle: a
     // process that dies mid-turn is exactly the one whose successor needs it.
     await persistResumeCursor(store, driver, threadId);
+    if (!args.driverTurnId) await args.afterSend?.();
     const outcome = await driver.awaitTurn(threadId, sent.turnId, controller.signal);
     await recordContextUsage(store, driver, threadId, storeTurnId);
     if (outcome.status === "failed") recordTools.noteFailure();

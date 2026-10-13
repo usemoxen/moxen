@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { CliRenderer } from "@opentui/core";
 
 import { threadStatus } from "../../model/shell.js";
@@ -34,6 +35,10 @@ export function useThreadOps(params: {
   /** Which revert row awaits its confirming second press, if any. */
   revertArmed: RevertKind | false;
   sessionRunningRef: { current: boolean };
+  /** A native subagent's transcript is on screen in place of the thread's. */
+  subagentOpen: boolean;
+  /** Puts a reverted prompt back in the thread's composer. */
+  restoreDraft: (threadId: string, text: string) => void;
   closePicker: (returnFocus?: "composer" | "chat" | "diff") => void;
   closeDiff: () => void;
   setError: (message: string) => void;
@@ -65,6 +70,8 @@ export function useThreadOps(params: {
     deleteArmed,
     revertArmed,
     sessionRunningRef,
+    subagentOpen,
+    restoreDraft,
     closePicker,
     closeDiff,
     setError,
@@ -128,22 +135,67 @@ export function useThreadOps(params: {
       });
   };
 
+  /** The thread whose settle awaits its confirming second press (it would stop running work). */
+  const settleArmedRef = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+
   /**
-   * Settles (or unsettles) the open thread. Settling drops back into the
-   * new-thread view — the settled thread stays open underneath as the source
-   * that lends its project/model/modes, so the next prompt starts fresh
-   * instead of appending to a finished thread. Unsettling stays put.
+   * Settles (or unsettles) the open thread — and, with it, the delegated
+   * tasks beneath it. Never its parent or siblings: a task settles on its own. Settling drops back into the new-thread view — the settled thread
+   * stays open underneath as the source that lends its project/model/modes,
+   * so the next prompt starts fresh instead of appending to a finished
+   * thread. Unsettling stays put.
+   *
+   * Settling stops whatever the thread or its tasks are still running, so
+   * when something is, the first press only arms (like delete) and the
+   * second one stops it and settles.
    */
   const toggleSettleThread = () => {
     if (openThreadId === null || selected === null) {
       setError("no open thread to settle");
       return;
     }
+    // A subagent's transcript is read-only and belongs to its thread: settling
+    // from there would settle the parent and everything it runs.
+    if (subagentOpen) {
+      setError("close the subagent to settle its thread");
+      return;
+    }
     const id = openThreadId;
     const settled = threadStatus(selected, Date.now()) === "settled";
+    let stop = false;
+    if (!settled) {
+      const family = new Set([id]);
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const thread of shellThreads) {
+          if (typeof thread.parentThreadId === "string" && family.has(thread.parentThreadId) && !family.has(thread.id)) {
+            family.add(thread.id);
+            grew = true;
+          }
+        }
+      }
+      // The open thread's own live flag wins over its shell row, which can lag a turn behind.
+      const running = shellThreads.filter(
+        (thread) => family.has(thread.id) && thread.id !== id && threadStatus(thread, Date.now()) === "running",
+      ).length + (sessionRunningRef.current || threadStatus(selected, Date.now()) === "running" ? 1 : 0);
+      stop = running > 0;
+      if (stop && settleArmedRef.current?.id !== id) {
+        if (settleArmedRef.current !== null) clearTimeout(settleArmedRef.current.timer);
+        settleArmedRef.current = { id, timer: setTimeout(() => (settleArmedRef.current = null), 4_000) };
+        toasts.push(
+          "thread-settle-armed",
+          "info",
+          `Settle again to stop ${running === 1 ? "1 running thread" : `${running} running threads`} and settle`,
+          4_000,
+        );
+        return;
+      }
+      if (settleArmedRef.current !== null) clearTimeout(settleArmedRef.current.timer);
+      settleArmedRef.current = null;
+    }
     const command = settled
       ? ({ type: "thread.unsettle", threadId: id, reason: "user" } as const)
-      : ({ type: "thread.settle", threadId: id } as const);
+      : ({ type: "thread.settle", threadId: id, ...(stop ? { stop: true } : {}) } as const);
     void client
       .dispatch(command)
       .then(() => {
@@ -310,6 +362,11 @@ export function useThreadOps(params: {
         );
         closePicker("chat");
         closeDiff();
+        // The prompt that was taken back returns to the composer, ready to edit and resend.
+        if (entry.kind === "user" && entry.text.trim().length > 0) {
+          restoreDraft(id, entry.text);
+          setFocus("composer");
+        }
         setThreadState(emptyThreadState());
         setThreadResync((count) => count + 1);
       })

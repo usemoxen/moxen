@@ -1,5 +1,7 @@
 import type { ProviderSummary } from "../../core/catalog/summary.js";
-import type { SettingDescriptor, SettingValue, SettingView } from "../../core/configschema.js";
+import { updateState, versionNumber, type UpdatableProvider } from "../../core/catalog/update.js";
+import type { SettingDescriptor, SettingSection, SettingValue, SettingView } from "../../core/configschema.js";
+import type { QueryResult } from "../../server/api.js";
 
 /**
  * What the settings page offers for a setting, as a list to pick from.
@@ -25,6 +27,11 @@ export type SettingControl =
 
 const option = (value: string, label: string, description?: string): SettingOption =>
   description === undefined ? { value, label } : { value, label, description };
+
+/** Big numbers with thousands separators (`200,000`), small ones as they are. */
+function numberLabel(value: number): string {
+  return value >= 10_000 ? value.toLocaleString("en-US") : String(value);
+}
 
 function durationLabel(value: string): string {
   const match = /^(\d+)(ms|s|m|h)$/.exec(value);
@@ -118,7 +125,11 @@ export function settingControl(
       break;
     case "integer":
       if (kind.presets === undefined) return { kind: "text", multiline: false };
-      options = kind.presets.map((preset) => option(String(preset), `${preset}${kind.unit ?? ""}`));
+      options = [
+        // A key unset by default needs a way back to unset, which is also what it reads as at first.
+        ...(descriptor.defaultValue === undefined ? [option("", "Not set", "Left to the provider")] : []),
+        ...kind.presets.map((preset) => option(String(preset), `${numberLabel(preset)}${kind.unit ?? ""}`)),
+      ];
       break;
     case "duration":
       if (kind.presets === undefined) return { kind: "text", multiline: false };
@@ -144,6 +155,61 @@ export function settingValueLabel(descriptor: SettingDescriptor, value: SettingV
     if (match !== undefined) return match.label;
   }
   if (value === undefined || value === "") return "Not set";
-  if (descriptor.kind.type === "integer") return `${String(value)}${descriptor.kind.unit ?? ""}`;
+  if (descriptor.kind.type === "integer") return `${typeof value === "number" ? numberLabel(value) : String(value)}${descriptor.kind.unit ?? ""}`;
   return String(value);
+}
+
+// -- provider versions and updates ---------------------------------------------
+
+/** The provider a settings section is about, when it can be updated from here. */
+export function updatableProviderOf(section: SettingSection): UpdatableProvider | null {
+  if (section === "provider:claude") return "claude";
+  if (section === "provider:opencode") return "opencode";
+  return null;
+}
+
+/** One provider as the doctor query reports it. */
+export type ProviderCheckView = QueryResult<"doctor">["providers"]["claude"];
+
+/** What the registry said about one provider's newest release; `undefined` while it is still being asked. */
+export type LatestView = { readonly enabled: boolean; readonly latest: string | null; readonly channel: string | null };
+
+export interface ProviderVersionLine {
+  /** The version number, or null when the binary is missing or would not say. */
+  readonly version: string | null;
+  /** One sentence on where it stands: against the floor Moxen holds it to, then the newest release. */
+  readonly status: string;
+  readonly tone: "ok" | "warn" | "update" | "muted";
+  /** The update button's text: it names the version when there is one to go to, and says so when there is not. */
+  readonly button: string;
+  /** Nothing newer exists, so the button is a statement more than an action. */
+  readonly settled: boolean;
+}
+
+/**
+ * Where an installed provider stands, for the settings page: its version,
+ * whether it meets the floor Moxen holds it to, and whether a newer release
+ * exists on its channel. "Newer exists" comes only from a successful registry
+ * read; without one the page says it could not tell, never "up to date".
+ */
+export function providerVersionLine(check: ProviderCheckView | undefined, latest?: LatestView): ProviderVersionLine {
+  const base = { button: "[ Update ]", settled: false } as const;
+  if (check === undefined) return { ...base, version: null, status: "Checking…", tone: "muted" };
+  if (!check.installed) return { ...base, version: null, status: "Not found on this machine. Check the executable path below.", tone: "warn" };
+  const version = versionNumber(check.version);
+  if (version === null) return { ...base, version: null, status: "Could not read its version.", tone: "warn" };
+  if (check.minVersion !== undefined && !check.ok) {
+    return { ...base, version, status: `Older than the ${check.minVersion} Moxen needs: sessions will not start until it is updated.`, tone: "warn" };
+  }
+  if (latest === undefined) return { ...base, version, status: "Checking for a newer version…", tone: "muted" };
+  if (!latest.enabled) return { ...base, version, status: "Version checks are off (Settings, General).", tone: "muted" };
+  const state = updateState(version, latest.latest);
+  const channel = latest.channel === null ? "" : ` on the ${latest.channel} channel`;
+  if (state === "available") {
+    return { version, status: `${latest.latest} is available${channel}.`, tone: "update", button: `[ Update to ${latest.latest} ]`, settled: false };
+  }
+  if (state === "current") {
+    return { version, status: `Up to date: ${latest.latest} is the newest${channel}.`, tone: "ok", button: "[ Up to date ]", settled: true };
+  }
+  return { ...base, version, status: "Could not check for a newer version.", tone: "muted" };
 }

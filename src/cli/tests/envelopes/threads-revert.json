@@ -21,7 +21,7 @@
       "title": "Existing project",
       "workspaceRoot": "<root>",
       "defaultModelSelection": {
-        "instanceId": "codex",
+        "instanceId": "opencode",
         "model": "gpt-5.6-sol"
       },
       "createdAt": "<time>",
@@ -36,7 +36,7 @@
     "keptTurns": 1,
     "removedTurns": 1,
     "providers": [
-      "codex"
+      "opencode"
     ],
     "command": {
       "type": "thread.conversation.revert",

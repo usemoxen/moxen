@@ -6,7 +6,7 @@
  * are reads; `ensure` with `create` policy inserts (title = basename,
  * null default model — the explicit-default decision lands at send
  * time, replacing the old version-dependent passthrough).
- * See ARCHITECTURE.md §10.
+ * See docs/overview.md.
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";

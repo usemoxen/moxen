@@ -5,7 +5,7 @@
  * behavior — but execution is ledger-local: no dispatch-then-poll, no
  * snapshot preflights. A per-thread mutex enforces one active turn per
  * session. Provider drivers attach in Stage 2 via `completeTurn` /
- * `failTurn` / `trackRunning`. See ARCHITECTURE.md §9.
+ * `failTurn` / `trackRunning`. See docs/threads.md.
  */
 import os from "node:os";
 
@@ -886,24 +886,16 @@ export async function interruptTurn(
 }
 
 /**
- * A thread's settlement family: its root ancestor (climbing `parentThreadId`,
- * stopping at a missing parent or a cycle) and every live descendant. Archived
- * and deleted members are left out; the requested thread is always in.
+ * A thread's settlement family: itself and every live descendant (its
+ * delegated tasks, and theirs). Settling a task never reaches up to its parent
+ * or across to its siblings. Archived and deleted members are left out; the
+ * requested thread is always in.
  */
 async function threadFamily(store: ThreadStore, threadId: string): Promise<string[]> {
   // The parent link lives in the delegations ledger, not on the thread record.
   const rows = await store.readDelegations().catch(() => []);
-  const parentOf = new Map(rows.map((row) => [row.childThreadId, row.parentThreadId]));
-  let root = threadId;
-  const seen = new Set([root]);
-  for (;;) {
-    const parent = parentOf.get(root);
-    if (parent === undefined || seen.has(parent) || (await store.readThreadRecord(parent)) === null) break;
-    seen.add(parent);
-    root = parent;
-  }
-  const family = new Set([root]);
-  const queue = [root];
+  const family = new Set([threadId]);
+  const queue = [threadId];
   while (queue.length > 0) {
     const current = queue.shift()!;
     for (const row of rows) {
@@ -914,7 +906,6 @@ async function threadFamily(store: ThreadStore, threadId: string): Promise<strin
       queue.push(row.childThreadId);
     }
   }
-  family.add(threadId);
   return [...family];
 }
 
@@ -925,13 +916,22 @@ async function withThreadLocks<T>(store: ThreadStore, ids: readonly string[], ru
   return await store.withThreadLock(first, () => withThreadLocks(store, rest, run));
 }
 
+export interface SettleOptions {
+  /** Interrupt the family's running work instead of refusing to settle past it. */
+  readonly stop?: boolean;
+}
+
 /**
- * Settling any thread settles its whole family (root and all live
- * descendants), so a settled parent never leaves active subthreads behind.
+ * Settling a thread settles it and all its live descendants, so a settled
+ * parent never leaves active subthreads behind. A task settles on its own: its
+ * parent and siblings are untouched.
  * If any member still has running/queued work or pending approvals or input,
- * nothing is settled. Returns the requested thread's record.
+ * nothing is settled — unless `stop` says to end that work first: every
+ * running or queued turn in the family is interrupted (a run waiting on an
+ * approval or an answer goes down with its turn), then the family settles.
+ * Returns the requested thread's record.
  */
-export async function settleThread(store: ThreadStore, rawThreadId: string): Promise<StoredThread> {
+export async function settleThread(store: ThreadStore, rawThreadId: string, options: SettleOptions = {}): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   const family = await threadFamily(store, threadId);
   return await withThreadLocks(store, family, async () => {
@@ -946,13 +946,25 @@ export async function settleThread(store: ThreadStore, rawThreadId: string): Pro
       const running = openTurn(await store.readTurns(id)) !== null;
       if (running || thread.hasPendingApprovals || thread.hasPendingUserInput) blocked.push({ id, running, thread });
     }
+    if (blocked.length > 0 && options.stop === true) {
+      for (const entry of blocked) {
+        // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
+        for (const turn of await store.readTurns(entry.id)) {
+          if (turn.status === "running" || turn.status === "queued") await interruptTurnLocked(store, entry.thread, turn, now);
+        }
+        const index = members.findIndex((member) => member.id === entry.id);
+        if (index !== -1) members[index] = { ...members[index]!, hasPendingApprovals: false, hasPendingUserInput: false };
+        store.emit(entry.id, "turn-interrupted");
+      }
+      blocked.length = 0;
+    }
     if (blocked.length > 0) {
       const culprit = blocked.find((entry) => entry.id === threadId) ?? blocked[0]!;
       throw new CliError(
         "THREAD_SETTLE_BLOCKED",
         culprit.id === threadId
           ? `Thread ${threadId} still has active or blocked work.`
-          : `Thread ${threadId} cannot settle: ${culprit.id} in its family still has active or blocked work.`,
+          : `Thread ${threadId} cannot settle: ${culprit.id} under it still has active or blocked work.`,
         {
           exitCode: 4,
           details: {
@@ -977,7 +989,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string): Pro
   });
 }
 
-/** The mirror of `settleThread`: the whole family is woken; nothing can block it. Returns the requested thread's record. */
+/** The mirror of `settleThread`: the thread and its descendants are woken; nothing can block it. Returns the requested thread's record. */
 export async function unsettleThread(store: ThreadStore, rawThreadId: string): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   const family = await threadFamily(store, threadId);

@@ -128,6 +128,14 @@ export class FakeQuery implements ClaudeQuery {
     this.models.push(model);
   }
 
+  /** Every `setMcpServers` call, in order. */
+  readonly mcpServerSets: Array<Record<string, unknown>> = [];
+
+  async setMcpServers(servers: Record<string, unknown>): Promise<unknown> {
+    this.mcpServerSets.push(servers);
+    return { added: [], removed: [], errors: {} };
+  }
+
   /** Every `applyFlagSettings` call, in order. */
   readonly flagSettings: FlagSettings[] = [];
 

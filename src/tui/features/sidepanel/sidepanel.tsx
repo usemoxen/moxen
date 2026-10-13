@@ -4,7 +4,8 @@ import { TextAttributes } from "@opentui/core";
 
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import { useHover } from "../../hooks/useHover.js";
-import { contextShares, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
+import { prettyToolName } from "../../model/activity.js";
+import { contextShares, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
 import { backgroundTaskKind, backgroundTaskTitle, untilLabel, type BackgroundTaskRow, type ContextUsage } from "../../model/thread.js";
 import { formatDuration, formatTokenCount, formatUsd } from "../../model/turns.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
@@ -217,11 +218,11 @@ function Empty({ glyph, text }: { glyph: string; text: string }) {
   );
 }
 
-function Row({ children, onClick }: { children: ReactNode; onClick?: () => void }) {
+function Row({ children, onClick, spaced = false }: { children: ReactNode; onClick?: () => void; spaced?: boolean }) {
   const { hovered, handlers } = useHover();
   return (
     <box
-      style={{ flexDirection: "column", flexShrink: 0 }}
+      style={{ flexDirection: "column", flexShrink: 0, ...(spaced ? { marginTop: 1 } : {}) }}
       backgroundColor={onClick !== undefined && hovered ? SURFACE.border : SURFACE.panel}
       {...(onClick !== undefined ? { onMouseDown: onClick, ...handlers } : {})}
       selectable={false}
@@ -286,6 +287,7 @@ export function AgentsTab({
   now,
   onOpen,
   onOpenSubagent,
+  onStopSubagent,
 }: {
   threads: readonly AgentThreadRow[];
   subagents: readonly NativeSubagentRow[];
@@ -293,6 +295,8 @@ export function AgentsTab({
   onOpen: (threadId: string) => void;
   /** Opens a subagent's own conversation in the chat pane. */
   onOpenSubagent?: (agentId: string) => void;
+  /** Stops a running subagent on its own (where the provider can); omitted hides the action. */
+  onStopSubagent?: (agentId: string) => void;
 }) {
   const inner = useContext(PanelWidth);
   return (
@@ -338,7 +342,7 @@ export function AgentsTab({
           const state = agent.running ? formatDuration(Math.max(1000, now - Date.parse(agent.at))) : took === null || !Number.isFinite(took) ? "done" : `done in ${formatDuration(took)}`;
           const typeWidth = Math.min(agent.agentType.length, Math.max(4, inner - state.length - 6));
           return (
-            <Row key={agent.agentId} {...(onOpenSubagent === undefined ? {} : { onClick: () => onOpenSubagent(agent.agentId) })}>
+            <Row key={agent.agentId} spaced {...(onOpenSubagent === undefined ? {} : { onClick: () => onOpenSubagent(agent.agentId) })}>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                 <text fg={agent.running ? COLOR.warn : COLOR.added}>{agent.running ? "● " : "✓ "}</text>
                 <text fg={COLOR.text}>{truncate(agent.agentType, typeWidth)}</text>
@@ -352,9 +356,14 @@ export function AgentsTab({
               </box>
               {agent.lastMessage === null ? null : (
                 <box style={{ flexDirection: "row", flexShrink: 0, paddingLeft: 2 }}>
-                  <text fg={COLOR.faint} wrapMode="word">{truncate(agent.lastMessage.replace(/\s+/g, " "), (inner - 2) * 2)}</text>
+                  <text fg={COLOR.dim} wrapMode="word">{truncate(subagentPreview(agent.lastMessage), (inner - 2) * 2)}</text>
                 </box>
               )}
+              {agent.running && onStopSubagent !== undefined ? (
+                <box style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 2 }}>
+                  <ActionText label="stop" color={COLOR.danger} onClick={() => onStopSubagent(agent.agentId)} />
+                </box>
+              ) : null}
             </Row>
           );
         })
@@ -506,7 +515,8 @@ export function ContextTab({
                 // shared by every row, so the bars start and end together
                 // without spending a second line on each. Bars are against
                 // the heaviest tool — the question is which one to trim.
-                const tools = breakdown.tools.slice(0, 6);
+                // Named as the timeline names them (`Linear · List issues`), not by the wire id.
+                const tools = breakdown.tools.slice(0, 6).map((tool) => ({ ...tool, key: tool.name, name: prettyToolName(tool.name) }));
                 const heaviest = tools[0]?.tokens ?? 0;
                 const values = tools.map((tool) => formatTokenCount(tool.tokens));
                 const valueWidth = Math.max(...values.map((value) => value.length));
@@ -515,7 +525,7 @@ export function ContextTab({
                 return tools.map((tool, index) => {
                   const bar = meter(barWidth, heaviest > 0 ? tool.tokens / heaviest : 0);
                   return (
-                    <box key={tool.name} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+                    <box key={tool.key} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                       <text fg={COLOR.text}>{`${truncate(tool.name, nameWidth).padEnd(nameWidth)} `}</text>
                       {bar.filled ? <text fg={COLOR.command}>{bar.filled}</text> : null}
                       {bar.empty ? <text fg={FREE_COLOR}>{bar.empty}</text> : null}

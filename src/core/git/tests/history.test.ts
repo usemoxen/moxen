@@ -137,6 +137,8 @@ describe.runIf(GIT_AVAILABLE)("git history", () => {
     expect(overview.branch).toBe("main");
     expect(overview.commits).toHaveLength(1);
     expect(overview.branches.some((branch) => branch.name === "main")).toBe(true);
+    // No remote: the local main is what work merges into.
+    expect(overview.defaultBranch).toBe("main");
   });
 
   it("reads one commit in full: body, committer, parents, files and patch", async () => {

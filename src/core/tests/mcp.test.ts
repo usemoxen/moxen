@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeConfig, setConfigValue } from "../config.js";
 import { CliError } from "../errors.js";
-import { parseMcpServers, redactMcpServers, resolveMcpServers } from "../mcp.js";
+import { mcpSignature, parseMcpServers, redactMcpServers, resolveMcpServers, type InProcessMcpServerSpec, type McpServerSpec } from "../mcp.js";
 import { tempDir } from "../testing/tmp.js";
 
 function codeOf(run: () => unknown): string | null {
@@ -95,5 +95,35 @@ describe("resolveMcpServers", () => {
     expect(await resolveMcpServers({ a: { command: "x" } }, root)).toHaveLength(1);
     await writeFile(path.join(root, "moxen.json"), JSON.stringify({ mcpServers: { "bad name": { command: "x" } } }));
     await expect(resolveMcpServers(undefined, root)).rejects.toMatchObject({ code: "INVALID_CONFIG" });
+  });
+});
+
+describe("mcpSignature", () => {
+  const docs: McpServerSpec = { name: "docs", type: "http", url: "https://docs.example/mcp", headers: {} };
+  const fs: McpServerSpec = { name: "fs", type: "stdio", command: "npx", args: ["fs-mcp"], env: {} };
+  /** moxen's own tools as the connection builds them: fresh closures every time, a fallback that moves. */
+  const builtin = (port: number): InProcessMcpServerSpec => ({
+    name: "moxen",
+    type: "in-process",
+    tools: [{ name: "delegate", description: "d", inputSchema: {} }],
+    call: async () => ({ text: "", isError: false }),
+    fallback: { name: "moxen", type: "http", url: `http://127.0.0.1:${port}/mcp`, headers: {} },
+    alwaysLoad: true,
+  });
+
+  it("is the same for the same servers in any order", () => {
+    expect(mcpSignature([docs, fs])).toBe(mcpSignature([fs, docs]));
+  });
+
+  it("changes when a server is added, removed or reconfigured", () => {
+    const base = mcpSignature([docs]);
+    expect(mcpSignature([docs, fs])).not.toBe(base);
+    expect(mcpSignature([])).not.toBe(base);
+    expect(mcpSignature([{ ...docs, url: "https://docs.example/v2" } as McpServerSpec])).not.toBe(base);
+  });
+
+  it("does not see moxen's own server as changed when it is rebuilt, or when its loopback port moves", () => {
+    expect(mcpSignature([docs, builtin(4001)])).toBe(mcpSignature([docs, builtin(4002)]));
+    expect(mcpSignature([builtin(4001)])).not.toBe(mcpSignature([]));
   });
 });

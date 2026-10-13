@@ -30,6 +30,7 @@ export const SETTING_SECTIONS = [
   "interface",
   "git",
   "provider:claude",
+  "provider:opencode",
 ] as const;
 
 export type SettingSection = (typeof SETTING_SECTIONS)[number];
@@ -41,6 +42,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   interface: "Interface",
   git: "Git and forges",
   "provider:claude": "Claude Code",
+  "provider:opencode": "OpenCode",
 };
 
 export interface SettingChoice {
@@ -209,6 +211,15 @@ export const SETTINGS: readonly SettingDescriptor[] = [
     defaultValue: false,
   },
   {
+    key: "installSkills",
+    label: "Install Moxen's skills in projects",
+    description:
+      "Put the skills Moxen ships into a project that already has a `.claude` or `.agents` folder (`.claude/skills` when it has both), so both providers find them there. Copies are kept current, listed in `.git/info/exclude`, and never replace a skill you already have. Off, or with neither folder, the providers are pointed at Moxen's own folder instead.",
+    section: "turns",
+    kind: { type: "boolean" },
+    defaultValue: true,
+  },
+  {
     key: "instructions",
     label: "Extra instructions",
     description: "Appended to every provider session's system prompt.",
@@ -259,7 +270,7 @@ export const SETTINGS: readonly SettingDescriptor[] = [
   {
     key: "ui.backdrop",
     label: "Backdrop",
-    description: "The animated field behind the thread list. Turn it off on a slow terminal or over SSH.",
+    description: "The animated field behind the thread list and the new-thread view. Turn it off on a slow terminal or over SSH.",
     section: "interface",
     kind: {
       type: "enum",
@@ -270,6 +281,15 @@ export const SETTINGS: readonly SettingDescriptor[] = [
       ],
     },
     defaultValue: "animated",
+  },
+  {
+    key: "ui.modelScenes",
+    label: "Model backdrops",
+    description:
+      "Give a model with a scene of its own — Haiku's branch, Sonnet's strings, Opus's galaxy, Fable's butterflies, Mythos's night moths, Astra's jump to light speed, Sol's sun, Terra's Earthrise, Luna's Moon — that scene behind the new-thread view, easing between them as you switch. Off, every model keeps the monitoring field. Follows the backdrop setting: static draws it once, off hides it.",
+    section: "interface",
+    kind: { type: "boolean" },
+    defaultValue: true,
   },
   {
     key: "ui.defaultSidePanel",
@@ -302,6 +322,16 @@ export const SETTINGS: readonly SettingDescriptor[] = [
     section: "interface",
     kind: { type: "integer", min: 5, max: 3600, unit: "s", presets: [10, 20, 60, 300, 900] },
     defaultValue: 20,
+  },
+
+  {
+    key: "updates.checkLatest",
+    label: "Check for newer versions",
+    description:
+      "When the settings page opens, ask the npm registry which Claude Code and OpenCode releases are newest, so it can say whether an update is available. Nothing else is sent. Off, the page shows installed versions only.",
+    section: "general",
+    kind: { type: "boolean" },
+    defaultValue: true,
   },
 
   // -- git and forges --------------------------------------------------------
@@ -399,6 +429,50 @@ export const SETTINGS: readonly SettingDescriptor[] = [
     description:
       "Take the CLI's partial-message stream so text appears as it is written. Turning it off leaves whole messages arriving at once, which is quieter over a slow link.",
     section: "provider:claude",
+    kind: { type: "boolean" },
+    defaultValue: true,
+    restartRequired: true,
+  },
+  {
+    key: "providers.claude.agentSkills",
+    label: "Skills from .agents/skills",
+    description:
+      "Offer the skills in a project's or your home `.agents/skills`, and moxen's own, to Claude Code through a mod, so none has to be copied into `.claude/skills`. A skill `.claude/skills` already has is left to Claude Code. Needs Claude Code 2.1.287 or newer.",
+    section: "provider:claude",
+    kind: { type: "boolean" },
+    defaultValue: true,
+    restartRequired: true,
+  },
+  {
+    key: "providers.claude.autoCompactWindow",
+    label: "Auto-compact window",
+    description:
+      "Tokens of context at which Claude Code compacts the conversation on its own, from 100,000 to 1,000,000. Left unset it uses the window tuned for the model. A lower window compacts earlier and keeps long sessions cheaper and sharper.",
+    section: "provider:claude",
+    kind: { type: "integer", min: 100_000, max: 1_000_000, presets: [200_000, 300_000, 500_000, 800_000, 1_000_000] },
+    defaultValue: undefined,
+    restartRequired: true,
+  },
+
+  // -- OpenCode --------------------------------------------------------------
+  // `serverUrl` (an external server) is left out on purpose: v2 authenticates every
+  // call and Moxen reads the external server's password only from config, so a URL
+  // alone cannot work. It waits for a masked field.
+  {
+    key: "providers.opencode.binaryPath",
+    label: "OpenCode executable",
+    description: "The `opencode` binary Moxen starts its servers with, and updates.",
+    section: "provider:opencode",
+    kind: { type: "string", placeholder: "opencode" },
+    defaultValue: "opencode",
+    restartRequired: true,
+  },
+  {
+    key: "providers.opencode.bundledSkills",
+    label: "Moxen's skills",
+    description:
+      "Offer the skills Moxen ships (threads, handoff, orchestrate and the rest) to the OpenCode servers it starts, through their `skills` config. Skills in a project's or your home `.agents/skills` need nothing: OpenCode reads those itself.",
+    section: "provider:opencode",
     kind: { type: "boolean" },
     defaultValue: true,
     restartRequired: true,

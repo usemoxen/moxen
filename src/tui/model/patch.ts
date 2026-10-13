@@ -1,3 +1,8 @@
+import { basenameToFiletype, extensionToFiletype } from "@opentui/core";
+
+import { builtParserAssetPaths } from "../../core/syntax/builtParsers.js";
+import { defaultParserAssetPaths } from "../../core/syntax/parsers.js";
+
 export interface PatchFile {
   path: string;
   filetype: string | undefined;
@@ -48,10 +53,92 @@ const FILETYPES: Record<string, string> = {
   sql: "sql",
 };
 
-/** Grammar name for a path, matching the identifiers OpenTUI's tree-sitter client expects. */
+/**
+ * Extensions OpenTUI's own table leaves out (or that we read differently):
+ * `.m` is Objective-C here, not MATLAB, which has no grammar in the bundle.
+ */
+const EXTRA_FILETYPES: Record<string, string> = {
+  m: "objc",
+  mm: "objc",
+  mk: "make",
+  cu: "cuda",
+  cuh: "cuda",
+  kdl: "kdl",
+  bzl: "starlark",
+  bazel: "starlark",
+  star: "starlark",
+  bicep: "bicep",
+  odin: "odin",
+  graphql: "graphql",
+  gql: "graphql",
+  cmake: "cmake",
+  nix: "nix",
+  proto: "proto",
+  glsl: "glsl",
+  vert: "glsl",
+  frag: "glsl",
+  prisma: "prisma",
+  templ: "templ",
+  just: "just",
+  mmd: "mermaid",
+  mermaid: "mermaid",
+  sol: "solidity",
+  res: "rescript",
+  resi: "rescript",
+  gleam: "gleam",
+  fish: "fish",
+  typ: "typst",
+  f90: "fortran",
+  f95: "fortran",
+  f03: "fortran",
+  f08: "fortran",
+  pas: "pascal",
+  pp: "pascal",
+  rkt: "racket",
+  tcl: "tcl",
+  d: "d",
+  adb: "ada",
+  ads: "ada",
+  wgsl: "wgsl",
+  ejs: "ejs",
+  erb: "ejs",
+  properties: "properties",
+};
+
+/** Whole file names with no useful extension. */
+const EXTRA_BASENAMES: Record<string, string> = {
+  "cmakelists.txt": "cmake",
+  justfile: "just",
+  kconfig: "kconfig",
+};
+
+/** Grammars OpenTUI can actually load: its own plus every vendored one (directory name = filetype). */
+const SUPPORTED_FILETYPES: ReadonlySet<string> = new Set([
+  "javascript",
+  "typescript",
+  "markdown",
+  "markdown_inline",
+  "zig",
+  ...defaultParserAssetPaths.map((asset) => asset.split("/")[0]!),
+  ...builtParserAssetPaths.map((asset) => asset.split("/")[0]!),
+]);
+
+/**
+ * Grammar name for a path, matching the identifiers OpenTUI's tree-sitter client expects.
+ * Our own table wins (it folds `js`/`tsx` into the TypeScript grammar), then the
+ * extras above, then OpenTUI's full extension and file-name tables — but only for
+ * a grammar that is really loaded, so an unsupported language reads as plain text
+ * rather than naming a parser that is not there.
+ */
 export function detectFiletype(filePath: string): string | undefined {
-  const extension = filePath.split(".").pop()?.toLowerCase();
-  return extension === undefined ? undefined : FILETYPES[extension];
+  const name = filePath.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+  const extension = name.includes(".") ? name.split(".").pop() : undefined;
+  const own = extension === undefined ? undefined : (FILETYPES[extension] ?? EXTRA_FILETYPES[extension]);
+  if (own !== undefined) return own;
+  const byName = EXTRA_BASENAMES[name];
+  if (byName !== undefined) return byName;
+  const known = EXTRA_BASENAMES[name] ?? basenameToFiletype.get(name) ?? (extension === undefined ? undefined : extensionToFiletype.get(extension));
+  return known !== undefined && SUPPORTED_FILETYPES.has(known) ? known : undefined;
 }
 
 function pathFromHeader(line: string): string | null {

@@ -12,6 +12,21 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log("--- command palette (open) ---");
   console.log(setup.captureCharFrame());
 
+  // The provider updaters: found by filter, each named for what it runs.
+  for (const char of ["u", "p", "d", "a", "t", "e"]) {
+    await act(async () => setup.mockInput.pressKey(char));
+    await setup.flush();
+  }
+  const updates = setup.captureCharFrame();
+  console.log("--- palette update filtered ---");
+  console.log(updates);
+  if (!updates.includes("Update Claude Code") || !updates.includes("claude update")) fail("the palette offered no Update Claude Code row");
+  if (!updates.includes("Update OpenCode") || !updates.includes("opencode upgrade")) fail("the palette offered no Update OpenCode row");
+  for (let index = 0; index < 6; index += 1) {
+    await act(async () => setup.mockInput.pressBackspace());
+    await setup.flush();
+  }
+
   // A copy row works inline (toast where the clipboard resolves) and leaves
   // the palette open for the next action.
   await act(async () => setup.mockMouse.click(55, 10));
@@ -83,7 +98,7 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   // Rename opens its own prompt, prefilled with the current title …
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 17));
+  await act(async () => setup.mockMouse.click(55, 18));
   await setup.flush();
   console.log("--- rename modal (open) ---");
   console.log(setup.captureCharFrame());
@@ -100,7 +115,7 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   // Regenerate fires a toast and closes back to where the palette opened.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 16));
+  await act(async () => setup.mockMouse.click(55, 17));
   await setup.flush();
   console.log("--- title regenerate fired ---");
   console.log(setup.captureCharFrame());
@@ -108,7 +123,7 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   // Compact dispatches a /compact turn and closes.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 19));
+  await act(async () => setup.mockMouse.click(55, 20));
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   console.log("--- compact dispatched ---");
@@ -117,7 +132,7 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   // Settle toasts and closes, keeping the thread selected.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 15));
+  await act(async () => setup.mockMouse.click(55, 16));
   await setup.flush();
   console.log("--- thread settled ---");
   console.log(setup.captureCharFrame());
@@ -125,7 +140,7 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   // Archive last: success toasts and falls back to the next thread.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 18));
+  await act(async () => setup.mockMouse.click(55, 19));
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   console.log("--- thread archived (fallback selected) ---");

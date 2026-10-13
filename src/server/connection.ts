@@ -17,10 +17,14 @@
  *   `server.getConfig` payload shape, so `extractProviders` (and the
  *   effort picker) works unmodified.
  */
+import { searchThreadsView } from "../core/threads/search.js";
 import * as Effect from "effect/Effect";
 
 import { buildDirectProviders } from "../core/catalog/direct.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
+import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
+import { latestVersions } from "../core/providers/latest.js";
+import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultModelSelection, resolveModelSelection } from "../core/catalog/selection.js";
@@ -68,7 +72,9 @@ import {
 import {
   driverForInstance,
   driverKey,
+  ensureDriverSession,
   subscribeDriverThread,
+  liveTurnText,
   type TurnDriver,
   type TurnDriverFactories,
 } from "../core/threads/execute.js";
@@ -137,6 +143,10 @@ export interface DirectConnectionOptions {
   readonly configPath?: string;
   /** The `moxen` tools' MCP server per thread; defaults to `mcp/main.ts`. Null turns them off. */
   readonly builtinMcpServers?: ((threadId: string) => readonly McpServerSpec[]) | null;
+  /** Runs a provider CLI's own updater (tests); defaults to the real one. */
+  readonly updateProvider?: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
+  /** Reads the newest provider versions (tests); defaults to the npm registry. */
+  readonly latestVersions?: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
 }
 
 export class DirectConnection implements ClientApi {
@@ -151,6 +161,8 @@ export class DirectConnection implements ClientApi {
   /** The per-provider settings the last config read saw; see `driverFor`. */
   private lastProviders: ProvidersConfig | undefined;
   private readonly builtinMcpServers: ((threadId: string) => readonly McpServerSpec[]) | null;
+  private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
+  private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private storePromise: Promise<ThreadStore> | null = null;
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
@@ -179,6 +191,8 @@ export class DirectConnection implements ClientApi {
       this.lastProviders = config.providers;
       return config;
     };
+    this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
+    this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? (threadId) => [this.moxenToolsFor(threadId)] : options.builtinMcpServers;
   }
@@ -186,7 +200,7 @@ export class DirectConnection implements ClientApi {
   /**
    * The moxen tools for one thread. Its environment names this store (and
    * config and server mode) outright: providers hand MCP servers a filtered
-   * environment (Codex does), and the tools must reach the same threads.
+   * environment (some do), and the tools must reach the same threads.
    */
   private moxenToolsFor(threadId: string): McpServerSpec {
     // Hosted in this process: Claude calls the tools in-process, the other
@@ -333,17 +347,24 @@ export class DirectConnection implements ClientApi {
     onError: (error: unknown) => void,
   ): () => void {
     let lastHash: string | null = null;
+    // What the store and the project list looked like when `lastHash` was
+    // taken, and when the next scheduled turn comes due. While the first
+    // holds and the second has not passed, the rows cannot have changed:
+    // skip the read of every thread's turns (and the stringify of them all).
+    let lastFingerprint: string | null = null;
+    let nextDueAt = Number.POSITIVE_INFINITY;
     let stopped = false;
     this.startScheduling();
     const poll = async (): Promise<void> => {
       if (stopped || this.closed) return;
       try {
         const store = await this.store();
-        const [projects, threads] = await Promise.all([
-          listStoredProjects(this.storeRoot),
-          listThreads(store, { status: "all" }),
-        ]);
+        const [version, projects] = await Promise.all([store.shellVersion(), listStoredProjects(this.storeRoot)]);
+        const fingerprint = `${version}#${JSON.stringify(projects)}`;
+        if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
+        const threads = await listThreads(store, { status: "all" });
         const now = Date.now();
+        nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
         const parents = new Map((await store.readDelegations().catch(() => [])).map((row) => [row.childThreadId, row.parentThreadId] as const));
         const rows = await Promise.all(
@@ -354,6 +375,13 @@ export class DirectConnection implements ClientApi {
             if (turns.some((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) <= now)) {
               void this.runDue(entry.id);
             }
+            for (const turn of turns) {
+              if (turn.status === "queued" && typeof turn.scheduledFor === "string") {
+                // One already due that is still queued is retried every poll, as before.
+                const due = Math.max(Date.parse(turn.scheduledFor), now);
+                if (due < nextDueAt) nextDueAt = due;
+              }
+            }
             // Threads from before the record kept its native subagents get
             // the list folded from their ledger once; the next poll shows it.
             if (entry.nativeSubagents === undefined) void backfillNativeSubagents(store, entry.id);
@@ -361,6 +389,7 @@ export class DirectConnection implements ClientApi {
           }),
         );
         const visible = rows.filter((row) => row.archivedAt == null && row.deletedAt == null);
+        lastFingerprint = fingerprint;
         const hash = JSON.stringify({ projects, threads: visible });
         if (hash !== lastHash) {
           lastHash = hash;
@@ -390,6 +419,9 @@ export class DirectConnection implements ClientApi {
     onError: (error: unknown) => void,
   ): () => void {
     let lastHash: string | null = null;
+    // What the store looked like when `lastHash` was taken: while it holds
+    // there is nothing new to read, hash or send.
+    let lastVersion: string | null = null;
     let stopped = false;
     // When each streamed message first appeared: its place in the
     // timeline, between the tool calls around it.
@@ -401,8 +433,16 @@ export class DirectConnection implements ClientApi {
     const poll = async (): Promise<void> => {
       if (stopped || this.closed) return;
       try {
+        // The poll runs every few hundred ms for as long as the thread is
+        // open, and a long thread's ledgers are megabytes: read, parse and
+        // stringify them only when a stat says something was written.
+        // (Recovering an orphaned turn comes first — it is what writes.)
+        await recoverOrphanedTurn(await this.context(), threadId);
+        const version = await (await this.store()).threadVersion(threadId);
+        if (version === lastVersion) return;
         const detail = await this.threadDetail(threadId);
         if (!detail) return;
+        lastVersion = version;
         const latest = detail.latestTurn;
         runningTurnId = latest && latest.state === "running" ? latest.turnId : null;
         const hash = JSON.stringify(detail);
@@ -456,6 +496,22 @@ export class DirectConnection implements ClientApi {
         });
       }
     };
+    // A thread opened mid-turn: replay what the provider streamed before this
+    // subscription existed, through the same path live events take, so the
+    // message keeps its place (`firstAt`) and the thought its text.
+    const replayLiveText = (driver: Parameters<typeof liveTurnText>[0]): void => {
+      const live = liveTurnText(driver, threadId);
+      if (!live) return;
+      for (const message of live.messages) {
+        const turnId = runningTurnId ?? message.turnId;
+        if (!turnId) continue;
+        firstSeen.set(noteMessageId(turnId, message.id), message.firstAt);
+        onEvent({ type: "message.part.updated", provider: live.provider, threadId, turnId, messageId: message.id, text: message.text } as ProviderRuntimeEvent);
+      }
+      for (const thought of live.reasoning) {
+        onEvent({ type: "reasoning.delta", provider: live.provider, threadId, turnId: thought.turnId, reasoningId: thought.id, text: thought.text } as ProviderRuntimeEvent);
+      }
+    };
     // The bridge attaches lazily per active driver session: poll for a
     // session and subscribe once it exists, so events flow even when the
     // turn was started elsewhere (CLI) while the TUI watches.
@@ -470,6 +526,9 @@ export class DirectConnection implements ClientApi {
         const hasSession = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
         if (!hasSession) return;
         unsubscribeBridge = subscribeDriverThread(driver, threadId, onEvent);
+        // Same tick as the subscribe: nothing slips between what the turn had
+        // already streamed (while this thread was not open) and what follows.
+        replayLiveText(driver);
       } catch {
         // Retry on the next poll.
       }
@@ -492,8 +551,6 @@ export class DirectConnection implements ClientApi {
   }
 
   private async threadDetail(threadId: string): Promise<ThreadEnvelope | null> {
-    // The TUI polls here: a turn orphaned by a dead process must not spin forever.
-    await recoverOrphanedTurn(await this.context(), threadId);
     const store = await this.store();
     const read = await readThread(store, threadId, { view: "messages" }).catch(() => null);
     if (!read) return null;
@@ -553,7 +610,7 @@ export class DirectConnection implements ClientApi {
         await interruptTurn(await this.store(), command.threadId, command.turnId);
         return accepted;
       case "thread.settle":
-        await settleThread(await this.store(), command.threadId);
+        await settleThread(await this.store(), command.threadId, command.stop === true ? { stop: true } : {});
         return accepted;
       case "thread.unsettle":
         await unsettleThread(await this.store(), command.threadId);
@@ -652,6 +709,11 @@ export class DirectConnection implements ClientApi {
         const { config, path } = await this.readConfigFile();
         await saveConfig(path, setConfigValue(config, command.key, command.value));
         return { ...(await this.settingsSnapshot()), accepted: true };
+      }
+      case "provider.update": {
+        // The binary the sessions are configured to use, which is the one to update.
+        const providers = (await this.loadConfig()).providers;
+        return await this.runProviderUpdate(command.provider, providers?.[command.provider]?.binaryPath);
       }
       case "thread.conversation.revert":
         return {
@@ -852,6 +914,33 @@ export class DirectConnection implements ClientApi {
     return (await Effect.runPromise(driver.hasSession(threadId)).catch(() => false)) ? driver : null;
   }
 
+  /**
+   * The driver to read a native subagent through. After a restart no driver
+   * holds the thread's OpenCode session, yet the subagent's conversation
+   * still lives in OpenCode's own store: resume the session, as a send
+   * would, so the history can be read. Null for a thread with nothing to
+   * resume (Claude reads its subagents from disk), or when the resume fails
+   * (the working directory is gone, OpenCode will not start).
+   */
+  private async subagentDriver(threadId: string): Promise<TurnDriver | null> {
+    const live = await this.sessionDriver(threadId);
+    if (live !== null) return live;
+    const store = await this.store();
+    const thread = await store.readThreadRecord(threadId);
+    if (thread?.providerSessions?.["opencode"] === undefined) return null;
+    const turns = await store.readTurns(threadId);
+    const selection = [...turns].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread.modelSelection;
+    if (driverKey(selection.instanceId) !== "opencode") return null;
+    await this.context();
+    const driver = this.driverFor(selection.instanceId);
+    try {
+      await ensureDriverSession(driver, thread, { modelSelection: selection });
+    } catch {
+      return null;
+    }
+    return driver;
+  }
+
   private async driverForThread(threadId: string): Promise<TurnDriver> {
     const store = await this.store();
     const thread = await inspectThread(store, threadId);
@@ -936,6 +1025,10 @@ export class DirectConnection implements ClientApi {
         const { type: _type, ...filter } = query;
         return await listThreadsView(ctx, filter);
       }
+      case "threads.search": {
+        const { type: _type, ...request } = query;
+        return await searchThreadsView(ctx, request);
+      }
       case "thread.inspect":
         await recoverOrphanedTurn(ctx, query.threadId);
         return await inspectThreadView(ctx, query.threadId);
@@ -951,8 +1044,10 @@ export class DirectConnection implements ClientApi {
         return { status: await this.turnSettled(query.threadId, query.turnId) };
       case "providers.list":
         return { providers: withLiveUsage(await this.providers()) };
-      case "doctor":
-        return await diagnose(this.storeRoot);
+      case "doctor": {
+        const providers = (await this.loadConfig()).providers;
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath);
+      }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
         return driver ? { live: true, tasks: driver.backgroundTasks?.(query.threadId) ?? [] } : { live: false, tasks: [] };
@@ -962,15 +1057,23 @@ export class DirectConnection implements ClientApi {
         if (!driver) return { live: false, breakdown: null };
         const breakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
         if (breakdown) return { live: true, breakdown };
-        // Totals only (Codex, Grok): the reading without categories.
+        // Totals only: the reading without categories.
         const usage = driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
         return { live: true, breakdown: usage ? { ...usage, categories: [], estimated: false } : null };
       }
       case "thread.subagent": {
-        // OpenCode keeps each subagent as a child session only its live driver can read.
-        const driver = await this.sessionDriver(query.threadId);
+        // OpenCode keeps each subagent as a child session only a driver holding the thread's session can read.
+        const driver = await this.subagentDriver(query.threadId);
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId) : undefined;
         return await subagentTranscript(await this.store(), query.threadId, query.agentId, readHistory);
+      }
+      case "provider.latest": {
+        // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
+        const config = await this.loadConfig();
+        if (config.updates?.checkLatest === false) {
+          return { enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null } };
+        }
+        return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
       }
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };

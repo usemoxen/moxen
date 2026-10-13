@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
+import { HoverButton } from "../../ui/hoverbutton.js";
 import { COLOR, markdownSyntaxStyle, SURFACE, truncate } from "../../theme.js";
 import type { PendingUserInputQuestion } from "../../model/thread.js";
 
@@ -31,6 +32,9 @@ export function AnswerPanel({
   width,
   suspended,
   pickedValues,
+  customValue,
+  tabs,
+  onGoto,
   onToggleOption,
   onPickOption,
   onCustom,
@@ -47,13 +51,24 @@ export function AnswerPanel({
   suspended: boolean;
   /** Option values currently toggled (multi-select). */
   pickedValues: readonly string[];
+  /** Free-text answer already given to this question (when revisiting it). */
+  customValue?: string;
+  /** One tab per question of a multi-question request, in order. */
+  tabs: ReadonlyArray<{ header: string; answered: boolean }>;
+  /** Jump to another question, keeping answers. */
+  onGoto: (index: number) => void;
   onToggleOption: (value: string) => void;
   onPickOption: (value: string) => void;
   onCustom: () => void;
   onContinue: () => void;
   onDismiss: () => void;
 }) {
-  const [highlight, setHighlight] = useState(0);
+  // Revisiting a question lands on what was answered, not the top row.
+  const [highlight, setHighlight] = useState(() => {
+    const picked = question.options.findIndex((option) => pickedValues.includes(option.value ?? option.label));
+    if (picked >= 0) return picked;
+    return customValue !== undefined && question.allowCustomAnswer !== false ? question.options.length : 0;
+  });
 
   const rows: AnswerRow[] = [
     ...question.options.map((option, order) => {
@@ -73,7 +88,14 @@ export function AnswerPanel({
     }),
     ...(question.allowCustomAnswer === false
       ? []
-      : [{ key: "custom", label: "✎ Custom answer…", onPick: onCustom }]),
+      : [
+          {
+            key: "custom",
+            label: "✎ Custom answer…",
+            ...(customValue === undefined ? {} : { meta: truncate(customValue, 32), selected: true }),
+            onPick: onCustom,
+          },
+        ]),
     ...(question.multiSelect
       ? [{ key: "continue", label: "Continue ✓", meta: `${pickedValues.length} picked`, onPick: onContinue }]
       : []),
@@ -84,8 +106,14 @@ export function AnswerPanel({
 
   useKeyboard((key) => {
     if (suspended || rows.length === 0) return;
-    if (key.name === "escape" || key.name === "esc") {
-      onDismiss();
+    // No escape here: this listener is global, so it would take esc from whichever
+    // panel is focused. The × in the header dismisses.
+    if (total > 1 && (key.name === "left" || key.name === "backspace") && position > 0) {
+      onGoto(position - 1);
+      return;
+    }
+    if (total > 1 && key.name === "right" && position + 1 < total) {
+      onGoto(position + 1);
       return;
     }
     if (key.name === "up") {
@@ -132,12 +160,34 @@ export function AnswerPanel({
         selectable={false}
       >
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
-            {truncate(`◈ ${question.header}${total > 1 ? ` ${position + 1}/${total}` : ""}`, inner)}
-          </text>
-          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {"esc dismisses"}
-          </text>
+          {total > 1 ? (
+            <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+              <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
+                {"◈ "}
+              </text>
+              {tabs.map((tab, order) => {
+                const active = order === position;
+                // Only the open tab spells its header out; the rest stay a number
+                // (with a ✓ once answered) so a long request still fits the row.
+                const label = ` ${order + 1}${tab.answered ? "✓" : ""}${active ? ` ${truncate(tab.header, Math.max(8, inner - 30 - tabs.length * 5))}` : ""} `;
+                return (
+                  <HoverButton
+                    key={order}
+                    label={label}
+                    fg={active ? COLOR.warn : tab.answered ? COLOR.accent : COLOR.faint}
+                    hoverFg={COLOR.bright}
+                    {...(active ? { bg: SURFACE.hover } : { bg: SURFACE.raised })}
+                    onClick={() => onGoto(order)}
+                  />
+                );
+              })}
+            </box>
+          ) : (
+            <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
+              {truncate(`◈ ${question.header}`, inner)}
+            </text>
+          )}
+          <HoverButton label=" × " fg={COLOR.faint} hoverFg={COLOR.danger} bg={SURFACE.raised} onClick={onDismiss} />
         </box>
         <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
           <text fg={COLOR.bright} bg={SURFACE.raised}>
@@ -182,7 +232,7 @@ export function AnswerPanel({
         )}
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-        <text fg={COLOR.faint}>{truncate("↑↓ move · 1-9 pick · enter selects · esc dismisses", Math.max(0, width))}</text>
+        <text fg={COLOR.faint}>{truncate(`↑↓ move · 1-9 pick · enter selects${total > 1 ? " · ←→ questions" : ""} · × dismisses`, Math.max(0, width))}</text>
       </box>
     </box>
   );

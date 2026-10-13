@@ -141,6 +141,8 @@ interface ToolState {
   input: Record<string, unknown>;
   output: string | undefined;
   error: string | undefined;
+  /** v2's own kind of failure (`aborted` for a call cut short by an interrupt, `tool.execution` for one that failed). */
+  errorType: string | undefined;
   metadata: Record<string, unknown>;
   start: number | undefined;
   end: number | undefined;
@@ -170,7 +172,16 @@ const NOISE_EVENTS: ReadonlySet<string> = new Set([
  */
 export class OpencodeEventTranslator {
   private readonly texts = new Map<string, string>();
+  /** Open reasoning stretches (the model's thinking summary), by message and ordinal: text so far and when each began. */
+  private readonly reasonings = new Map<string, { text: string; start: number | undefined }>();
   private readonly tools = new Map<string, ToolState>();
+  /**
+   * Calls that have ended. An event that straggles in after its call's end
+   * (a late progress update, a repeated result) would otherwise start the call
+   * over as a blank `tool` with no input, and — the newest row winning where
+   * rows are folded by call id — wipe the finished call from the transcript.
+   */
+  private readonly finished = new Set<string>();
   /** Open forms: form id → the fields a reply must key its answers by. */
   private readonly forms = new Map<string, { sessionID: string; fields: OpencodeFormField[] }>();
   /** Per session: user inbox items enqueued and not yet delivered. */
@@ -184,6 +195,7 @@ export class OpencodeEventTranslator {
    */
   resetLive(): void {
     this.texts.clear();
+    this.reasonings.clear();
     this.tools.clear();
     this.pendingInbox.clear();
   }
@@ -221,6 +233,28 @@ export class OpencodeEventTranslator {
         if (final === previous || final.length === 0) return [];
         return [this.textPart(data, key, final)];
       }
+      case "session.reasoning.started": {
+        const key = this.textKey(data);
+        this.reasonings.set(key, { text: "", start: created });
+        return [this.reasoningPart(data, key, "", "running", created, undefined)];
+      }
+      case "session.reasoning.delta": {
+        const delta = typeof data.delta === "string" ? data.delta : "";
+        if (delta.length === 0) return [];
+        const key = this.textKey(data);
+        const open = this.reasonings.get(key) ?? { text: "", start: created };
+        open.text += delta;
+        this.reasonings.set(key, open);
+        return [this.reasoningPart(data, key, open.text, "running", open.start, undefined)];
+      }
+      case "session.reasoning.ended": {
+        const key = this.textKey(data);
+        const open = this.reasonings.get(key);
+        this.reasonings.delete(key);
+        // The ended text is the whole of it; the deltas it follows may have been cut short.
+        const text = typeof data.text === "string" ? data.text : (open?.text ?? "");
+        return [this.reasoningPart(data, key, text, "completed", open?.start, created)];
+      }
       case "session.tool.input.started": {
         const call = this.tool(data, created);
         if (!call) return [];
@@ -250,7 +284,7 @@ export class OpencodeEventTranslator {
         call.output = toolContentText(data.content);
         call.metadata = { ...call.metadata, ...(asRecord(data.metadata) ?? {}) };
         call.end = created ?? call.end;
-        this.tools.delete(this.toolKey(data));
+        this.endCall(this.toolKey(data));
         return [this.toolPart(data, call)];
       }
       case "session.tool.failed": {
@@ -258,8 +292,9 @@ export class OpencodeEventTranslator {
         if (!call) return [];
         call.status = "error";
         call.error = asString(asRecord(data.error)?.message) ?? "Tool failed.";
+        call.errorType = asString(asRecord(data.error)?.type) ?? undefined;
         call.end = created ?? call.end;
-        this.tools.delete(this.toolKey(data));
+        this.endCall(this.toolKey(data));
         return [this.toolPart(data, call)];
       }
       case "permission.asked": {
@@ -357,6 +392,21 @@ export class OpencodeEventTranslator {
         if (!sessionID) return [];
         return [{ type: "session.error", properties: { sessionID, error: errorOf(data.error) } }];
       }
+      case "session.compaction.ended": {
+        const sessionID = asString(data.sessionID);
+        if (!sessionID) return [];
+        return [{
+          type: "session.compacted",
+          properties: { sessionID, reason: asString(data.reason) ?? "manual", summary: asString(data.text) ?? "" },
+        }];
+      }
+      case "session.compaction.failed": {
+        const sessionID = asString(data.sessionID);
+        // An automatic compaction that fails is the run's own failure to report
+        // (`session.execution.failed` follows); only a requested one ends here.
+        if (!sessionID || data.reason !== "manual") return [];
+        return [{ type: "session.error", properties: { sessionID, error: errorOf(data.error) } }];
+      }
       case "location.shutdown":
         // The server dropped the location our turns run in: no session to name.
         return [{ type: "session.error", properties: { error: { message: "The OpenCode server shut down.", name: "location.shutdown" } } }];
@@ -383,6 +433,38 @@ export class OpencodeEventTranslator {
     };
   }
 
+  /** The model's thinking as a cumulative part, `running` while it streams and `completed` once it ends. */
+  private reasoningPart(
+    data: Record<string, unknown>,
+    key: string,
+    text: string,
+    status: "running" | "completed",
+    start: number | undefined,
+    end: number | undefined,
+  ): OpencodeSubscribedEvent {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: asString(data.sessionID) ?? "",
+        part: {
+          id: `reasoning:${key}`,
+          messageID: asString(data.assistantMessageID) ?? "",
+          type: "reasoning",
+          text,
+          state: { status },
+          time: { ...(start !== undefined ? { start } : {}), ...(end !== undefined ? { end } : {}) },
+        },
+      },
+    };
+  }
+
+  private endCall(key: string): void {
+    this.tools.delete(key);
+    this.finished.add(key);
+    // Only recent calls can still have stragglers: keep the set from growing for the life of the session.
+    if (this.finished.size > 5_000) this.finished.delete(this.finished.values().next().value as string);
+  }
+
   private toolKey(data: Record<string, unknown>): string {
     return asString(data.id) ?? "";
   }
@@ -391,7 +473,7 @@ export class OpencodeEventTranslator {
   private tool(data: Record<string, unknown>, created: number | undefined): ToolState | null {
     const key = this.toolKey(data);
     const sessionID = asString(data.sessionID);
-    if (!key || !sessionID) return null;
+    if (!key || !sessionID || this.finished.has(key)) return null;
     let call = this.tools.get(key);
     if (!call) {
       call = {
@@ -402,6 +484,7 @@ export class OpencodeEventTranslator {
         input: {},
         output: undefined,
         error: undefined,
+        errorType: undefined,
         metadata: {},
         start: created,
         end: undefined,
@@ -435,6 +518,7 @@ function toolState(call: ToolState): Record<string, unknown> {
     input: call.input,
     ...(call.output !== undefined ? { output: call.output } : {}),
     ...(call.error !== undefined ? { error: call.error } : {}),
+    ...(call.errorType !== undefined ? { errorType: call.errorType } : {}),
     metadata: call.metadata,
     time: { ...(call.start !== undefined ? { start: call.start } : {}), ...(call.end !== undefined ? { end: call.end } : {}) },
   };

@@ -36,7 +36,7 @@ async function seedProject(harness: TestHarness, overrides: Record<string, unkno
     id: "project-existing",
     title: "Existing project",
     workspaceRoot,
-    defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     ...(overrides as object),
   });
 }
@@ -46,7 +46,7 @@ async function seedThread(harness: TestHarness, overrides: Record<string, unknow
     id: "thread-existing",
     projectId: "project-existing",
     title: "Existing thread",
-    modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     runtimeMode: "full-access",
     interactionMode: "default",
     ...(overrides as object),
@@ -171,7 +171,7 @@ describe("sendThreadMessage", () => {
     });
 
     expect(result.command).toMatchObject({
-      modelSelection: { instanceId: "codex", model: "gpt-5.3-codex" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.3-codex" },
     });
     const options = (result.command as { modelSelection: { options: Array<{ id: string; value: unknown }> } })
       .modelSelection.options;
@@ -282,13 +282,13 @@ describe("thread lifecycle", () => {
       id: "project-1",
       title: "Project One",
       workspaceRoot,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     await createThread(harness.store, {
       id: "thread-active",
       projectId: "project-1",
       title: "Active thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -296,7 +296,7 @@ describe("thread lifecycle", () => {
       id: "thread-settled",
       projectId: "project-1",
       title: "Settled thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -629,13 +629,13 @@ describe("delegated tasks", () => {
       id: "project-1",
       title: "Project One",
       workspaceRoot,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     await createThread(harness.store, {
       id: "thread-parent",
       projectId: "project-1",
       title: "Parent thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -672,13 +672,13 @@ describe("delegated tasks", () => {
       id: "project-1",
       title: "Project One",
       workspaceRoot,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     await createThread(harness.store, {
       id: "thread-parent",
       projectId: "project-1",
       title: "Parent thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -701,13 +701,13 @@ describe("delegated tasks", () => {
       id: "project-1",
       title: "Project One",
       workspaceRoot: runningRoot,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     await createThread(running.store, {
       id: "thread-parent",
       projectId: "project-1",
       title: "Parent thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -785,7 +785,7 @@ describe("delegated tasks", () => {
       id: "thread-foreign",
       projectId: "project-2",
       title: "Foreign thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });
@@ -801,13 +801,13 @@ describe("delegated tasks", () => {
       id: "project-1",
       title: "Project One",
       workspaceRoot,
-      defaultModelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     await createThread(harness.store, {
       id: "thread-parent",
       projectId: "project-1",
       title: "Parent thread",
-      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
     });

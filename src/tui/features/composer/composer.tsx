@@ -10,14 +10,13 @@ import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { COLOR, pulseColor, SURFACE, truncate } from "../../theme.js";
 import { thumbGeometry } from "../../model/scrollbar.js";
-import { detectSkillTrigger, filterSkills, insertSkillMention, marqueeWindow, type SkillTrigger } from "../../model/skills.js";
+import { detectSkillTrigger, filterSkills, insertSkillMention, leadingCommandRange, type SkillTrigger } from "../../model/skills.js";
+import { SkillPicker, SKILL_POPUP_ROWS } from "./skillpicker.js";
 import type { SkillSummary } from "../../../core/catalog/summary.js";
 import type { ContextUsageDisplay } from "../../model/turns.js";
 import type { PlanUsageGauge } from "../../model/sidepanel.js";
 import { nextImageLabel, pairImageTokens, relabelImageTokens } from "../../model/imagetokens.js";
 
-/** Rows visible at once before the list scrolls (wheel, not the arrow keys alone). */
-const SKILL_POPUP_ROWS = 6;
 /** Marquee tick for the highlighted row's description, ms per column. */
 const SKILL_MARQUEE_INTERVAL_MS = 350;
 
@@ -86,7 +85,11 @@ function PlanUsageSegment({ gauges, onClick }: { gauges: readonly PlanUsageGauge
 /** How an `[Image #N]` token reads in the draft: a filled chip, one unit to the cursor and to backspace. */
 let tokenStyle: SyntaxStyle | null = null;
 function imageTokenStyle(): SyntaxStyle {
-  tokenStyle ??= SyntaxStyle.fromStyles({ "extmark.image": { fg: PICK_FG, bg: PICK_BG, bold: true } });
+  tokenStyle ??= SyntaxStyle.fromStyles({
+    "extmark.image": { fg: PICK_FG, bg: PICK_BG, bold: true },
+    // A leading /command the picker knows: coloured, but ordinary editable text.
+    "extmark.command": { fg: COLOR.command, bold: true },
+  });
   return tokenStyle;
 }
 
@@ -202,7 +205,7 @@ export function Composer({
   width,
   hideHint,
   skills,
-  skillPrefix,
+  onSkillsOpen,
   contextUsage,
   onContextUsageClick,
   backgroundSummary,
@@ -233,7 +236,7 @@ export function Composer({
   placeholder: string;
   /** Pretty model name — never the raw provider slug. */
   model: string;
-  /** Provider-brand color for the model name (Claude/Codex/OpenCode); null/undefined falls back to the default text color. */
+  /** Provider-brand color for the model name (Claude/OpenCode); null/undefined falls back to the default text color. */
   modelColor?: string | null | undefined;
   /** Effort knob value (e.g. `xhigh`); null hides the segment. */
   effort?: string | null;
@@ -264,10 +267,10 @@ export function Composer({
   /** The "creating" view renders its own centered hint below the composer;
       suppress this one so it isn't shown twice. */
   hideHint?: boolean;
-  /** Undefined hides `$` skill invocation entirely (no catalog loaded yet). */
+  /** Undefined hides `/` skill invocation entirely (no catalog loaded yet). */
   skills?: readonly SkillSummary[] | undefined;
-  /** How the provider invokes a picked skill: `$name` (Codex) or `/name`. */
-  skillPrefix?: "$" | "/" | undefined;
+  /** The picker just opened: a chance to ask the provider for a fresher list (a skill added since). */
+  onSkillsOpen?: () => void;
   /** Null/undefined hides the segment — the driver never reported usage for this thread. */
   contextUsage?: ContextUsageDisplay | null;
   onContextUsageClick?: () => void;
@@ -309,6 +312,25 @@ export function Composer({
       ...(styleId === null ? {} : { styleId }),
     });
     tokens.current.set(name, { id, label });
+  };
+  /** The extmark colouring the draft's leading /command, when it names a known one. */
+  const commandMark = useRef<number | null>(null);
+  const commandType = useRef<number | null>(null);
+  const knownCommands = useMemo(() => new Set((skills ?? []).map((skill) => skill.name)), [skills]);
+  const markCommand = (node: TextareaRenderable) => {
+    if (commandMark.current !== null) node.extmarks.delete(commandMark.current);
+    commandMark.current = null;
+    const range = leadingCommandRange(node.plainText, knownCommands);
+    if (range === null) return;
+    commandType.current ??= node.extmarks.registerType("command-token");
+    const styleId = imageTokenStyle().getStyleId("extmark.command");
+    commandMark.current = node.extmarks.create({
+      start: range[0],
+      end: range[1],
+      virtual: false,
+      typeId: commandType.current,
+      ...(styleId === null ? {} : { styleId }),
+    });
   };
   const attachmentKey = (attachments ?? []).join("\n");
   /** The "⋯ more" menu of footer controls a narrow composer cannot fit. */
@@ -356,7 +378,9 @@ export function Composer({
     // image its token back (the rest are placed at the next attach pass).
     node.extmarks.clear();
     tokens.current.clear();
+    commandMark.current = null;
     for (const span of pairImageTokens(draft, attachments ?? []).paired) markToken(node, span.name, span.label, span.start);
+    markCommand(node);
     // `draft` is read at the moment `resetKey` changes, not tracked as its
     // own dependency — see the `resetKey` doc comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -409,6 +433,12 @@ export function Composer({
     else if (safeSkillIndex >= pane.scrollTop + skillPopupRows) pane.scrollTo(safeSkillIndex - skillPopupRows + 1);
   }, [safeSkillIndex, skillPopupRows]);
 
+  // Opening the picker is when a stale list gets asked for again (see `useSkillInventory`).
+  useEffect(() => {
+    if (skillTrigger !== null) onSkillsOpen?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skillTrigger !== null]);
+
   // The highlighted row's description auto-scrolls instead of sitting
   // truncated — ticks only while the picker is actually open.
   useEffect(() => {
@@ -423,7 +453,7 @@ export function Composer({
   const insertSkill = (skill: SkillSummary) => {
     if (skillTrigger === null) return;
     const text = areaRef.current?.plainText ?? localRef.current;
-    const result = insertSkillMention(text, skillTrigger, skill.name, skillPrefix ?? "$");
+    const result = insertSkillMention(text, skillTrigger, skill.name);
     const node = areaRef.current;
     if (node !== null) {
       node.setText(result.text);
@@ -439,6 +469,30 @@ export function Composer({
   // typed, even a space, is the user's own.
   const offeredSuggestion = suggestion !== undefined && suggestion !== null && draft.length === 0 && !external ? suggestion : null;
 
+  // The inventory answers about a second after the composer opens, so a "/"
+  // typed in that gap was never offered (the change handler skips detection
+  // without a catalog) and nothing would re-read it once the catalog landed.
+  // Re-read the draft when the catalog arrives, and drop the picker when it goes
+  // (a model switch fetches a new one).
+  useEffect(() => {
+    if (skills === undefined) {
+      setSkillTrigger(null);
+      return;
+    }
+    const text = areaRef.current?.plainText ?? localRef.current;
+    setSkillTrigger(detectSkillTrigger(text, areaRef.current?.cursorOffset ?? text.length));
+    setSkillIndex(0);
+    // Keyed on whether a catalog exists, not on its identity: a re-render must not reset the selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skills !== undefined]);
+
+  // The catalog arrives after the first keystrokes: colour what was typed before it did.
+  useEffect(() => {
+    const node = areaRef.current;
+    if (node !== null) markCommand(node);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [knownCommands]);
+
   const handleContentChange = () => {
     if (external) return;
     const text = areaRef.current?.plainText ?? "";
@@ -446,6 +500,7 @@ export function Composer({
     onInput(text);
     // A token deleted (backspace takes it whole) detaches its image.
     const node = areaRef.current;
+    if (node !== null) markCommand(node);
     if (node !== null) {
       for (const [name, token] of [...tokens.current]) {
         if (node.extmarks.get(token.id) !== null) continue;
@@ -606,82 +661,23 @@ export function Composer({
         </box>
       )}
       {skillTrigger === null ? null : (
-        // Floats just above the composer's own top edge (negative `top`
-        // relative to this outer box) — Minecraft/slash-picker style, live
-        // over whatever the textarea is doing underneath it.
-        <box
-          style={{
-            position: "absolute",
-            left: 0,
-            top: -(skillPopupRows + 2),
-            width,
-            flexDirection: "column",
-            paddingLeft: 1,
-            paddingRight: 1,
-            paddingTop: 1,
-            paddingBottom: 1,
-            zIndex: 25,
+        // Floats just above the composer's own top edge, live over whatever
+        // the textarea is doing underneath it.
+        <SkillPicker
+          matches={skillMatches}
+          query={skillTrigger.query}
+          activeIndex={safeSkillIndex}
+          marqueeTick={skillMarqueeTick}
+          width={width}
+          rows={skillPopupRows}
+          hasCatalog={skills !== undefined && skills.length > 0}
+          scrollRef={skillScrollRef}
+          onPick={insertSkill}
+          onHover={(index) => {
+            skillNavSourceRef.current = "mouse";
+            setSkillIndex(index);
           }}
-          border={["left"]}
-          borderStyle="heavy"
-          borderColor={SURFACE.borderFocus}
-          backgroundColor={SURFACE.raised}
-        >
-          {skillMatches.length === 0 ? (
-            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"no matching skills"}</text>
-          ) : (
-            // Fixed-height scrollbox: a wheel over the popup scrolls the
-            // skill list itself instead of leaking through to the chat pane
-            // underneath it. Every match renders (not just the first
-            // `SKILL_POPUP_ROWS`) — the box just clips/scrolls to them.
-            // Scrollable content hugs its own intrinsic size instead of
-            // stretching to the viewport, so each row needs an explicit
-            // width (reserving one column for the scrollbar track) —
-            // otherwise a short name shares an unstretched row with its
-            // description and both get crushed.
-            <scrollbox ref={skillScrollRef} style={{ height: skillPopupRows, flexShrink: 0 }} stickyStart="top">
-              {skillMatches.map((skill, index) => {
-                const active = index === safeSkillIndex;
-                const rowBg = active ? PICK_BG : SURFACE.raised;
-                const label = skill.displayName ?? skill.name;
-                const meta = skill.shortDescription ?? skill.description ?? "";
-                const rowWidth = Math.max(4, width - 3);
-                // The name is the actionable part (what `$name` inserts) —
-                // it never gets crowded out by a long description. Whatever
-                // width survives goes to the description; the highlighted
-                // row's description auto-scrolls through the rest instead
-                // of sitting truncated, everything else stays static.
-                const labelText = truncate(`$${label}`, rowWidth);
-                const metaBudget = rowWidth - labelText.length - 1;
-                const metaText =
-                  meta.length === 0 || metaBudget < 8
-                    ? null
-                    : active
-                      ? marqueeWindow(meta, metaBudget, skillMarqueeTick)
-                      : truncate(meta, metaBudget);
-                return (
-                  <box
-                    key={skill.name}
-                    style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}
-                    backgroundColor={rowBg}
-                    onMouseDown={() => insertSkill(skill)}
-                    onMouseOver={() => {
-                      skillNavSourceRef.current = "mouse";
-                      setSkillIndex(index);
-                    }}
-                  >
-                    <text fg={active ? PICK_FG : COLOR.command} bg={rowBg} selectable={false}>
-                      {labelText}
-                    </text>
-                    {metaText === null ? null : (
-                      <text fg={active ? PICK_FG : COLOR.faint} bg={rowBg} selectable={false}>{` ${metaText}`}</text>
-                    )}
-                  </box>
-                );
-              })}
-            </scrollbox>
-          )}
-        </box>
+        />
       )}
       <box
         border={["left"]}

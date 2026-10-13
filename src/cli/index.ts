@@ -28,6 +28,7 @@ import {
 import { cliClient } from "./infra/client.js";
 import { redactMcpServers } from "../core/mcp.js";
 import { doctor } from "./doctor.js";
+import { parseUpdatable, updateCommand } from "./update.js";
 import { preferDirectClient } from "./infra/client.js";
 import { reexecInProduction } from "./infra/production.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
@@ -63,6 +64,7 @@ import {
   listBackgroundTasks,
   stopBackgroundTask,
   listThreads,
+  searchThreads,
   readThread,
   renameThread,
   revertConversation,
@@ -147,7 +149,7 @@ function addThreadOptions(command: Command): Command {
     .option("--prompt-file <path>", "Read the handover prompt from a UTF-8 file.")
     .option("--stdin", "Read the handover prompt from stdin.")
     .addOption(new Option("--open <mode>").choices(["auto", "desktop", "browser", "none"]))
-    .option("--provider <instance-id>", "Provider instance id (for example codex or claudeAgent).")
+    .option("--provider <instance-id>", "Provider instance id (for example opencode/openai or claudeAgent).")
     .option("--model <slug>", "Provider model slug.")
     .addOption(
       new Option("--speed, --speed-mode <mode>", "Model speed mode.")
@@ -413,6 +415,18 @@ program.command("doctor").description("Check provider binaries, auth, store, and
   }),
 );
 
+program
+  .command("update")
+  .description("Update Claude Code or OpenCode with its own updater, and report the version before and after.")
+  .argument("<provider>", "claude | opencode")
+  .action((provider: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const { update, text } = await updateCommand(context.config, parseUpdatable(provider));
+      writeSuccess(update, context, text);
+    }),
+  );
+
 /** Config as shown: MCP `env`/`headers` values may be secrets. */
 function displayConfig(config: CliConfig): CliConfig {
   return config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config;
@@ -666,6 +680,26 @@ threads.command("list")
   );
 
 threads
+  .command("search <query...>")
+  .description("Find threads by what is in them: title, messages, tool calls. Settled threads are included; active ones come first.")
+  .option("--cwd <path>", "Only the project resolved from this folder.")
+  .addOption(new Option("--workspace-mode <mode>").choices(["repo", "folder"]))
+  .option("--project <project-id>", "Only an exact project id.")
+  .addOption(new Option("--status <status>", "Only threads in this lifecycle status.").choices(["active", "settled", "snoozed", "all"]).default("all"))
+  .option("--limit <n>", "Most threads to return.", (value) => Number.parseInt(value, 10))
+  .action((words: string[], options: ThreadListCommandOptions & { limit?: number }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await searchThreads(context.config, words.join(" "), options);
+      const lines = result.threads.flatMap((thread) => [
+        `${thread.status}\t${thread.threadId}\t${thread.title}${thread.hitCount > thread.hits.length ? `\t(${thread.hitCount} matches)` : ""}`,
+        ...thread.hits.map((hit) => `  ${hit.kind}${hit.source ? ` ${hit.source}` : ""}: ${hit.snippet}`),
+      ]);
+      writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No matching threads.");
+    }),
+  );
+
+threads
   .command("inspect")
   .description("Inspect a thread before targeting it.")
   .requiredOption("--thread <thread-id>", "Exact thread id.")
@@ -889,10 +923,11 @@ threads
   .command("settle")
   .description("Mark a thread as settled after verifying it can be settled.")
   .requiredOption("--thread <thread-id>", "Exact thread id.")
-  .action((options: { thread: string }) =>
+  .option("--stop", "Interrupt running work in the thread and its delegated tasks first, instead of refusing.")
+  .action((options: { thread: string; stop?: boolean }) =>
     action(async () => {
       const context = await commandContext();
-      const result = await settleThread(context.config, options.thread);
+      const result = await settleThread(context.config, options.thread, { stop: options.stop === true });
       writeSuccess(
         result,
         context,
@@ -1249,7 +1284,7 @@ providers
 providers
   .command("skills")
   .description("List the skills and slash commands a provider resolves for a directory.")
-  .requiredOption("--provider <instance-id>", "Provider instance id (claudeAgent, codex, grok, opencode, …).")
+  .requiredOption("--provider <instance-id>", "Provider instance id (claudeAgent, opencode/<provider>, …).")
   .option("--cwd <path>", "Directory to resolve for (defaults to the current working directory).")
   .action((options: { provider: string; cwd?: string }) =>
     action(async () => {

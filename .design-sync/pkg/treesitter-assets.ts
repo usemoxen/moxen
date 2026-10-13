@@ -1,6 +1,6 @@
 /**
  * Collects every tree-sitter grammar the TUI registers — opentui's bundled
- * defaults plus the repo's `src/tui/syntax` parsers (`getParsers()`) — and
+ * defaults plus the repo's `src/core/syntax` parsers (`getParsers()`) — and
  * writes them for the browser:
  *
  *   dist/tree-sitter/<filetype>.js   one script per grammar: the wasm (base64)
@@ -60,7 +60,7 @@ export async function buildTreeSitterAssets(dist: string): Promise<{ grammars: n
     ...(d.injectionMapping ? { injectionMapping: d.injectionMapping } : {}),
   }));
   // 2. The repo's vendored parsers, exactly as `registerSyntaxParsers` adds them.
-  const { getParsers } = await import(join(ROOT, "src/tui/syntax/parsers.ts"));
+  const { getParsers } = await import(join(ROOT, "src/core/syntax/parsers.ts"));
   for (const p of await getParsers()) {
     grammars.push({
       filetype: p.filetype,

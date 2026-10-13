@@ -32,6 +32,8 @@ export interface ClaudeSettings {
   readonly promptSuggestions: boolean;
   /** Take the token-level stream, so text appears as it is written. */
   readonly partialMessages: boolean;
+  /** Load the `agent-skills` mod: skills from `.agents/skills` and moxen's own, with no copy into `.claude/skills`. */
+  readonly agentSkills: boolean;
 }
 
 export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
@@ -42,6 +44,7 @@ export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
   thinkingDisplay: "summarized",
   promptSuggestions: true,
   partialMessages: true,
+  agentSkills: true,
 };
 
 export function normalizeClaudeSettings(raw: Partial<ClaudeSettings> = {}): ClaudeSettings {
@@ -53,6 +56,7 @@ export function normalizeClaudeSettings(raw: Partial<ClaudeSettings> = {}): Clau
     thinkingDisplay: raw.thinkingDisplay === "omitted" ? "omitted" : "summarized",
     promptSuggestions: raw.promptSuggestions ?? true,
     partialMessages: raw.partialMessages ?? true,
+    agentSkills: raw.agentSkills ?? true,
   };
 }
 

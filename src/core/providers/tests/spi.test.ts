@@ -12,7 +12,7 @@ function stubAdapter(): ProviderAdapter {
   const unsupported = (): Effect.Effect<never, Error> =>
     Effect.die(new Error("not implemented"));
   return {
-    provider: "codex",
+    provider: "opencode",
     capabilities: { sessionModelSwitch: "unsupported" },
     startSession: () => unsupported(),
     resumeCursor: () => null,
@@ -31,14 +31,14 @@ function stubAdapter(): ProviderAdapter {
 }
 
 describe("provider SPI", () => {
-  it("names exactly the four owned surfaces", () => {
-    expect([...PROVIDER_DRIVER_KINDS]).toEqual(["claude", "codex", "grok", "opencode"]);
+  it("names exactly the two owned surfaces", () => {
+    expect([...PROVIDER_DRIVER_KINDS]).toEqual(["claude", "opencode"]);
   });
 
   it("guards driver kinds", () => {
     expect(isProviderDriverKind("claude")).toBe(true);
-    expect(isProviderDriverKind("codex")).toBe(true);
-    expect(isProviderDriverKind("grok")).toBe(true);
+    expect(isProviderDriverKind("codex")).toBe(false);
+    expect(isProviderDriverKind("grok")).toBe(false);
     expect(isProviderDriverKind("opencode")).toBe(true);
     expect(isProviderDriverKind("cursor")).toBe(false);
     expect(isProviderDriverKind("cursor")).toBe(false);
@@ -63,7 +63,7 @@ describe("provider SPI", () => {
     ] as const) {
       expect(adapter[key]).toBeDefined();
     }
-    expect(adapter.provider).toBe("codex");
+    expect(adapter.provider).toBe("opencode");
   });
 
   it("runs trivial effects against the upgraded Effect runtime", async () => {

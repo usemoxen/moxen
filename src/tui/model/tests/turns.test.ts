@@ -171,6 +171,34 @@ describe("groupTurns", () => {
     expect(groups[0]?.live).toMatchObject({ id: "m1", text: "partial…" });
   });
 
+  it("moves streaming text into the work once a tool call lands after it", () => {
+    const tool = entry({
+      id: "t1",
+      at: "2026-09-16T02:00:05.000Z",
+      kind: "activity",
+      activityKind: "tool.completed",
+      activity: { id: "t1", tone: "tool", kind: "tool.completed", summary: "x", turnId: "turn-1", createdAt: "2026-09-16T02:00:05.000Z", payload: { toolCallId: "c1" } } as unknown as TimelineEntry["activity"],
+    });
+    const text = entry({ id: "m1", at: "2026-09-16T02:00:01.000Z", kind: "assistant", text: "Now checking X…", streaming: true });
+    const groups = groupTurns([entry({ id: "u1", kind: "user", text: "go" }), text, tool]);
+    expect(groups[0]?.live).toBeNull();
+    expect(groups[0]?.work.map((row) => row.id)).toEqual(["m1", "t1"]);
+    // Bookkeeping rows do not end the text: it is still being written.
+    const noise = entry({ id: "n1", at: "2026-09-16T02:00:05.000Z", kind: "activity", activity: { id: "n1", tone: "info", kind: "context-window.updated", summary: "", turnId: "turn-1", createdAt: "x", payload: {} } as unknown as TimelineEntry["activity"] });
+    expect(groupTurns([entry({ id: "u1", kind: "user", text: "go" }), text, noise])[0]?.live).toMatchObject({ id: "m1" });
+  });
+
+  it("keeps streaming text where it was written when the user sends a message after it", () => {
+    const groups = groupTurns([
+      entry({ id: "u1", kind: "user", text: "go", at: "2026-09-16T02:00:00.000Z" }),
+      entry({ id: "m1", kind: "assistant", text: "moxen isn't on PATH. Let me find it.", streaming: true, at: "2026-09-16T02:00:01.000Z" }),
+      entry({ id: "u2", kind: "user", text: "(bun src/cli)", at: "2026-09-16T02:00:09.000Z" }),
+    ]);
+    expect(groups[0]?.live).toBeNull();
+    expect(groups[0]?.work.map((row) => row.id)).toEqual(["m1"]);
+    expect(groups[0]?.nudges.map((row) => row.id)).toEqual(["u2"]);
+  });
+
   it("promotes the final message for the same id into the reply", () => {
     const groups = groupTurns([
       entry({ id: "u1", kind: "user", text: "go" }),

@@ -9,16 +9,19 @@ import { Timeline } from "../features/timeline/timeline.js";
 import { DiffPanel } from "../features/diffpanel/diffpanel.js";
 import { Composer } from "../features/composer/composer.js";
 import { useSkillInventory } from "../features/composer/useSkillInventory.js";
+import { pickerEntries } from "../model/skills.js";
 import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
 import { SettingsModal } from "../features/settings/settingsmodal.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import { SubagentBar } from "../features/subagentview/subagentbar.js";
 import { describeScheduled, formatScheduleInput, parseScheduleInput } from "../model/schedule.js";
-import { subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
+import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
 import { useGitPanel } from "../features/gitpanel/useGitPanel.js";
+import { useProviderVersions } from "../features/settings/useProviderVersions.js";
 import { uiFromSnapshot, useSettings } from "../features/settings/useSettings.js";
 import { PickerModal, type PickerBody } from "../features/pickers/pickermodal.js";
+import { useThreadSearch } from "../features/search/useThreadSearch.js";
 import { ModalShell } from "../ui/modalshell.js";
 import { RenameModal } from "../ui/renamemodal.js";
 import { AnswerPanel } from "../features/answerpanel/answerpanel.js";
@@ -42,7 +45,8 @@ import { waitSpans } from "../model/waits.js";
 import { markModalDismissed } from "../model/modalDismiss.js";
 import { setPathRoots } from "../model/activity.js";
 import { Sidebar } from "../features/sidebar/sidebar.js";
-import { MonitoringBackdrop } from "../ui/backdrop.js";
+import { sceneForModel } from "../ui/scenes/catalog.js";
+import { SceneBackdrop } from "../ui/scenes/scenebackdrop.js";
 import { LoadingScreen } from "../ui/loadingscreen.js";
 import { bootLoadingStage, isBootReady } from "../model/readiness.js";
 import { HoverButton } from "../ui/hoverbutton.js";
@@ -83,8 +87,9 @@ import {
   TOAST_INSET,
   TOAST_STEP,
 } from "./constants.js";
-import { clock, scrollPane } from "./utils.js";
+import { clock, launchTarget, scrollPane } from "./utils.js";
 import { useTasksPanel } from "../features/taskspanel/useTasksPanel.js";
+import { useProviderUpdates } from "./hooks/useProviderUpdates.js";
 import { useQuitConfirm } from "./hooks/useQuitConfirm.js";
 import { useUsageLimitBanner } from "./hooks/useUsageLimitBanner.js";
 import { useNoticePager } from "./hooks/useNoticePager.js";
@@ -194,6 +199,10 @@ export function App({
   // snapshot outlives the page, so once it exists the app draws from it:
   // a `ui.*` edit applies on the spot instead of after a restart.
   const settings = useSettings(client, picker === "settings");
+  // Each provider's install on the settings page, and the updaters behind the palette rows and the page's buttons;
+  // the versions are read again whenever an update ends.
+  const providerVersions = useProviderVersions(client, picker === "settings");
+  const providerUpdates = useProviderUpdates(client, toasts.push, providerVersions.reload);
   const ui = uiFromSnapshot(settings.snapshot) ?? launchUi;
   const [pickerFilter, setPickerFilter] = useState("");
   /** Where esc/backdrop returns focus after the command palette closes. */
@@ -225,6 +234,7 @@ export function App({
     resolveAnswerQuestion,
     answerCurrentQuestion,
     toggleAnswerOption,
+    goToQuestion,
     dismissAnswerRequest,
   } = useAnswerFlow(client, threadState, threadStateRef, openThreadId, picker, toasts, setError);
   /** Dismissal key of the last-dismissed resume-compaction banner — a new
@@ -254,6 +264,7 @@ export function App({
     copyDraft,
     setDraft,
     resetDraft,
+    restoreDraft,
     writePending,
     setPending,
     editDraftExternally,
@@ -302,10 +313,11 @@ export function App({
     // the project from". (`sections.settled` is pagination-gated, so it
     // can't serve as the fallback.) The fallback thread only lends its
     // project/model/modes to the composer.
-    const first = sections.active[0]?.thread.id ?? visibleThreads(shell)[0]?.id ?? null;
-    if (first === null) return;
-    setOpenThreadId(first);
-    if (launchView === "thread") return;
+    const target = launchTarget(sections.active, visibleThreads(shell)[0]?.id ?? null);
+    if (target.threadId === null) return;
+    setOpenThreadId(target.threadId);
+    // A thread that is working or waiting on the user is where they were: open it, not the new-thread screen.
+    if (launchView === "thread" || target.transcript) return;
     setCreating(true);
     setFocus("composer");
   }, [openThreadId, sections, launchView]);
@@ -355,7 +367,8 @@ export function App({
     (creating ? null : (selected?.worktreePath ?? null)) ??
     shell.projects.find((project) => project.id === effectiveProjectId)?.workspaceRoot ??
     null;
-  const skillInventory = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
+  const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
+  const pickerSkills = useMemo(() => pickerEntries(skillInventory), [skillInventory]);
 
   /** One palette copy action: missing data toasts instead of dispatching. */
   const copyPaletteText = (text: string | null, emptyMessage: string) => {
@@ -493,6 +506,8 @@ export function App({
     deleteArmed,
     revertArmed,
     sessionRunningRef,
+    subagentOpen: subagentView.target !== null,
+    restoreDraft,
     closePicker,
     closeDiff: diffPanel.closeDiff,
     setError,
@@ -835,7 +850,11 @@ export function App({
       // the window opens the close menu; a 3rd (in the menu) quits via the
       // confirm branch above. An empty prompt jumps straight to the menu.
       const shouldOpenMenu = registerCtrlCPress();
-      if (openThreadId !== null) resetDraft(openThreadId);
+      if (openThreadId !== null) {
+        resetDraft(openThreadId);
+        // The prompt's pasted images are part of it: clearing the text left the chips behind.
+        writePending(openThreadId, []);
+      }
       if (draft.trim().length === 0 || shouldOpenMenu) {
         toasts.dismiss("ctrl-c");
         openQuitConfirm();
@@ -977,6 +996,16 @@ export function App({
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
 
+  /** Whether the open thread's provider can stop one native subagent on its own (OpenCode's driver can; Claude's run inside the turn). */
+  const canStopSubagent = selected?.modelSelection?.instanceId.startsWith("opencode") === true;
+  const stopSubagent = (agentId: string): void => {
+    if (openThreadId === null) return;
+    void client
+      .dispatch({ type: "thread.background.stop", threadId: openThreadId, taskId: agentId })
+      .then(() => toasts.push("subagent-stop", "info", "Subagent stopped", COPY_TOAST_MS))
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
+
   /** Opens the command palette, remembering where esc should return focus. */
   const openCommandPalette = () => {
     // Nothing in it applies to a thread that does not exist yet.
@@ -1017,6 +1046,9 @@ export function App({
     setError,
     closePicker,
   });
+  /** The model's own scene behind the new-thread view (and the sidebar's
+      window onto it), or null for the monitoring texture. */
+  const creatingScene = creating && ui?.modelScenes !== false ? sceneForModel(model) : null;
 
   // A 1s tick while a turn is in flight drives the thinking/working elapsed
   // counter; the 30s tick above is enough for sidebar ages when idle.
@@ -1230,8 +1262,40 @@ export function App({
    * turn that produced file changes for the diff-turn picker, or the
    * command palette's copy/thread/export/jump sections.
    */
+  const threadSearch = useThreadSearch(client, picker === "search", pickerFilter);
   const pickerBody: PickerBody = useMemo(() => {
     if (picker === null) return { kind: "list", sections: [] };
+    // Thread search: what the server found, active threads above settled ones.
+    if (picker === "search") {
+      if (threadSearch.kind === "idle") return { kind: "list", sections: [] };
+      if (threadSearch.kind === "loading") return { kind: "loading" };
+      if (threadSearch.kind === "error") return { kind: "error", message: threadSearch.message };
+      const rowOf = (entry: (typeof threadSearch.found.threads)[number]) => {
+        const hit = entry.hits[0];
+        const where = hit === undefined || hit.kind === "title" ? "title" : hit.kind === "tool" ? (hit.source ?? "tool") : hit.kind === "message" ? (hit.source ?? "message") : hit.kind;
+        const more = entry.hitCount > 1 ? ` (+${entry.hitCount - 1})` : "";
+        return {
+          key: `search:${entry.threadId}`,
+          label: entry.title,
+          meta: hit === undefined ? "" : `${where}: ${hit.snippet}${more}`,
+          onPick: () => {
+            closePicker("composer");
+            setCreating(false);
+            setOpenThreadId(entry.threadId);
+          },
+        };
+      };
+      const found = threadSearch.found.threads;
+      const active = found.filter((entry) => entry.status !== "settled").map(rowOf);
+      const settled = found.filter((entry) => entry.status === "settled").map(rowOf);
+      return {
+        kind: "list",
+        sections: [
+          ...(active.length > 0 ? [{ header: "Active", rows: active }] : []),
+          ...(settled.length > 0 ? [{ header: "Settled", headerColor: COLOR.faint, rows: settled }] : []),
+        ],
+      };
+    }
     // Message actions need no catalog either: copy plus a checkpoint-backed
     // history revert for the clicked user turn (assistant clicks copy
     // directly and never reach this modal).
@@ -1276,6 +1340,10 @@ export function App({
                     },
                   ]
                 : []),
+              // Only a user prompt is a revert point: an agent reply belongs to the turn its prompt opened.
+              ...(entry.kind !== "user"
+                ? []
+                : [
               revertTarget === null
                 ? {
                     key: "message:revert",
@@ -1308,6 +1376,7 @@ export function App({
                         : "files back to before this turn, new ones removed",
                     onPick: () => revertMessageTurn(entry, revertTarget, "files"),
                   },
+                  ]),
             ],
           },
         ],
@@ -1369,6 +1438,15 @@ export function App({
             header: "Thread",
             rows: [
               {
+                key: "thread:search",
+                label: "Search threads",
+                meta: "titles, messages, tool calls · settled included",
+                onPick: () => {
+                  setPickerFilter("");
+                  setPicker("search");
+                },
+              },
+              {
                 key: "thread:new",
                 label: "New thread",
                 ...(selected === null ? {} : { meta: projectTitle }),
@@ -1391,11 +1469,40 @@ export function App({
                   setPicker("project");
                 },
               },
-              {
-                key: "thread:settle",
-                label: selected !== null && threadStatus(selected, Date.now()) === "settled" ? "Unsettle thread" : "Settle thread",
-                onPick: toggleSettleThread,
-              },
+              // Over a native subagent's transcript, settling means that subagent —
+              // never the thread it belongs to. A subagent is not a thread of its
+              // own, so settling is stopping it while it runs, and closing it after.
+              subagentView.target !== null
+                ? (() => {
+                    const agentId = subagentView.target.agentId;
+                    const running = subagentRows.find((row) => row.agentId === agentId)?.running === true;
+                    return running && canStopSubagent
+                      ? {
+                          key: "thread:settle",
+                          label: "Settle subagent",
+                          meta: "stops it",
+                          onPick: () => {
+                            stopSubagent(agentId);
+                            subagentView.close();
+                            closePicker("chat");
+                          },
+                        }
+                      : {
+                          key: "thread:settle",
+                          // A running one this provider cannot stop alone only has its view closed.
+                          label: running ? "Close subagent" : "Settle subagent",
+                          meta: running ? "keeps running" : "closes it",
+                          onPick: () => {
+                            subagentView.close();
+                            closePicker("chat");
+                          },
+                        };
+                  })()
+                : {
+                    key: "thread:settle",
+                    label: selected !== null && threadStatus(selected, Date.now()) === "settled" ? "Unsettle thread" : "Settle thread",
+                    onPick: toggleSettleThread,
+                  },
               {
                 key: "thread:regenerate-title",
                 label: "Regenerate title",
@@ -1510,6 +1617,29 @@ export function App({
                         usageBanner.continueInNewThread();
                       },
                     }),
+              },
+            ],
+          },
+          {
+            header: "Providers",
+            rows: [
+              {
+                key: "update:claude",
+                label: "Update Claude Code",
+                meta: "claude update",
+                onPick: () => {
+                  closePicker("chat");
+                  providerUpdates.update("claude");
+                },
+              },
+              {
+                key: "update:opencode",
+                label: "Update OpenCode",
+                meta: "opencode upgrade",
+                onPick: () => {
+                  closePicker("chat");
+                  providerUpdates.update("opencode");
+                },
               },
             ],
           },
@@ -1675,7 +1805,7 @@ export function App({
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background]);
+  }, [picker, providers, providersError, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**
@@ -1701,8 +1831,9 @@ export function App({
     const kind = gitPanel.forge?.kind ?? null;
     const noun = requestNoun(kind);
     const branch = gitPanel.overview?.status?.branch ?? null;
+    const base = gitPanel.base;
     if (!threadLimited) {
-      send(openRequestPrompt({ kind, draft, branch, cold: false }), "queue");
+      send(openRequestPrompt({ kind, draft, branch, base, cold: false }), "queue");
       toasts.push("forge-agent", "info", `Asked the agent to open a ${draft ? "draft " : ""}${noun.short}`, COPY_TOAST_MS);
       return;
     }
@@ -1711,8 +1842,8 @@ export function App({
       .dispatch({
         type: "thread.delegate",
         parentThreadId: selected.id,
-        task: openRequestPrompt({ kind, draft, branch, cold: true }),
-        title: `Open a ${draft ? "draft " : ""}${noun.short}`,
+        task: openRequestPrompt({ kind, draft, branch, base, cold: true }),
+        title: `Open a ${draft ? "draft " : ""}${noun.short}${base === null ? "" : ` into ${base}`}`,
         provider: handOff.instanceId,
         model: handOff.model,
         wait: false,
@@ -1839,6 +1970,12 @@ export function App({
         width={panelWidth}
         suspended={picker === "answer-custom"}
         pickedValues={draft.selected[question.id] ?? []}
+        {...(draft.custom[question.id] === undefined ? {} : { customValue: draft.custom[question.id]! })}
+        tabs={activeAnswerRequest.questions.map((entry) => ({
+          header: entry.header,
+          answered: resolveAnswerQuestion(entry, draft) !== null,
+        }))}
+        onGoto={goToQuestion}
         onToggleOption={(value) => toggleAnswerOption(draft, question.id, value)}
         onPickOption={(value) => answerCurrentQuestion(question.id, { selected: [value] })}
         onCustom={() => setPicker("answer-custom")}
@@ -1920,20 +2057,22 @@ export function App({
               backgroundColor: SURFACE.base,
             }}
           >
-            {/* Faint control-plane texture behind the empty state only:
-                grid + drifting status dots, zinc palette, unmounted (zero
-                cost) in thread view. offsetX is the pane's raw terminal
+            {/* Behind the empty state only, unmounted (zero cost) in
+                thread view: the selected model's scene when it has one
+                (`ui/scenes/`, a reading well dimmed under the composer),
+                else the faint control-plane texture — grid + drifting
+                status dots, zinc palette — easing between them as the
+                model changes. offsetX is the pane's raw terminal
                 origin (the builder mods it) and the field spans the whole
                 screen with the sidebar's — one lattice, one swarm.
                 Foreground column sits above at zIndex 1 with its own opaque
                 surfaces so text never seams. */}
             {ui?.backdrop === "off" ? null : (
-              <MonitoringBackdrop
+              <SceneBackdrop
+                scene={creatingScene ?? "grid"}
                 width={Math.max(0, width - SIDEBAR_WIDTH)}
                 height={height}
-                offsetX={SIDEBAR_WIDTH}
-                fieldWidth={width}
-                fieldHeight={height}
+                well
                 motion={ui?.backdrop === "static" ? "static" : "animated"}
               />
             )}
@@ -1987,8 +2126,8 @@ export function App({
                 onCopyClick={copyDraft}
                 onExternalEditClick={editDraftExternally}
                 editingExternally={editingExternally}
-                skills={skillInventory?.skills}
-                skillPrefix={skillInventory?.trigger}
+                skills={pickerSkills}
+                onSkillsOpen={refreshSkills}
               />
               )}
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center", marginTop: 1 }}>
@@ -2040,9 +2179,15 @@ export function App({
             turnFileDiffs={diffPanel.turnPatchCache.current}
             gitFiles={diffPanel.gitPatchCache.current}
             width={chatWidth}
-            sessionStatus={session?.status ?? "idle"}
+            // A subagent's transcript is its own run: whether it is still working, and since when, is the
+            // subagent's — the thread's idle parent would have its last group read "Worked" under a bar that says running.
+            sessionStatus={subagentView.target !== null ? subagentRun(subagentView.transcript).status : (session?.status ?? "idle")}
             now={now}
-            turnStartedAt={selected?.latestTurn?.startedAt ?? selected?.latestTurn?.requestedAt ?? null}
+            turnStartedAt={
+              subagentView.target !== null
+                ? subagentRun(subagentView.transcript).startedAt
+                : (selected?.latestTurn?.startedAt ?? selected?.latestTurn?.requestedAt ?? null)
+            }
           />
           ) : (
             <box style={{ flexDirection: "column", flexGrow: 1, alignItems: "center", justifyContent: "center" }}>
@@ -2114,8 +2259,8 @@ export function App({
             onCopyClick={copyDraft}
             onExternalEditClick={editDraftExternally}
             editingExternally={editingExternally}
-            skills={skillInventory?.skills}
-            skillPrefix={skillInventory?.trigger}
+            skills={pickerSkills}
+            onSkillsOpen={refreshSkills}
             contextUsage={contextUsageDisplay}
             onContextUsageClick={() => toggleSideTab("context")}
             backgroundSummary={backgroundSummaryLabel(background)}
@@ -2199,6 +2344,9 @@ export function App({
                     commitChecks={gitPanel.commitChecks}
                     commit={gitPanel.commit}
                     opener={requestOpener}
+                    base={gitPanel.base}
+                    baseChoices={gitPanel.baseChoices}
+                    onPickBase={gitPanel.pickBase}
                     onAgentOpen={agentOpenRequest}
                     onOpenCommit={gitPanel.openCommit}
                     onCloseCommit={gitPanel.closeCommit}
@@ -2229,6 +2377,7 @@ export function App({
                       setFocus("chat");
                       subagentView.open(openThreadId, agentId);
                     }}
+                    {...(canStopSubagent ? { onStopSubagent: stopSubagent } : {})}
                     now={now}
                     onOpen={openThreadFromPanel}
                   />
@@ -2456,6 +2605,10 @@ export function App({
           saving={settings.saving}
           error={settings.error}
           onSet={settings.set}
+          versions={providerVersions.versions}
+          latest={providerVersions.latest}
+          updating={providerUpdates.updating}
+          onUpdate={providerUpdates.update}
           providers={providers}
           screenWidth={width}
           screenHeight={height}
@@ -2498,6 +2651,8 @@ export function App({
                   ? "Select diff turn"
                   : picker === "command"
                     ? "Command palette"
+                    : picker === "search"
+                      ? "Search threads"
                     : picker === "project"
                       ? "Select project"
                       : "Message actions"
@@ -2505,7 +2660,8 @@ export function App({
           body={pickerBody}
           filter={pickerFilter}
           onFilterChange={setPickerFilter}
-          filterable={picker === "model" || picker === "command" || picker === "message" || picker === "project"}
+          filterable={picker === "model" || picker === "command" || picker === "message" || picker === "project" || picker === "search"}
+          prefiltered={picker === "search"}
           emptyLabel={
             picker === "model"
               ? pickerFilter.trim().length > 0
@@ -2519,6 +2675,10 @@ export function App({
                   ? "No turns with changes."
                   : picker === "command"
                     ? "No matching commands."
+                    : picker === "search"
+                      ? pickerFilter.trim().length === 0
+                        ? "Type to search titles, messages and tool calls."
+                        : "No threads match."
                     : picker === "project"
                       ? "No projects reported by the server."
                       : "No actions."

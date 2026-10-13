@@ -1,7 +1,7 @@
 import type { ReactNode, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { TextAttributes } from "@opentui/core";
+import { TextAttributes, bold, fg, t } from "@opentui/core";
 
 import { useHover } from "../../hooks/useHover.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
@@ -9,9 +9,10 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import { describeActivity, fileRowCounts, formatMs, readRangeLabel } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { formatBytes, renderMessage } from "../../model/message.js";
-import { isUsageContinue, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
+import { isCompactPrompt, isUsageContinue, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
+import { readOpenRequestPrompt, requestNoun, type OpenRequestAsk } from "../../model/gitpanel.js";
 import { COLOR, DIFF_BG, MARKER, pulseColor, SPINNER_FRAMES, SURFACE, truncate, markdownSyntaxStyle } from "../../theme.js";
 
 const syntaxStyle = markdownSyntaxStyle;
@@ -62,6 +63,7 @@ function ToolChip({
   title,
   titleBold = false,
   time,
+  meta = [],
   running,
   children,
   onToggle,
@@ -74,6 +76,8 @@ function ToolChip({
       a plain tool title — every other kind stays at the regular weight. */
   titleBold?: boolean;
   time: string;
+  /** Outcome facts (`exit 0`, `3s`) shown after the time on the header line. */
+  meta?: readonly string[];
   running: boolean;
   children: React.ReactNode;
   /** Makes the header row expand/collapse its body (long commands). The
@@ -110,7 +114,7 @@ function ToolChip({
             }
           : {})}
       >
-        <text fg={rail} selectable={false}>{`${glyph} `}</text>
+        <text fg={rail} selectable={false} style={{ flexShrink: 0 }}>{`${glyph} `}</text>
         <text
           fg={toggleable && hovered ? COLOR.bright : running ? COLOR.warn : COLOR.tool}
           attributes={titleBold ? TextAttributes.BOLD : 0}
@@ -118,9 +122,9 @@ function ToolChip({
         >
           {title}
         </text>
-        <text fg={COLOR.faint} selectable={false}>{time.length === 0 ? "" : `  ·  ${time}`}</text>
+        <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{[time, ...meta].filter((part) => part.length > 0).map((part) => `  ·  ${part}`).join("")}</text>
         {toggleable ? (
-          <text fg={COLOR.faint} selectable={false}>{expanded ? " ▾" : " ▸"}</text>
+          <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{expanded ? " ▾" : " ▸"}</text>
         ) : null}
       </box>
       <box style={{ flexDirection: "column", flexGrow: 1, paddingLeft: 2 }}>
@@ -153,7 +157,7 @@ function TodoRows({ items }: { items: { content: string; status: string }[] }) {
   );
 }
 
-function ActivityRow({ entry, now, turnFiles = [], onOpenUrl }: { entry: TimelineEntry; now: number; turnFiles?: readonly PatchFile[]; onOpenUrl?: ((url: string) => void) | undefined }) {
+function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { entry: TimelineEntry; now: number; turnFiles?: readonly PatchFile[]; onOpenUrl?: ((url: string) => void) | undefined; width?: number }) {
   const [expanded, setExpanded] = useState(false);
   if (entry.activity === null) return null;
   const view = describeActivity(entry.activity);
@@ -164,7 +168,6 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl }: { entry: Timelin
     const meta: string[] = [];
     if (view.exit !== null) meta.push(`exit ${view.exit}`);
     if (view.durationMs !== null) meta.push(formatMs(view.durationMs));
-    if (view.workdir !== null) meta.push(view.workdir.replace(/\\/g, "/").split("/").pop() ?? view.workdir);
     if (view.running) meta.push("running");
     const command = clampInfo(view.command, MAX_COMMAND_LINES);
     return (
@@ -173,9 +176,12 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl }: { entry: Timelin
         glyph="$"
         title={view.tool}
         time={time}
+        meta={meta}
         running={view.running}
         {...(command.truncated ? { onToggle: () => setExpanded((current) => !current), expanded } : {})}
       >
+        {/* A call whose input has not arrived yet falls back to the tool's own name: not a command to print. */}
+        {view.command === view.tool ? null : (
         <code
           content={expanded ? view.command : command.text}
           filetype={commandFiletype(view.tool)}
@@ -185,7 +191,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl }: { entry: Timelin
           fg={view.failed ? COLOR.danger : COLOR.text}
           wrapMode="word"
         />
-        {meta.length === 0 ? null : <text fg={COLOR.faint}>{meta.join("  ·  ")}</text>}
+        )}
         {view.outputTail === null ? null : (
           <text fg={COLOR.danger}>{clamp(view.outputTail, MAX_COMMAND_LINES)}</text>
         )}
@@ -418,24 +424,22 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl }: { entry: Timelin
     );
   }
 
+  if (view.kind === "notice" && view.notice === "compacted") {
+    // The provider compacted on its own: the same boundary line as a `/compact` turn.
+    return <CompactionLine title={view.title} tone={COLOR.diff} meta={time.length === 0 ? [] : [time]} summary={view.detail} width={width} />;
+  }
+
   if (view.kind === "notice") {
-    // A compaction summary is long: folded until asked for. A refusal
-    // reason is short: shown under the title.
-    const foldable = view.notice === "compacted" && view.detail !== null;
+    // What is left once a compaction has its own line: a refusal, whose reason is short and shown under the title.
     return (
       <ToolChip
         rail={view.notice === "permission-denied" ? COLOR.danger : COLOR.diff}
-        glyph={view.notice === "compacted" ? "⇣" : view.notice === "permission-denied" ? "⊘" : "•"}
+        glyph={view.notice === "permission-denied" ? "⊘" : "•"}
         title={view.title}
         time={time}
         running={false}
-        {...(foldable ? { onToggle: () => setExpanded((current) => !current), expanded } : {})}
       >
-        {view.detail === null ? null : foldable ? (
-          expanded ? <text fg={COLOR.dim} wrapMode="word">{view.detail}</text> : null
-        ) : (
-          <text fg={COLOR.dim}>{clamp(view.detail, 2)}</text>
-        )}
+        {view.detail === null ? null : <text fg={COLOR.dim}>{clamp(view.detail, 2)}</text>}
       </ToolChip>
     );
   }
@@ -658,6 +662,45 @@ function TaskNotificationBlock({
 }
 
 /**
+ * The Git tab's "have the agent open it" ask: a card naming the request and
+ * its branch, in the delegated-task card's style, instead of a "you" block
+ * holding the steps the agent reads.
+ */
+function OpenRequestBlock({ entry, ask, now }: { entry: TimelineEntry; ask: OpenRequestAsk; now: number }) {
+  const noun = requestNoun(ask.kind);
+  const cli = ask.kind === "gitlab" ? "glab mr create" : "gh pr create";
+  const into = ask.base === null ? "" : ask.kind === "gitlab" ? ` --target-branch ${ask.base}` : ` --base ${ask.base}`;
+  return (
+    <box
+      border={["left"]}
+      borderStyle="heavy"
+      borderColor={COLOR.diff}
+      style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}
+      backgroundColor={SURFACE.panel}
+    >
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
+        <text fg={COLOR.diff} bg={SURFACE.panel}>{"⇡ "}</text>
+        <text fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD}>{`Open ${ask.draft ? "a draft" : "a"} ${noun.short}`}</text>
+        <text fg={COLOR.faint} bg={SURFACE.panel}>{"  ·  "}</text>
+        <text fg={COLOR.accent} bg={SURFACE.panel}>{ask.branch ?? "current branch"}</text>
+        {ask.base === null ? null : (
+          <>
+            <text fg={COLOR.faint} bg={SURFACE.panel}>{" → "}</text>
+            <text fg={COLOR.bright} bg={SURFACE.panel}>{ask.base}</text>
+          </>
+        )}
+        <text fg={COLOR.faint} bg={SURFACE.panel}>{"  ·  "}</text>
+        <text fg={ask.draft ? COLOR.dim : COLOR.added} bg={SURFACE.panel}>{ask.draft ? "draft" : "ready for review"}</text>
+        <text fg={COLOR.faint} bg={SURFACE.panel}>{`  ·  ${clockTime(entry.at, now)}`}</text>
+      </box>
+      <text fg={COLOR.dim} bg={SURFACE.panel}>
+        {`  ${ask.cold ? "Read the branch, then commit" : "Commit"} what belongs, push, and open it with ${cli}${into}`}
+      </text>
+    </box>
+  );
+}
+
+/**
  * The continue moxen sent after a usage limit reset: one quiet line where a
  * "you" prompt would be — the agent reads the full instruction, the user
  * only needs to know why the thread picked up again.
@@ -670,6 +713,111 @@ function ContinueNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
       <text fg={COLOR.faint}>{`  ·  ${clockTime(entry.at, now)}`}</text>
     </box>
   );
+}
+
+/**
+ * Where the conversation was compacted: a rule across the pane with the
+ * label set in it, so it reads as a boundary in the history (what is above
+ * it is now only a summary to the model) rather than as one more tool call.
+ * The summary the provider kept sits behind a toggle and renders as markdown,
+ * in a panel like a reply's. The label is one styled text, so no cell shifts
+ * where its colours change.
+ */
+function CompactionLine({
+  title,
+  tone,
+  meta,
+  summary,
+  width,
+}: {
+  title: string;
+  tone: string;
+  meta: readonly string[];
+  summary: string | null;
+  width: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { hovered, handlers } = useHover();
+  const foldable = summary !== null;
+  const toggle = foldable ? (expanded ? "▾ summary" : "▸ summary") : "";
+  const inner = Math.max(8, width - 2);
+  // The metadata and then the title give way before the rule does.
+  const fits = (parts: string) => parts.length + 2 <= inner - 4;
+  let metaText = meta.length === 0 ? "" : `  ·  ${meta.join("  ·  ")}`;
+  let toggleText = foldable ? `  ${toggle}` : "";
+  if (!fits(`⇣ ${title}${metaText}${toggleText}`)) metaText = "";
+  if (!fits(`⇣ ${title}${metaText}${toggleText}`)) toggleText = "";
+  const shownTitle = truncate(title, Math.max(4, inner - 8 - metaText.length - toggleText.length));
+  // One styled text for the label, so no cell shifts where its colours change.
+  const label = t`${fg(tone)("⇣ ")}${bold(fg(hovered && foldable ? COLOR.bright : COLOR.text)(shownTitle))}${fg(COLOR.faint)(metaText)}${fg(hovered ? COLOR.dim : COLOR.faint)(toggleText)}`;
+  // The rules grow to fill what the label leaves and clip, rather than being
+  // measured against a width estimate: a line a column too long wraps its right
+  // rule onto a row nobody sees.
+  // The gaps between rule and label are spacer boxes, not spaces in the label (a
+  // leading space was lost in a real terminal) and not margins (ignored on the
+  // clipped rule). Two cells on the left, one on the right: the ⇣ glyph draws
+  // wide in some fonts and eats a cell of the left gap, so a matching right gap
+  // read a cell too wide.
+  const rule = (
+    <box style={{ flexGrow: 1, flexBasis: 0, height: 1, overflow: "hidden" }} selectable={false}>
+      <text fg={COLOR.faint} wrapMode="none" selectable={false}>{"─".repeat(400)}</text>
+    </box>
+  );
+  const gap = (cells: number) => <box style={{ width: cells, height: 1, flexShrink: 0 }} selectable={false} />;
+  return (
+    <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 2, marginBottom: 1, paddingLeft: 1, paddingRight: 1 }}>
+      <box
+        style={{ flexDirection: "row", height: 1, flexShrink: 0 }}
+        selectable={false}
+        {...(foldable ? { onMouseDown: () => setExpanded((current) => !current), ...handlers } : {})}
+      >
+        {rule}
+        {gap(2)}
+        <text content={label} wrapMode="none" selectable={false} />
+        {gap(1)}
+        {rule}
+      </box>
+      {expanded && summary !== null ? (
+        <box
+          border={["left"]}
+          borderStyle="heavy"
+          borderColor={COLOR.diff}
+          style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}
+          backgroundColor={SURFACE.panel}
+        >
+          <markdown content={summary} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
+        </box>
+      ) : null}
+    </box>
+  );
+}
+
+/**
+ * A `/compact` turn as that one boundary line, not a "you" card, a "Worked
+ * for…" fold and the whole summary dumped under them: "Compacting…" while the
+ * provider works, then "Conversation compacted" with how long it took. Said
+ * plainly when the turn ended with no summary to show.
+ */
+function CompactBlock({ group, open, now, width }: { group: TurnGroup; open: boolean; now: number; width: number }) {
+  const tick = useAnimTick(open, 500);
+  let compacted = false;
+  let summary: string | null = null;
+  for (const entry of group.work) {
+    if (entry.kind !== "activity" || entry.activity === null) continue;
+    try {
+      const view = describeActivity(entry.activity);
+      if (view.kind === "notice" && view.notice === "compacted") {
+        compacted = true;
+        summary = view.detail;
+      }
+    } catch {
+      // A row that does not describe itself is not the compaction.
+    }
+  }
+  const title = open ? "Compacting conversation…" : compacted ? "Conversation compacted" : "Compaction ended without a summary";
+  const tone = open ? pulseColor(tick, COLOR.dim, COLOR.warn, 1800) : compacted ? COLOR.diff : COLOR.dim;
+  const meta = [...(open || group.durationMs <= 0 ? [] : [formatDuration(group.durationMs)]), clockTime(group.startedAt, now)];
+  return <CompactionLine title={title} tone={tone} meta={meta} summary={open ? null : summary} width={width} />;
 }
 
 function PromptBlock({
@@ -1032,6 +1180,8 @@ function TurnBlock({  group,
   }, [group]);
   const renderPrompt = (entry: TimelineEntry) => {
     if (isUsageContinue(entry.message)) return <ContinueNotice key={entry.id} entry={entry} now={now} />;
+    const ask = entry.message?.role === "user" ? readOpenRequestPrompt(entry.message.text) : null;
+    if (ask !== null) return <OpenRequestBlock key={entry.id} entry={entry} ask={ask} now={now} />;
     const tasks = taskNotifications(entry.message);
     return tasks === null ? (
       <PromptBlock key={entry.id} entry={entry} homeDir={homeDir} now={now} onOpenActions={() => onOpenMessageActions(entry)} />
@@ -1041,7 +1191,7 @@ function TurnBlock({  group,
   };
   const renderWorkEntry = (entry: TimelineEntry) =>
     entry.kind === "user" ? renderPrompt(entry) : entry.kind === "activity" ? (
-      <ActivityRow entry={entry} now={now} turnFiles={overlayRowIds.has(entry.id) ? turnFiles : EMPTY_PATCH_FILES} onOpenUrl={onOpenUrl} />
+      <ActivityRow entry={entry} now={now} turnFiles={overlayRowIds.has(entry.id) ? turnFiles : EMPTY_PATCH_FILES} onOpenUrl={onOpenUrl} width={width} />
     ) : (
       <box
         border={["left"]}
@@ -1089,6 +1239,10 @@ function TurnBlock({  group,
   // Expanded, a prompt sent mid-turn sits where it landed in the work; folded,
   // it stays with the turn's opening prompts above the fold.
   const nudges = workExpanded ? group.nudges : [];
+  // A delegated task settling mid-turn is not something the user said: folded,
+  // its card stays where it landed — below the fold, not above it with the
+  // opening prompts.
+  const lateNotices = workExpanded ? [] : group.nudges.filter((entry) => taskNotifications(entry.message) !== null);
   const inLine =
     (inFlow && group.reply !== null) || nudges.length > 0
       ? [...group.work, ...(inFlow && group.reply !== null ? [group.reply] : []), ...nudges].sort((left, right) => left.at.localeCompare(right.at))
@@ -1105,6 +1259,11 @@ function TurnBlock({  group,
   // trailing tools — the newest calls stay visible until the turn ends.
   const segments = workExpanded ? segmentWork(work, inFlow ? null : closing) : [];
 
+  // `/compact` alone: one line, not a prompt card over a fold of work.
+  if (group.prompts.length > 0 && group.prompts.every((entry) => isCompactPrompt(entry.message))) {
+    return <CompactBlock group={group} open={open} now={now} width={width} />;
+  }
+
   const renderToolRow = (entry: TimelineEntry) => (
     <box key={entry.id} style={{ flexDirection: "column", flexShrink: 0 }}>
       {renderWorkEntry(entry)}
@@ -1116,9 +1275,10 @@ function TurnBlock({  group,
     // carries its own marginTop, and the scrollbox pads the last turn — a
     // wrapper margin here stacked with the next prompt's into a double gap.
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      {group.prompts.filter((entry) => !nudges.includes(entry)).map(renderPrompt)}
+      {group.prompts.filter((entry) => !nudges.includes(entry) && !lateNotices.includes(entry)).map(renderPrompt)}
 
       <WorkFold group={group} open={open} now={now} expanded={workExpanded} onToggle={() => onToggleWork(group.id)} />
+      {lateNotices.map(renderPrompt)}
       {segments.map((segment, index) => {
         const closingBoundary =
           segment.message !== null && closing !== null && segment.message.id === closing.id;

@@ -93,11 +93,13 @@ export function uiFromSnapshot(snapshot: SettingsSnapshot | null): UiConfig | nu
   if (snapshot === null) return null;
   const value = (key: string): unknown => snapshot.settings.find((view) => view.descriptor.key === key)?.value;
   const backdrop = value("ui.backdrop");
+  const modelScenes = value("ui.modelScenes");
   const side = value("ui.defaultSidePanel");
   const context = value("ui.contextRefreshSeconds");
   const usage = value("ui.usageRefreshSeconds");
   return {
     ...(backdrop === "animated" || backdrop === "static" || backdrop === "off" ? { backdrop } : {}),
+    ...(typeof modelScenes === "boolean" ? { modelScenes } : {}),
     ...(side === "context" || side === "git" || side === "agents" || side === "background" ? { defaultSidePanel: side } : {}),
     ...(typeof context === "number" ? { contextRefreshSeconds: context } : {}),
     ...(typeof usage === "number" ? { usageRefreshSeconds: usage } : {}),

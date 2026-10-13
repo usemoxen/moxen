@@ -140,6 +140,25 @@ export interface ModelSwitchView {
   reason: "refusal-fallback" | "auto";
 }
 
+/**
+ * What a compaction kept, as readable markdown. Claude Code hands it over as
+ * `<analysis>…</analysis><summary>…</summary>`: the analysis is the model's
+ * scratch work and the summary is the part it carries forward, so only the
+ * summary is shown, and the tags themselves never are. A summary with no tags
+ * (the other providers') passes through; one cut off before its closing tag
+ * keeps what arrived. Null when nothing readable is left.
+ */
+export function compactionSummary(detail: string | null): string | null {
+  if (detail === null) return null;
+  const open = /<summary>/iu.exec(detail);
+  const body =
+    open === null
+      ? detail.replace(/<analysis>[\s\S]*?(?:<\/analysis>|$)/giu, "")
+      : detail.slice(open.index + open[0].length).replace(/<\/summary>[\s\S]*$/iu, "");
+  const text = body.replace(/<\/?(?:analysis|summary)>/giu, "").trim();
+  return text.length === 0 ? null : text;
+}
+
 /** Something the provider did to the session: compacted it, or refused a tool call in auto mode. */
 export interface NoticeView {
   kind: "notice";
@@ -532,7 +551,7 @@ function toolSearchView(input: Record<string, unknown>, running: boolean): Activ
       return { kind: "todos", title: "Loaded checklist tools", items: [], running };
     }
     if (names.length > 0) {
-      return { kind: "tool", tool: running ? "Loading tools" : "Loaded tools", detail: names.join(", "), running };
+      return { kind: "tool", tool: running ? "Loading tools" : "Loaded tools", detail: names.map(prettyToolName).join(", "), running };
     }
   }
   const terms = query
@@ -642,10 +661,14 @@ const SUBAGENT_OUTCOME: Record<string, string> = {
  */
 function opencodeSubagentState(state: Record<string, unknown>, input: Record<string, unknown>, running: boolean): string | null {
   if (running || asString(input.agent) === null) return null;
-  if (state.status === "failed") return "failed";
+  const output = asString(state.output) ?? "";
+  const said = /<subagent\b[^>]*\bstate="([a-z_]+)"/u.exec(output)?.[1];
+  // A call an interrupt cut short is stopped, not failed — the server says so
+  // (`stopped`), and a message that names it covers a call that said it in words.
+  if (state.stopped === true || said === "cancelled" || said === "interrupted") return "stopped";
+  if (state.status === "failed") return /\b(aborted|cancell?ed|interrupted)\b/iu.test(output) ? "stopped" : "failed";
   if (input.background === true) return "launched";
-  const said = /<subagent\b[^>]*\bstate="([a-z_]+)"/u.exec(asString(state.output) ?? "")?.[1];
-  return said === "failed" || said === "error" ? "failed" : said === "cancelled" || said === "interrupted" ? "stopped" : null;
+  return said === "failed" || said === "error" ? "failed" : null;
 }
 
 /**
@@ -664,14 +687,52 @@ function codeModeCalls(code: string): string {
   return [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(", ");
 }
 
-/** `mcp__linear__create_issue` → `linear: create_issue` — the raw
-    double-underscore server/tool encoding reads poorly verbatim. */
+/**
+ * An MCP tool's id is `mcp__<server>__<tool>`. The server part is whatever the
+ * client named it: a hosted connector arrives as `claude_ai_Linear`, a plugin's
+ * as `plugin_<plugin>_<server>`. Neither reads well verbatim.
+ */
+export function parseMcpToolName(name: string): { server: string; tool: string } | null {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(name.trim());
+  return match === null ? null : { server: match[1]!, tool: match[2]! };
+}
+
+/** `claude_ai_Linear` → `Linear`, `plugin_figma_figma` → `figma`, `claude_ai_Claude_Docs` → `Claude Docs`. */
+export function prettyMcpServer(server: string): string {
+  const words = server
+    .replace(/^claude[_.\s]ai[_.\s]+/iu, "")
+    .replace(/^plugin[_-]+/iu, "")
+    .split(/[_\s-]+/u)
+    .filter((word) => word.length > 0);
+  // `plugin_linear_linear`: a plugin named for its one server says it twice.
+  const half = words.length / 2;
+  const doubled = Number.isInteger(half) && half > 0 && words.slice(0, half).join(" ").toLowerCase() === words.slice(half).join(" ").toLowerCase();
+  // A name that is all lowercase (`linear`) is capitalised; one that already has capitals (`Claude Docs`) is left as written.
+  const shown = (doubled ? words.slice(0, half) : words).map((word) => (word === word.toLowerCase() ? `${word[0]!.toUpperCase()}${word.slice(1)}` : word));
+  return shown.join(" ") || server;
+}
+
+/** `list_issues` → `List issues`, `getTeam` → `Get team`. */
+export function prettyMcpTool(tool: string): string {
+  const words = tool
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .split(/[_\s-]+/u)
+    .filter((word) => word.length > 0)
+    .map((word) => word.toLowerCase());
+  const text = words.join(" ");
+  return text.length === 0 ? tool : `${text[0]!.toUpperCase()}${text.slice(1)}`;
+}
+
+/** `mcp__claude_ai_Linear__list_issues` → `Linear · List issues`; any other name as it is. */
+export function prettyToolName(name: string): string {
+  const mcp = parseMcpToolName(name);
+  return mcp === null ? name : `${prettyMcpServer(mcp.server)} · ${prettyMcpTool(mcp.tool)}`;
+}
+
 function friendlyToolTitle(name: string): string {
   const known = FRIENDLY_TOOL_TITLES[name.toLowerCase()];
   if (known !== undefined) return known;
-  const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name);
-  if (mcpMatch !== null) return `${mcpMatch[1]}: ${mcpMatch[2]}`;
-  return name;
+  return prettyToolName(name);
 }
 
 function isRunning(payload: Record<string, unknown>): boolean {
@@ -711,7 +772,13 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
   }
   if (activity.kind === "notice") {
     const notice = payload.notice === "compacted" || payload.notice === "permission-denied" ? payload.notice : "other";
-    return { kind: "notice", notice, title: asString(activity.summary) ?? "Notice", detail: asString(payload.detail) };
+    const detail = asString(payload.detail);
+    return {
+      kind: "notice",
+      notice,
+      title: asString(activity.summary) ?? "Notice",
+      detail: notice === "compacted" ? compactionSummary(detail) : detail,
+    };
   }
   if (activity.kind === "usage.limit" || activity.kind === "usage.wrap-up") {
     return { kind: "usage-limit", label: asString(payload.label), resetsAt: asString(payload.resetsAt), wrapUp: activity.kind === "usage.wrap-up" };
@@ -924,7 +991,11 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
       };
     }
     if (short === "skill") {
-      return { kind: "skill", name: asString(input.name) ?? title, running };
+      // Claude sends `{ skill }`, OpenCode `{ name }` — and records it with an
+      // empty input, leaving the name only in the result it loads
+      // (`<skill_content name="…">`).
+      const loaded = /<skill_content name="([^"]+)"/u.exec(asString(payload.detail) ?? "")?.[1];
+      return { kind: "skill", name: asString(input.name) ?? asString(input.skill) ?? loaded ?? title, running };
     }
     // OpenCode's list/read rows arrive nameless (`data: {}`) with a
     // `<path>…</path><type>file|directory</type>` result dump in `detail` —

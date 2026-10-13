@@ -142,12 +142,19 @@ export function imageSetError(images: readonly Pick<ImageAttachmentUpload, "name
 /** `@path` preceded by start-of-line or whitespace, so emails don't match. */
 const MENTION = /(^|\s)@([^\s@][^\s]*)/g;
 
+/**
+ * `@path` names an image to attach — and only when it reads like one. Prompts
+ * are full of other `@` words (`@property(nonatomic)`, `@Override`, `@param`,
+ * a handle), and treating each as a file to attach failed the whole message
+ * with "attachment not found" and rewrote the code in it. Those stay text.
+ */
 export function extractMentions(draft: string): { text: string; paths: string[] } {
   const paths: string[] = [];
   const text = draft.replace(MENTION, (_match, prefix: string, raw: string) => {
     const suffix = raw.match(/[.,;:!?)]+$/)?.[0] ?? "";
     const cleaned = suffix.length > 0 ? raw.slice(0, -suffix.length) : raw;
     if (cleaned.length === 0) return _match;
+    if (MIME_BY_EXTENSION[path.extname(cleaned).toLowerCase()] === undefined) return _match;
     paths.push(cleaned);
     return `${prefix}${path.basename(cleaned)}${suffix}`;
   });

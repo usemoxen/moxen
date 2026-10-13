@@ -1,7 +1,7 @@
 /**
  * Claude driver: `ProviderAdapter` over the official Agent SDK.
  *
- * Thin by design (§4): no Effect Layers, no host services. One `query()`
+ * Thin by design (docs/providers.md): no Effect Layers, no host services. One `query()`
  * per thread in streaming-input mode; a per-session pump translates SDK
  * messages into SPI events, transcripts, usage totals, and turn outcomes.
  * Permissions park in `canUseTool` until `respondToRequest` /
@@ -9,7 +9,7 @@
  * `getSessionMessages` + `forkSession` + resume); compaction is the
  * slash-command `/compact` with `compact_boundary` observed. Auth is
  * inherited from the CLI login — never our own OAuth.
- * See ARCHITECTURE.md §5.
+ * See docs/providers.md.
  */
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -59,7 +59,7 @@ import type {
   SideQuestionInput,
 } from "../spi.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { McpServerSpec } from "../../mcp.js";
+import { mcpSignature, type McpServerSpec } from "../../mcp.js";
 import {
   claudeSignedOutMessage,
   isClaudeAuthErrorText,
@@ -70,6 +70,7 @@ import {
   resolveClaudeHomePath,
   type ClaudeSettings,
 } from "./config.js";
+import type { SkillsMod } from "./skillsmod.js";
 import {
   classifyToolUse,
   needsAllowDangerouslySkipPermissions,
@@ -77,6 +78,8 @@ import {
   sessionAllowKey,
 } from "./permissions.js";
 import { claudeModelName } from "./catalog.js";
+import { assertClaudeCodeVersion } from "./version.js";
+import { isolationViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import {
   effectiveEffortChoice,
   effortFlagSettings,
@@ -110,6 +113,12 @@ export interface ClaudeDriverOptions {
   readonly transport?: ClaudeTransport;
   readonly sessionApi?: ClaudeSessionApi;
   readonly usageProbeTimeoutMs?: number;
+  /**
+   * The `agent-skills` mod to load into every session (see `skillsmod.ts`).
+   * Null leaves sessions as they were; production passes `locateSkillsMod()`.
+   * Tests stay off unless they ask, so none depends on where the checkout lives.
+   */
+  readonly skillsMod?: SkillsMod | null;
 }
 
 export type DriverTurnStatus = "completed" | "failed" | "interrupted";
@@ -149,6 +158,8 @@ interface ParkedRequest {
 interface ClaudeSession {
   readonly threadId: ThreadId;
   readonly workingDirectory: string;
+  /** How moxen's own skills reach this session; only `served` points the mod at the bundled folder. */
+  readonly moxenSkills: "project" | "served" | "none";
   /**
    * The assistant message streaming now, not yet known to be interim or
    * final. The next tool call or message makes it a note; `result` makes it
@@ -186,9 +197,14 @@ interface ClaudeSession {
   model: string | null;
   /** The session-wide effort last applied (never `ultrathink`, which is per turn); null = the model's default. */
   effort: ClaudeEffortChoice | null;
-  /** MCP servers and runtime instructions the session was started with, kept so a rebuilt query has them too. */
-  readonly mcpServers: readonly McpServerSpec[] | null;
+  /**
+   * The MCP servers the session has (kept current by `updateMcpServers`) and the runtime instructions it was
+   * started with, kept so a rebuilt query has them too.
+   */
+  mcpServers: readonly McpServerSpec[] | null;
   readonly instructions: string | null;
+  /** Set when the session runs in its own worktree: the PreToolUse hook refuses what reaches the checkout it came from. */
+  readonly isolation: WorktreeIsolation | null;
   /**
    * SDK message uuid → the API message id and tool calls it carried. A
    * refusal fallback names what it retracts by uuid; the transcript knows
@@ -386,6 +402,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   private readonly transport: ClaudeTransport;
   private readonly sessionApi: ClaudeSessionApi;
   private readonly usageProbeTimeoutMs: number;
+  private readonly skillsMod: SkillsMod | null;
   private readonly sessions = new Map<ThreadId, ClaudeSession>();
   /**
    * Last resumable CLI session id per thread, kept past session teardown.
@@ -406,6 +423,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SdkTransport();
     this.sessionApi = options.sessionApi ?? new SdkSessionApi();
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
+    this.skillsMod = this.settings.agentSkills ? (options.skillsMod ?? null) : null;
     this.handlePermissionRequest = (toolName, input, callbackOptions) =>
       this.onPermissionRequest(toolName, input, callbackOptions);
     this.handleUserDialog = (request, dialogOptions) => this.onUserDialog(request, dialogOptions);
@@ -426,6 +444,46 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     });
   }
 
+  /** The effort a session starts at, without its `settings` (those are merged in `sessionSettings`). */
+  private spawnEffort(session: ClaudeSession): Omit<ReturnType<typeof spawnEffortOptions>, "settings"> {
+    const { settings: _settings, ...effort } = spawnEffortOptions(session.effort);
+    return effort;
+  }
+
+  /**
+   * Session-scoped Claude Code settings: the ultracode flag the effort choice sets, and the user's auto-compact
+   * window (`providers.claude.autoCompactWindow`). One `settings` option holds both, so they are merged.
+   */
+  private sessionSettings(session: ClaudeSession): { settings?: NonNullable<ClaudeQueryOptions["settings"]> } {
+    const effort = spawnEffortOptions(session.effort).settings;
+    const window = this.settings.autoCompactWindow;
+    const merged = { ...effort, ...(window !== null ? { autoCompactWindow: window } : {}) };
+    return Object.keys(merged).length > 0 ? { settings: merged as NonNullable<ClaudeQueryOptions["settings"]> } : {};
+  }
+
+  /**
+   * The servers this thread should have now, for a session already running.
+   * The SDK replaces the whole set it was given (a server left out is
+   * disconnected), so the full set goes in whenever it differs.
+   */
+  readonly updateMcpServers = async (threadId: ThreadId, servers: readonly McpServerSpec[]): Promise<void> => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed || typeof session.query.setMcpServers !== "function") return;
+    if (mcpSignature(servers) === mcpSignature(session.mcpServers ?? [])) return;
+    await session.query.setMcpServers(claudeMcpServers(servers));
+    session.mcpServers = servers.length > 0 ? servers : null;
+  };
+
+  /** Binaries already found current: a pass is remembered, a refusal is asked again (the user may have updated since). */
+  private readonly versionOk = new Set<string>();
+
+  private async checkClaudeCodeVersion(): Promise<void> {
+    const binary = this.settings.binaryPath;
+    if (this.versionOk.has(binary)) return;
+    await assertClaudeCodeVersion(binary, this.baseEnv);
+    this.versionOk.add(binary);
+  }
+
   private requireSession(threadId: ThreadId): ClaudeSession {
     const session = this.sessions.get(threadId);
     if (!session) {
@@ -442,6 +500,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.attempt("CLAUDE_SPAWN_FAILED", `Could not start a Claude session for thread ${input.threadId}`, async () => {
       const existing = this.sessions.get(input.threadId);
       if (existing && !existing.closed) return this.describeSession(existing);
+      await this.checkClaudeCodeVersion();
       const launch = parseClaudeLaunchArgs(this.settings.launchArgs);
       const basePermissionMode = permissionModeForRuntimeMode(
         input.runtimeMode ?? "full-access",
@@ -450,6 +509,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       const session: ClaudeSession = {
         threadId: input.threadId,
         workingDirectory: input.workingDirectory,
+        moxenSkills: input.moxenSkills ?? "served",
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
         closed: false,
@@ -459,6 +519,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         effort: sessionWideEffort(effectiveEffortChoice(input.modelSelection)),
         mcpServers: input.mcpServers && input.mcpServers.length > 0 ? input.mcpServers : null,
         instructions: input.instructions ?? null,
+        isolation: input.isolation ?? null,
         sdkMessages: new Map(),
         stream: { messageId: null, blocks: new Map() },
         textPublished: new Map(),
@@ -1941,7 +2002,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     ];
     const text = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
     const openTurnId = (): TurnId | null => session.transcript.find((turn) => turn.status === "running")?.id ?? null;
-    return {
+    const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {
       PostCompact: observe((input) => {
         this.publish({
           type: "session.notice",
@@ -1991,6 +2052,28 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       SubagentStart: observe((input) => this.publishSubagent(session, input, "started")),
       SubagentStop: observe((input) => this.publishSubagent(session, input, "stopped")),
     };
+    const { isolation } = session;
+    if (isolation) {
+      // Unlike `canUseTool`, a hook runs in every permission mode (bypass included), and it covers subagents.
+      hooks.PreToolUse = [
+        {
+          hooks: [
+            async (input) => {
+              const call = input as unknown as { tool_name?: unknown; tool_input?: unknown; cwd?: unknown };
+              const reason = isolationViolation(isolation, {
+                tool: typeof call.tool_name === "string" ? call.tool_name : "",
+                input: call.tool_input,
+                cwd: typeof call.cwd === "string" ? call.cwd : session.workingDirectory,
+              });
+              return reason === null
+                ? {}
+                : { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } };
+            },
+          ],
+        },
+      ];
+    }
+    return hooks;
   }
 
   private publishSubagent(session: ClaudeSession, input: Record<string, unknown>, status: "started" | "stopped"): void {
@@ -2278,8 +2361,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     )) {
       if (typeof value === "string") env[key] = value;
     }
+    // The mod finds moxen's own skills here; `.agents/skills` it reads itself.
+    if (this.skillsMod?.bundledSkillsDir && session.moxenSkills === "served") env["MOXEN_SKILLS_DIR"] = this.skillsMod.bundledSkillsDir;
     return {
       cwd: session.workingDirectory,
+      ...(this.skillsMod ? { plugins: [{ type: "local" as const, path: this.skillsMod.path }] } : {}),
       ...(session.model ? { model: session.model } : {}),
       ...(session.resumeSessionId ? { resume: session.resumeSessionId } : {}),
       // Built per query: an in-process server instance connects to one query only, so a rebuilt one needs its own.
@@ -2297,7 +2383,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       ...(needsAllowDangerouslySkipPermissions(session.basePermissionMode)
         ? { allowDangerouslySkipPermissions: true }
         : {}),
-      ...spawnEffortOptions(session.effort),
+      ...this.spawnEffort(session),
+      ...this.sessionSettings(session),
       env,
       pathToClaudeCodeExecutable: resolveClaudeExecutable(this.settings.binaryPath, this.baseEnv),
       canUseTool: this.handlePermissionRequest,

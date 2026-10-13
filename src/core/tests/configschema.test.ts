@@ -55,13 +55,26 @@ describe("settings schema", () => {
       const kind = descriptor.kind;
       if ((kind.type !== "integer" && kind.type !== "duration") || kind.presets === undefined) continue;
       for (const preset of kind.presets) expect(parseSettingValue(descriptor, String(preset))).toBe(preset);
-      expect(kind.presets as readonly unknown[]).toContain(descriptor.defaultValue);
+      // A key that is unset by default (the auto-compact window) has no default to offer among them.
+      if (descriptor.defaultValue !== undefined) expect(kind.presets as readonly unknown[]).toContain(descriptor.defaultValue);
     }
   });
 
   it("clears an optional enum set to nothing, but refuses nothing for one with a default", () => {
     expect(setConfigValue({ ...DEFAULT_CONFIG, speedMode: "fast" }, "speedMode", "").speedMode).toBeUndefined();
     expect(() => parseSettingValue(settingDescriptor("ui.backdrop")!, "")).toThrow(/must be one of/);
+  });
+
+  it("takes the provider settings the panes offer, within their range, and reads them back from the file", () => {
+    const window = setConfigValue(DEFAULT_CONFIG, "providers.claude.autoCompactWindow", "300000");
+    expect(window.providers?.claude?.autoCompactWindow).toBe(300_000);
+    expect(() => setConfigValue(DEFAULT_CONFIG, "providers.claude.autoCompactWindow", "50000")).toThrow(/between 100000 and 1000000/);
+    expect(setConfigValue(window, "providers.claude.autoCompactWindow", "").providers?.claude?.autoCompactWindow).toBeUndefined();
+
+    const both = setConfigValue(window, "providers.opencode.binaryPath", "/opt/opencode");
+    const reloaded = normalizeConfig(JSON.parse(JSON.stringify(both)));
+    expect(reloaded.providers?.claude?.autoCompactWindow).toBe(300_000);
+    expect(reloaded.providers?.opencode?.binaryPath).toBe("/opt/opencode");
   });
 
   it("refuses a key it does not know", () => {

@@ -2,7 +2,9 @@
   "parsers": [
     {
       "filetype": "json",
-      "aliases": ["jsonc"],
+      "aliases": [
+        "jsonc"
+      ],
       "wasm": "https://github.com/tree-sitter/tree-sitter-json/releases/download/v0.24.8/tree-sitter-json.wasm",
       "queries": {
         "highlights": [
@@ -21,7 +23,10 @@
     },
     {
       "filetype": "kotlin",
-      "aliases": ["kt", "kts"],
+      "aliases": [
+        "kt",
+        "kts"
+      ],
       "wasm": "https://github.com/fwcd/tree-sitter-kotlin/releases/download/0.3.8/tree-sitter-kotlin.wasm",
       "queries": {
         "highlights": [
@@ -67,7 +72,11 @@
     },
     {
       "filetype": "powershell",
-      "aliases": ["ps1", "psm1", "pwsh"],
+      "aliases": [
+        "ps1",
+        "psm1",
+        "pwsh"
+      ],
       "wasm": "https://unpkg.com/tree-sitter-powershell@0.26.4/tree-sitter-powershell.wasm",
       "queries": {
         "highlights": [
@@ -136,6 +145,265 @@
       "queries": {
         "highlights": [
           "https://raw.githubusercontent.com/tree-sitter/tree-sitter-php/v0.24.2/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "yaml",
+      "aliases": [
+        "yml"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/download/v0.7.2/tree-sitter-yaml.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-yaml/v0.7.2/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "swift",
+      "wasm": "https://github.com/alex-pinkus/tree-sitter-swift/releases/download/0.7.3/tree-sitter-swift.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/alex-pinkus/tree-sitter-swift/0.7.3/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "objc",
+      "aliases": [
+        "objective-c",
+        "objectivec",
+        "m",
+        "mm"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-objc/releases/download/v3.0.2/tree-sitter-objc.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-c/v0.24.2/queries/highlights.scm",
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-objc/v3.0.2/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "csharp",
+      "aliases": [
+        "cs",
+        "c_sharp"
+      ],
+      "wasm": "https://github.com/tree-sitter/tree-sitter-c-sharp/releases/download/v0.23.5/tree-sitter-c_sharp.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-c-sharp/v0.23.5/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "scala",
+      "aliases": [
+        "sc"
+      ],
+      "wasm": "https://github.com/tree-sitter/tree-sitter-scala/releases/download/v0.26.2/tree-sitter-scala.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-scala/v0.26.2/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "lua",
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-lua/releases/download/v0.5.0/tree-sitter-lua.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-lua/v0.5.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "elixir",
+      "aliases": [
+        "ex",
+        "exs"
+      ],
+      "wasm": "https://github.com/elixir-lang/tree-sitter-elixir/releases/download/v0.3.5/tree-sitter-elixir.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/elixir-lang/tree-sitter-elixir/v0.3.5/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "haskell",
+      "aliases": [
+        "hs"
+      ],
+      "wasm": "https://github.com/tree-sitter/tree-sitter-haskell/releases/download/v0.24.1/tree-sitter-haskell.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-haskell/v0.24.1/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "ocaml",
+      "aliases": [
+        "ml",
+        "mli"
+      ],
+      "wasm": "https://github.com/tree-sitter/tree-sitter-ocaml/releases/download/v0.26.0/tree-sitter-ocaml.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-ocaml/v0.26.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "make",
+      "aliases": [
+        "makefile",
+        "mk"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-make/releases/download/v1.1.1/tree-sitter-make.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-make/v1.1.1/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "r",
+      "wasm": "https://github.com/r-lib/tree-sitter-r/releases/download/v1.3.0/tree-sitter-r.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/r-lib/tree-sitter-r/v1.3.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "julia",
+      "aliases": [
+        "jl"
+      ],
+      "wasm": "https://github.com/tree-sitter/tree-sitter-julia/releases/download/v0.25.0/tree-sitter-julia.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-julia/v0.25.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "perl",
+      "aliases": [
+        "pl",
+        "pm"
+      ],
+      "wasm": "https://github.com/tree-sitter-perl/tree-sitter-perl/releases/download/v2.0.0/tree-sitter-perl.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-perl/tree-sitter-perl/v2.0.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "xml",
+      "aliases": [
+        "svg",
+        "xsd",
+        "xsl",
+        "plist"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-xml/releases/download/v0.7.0/tree-sitter-xml.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-xml/v0.7.0/queries/xml/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "diff",
+      "aliases": [
+        "patch"
+      ],
+      "wasm": "https://github.com/the-mikedavis/tree-sitter-diff/releases/download/v0.2.0/tree-sitter-diff.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/the-mikedavis/tree-sitter-diff/v0.2.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "vim",
+      "aliases": [
+        "vimscript"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-vim/releases/download/v0.8.1/tree-sitter-vim.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-vim/v0.8.1/queries/vim/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "odin",
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-odin/releases/download/v1.3.0/tree-sitter-odin.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-odin/v1.3.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "cuda",
+      "aliases": [
+        "cu",
+        "cuh"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-cuda/releases/download/v0.21.2/tree-sitter-cuda.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-c/v0.24.2/queries/highlights.scm",
+          "https://raw.githubusercontent.com/tree-sitter/tree-sitter-cpp/v0.23.4/queries/highlights.scm",
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-cuda/v0.21.2/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "kdl",
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-kdl/releases/download/v2.0.0/tree-sitter-kdl.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-kdl/v2.0.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "kconfig",
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-kconfig/releases/download/v1.3.0/tree-sitter-kconfig.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-kconfig/v1.3.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "starlark",
+      "aliases": [
+        "bzl",
+        "bazel"
+      ],
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-starlark/releases/download/v1.3.0/tree-sitter-starlark.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-starlark/v1.3.0/queries/highlights.scm"
+        ]
+      }
+    },
+    {
+      "filetype": "bicep",
+      "wasm": "https://github.com/tree-sitter-grammars/tree-sitter-bicep/releases/download/v1.1.0/tree-sitter-bicep.wasm",
+      "queries": {
+        "highlights": [
+          "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-bicep/v1.1.0/queries/highlights.scm"
         ]
       }
     }

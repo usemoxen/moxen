@@ -47,7 +47,7 @@ function asString(value: unknown): string | null {
 
 /**
  * The questions array, wherever this provider parked it: Claude sends
- * `{ toolName, input }`, Codex and Grok `{ method, params }`, OpenCode the
+ * `{ toolName, input }`, OpenCode the
  * event properties verbatim.
  */
 function questionsFrom(raw: Record<string, unknown>): readonly unknown[] | null {

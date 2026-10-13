@@ -36,6 +36,8 @@ export interface ClaudeQueryOptions {
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly resume?: string;
   readonly mcpServers?: Record<string, McpServerConfig>;
+  /** Local plugins to load for this session (the `agent-skills` mod). */
+  readonly plugins?: Array<{ type: "local"; path: string }>;
   /** Claude Code's own prompt with moxen's runtime instructions appended. */
   readonly systemPrompt?: { readonly type: "preset"; readonly preset: "claude_code"; readonly append?: string };
   readonly env?: Record<string, string>;
@@ -90,6 +92,11 @@ export interface ClaudeQuery extends AsyncIterable<SDKMessage> {
   close?(): void;
   /** Stop a background task; a `task_notification` with status `stopped` follows. */
   stopTask?(taskId: string): Promise<void>;
+  /**
+   * Replace the servers moxen handed the session, mid-session: removed ones
+   * disconnect, new ones connect. The user's own servers are not touched.
+   */
+  setMcpServers?(servers: Record<string, McpServerConfig>): Promise<unknown>;
 }
 
 export interface ClaudeTransport {

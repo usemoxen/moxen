@@ -76,5 +76,18 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   await new Promise((resolve) => setTimeout(resolve, 500));
   await setup.flush();
   console.log("--- turn reverted (resynced) ---");
-  console.log(setup.captureCharFrame());
+  const reverted = setup.captureCharFrame();
+  console.log(reverted);
+  // The prompt that was taken back is in the composer, ready to edit and resend.
+  if (!reverted.includes("Render **markdown**, plus diffs and commands")) fail("reverted prompt not restored to the composer");
+
+  // Empty it again so the scenarios after this one see the composer as before.
+  await act(async () => setup.mockInput.pressKey("c", { ctrl: true }));
+  await setup.flush();
+  if (setup.captureCharFrame().includes("Render **markdown**, plus diffs and commands")) fail("ctrl+c did not clear the restored prompt");
+  // Revert hands focus to the composer; give it back to the timeline, and let
+  // the clear's toast expire so the next scenario starts from a quiet frame.
+  await act(async () => setup.mockInput.pressEscape());
+  await new Promise((resolve) => setTimeout(resolve, 2_200));
+  await setup.flush();
 }

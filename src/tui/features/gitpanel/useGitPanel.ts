@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { baseChoices, resolveBase } from "../../model/gitpanel.js";
 
 import type {
   ClientApi,
@@ -54,6 +56,11 @@ export interface GitPanelState {
   /** Which branch history is shown for; null follows the checked-out one. */
   readonly branch: string | null;
   readonly selectBranch: (branch: string | null) => void;
+  /** Branches a new request can merge into, the repository's default first. */
+  readonly baseChoices: readonly string[];
+  /** The one it will merge into: picked, else the default. Null when there is none to choose. */
+  readonly base: string | null;
+  readonly pickBase: (base: string) => void;
   readonly refresh: () => void;
   readonly createRequest: (input: { title: string; body?: string; draft?: boolean }) => Promise<string | null>;
   readonly commentOn: (number: number, body: string) => Promise<void>;
@@ -72,6 +79,9 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
   const [status, setStatus] = useState<ForgeRequestStatus | null>(null);
   const [commitChecks, setCommitChecks] = useState<Readonly<Record<string, ForgeChecks>>>({});
   const [commit, setCommit] = useState<OpenCommit | null>(null);
+  const [pickedBase, setPickedBase] = useState<string | null>(null);
+  const choices = useMemo(() => baseChoices(overview), [overview]);
+  const base = resolveBase(pickedBase, choices);
   const generation = useRef(0);
   const commitGeneration = useRef(0);
 
@@ -203,13 +213,14 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
           threadId,
           title: input.title,
           ...(input.body !== undefined ? { body: input.body } : {}),
+          ...(base !== null ? { targetBranch: base } : {}),
           ...(input.draft !== undefined ? { draft: input.draft } : {}),
         }),
       );
       read();
       return result.url;
     },
-    [client, threadId, write, read],
+    [client, threadId, write, read, base],
   );
 
   const commentOn = useCallback(
@@ -246,6 +257,9 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
     busy,
     branch,
     selectBranch,
+    baseChoices: choices,
+    base,
+    pickBase: setPickedBase,
     refresh: read,
     createRequest,
     commentOn,

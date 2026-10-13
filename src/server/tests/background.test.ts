@@ -107,7 +107,7 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 describe("background work through ClientApi", () => {
   it("keeps notes, records a self-started turn, and lists and stops background tasks", async () => {
     const driver = new BackgroundDriver();
-    const harness = await testHarness({ drivers: { claude: () => driver, codex: () => driver, grok: () => driver, opencode: () => driver } });
+    const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     try {
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Watch the log", wait: true, threadEnvMode: "local" });

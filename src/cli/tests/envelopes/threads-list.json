@@ -28,7 +28,7 @@
         "title": "Existing project",
         "workspaceRoot": "<root>",
         "defaultModelSelection": {
-          "instanceId": "codex",
+          "instanceId": "opencode",
           "model": "gpt-5.6-sol"
         },
         "createdAt": "<time>",
@@ -42,7 +42,7 @@
         "projectId": "project-existing",
         "title": "Existing thread",
         "modelSelection": {
-          "instanceId": "codex",
+          "instanceId": "opencode",
           "model": "gpt-5.6-sol"
         },
         "runtimeMode": "full-access",
@@ -60,7 +60,7 @@
         "session": {
           "threadId": "thread-existing",
           "status": "idle",
-          "providerName": "codex",
+          "providerName": "opencode",
           "runtimeMode": "full-access",
           "activeTurnId": null,
           "lastError": null,
@@ -81,7 +81,7 @@
         "proposedPlans": [],
         "turnModelSelections": {
           "<id-1>": {
-            "instanceId": "codex",
+            "instanceId": "opencode",
             "model": "gpt-5.6-sol"
           }
         },

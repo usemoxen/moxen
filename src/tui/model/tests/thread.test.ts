@@ -470,6 +470,36 @@ describe("timeline tool-call collapsing", () => {
   });
 });
 
+describe("a foreground OpenCode subagent call cut short", () => {
+  const call = (stateExtra: Record<string, unknown>, output: string) => ({
+    id: "a1",
+    tone: "tool",
+    kind: "tool-call.completed",
+    summary: "subagent",
+    turnId: "turn-1",
+    createdAt: "2026-09-22T07:34:01.000Z",
+    payload: {
+      itemType: "dynamic_tool_call",
+      status: "failed",
+      toolCallId: "call_sub",
+      title: "subagent",
+      data: { tool: "subagent", state: { status: "failed", input: { agent: "general", description: "Sleep 30 seconds" }, output, ...stateExtra } },
+    },
+  });
+  const view = (activity: unknown) => {
+    const state = applyThreadFrame(emptyThreadState(), snapshotWith({ thread: { id: "t1", activities: [activity] } }));
+    return describeActivity(timeline(state).find((entry) => entry.id === "a1")!.activity!);
+  };
+  it("reads stopped when the server says it was aborted, and failed when it really failed", () => {
+    expect(view(call({ stopped: true }, "Step interrupted"))).toMatchObject({ kind: "agent", state: "stopped", running: false });
+    expect(view(call({}, "Unable to start the subagent"))).toMatchObject({ kind: "agent", state: "failed" });
+  });
+  it("reads stopped when only the words say so", () => {
+    expect(view(call({}, "The tool call was cancelled."))).toMatchObject({ state: "stopped" });
+    expect(view(call({}, '<subagent sessionID="ses_c" state="cancelled">'))).toMatchObject({ state: "stopped" });
+  });
+});
+
 describe("timeline lifecycle filtering", () => {
   it("keeps our own turn bookkeeping out of the transcript", () => {
     // These rows exist for `threads read`; their summaries are a prompt

@@ -4,7 +4,7 @@ import { sdkMcpServer, zodShape } from "../../../core/providers/claude/transport
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../api.js";
 import { startMcpHttpServer } from "../http.js";
-import { callMoxenTool, MAX_MODELS_PER_PROVIDER, MOXEN_TOOLS } from "../tools.js";
+import { callMoxenTool, checkTodos, MAX_MODELS_PER_PROVIDER, MAX_TODO_CHARS, MAX_TODOS, MOXEN_TOOLS } from "../tools.js";
 
 function provider(instanceId: string, overrides: Partial<ProviderSummary> = {}, modelCount = 2): ProviderSummary {
   return {
@@ -43,6 +43,14 @@ describe("models tool", () => {
     expect(JSON.parse(result.text)).toEqual({
       providers: [{ provider: "claudeAgent", name: "CLAUDEAGENT", models: [{ model: "claudeAgent-m0", name: "Model 0", efforts: ["low", "high"] }] }],
     });
+  });
+
+  it("carries a provider's usage limits when known, and leaves the key out when not", async () => {
+    const usageLimits = { checkedAt: "2026-10-07T00:00:00.000Z", windows: [], unavailable: null };
+    const api = catalogApi([provider("claudeAgent", { usageLimits }), provider("codex")]);
+    const { providers } = JSON.parse((await callMoxenTool(api, "parent", "models", {})).text) as { providers: Array<{ provider: string; usageLimits?: unknown }> };
+    expect(providers.find((row) => row.provider === "claudeAgent")?.usageLimits).toEqual(usageLimits);
+    expect("usageLimits" in providers.find((row) => row.provider === "codex")!).toBe(false);
   });
 
   it("caps a huge catalog and says how many more there are, and filters by provider", async () => {
@@ -124,5 +132,34 @@ describe("in-process tools for Claude", () => {
       alwaysLoad: true,
     });
     expect(server).toMatchObject({ type: "sdk", name: "moxen" });
+  });
+});
+
+describe("todos checklist rules", () => {
+  const item = (content: string, status = "pending") => ({ content, status });
+
+  it("accepts a well-formed list, trimming and collapsing whitespace", () => {
+    const { plan, note } = checkTodos([item("  Read   the code ", "completed"), item("Fix the bug", "in_progress"), item("Run the tests")]);
+    expect(plan).toEqual([
+      { step: "Read the code", status: "completed" },
+      { step: "Fix the bug", status: "in_progress" },
+      { step: "Run the tests", status: "pending" },
+    ]);
+    expect(note).toBeNull();
+  });
+
+  it("refuses what would make the Tasks panel noise, saying what to change", () => {
+    expect(() => checkTodos([item("A", "in_progress"), item("B", "in_progress")])).toThrow(/exactly one/);
+    expect(() => checkTodos([item("Same step"), item("same STEP")])).toThrow(/listed twice/);
+    expect(() => checkTodos([item("   ")])).toThrow(/no content/);
+    expect(() => checkTodos([item("x".repeat(MAX_TODO_CHARS + 1))])).toThrow(/characters/);
+    expect(() => checkTodos(Array.from({ length: MAX_TODOS + 1 }, (_, index) => item(`Step ${index}`)))).toThrow(/At most/);
+    expect(() => checkTodos([item("A", "done")])).toThrow(/pending, in_progress or completed/);
+  });
+
+  it("records an unhelpful list but says so", () => {
+    expect(checkTodos([item("A"), item("B")]).note).toMatch(/No item is in_progress/);
+    expect(checkTodos([item("A", "completed")]).note).toMatch(/Every item is completed/);
+    expect(checkTodos([]).note).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { describeActivity, fileRowCounts, formatMs, readRangeLabel, setPathRoots } from "../activity.js";
+import { compactionSummary, describeActivity, prettyToolName, fileRowCounts, formatMs, readRangeLabel, setPathRoots } from "../activity.js";
 import type { ActivityEnvelope } from "../../../core/types.js";
 
 function activity(kind: string, payload: Record<string, unknown>): ActivityEnvelope {
@@ -437,64 +437,16 @@ describe("describeActivity", () => {
     expect(view.kind).toBe("tool");
   });
 
-  it("recovers the pattern from a pattern-titled completed grep row", () => {
+  it.each([
+    ["a pattern-titled completed row", "withCompletedInput|missingCompletedInput", "Found 14 matches\nC:/repo/src/tui/model/activity.ts:\n… 3 more lines"],
+    ["a regex with backslashes", "\\bname\\b", "Found 61 matches\nC:/repo/src/tui/model/attachments.ts:\n… 3 more lines"],
+    ["a zero-match dump", "activity.test.ts", "No files found"],
+    ["a truncation note on the match header", "attachment|clipboard", "Found 100 matches (more matches available)\nC:/repo/AGENTS.md:\n"],
+  ])("recovers the grep pattern from the title of %s", (_case, title, detail) => {
     const view = describeActivity(
-      activity("tool.completed", {
-        itemType: "dynamic_tool_call",
-        toolCallId: "call-4",
-        status: "completed",
-        title: "withCompletedInput|missingCompletedInput",
-        detail: "Found 14 matches\nC:/repo/src/tui/model/activity.ts:\n… 3 more lines",
-        data: {},
-      }),
+      activity("tool.completed", { itemType: "dynamic_tool_call", toolCallId: "call-4", status: "completed", title, detail, data: {} }),
     );
-    expect(view).toMatchObject({
-      kind: "grep",
-      pattern: "withCompletedInput|missingCompletedInput",
-      scope: null,
-    });
-  });
-
-  it("recovers regex patterns containing backslashes from the title", () => {
-    const view = describeActivity(
-      activity("tool.completed", {
-        itemType: "dynamic_tool_call",
-        toolCallId: "call-4",
-        status: "completed",
-        title: "\\bname\\b",
-        detail: "Found 61 matches\nC:/repo/src/tui/model/attachments.ts:\n… 3 more lines",
-        data: {},
-      }),
-    );
-    expect(view).toMatchObject({ kind: "grep", pattern: "\\bname\\b", scope: null });
-  });
-
-  it("maps zero-match grep dumps to the pattern-titled grep view", () => {
-    const view = describeActivity(
-      activity("tool.completed", {
-        itemType: "dynamic_tool_call",
-        toolCallId: "call-4",
-        status: "completed",
-        title: "activity.test.ts",
-        detail: "No files found",
-        data: {},
-      }),
-    );
-    expect(view).toMatchObject({ kind: "grep", pattern: "activity.test.ts", scope: null });
-  });
-
-  it("tolerates a truncation note on the match header", () => {
-    const view = describeActivity(
-      activity("tool.completed", {
-        itemType: "dynamic_tool_call",
-        toolCallId: "call-4",
-        status: "completed",
-        title: "attachment|clipboard",
-        detail: "Found 100 matches (more matches available)\nC:/repo/AGENTS.md:\n",
-        data: {},
-      }),
-    );
-    expect(view).toMatchObject({ kind: "grep", pattern: "attachment|clipboard", scope: null });
+    expect(view).toMatchObject({ kind: "grep", pattern: title, scope: null });
   });
 
   it("collapses nameless glob path dumps to their common directory", () => {
@@ -614,6 +566,35 @@ describe("describeActivity", () => {
     expect(ask).toMatchObject({ kind: "question", title: "Asked 1 question", detail: "What next?" });
   });
 
+  it("names a skill call by the skill, whichever field the provider puts it in", () => {
+    const call = (input: Record<string, unknown>) =>
+      describeActivity(
+        activity("tool.completed", {
+          itemType: "dynamic_tool_call",
+          toolCallId: "toolu_s",
+          status: "completed",
+          title: "Tool call",
+          detail: "Skill: {}",
+          data: { toolName: "Skill", input },
+        }),
+      );
+    // Claude Code: { skill, args }. OpenCode: { name }.
+    expect(call({ skill: "moxen-threads", args: "x" })).toMatchObject({ kind: "skill", name: "moxen-threads" });
+    expect(call({ name: "moxen-doctor" })).toMatchObject({ kind: "skill", name: "moxen-doctor" });
+    // OpenCode records an empty input; the name survives only in the loaded skill's result.
+    const opencode = describeActivity(
+      activity("tool-call.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: "call_o",
+        status: "completed",
+        title: "skill",
+        detail: '<skill_content name="swiftui-pro">\n# Skill: swiftui-pro\n',
+        data: { tool: "skill", state: { status: "completed", input: {} } },
+      }),
+    );
+    expect(opencode).toMatchObject({ kind: "skill", name: "swiftui-pro" });
+  });
+
   it("gives Claude's meta/orchestration tools a friendly title instead of the raw name", () => {
     const toolSearch = describeActivity(
       activity("tool.completed", {
@@ -651,7 +632,7 @@ describe("describeActivity", () => {
     expect(row("")).toMatchObject({ tool: "Searching for tools", detail: "" });
   });
 
-  it("beautifies a raw mcp__server__tool name into 'server: tool'", () => {
+  it("beautifies a raw mcp__server__tool name into 'Server · Tool'", () => {
     const mcpCall = describeActivity(
       activity("tool.completed", {
         itemType: "dynamic_tool_call",
@@ -662,7 +643,31 @@ describe("describeActivity", () => {
         data: { toolName: "mcp__linear__create_issue", input: {} },
       }),
     );
-    expect(mcpCall).toMatchObject({ kind: "tool", tool: "linear: create_issue" });
+    expect(mcpCall).toMatchObject({ kind: "tool", tool: "Linear · Create issue" });
+  });
+
+  it("reads a hosted connector's or plugin's server name and a tool's id as words", () => {
+    expect(prettyToolName("mcp__claude_ai_Linear__list_issues")).toBe("Linear · List issues");
+    expect(prettyToolName("mcp__claude_ai_Claude_Docs__batch")).toBe("Claude Docs · Batch");
+    expect(prettyToolName("mcp__plugin_linear_linear__save_comment")).toBe("Linear · Save comment");
+    expect(prettyToolName("mcp__figma__getDesignContext")).toBe("Figma · Get design context");
+    // Anything that is not an MCP id is left as it is.
+    expect(prettyToolName("Bash")).toBe("Bash");
+    expect(prettyToolName("mcp__nonsense")).toBe("mcp__nonsense");
+  });
+
+  it("names the MCP tools a ToolSearch loads the same way", () => {
+    const loaded = describeActivity(
+      activity("tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: "toolu_ts",
+        status: "completed",
+        title: "Tool call",
+        detail: "ToolSearch: {}",
+        data: { toolName: "ToolSearch", input: { query: "select:mcp__claude_ai_Linear__list_issues,mcp__claude_ai_Linear__save_issue" } },
+      }),
+    );
+    expect(loaded).toMatchObject({ kind: "tool", tool: "Loaded tools", detail: "Linear · List issues, Linear · Save issue" });
   });
 
   it("renders user-input.requested as the friendly question row", () => {
@@ -932,5 +937,26 @@ describe("moxen and subagent tool rows", () => {
       facts: [],
       running: true,
     });
+  });
+});
+
+describe("compactionSummary", () => {
+  it("keeps only the summary of Claude's <analysis>/<summary> pair, tags and all gone", () => {
+    const detail = "<analysis>\nScratch work.\n</analysis>\n\n<summary>\n1. Primary Request:\n   Scan the repo.\n</summary>\n";
+    expect(compactionSummary(detail)).toBe("1. Primary Request:\n   Scan the repo.");
+  });
+
+  it("passes an untagged summary through and keeps what arrived of a cut-off one", () => {
+    expect(compactionSummary("## Objective\n- Ship it.")).toBe("## Objective\n- Ship it.");
+    expect(compactionSummary("<analysis>x</analysis><summary>Half a sum")).toBe("Half a sum");
+    expect(compactionSummary("<analysis>only scratch, never closed")).toBeNull();
+    expect(compactionSummary(null)).toBeNull();
+  });
+
+  it("reaches the notice row: a compacted notice is cleaned, a refusal is not", () => {
+    const row = (notice: string, detail: string) =>
+      describeActivity({ ...activity("notice", { notice, detail }), summary: "t" } as unknown as ActivityEnvelope);
+    expect(row("compacted", "<analysis>a</analysis><summary>kept</summary>")).toMatchObject({ kind: "notice", detail: "kept" });
+    expect(row("permission-denied", "<summary>why</summary>")).toMatchObject({ detail: "<summary>why</summary>" });
   });
 });

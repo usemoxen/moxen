@@ -153,6 +153,25 @@ export async function listThreads(config: CliConfig, options: ThreadListOptions 
   return { runtime: directRuntime(), auth: directAuth(), snapshotSequence: 0, ...listed };
 }
 
+export interface ThreadSearchOptions extends ThreadListOptions {
+  limit?: number;
+  hitsPerThread?: number;
+}
+
+export async function searchThreads(config: CliConfig, query: string, options: ThreadSearchOptions = {}) {
+  const found = await (await cliClient(config)).query({
+    type: "threads.search",
+    query,
+    ...(options.project !== undefined ? { projectId: options.project } : {}),
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    ...(options.workspaceMode !== undefined ? { workspaceMode: options.workspaceMode } : {}),
+    ...(options.status !== undefined ? { status: options.status } : {}),
+    ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    ...(options.hitsPerThread !== undefined ? { hitsPerThread: options.hitsPerThread } : {}),
+  });
+  return { runtime: directRuntime(), auth: directAuth(), snapshotSequence: 0, ...found };
+}
+
 export async function inspectThread(config: CliConfig, rawThreadId: string) {
   const view = await inspect(await cliClient(config), requireThreadId(rawThreadId));
   return { runtime: directRuntime(), auth: directAuth(), snapshotSequence: 0, ...view };
@@ -255,13 +274,14 @@ export async function interruptThread(config: CliConfig, rawThreadId: string, op
   };
 }
 
-async function changeThreadSettlement(config: CliConfig, rawThreadId: string, state: "settled" | "active") {
+async function changeThreadSettlement(config: CliConfig, rawThreadId: string, state: "settled" | "active", stop = false) {
   const threadId = requireThreadId(rawThreadId);
   const client = await cliClient(config);
   const { project, thread: before } = await inspect(client, threadId);
   requireNotArchived(before, "change settlement state");
   if (
     state === "settled" &&
+    !stop &&
     (before.session?.status === "starting" ||
       before.session?.status === "running" ||
       before.hasPendingApprovals === true ||
@@ -281,7 +301,7 @@ async function changeThreadSettlement(config: CliConfig, rawThreadId: string, st
     state === "settled"
       ? { type: "thread.settle" as const, commandId: randomUUID(), threadId }
       : { type: "thread.unsettle" as const, commandId: randomUUID(), threadId, reason: "user" as const };
-  if (state === "settled") await client.dispatch({ type: "thread.settle", threadId });
+  if (state === "settled") await client.dispatch({ type: "thread.settle", threadId, ...(stop ? { stop: true } : {}) });
   else await client.dispatch({ type: "thread.unsettle", threadId, reason: "user" });
   const { thread: after } = await inspect(client, threadId);
   return {
@@ -307,8 +327,8 @@ async function changeThreadSettlement(config: CliConfig, rawThreadId: string, st
   };
 }
 
-export async function settleThread(config: CliConfig, threadId: string) {
-  return await changeThreadSettlement(config, threadId, "settled");
+export async function settleThread(config: CliConfig, threadId: string, options: { stop?: boolean } = {}) {
+  return await changeThreadSettlement(config, threadId, "settled", options.stop === true);
 }
 
 export async function unsettleThread(config: CliConfig, threadId: string) {

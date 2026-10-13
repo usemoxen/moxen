@@ -108,7 +108,7 @@ describe("scheduled messages", () => {
     await sendTurn(store, thread.id, { prompt: "then a", delivery: "queue" });
     await sendTurn(store, thread.id, { prompt: "then b", delivery: "queue" });
     // One for another model keeps its own turn.
-    await sendTurn(store, thread.id, { prompt: "elsewhere", delivery: "queue", modelSelection: { instanceId: "codex", model: "gpt-6" } });
+    await sendTurn(store, thread.id, { prompt: "elsewhere", delivery: "queue", modelSelection: { instanceId: "opencode", model: "gpt-6" } });
     await completeTurn(store, thread.id, running.turn.id, { text: "done" });
     const turns = await store.readTurns(thread.id);
     const next = turns.find((turn) => turn.status === "running")!;
