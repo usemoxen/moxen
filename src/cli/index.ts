@@ -29,6 +29,7 @@ import { cliClient } from "./infra/client.js";
 import { redactMcpServers } from "../core/mcp.js";
 import { doctor } from "./doctor.js";
 import { preferDirectClient } from "./infra/client.js";
+import { reexecInProduction } from "./infra/production.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
 import { writeError, writeSuccess } from "./output.js";
@@ -356,6 +357,7 @@ program
   .description("Open the terminal UI for threads.")
   .action(() =>
     action(async () => {
+      if (await reexecInProduction()) return;
       const context = await commandContext();
       const { runTui } = await import("../tui/index.js");
       await runTui(context.config, context.configPath);
