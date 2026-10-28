@@ -29,7 +29,6 @@ import * as Stream from "effect/Stream";
 import { CliError } from "../../errors.js";
 import { isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import { mcpSignature, type McpServerSpec } from "../../mcp.js";
-import { locateBundledSkills } from "../bundledskills.js";
 import { resolveStoreRoot } from "../../threads/store.js";
 import type { TurnUsage } from "../../threads/types.js";
 import type { HarnessProfileConfig, HarnessProviderConfig, InteractionMode, ModelSelection, RuntimeMode, WebConfig } from "../../types.js";
@@ -63,7 +62,7 @@ import { runTurn, type Authorization, type CompactionReport, type LoopEvent, typ
 import { CANCELLED_MESSAGE, classificationOf, declinedMessage, decidePermission, sessionAllowKey } from "./permissions.js";
 import { instructionsChangedReminder, instructionsIn, buildSystemPrompt, MCP_SECTION_HEADING, mcpSection } from "./prompt.js";
 import { openMcpPool, untrustedContext, type ConnectMcp, type McpPool } from "./mcp.js";
-import { discoverSkills, skillTool, type Skill, type SkillsMode } from "./skills.js";
+import { discoverSkills, skillTool, type Skill } from "./skills.js";
 import { primeProfileKey, readProfileApiKey, resolveCompactionSettings, resolveHarnessTarget, type ResolvedHarnessTarget } from "./profiles.js";
 import { HarnessTranscript } from "./session.js";
 import { cleanTitle, settledPrefix, SIDE_QUESTION_INSTRUCTION, SIDE_QUESTION_NO_CONTEXT, TITLE_INSTRUCTION } from "./sidequery.js";
@@ -90,8 +89,6 @@ export interface HarnessDriverOptions {
   readonly sleep?: TurnConfig["sleep"];
   /** Swapped out in tests. */
   readonly connectMcp?: ConnectMcp;
-  /** Where moxen's bundled skills are; found from the package by default. */
-  readonly bundledSkillsDir?: string | null;
   /** The home directory whose skill folders count as the user's own. */
   readonly home?: string;
 }
@@ -248,7 +245,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   /** Sessions being started (their MCP servers are connecting): a second start for the thread waits for the first. */
   private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
   private readonly connectMcp: ConnectMcp | undefined;
-  private readonly bundledSkillsDir: string | null;
   private readonly home: string | undefined;
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
   /** Titles being made, by session id, so a second ask waits for the first instead of paying for another request. */
@@ -263,7 +259,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport;
     this.sleep = options.sleep;
     this.connectMcp = options.connectMcp;
-    this.bundledSkillsDir = options.bundledSkillsDir === undefined ? locateBundledSkills() : options.bundledSkillsDir;
     this.home = options.home;
   }
 
@@ -336,7 +331,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     // Connected before the first request, so the tool list (and the prompt that mentions it) is whole from the start and stays that way.
     const mcp = await openMcpPool(servers, { cwd: input.workingDirectory, artifactDir, ...(input.disabledMcpTools ? { disabled: input.disabledMcpTools } : {}), ...(this.connectMcp ? { connect: this.connectMcp } : {}) });
     try {
-      const mode: SkillsMode = input.moxenSkills ?? "served";
       const session: HarnessSession = {
         threadId: input.threadId,
         sessionId,
@@ -365,7 +359,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         mcp,
         mcpSignature: fingerprint(servers),
         mcpNoticed: fingerprint(servers),
-        skillTool: skillTool(discoverSkills({ cwd: input.workingDirectory, mode, bundledDir: this.bundledSkillsDir, ...(input.hiddenMoxenSkills ? { hidden: input.hiddenMoxenSkills } : {}), ...(this.home !== undefined ? { home: this.home } : {}) })),
+        skillTool: skillTool(discoverSkills({ cwd: input.workingDirectory, ...(this.home !== undefined ? { home: this.home } : {}) })),
         subagents: new Map(),
         background: new BackgroundShells({ artifactDir, onEvent: (event) => this.onBackgroundEvent(session, event) }),
         wakeTimer: null,

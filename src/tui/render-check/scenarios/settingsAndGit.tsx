@@ -153,11 +153,10 @@ async function runSettings(): Promise<void> {
   if (written.at(-1)?.key !== "sessionTtl" || written.at(-1)?.value !== "2h") fail(`picking a preset wrote ${JSON.stringify(written)}`);
 
   // Free text: a box that wraps and grows, with its keys and what empty means said under it.
-  // Past Long threads to Agent context: Moxen's skills, then extra instructions.
+  // Past Long threads to Agent context, which opens on the extra instructions.
   for (let step = 0; step < 2; step += 1) await act(async () => setup.mockInput.pressTab());
   await setup.flush();
   if (!setup.captureCharFrame().includes("Extra instructions")) fail("Agent context does not hold the extra instructions");
-  await act(async () => setup.mockInput.pressArrow("down"));
   await act(async () => setup.mockInput.pressEnter());
   await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
   await setup.flush();
@@ -177,7 +176,6 @@ async function runSettings(): Promise<void> {
   await act(async () => setup.mockInput.pressEscape());
   await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
   await setup.flush();
-  await act(async () => setup.mockInput.pressArrow("up"));
 
   // The later sections: a restart-only setting says so, and a boolean
   // flips in place on click.
@@ -225,7 +223,7 @@ async function runSettings(): Promise<void> {
   }
   if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Compaction") && row.includes("Default (Moxen asks)")))) fail("the Claude Code tab does not say who compacts");
   if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Compact at") && row.includes("Default (80% of the window)")))) fail("the Claude Code tab does not say where it compacts");
-  if (seenOn("In force: Copied into a project") < 0) fail("the Claude Code tab does not say how Moxen's skills reach it");
+  if (seenOn("Moxen's skills") >= 0) fail("the Claude Code tab still offers Moxen's skills, which Moxen no longer ships");
   // Under the same headings, in the same order, as the other providers: Long threads before Setup.
   if (!(seenOn("Long threads") <= seenOn("Setup"))) fail("the Claude Code tab files Setup before Long threads");
 

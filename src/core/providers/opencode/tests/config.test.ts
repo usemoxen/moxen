@@ -56,21 +56,13 @@ describe("opencode config", () => {
   });
 
   it("writes only the compaction keys Moxen's settings name, keeping the user's own", () => {
-    expect(JSON.parse(buildServerConfigContent(undefined, [], { auto: false, buffer: 16_384 })).compaction).toEqual({ auto: false, buffer: 16_384 });
-    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ compaction: { auto: true, keep: { tokens: 24_000 } } }), [], { buffer: 8_192 })).compaction).toEqual({
+    expect(JSON.parse(buildServerConfigContent(undefined, { auto: false, buffer: 16_384 })).compaction).toEqual({ auto: false, buffer: 16_384 });
+    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ compaction: { auto: true, keep: { tokens: 24_000 } } }), { buffer: 8_192 })).compaction).toEqual({
       auto: true,
       keep: { tokens: 24_000 },
       buffer: 8_192,
     });
-    expect(JSON.parse(buildServerConfigContent(undefined, [], { auto: null, buffer: null }))).not.toHaveProperty("compaction");
-  });
-
-  it("denies the skills it is given after the user's own rules, so the last match keeps them hidden", () => {
-    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ permissions: [{ action: "skill", resource: "*", effect: "allow" }] }), [], {}, undefined, false, ["moxen-research"]));
-    expect(content.permissions).toEqual([
-      { action: "skill", resource: "*", effect: "allow" },
-      { action: "skill", resource: "moxen-research", effect: "deny" },
-    ]);
+    expect(JSON.parse(buildServerConfigContent(undefined, { auto: null, buffer: null }))).not.toHaveProperty("compaction");
   });
 
   it("pins share and update off in the injected config without clobbering the user's other keys", () => {
@@ -89,34 +81,27 @@ describe("opencode config", () => {
 
   it("switches OpenCode's own tools off: websearch is removed, every other one is denied after the user's own rules", () => {
     const own = { action: "shell", resource: "git *", effect: "allow" };
-    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ permissions: [own] }), [], {}, "WebSearch, webfetch,Shell"));
+    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ permissions: [own] }), {}, "WebSearch, webfetch,Shell"));
     expect(content.websearch).toBe(false);
     expect(content.permissions).toEqual([own, { action: "webfetch", resource: "*", effect: "deny" }, { action: "shell", resource: "*", effect: "deny" }]);
-    expect(JSON.parse(buildServerConfigContent(undefined, [], {}, "websearch"))).not.toHaveProperty("permissions");
-    expect(JSON.parse(buildServerConfigContent(undefined, [], {}, ""))).toEqual({ share: "disabled", update: "disable" });
+    expect(JSON.parse(buildServerConfigContent(undefined, {}, "websearch"))).not.toHaveProperty("permissions");
+    expect(JSON.parse(buildServerConfigContent(undefined, {}, ""))).toEqual({ share: "disabled", update: "disable" });
   });
 
   it("puts Moxen's prompt in as the system of build, keeping one the user wrote and the user's other agents", () => {
-    const off = JSON.parse(buildServerConfigContent(undefined, [], {}, undefined, false));
+    const off = JSON.parse(buildServerConfigContent(undefined, {}, undefined, false));
     expect(off).not.toHaveProperty("agents");
-    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { plan: { description: "Plans" }, reviewer: { system: "Review only." } } }), [], {}, "webfetch", true));
+    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { plan: { description: "Plans" }, reviewer: { system: "Review only." } } }), {}, "webfetch", true));
     expect(content.agents.build.system).toContain("running in the user's terminal, in OpenCode's harness");
     // Moxen's sessions never run OpenCode's plan agent (no plan mode, MXN-136): it is left as the user has it.
     expect(content.agents.plan).toEqual({ description: "Plans" });
     expect(content.agents.reviewer).toEqual({ system: "Review only." });
     // Built from the tools the server keeps: no web guidance when both web tools are off.
     expect(content.agents.build.system).not.toContain("# Using your tools\n- The web");
-    const theirs = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { build: { system: "Mine." } } }), [], {}, undefined, true));
+    const theirs = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { build: { system: "Mine." } } }), {}, undefined, true));
     expect(theirs.agents.build.system).toBe("Mine.");
   });
 
-  it("adds moxen's skills folder to the server config's skills list, once and after the user's own", () => {
-    expect(JSON.parse(buildServerConfigContent(undefined, ["/pkg/skills"]))).toEqual({ skills: ["/pkg/skills"], share: "disabled", update: "disable" });
-    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ skills: ["~/mine", "/pkg/skills"] }), ["/pkg/skills"])).skills).toEqual(["~/mine", "/pkg/skills"]);
-    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ skills: ["~/mine", 7] }), ["/pkg/skills"])).skills).toEqual(["~/mine", "/pkg/skills"]);
-    // With nothing to add, a config without `skills` stays without it.
-    expect(JSON.parse(buildServerConfigContent(undefined, []))).not.toHaveProperty("skills");
-  });
 
   it("compares semver with unparseable reading as too old", () => {
     expect(parseSemver("v1.18.30")).toEqual([1, 18, 30]);

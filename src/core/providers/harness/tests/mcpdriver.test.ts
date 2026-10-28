@@ -43,7 +43,6 @@ function driverWith(script: ModelEvent[][], extra: Partial<ConstructorParameters
     config,
     sessionsDir: path.join(dir, "sessions"),
     home: path.join(dir, "home"),
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);
@@ -261,28 +260,22 @@ describe("skills", () => {
     skill(path.join(work, ".claude", "skills"), "project-own");
     skill(path.join(work, ".claude", "skills"), "moxen-copy", "A copy moxen put here.", ".moxen-skill.json");
     skill(path.join(dir, "home", ".agents", "skills"), "user-own");
-    skill(path.join(dir, "bundled"), "moxen-bundled");
   });
 
-  const modes = async (mode: "project" | "served" | "none") => {
-    const { driver, requests } = driverWith([answer("hi")], { bundledSkillsDir: path.join(dir, "bundled") });
-    await start(driver, { moxenSkills: mode });
+  const firstRequest = async () => {
+    const { driver, requests } = driverWith([answer("hi")]);
+    await start(driver);
     await send(driver, "go");
     return requests[0]!;
   };
 
-  it("serves moxen's bundled skills only in `served` mode, next to the project's and the user's own", async () => {
-    expect(skillNames(await modes("served"))).toEqual(["moxen-bundled", "moxen-copy", "project-own", "user-own"]);
-    expect(skillNames(await modes("project"))).toEqual(["moxen-copy", "project-own", "user-own"]);
-  });
-
-  it("leaves moxen's skills out of a delegated task, whether bundled or copied into the project", async () => {
-    expect(skillNames(await modes("none"))).toEqual(["project-own", "user-own"]);
+  it("offers the project's and the user's own skills, never a copy an older Moxen left", async () => {
+    expect(skillNames(await firstRequest())).toEqual(["project-own", "user-own"]);
   });
 
   it("names the skill tool in the prompt only when it is offered, and loads a skill's text without its frontmatter", async () => {
-    const { driver, requests } = driverWith([call("c1", "skill", { name: "project-own" }), answer("done")], { bundledSkillsDir: null });
-    await start(driver, { moxenSkills: "project" });
+    const { driver, requests } = driverWith([call("c1", "skill", { name: "project-own" }), answer("done")]);
+    await start(driver);
     await send(driver, "go");
     expect(systemOf(requests[0]!)).toContain("The skill tool lists skills");
     expect(lastResult(requests[1]!)).toContain("Step one of project-own.");
@@ -290,10 +283,10 @@ describe("skills", () => {
     expect(lastResult(requests[1]!)).toContain(path.join(work, ".claude", "skills", "project-own"));
   });
 
-  it("does not name the skill tool when a delegated task has none left", async () => {
+  it("does not name the skill tool when there are no skills", async () => {
     fs.rmSync(path.join(work, ".claude"), { recursive: true });
     fs.rmSync(path.join(dir, "home"), { recursive: true });
-    const request = await modes("none");
+    const request = await firstRequest();
     expect(skillNames(request)).toBeNull();
     expect(systemOf(request)).not.toContain("skill");
   });

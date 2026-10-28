@@ -160,12 +160,6 @@ interface ParkedRequest {
 interface ClaudeSession {
   readonly threadId: ThreadId;
   readonly workingDirectory: string;
-  /** How moxen's own skills reach this session; only `served` points the mod at the bundled folder. */
-  readonly moxenSkills: "project" | "served" | "none";
-  /** Where the project's copies are. In `.agents/skills` only the mod offers them. */
-  readonly moxenSkillsFolder: ".claude" | ".agents" | null;
-  /** Moxen's skills this session must not offer (`ProviderSessionStartInput.hiddenMoxenSkills`). */
-  readonly hiddenMoxenSkills: readonly string[];
   /** Moxen memory is on: Claude Code's auto memory is off for this session (`ProviderSessionStartInput.moxenMemory`). */
   readonly moxenMemory: boolean;
   /**
@@ -517,9 +511,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       const session: ClaudeSession = {
         threadId: input.threadId,
         workingDirectory: input.workingDirectory,
-        moxenSkills: input.moxenSkills ?? "served",
-        moxenSkillsFolder: input.moxenSkillsFolder ?? null,
-        hiddenMoxenSkills: input.hiddenMoxenSkills ?? [],
         moxenMemory: input.moxenMemory === true,
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
@@ -534,9 +525,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
           ...(input.disabledMcpTools ?? []),
           ...(input.disabledNativeTools ?? []),
           ...(input.checklist === false ? CHECKLIST_TOOLS : []),
-          // Copies in `.claude/skills` are Claude Code's own to load: a deny rule is what keeps one out. Anywhere
-          // else only the mod offers them, and it is told; a rule there could only catch a user's skill of that name.
-          ...(input.moxenSkillsFolder === ".claude" ? (input.hiddenMoxenSkills ?? []).map((name) => `Skill(${name})`) : []),
         ],
         instructions: input.instructions ?? null,
         isolation: input.isolation ?? null,
@@ -2352,18 +2340,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     )) {
       if (typeof value === "string") env[key] = value;
     }
-    // The mod finds moxen's own skills here; `.agents/skills` it reads itself. An inherited value (moxen
-    // launched from a moxen session) must not point a project- or delegated-skills session at the bundled folder.
-    delete env["MOXEN_SKILLS_DIR"];
-    delete env["MOXEN_SKILLS_HIDE"];
-    delete env["MOXEN_OWN_SKILLS"];
+    // The mod serves the user's own `.agents/skills`, which Claude Code does not read itself.
     const mod = this.skillsMod;
-    const served = mod?.bundledSkillsDir != null && session.moxenSkills === "served";
-    // The mod loads for the user's own `.agents/skills` (agentSkills) or for Moxen's when only it can deliver them.
-    const modNeeded = mod !== null && (this.settings.agentSkills || served || (session.moxenSkills === "project" && session.moxenSkillsFolder === ".agents"));
-    if (served) env["MOXEN_SKILLS_DIR"] = mod!.bundledSkillsDir!;
-    if (modNeeded && session.hiddenMoxenSkills.length > 0) env["MOXEN_SKILLS_HIDE"] = session.hiddenMoxenSkills.join(",");
-    if (modNeeded && !this.settings.agentSkills) env["MOXEN_OWN_SKILLS"] = "0";
+    const modNeeded = mod !== null && this.settings.agentSkills;
     // One memory, Moxen's: Claude Code's auto memory is off in this session only, whatever its settings
     // files say (the variable outranks `autoMemoryEnabled`). The user's own `claude` keeps its memory.
     if (session.moxenMemory) env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1";

@@ -30,7 +30,6 @@ function driverFor(apiFormat: "chat" | "anthropic" | "responses", script: ModelE
     config: { profiles: [{ id: "p", apiFormat, baseUrl: "http://x", models: [{ id: "claude-opus-5-5" }] }] },
     sessionsDir: path.join(dir, "sessions"),
     home: dir,
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);

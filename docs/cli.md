@@ -242,16 +242,11 @@ checklist on each provider's tab. The MCP tab shows the answer per provider for 
 `providers` list ("offered to") is read once, as that checklist (a provider it left out has the server switched
 off there), and decides nothing on its own; a project's `moxen.json` may still carry one.
 
-Moxen's own skills (`skills/`) reach a thread one way, set by `skills.moxen`: `copy` (the default) puts them in a
-project's `.claude/skills` or `.agents/skills` when it has one of those folders and serves them otherwise; `serve`
-points each provider at Moxen's folder and takes earlier copies back out; `off` gives them to no thread. A
-project's `moxen.json` can choose (`{ "skills": { "moxen": "serve" } }`), and `providers.<kind>.moxenSkills`
-switches them off for one provider, or on (served) while the global is off. A delegated task gets none, and a
-provider without delegation tools does not get `moxen-orchestrate` or `moxen-research`; copies a session must not
-have are hidden with the provider's own rules. Each provider's tab says what is in force. The older
-`installSkills: false` reads as `serve`, and with it `providers.claude.agentSkills: false` or
-`providers.opencode.bundledSkills: false` as off for that provider. `agentSkills` now means only the user's own
-`.agents/skills` on Claude Code.
+Moxen ships no skills of its own: the Research and Orchestrate modes, Moxen memory and its MCP tools do what its
+bundled skills used to. Copies an older Moxen made in a project (folders marked `.moxen-skill.json` in
+`.claude/skills` or `.agents/skills`) are taken out when a session starts there; your own skills are never touched.
+The older keys `skills.moxen`, `providers.<kind>.moxenSkills` and `installSkills` still load and do nothing.
+`providers.claude.agentSkills` serves your own `.agents/skills` on Claude Code, which reads only `.claude/skills`.
 
 ## Remote access
 

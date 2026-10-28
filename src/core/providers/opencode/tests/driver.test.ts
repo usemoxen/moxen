@@ -796,40 +796,6 @@ describe("opencode driver", () => {
     expect(transport.servers[0]!.callsTo("session.switchAgent")).toEqual([]);
   });
 
-  it("offers moxen's bundled skills to the servers it spawns, when given and allowed", async () => {
-    const run = async (options: { bundledSkillsDir?: string | null; settings?: { bundledSkills: boolean } }) => {
-      const transport = new FakeOpencodeTransport({ commands: [] });
-      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, ...options });
-      drivers.push(driver);
-      await driver.skillInventory("/repo");
-      return transport.ensureCalls[0]!;
-    };
-    expect((await run({ bundledSkillsDir: "/pkg/skills" })).skillsDirs).toEqual(["/pkg/skills"]);
-    // Installed in the project already, or a delegated task: the bundled folder is not offered a second time.
-    for (const moxenSkills of ["project", "none"] as const) {
-      const transport = new FakeOpencodeTransport({ commands: [] });
-      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, bundledSkillsDir: "/pkg/skills" });
-      drivers.push(driver);
-      await Effect.runPromise(driver.startSession({ threadId: `t-${moxenSkills}`, workingDirectory: `/repo-${moxenSkills}`, moxenSkills }));
-      expect(transport.ensureCalls[0]!.skillsDirs).toBeUndefined();
-    }
-    // Off unless production passes the folder. The older setting no longer gates it: that is decided in core.
-    expect((await run({})).skillsDirs).toBeUndefined();
-    expect((await run({ bundledSkillsDir: "/pkg/skills", settings: { bundledSkills: false } })).skillsDirs).toEqual(["/pkg/skills"]);
-  });
-
-  it("denies the skills a session must not have, and a delegated task sharing the directory takes what is there", async () => {
-    const transport = new FakeOpencodeTransport({ commands: [] });
-    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" }, bundledSkillsDir: "/pkg/skills" });
-    drivers.push(driver);
-    await Effect.runPromise(driver.startSession({ threadId: "t-parent", workingDirectory: "/repo", hiddenMoxenSkills: ["moxen-research", "moxen-orchestrate", "moxen-research"] }));
-    expect(transport.ensureCalls[0]!.skillsDirs).toEqual(["/pkg/skills"]);
-    expect(transport.ensureCalls[0]!.deniedSkills).toEqual(["moxen-orchestrate", "moxen-research"]);
-    await Effect.runPromise(driver.startSession({ threadId: "t-child", workingDirectory: "/repo", moxenSkills: "none", delegated: true }));
-    // Same server, no restart asked for: the delegated task did not change what the server holds.
-    expect(transport.ensureCalls).toHaveLength(1);
-  });
-
   it("lists skills and commands from the directory's server", async () => {
     const transport = new FakeOpencodeTransport({
       commands: [

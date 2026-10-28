@@ -42,7 +42,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "delegate",
     description:
       "Hand a self-contained task to a new subagent thread, which runs in parallel on any provider and model. " +
-      "Only when the user has asked you to delegate (or a skill they invoked says to): each subagent starts cold and spends their usage, so by default do the work yourself. " +
+      "Only when the user has asked you to delegate (or put the thread in Research or Orchestrate mode): each subagent starts cold and spends their usage, so by default do the work yourself. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "Returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
     inputSchema: {

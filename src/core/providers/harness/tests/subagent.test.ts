@@ -37,7 +37,6 @@ function driverWith(script: Step[]) {
     config,
     sessionsDir: path.join(dir, "sessions"),
     home: dir,
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);
@@ -201,7 +200,6 @@ describe("subagents beside each other and in the background", () => {
       config,
       sessionsDir: path.join(dir, "sessions"),
       home: dir,
-      bundledSkillsDir: null,
       sleep: async () => {},
       transport: (request) => {
         requests.push(request);

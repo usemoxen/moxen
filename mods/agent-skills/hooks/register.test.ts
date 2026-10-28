@@ -62,17 +62,17 @@ describe('skill files', () => {
 })
 
 describe('serving skills', () => {
-  test('finds project, home and bundled skills, project first, and registers a tool and commands', async ($, on) => {
+  test('finds project and home skills, project first, and registers a tool and commands', async ($, on) => {
     const files: Files = {
       '/proj/.agents/skills/moxen-threads/SKILL.md': THREADS,
       '/home/u/.agents/skills/moxen-threads/SKILL.md': '---\ndescription: Home copy\n---\nhome',
       '/home/u/.agents/skills/mine/SKILL.md': '---\ndescription: Mine\n---\nmine',
-      '/bundled/moxen-handoff/SKILL.md': HANDOFF,
+      '/home/u/.agents/skills/moxen-handoff/SKILL.md': HANDOFF,
       '/proj/.claude/skills/already/SKILL.md': 'x',
       '/proj/.agents/skills/already/SKILL.md': 'x',
     }
     const fs = tree(files)
-    mock.env(on, { HOME: '/home/u', MOXEN_SKILLS_DIR: '/bundled' })
+    mock.env(on, { HOME: '/home/u' })
     const registered: string[] = []
     on('fs.list', async (_$, e) => ({ value: fs.list((e as { path: string }).path) }))
     on('fs.exists', async (_$, e) => ({ value: fs.exists((e as { path: string }).path) }))
@@ -101,18 +101,16 @@ describe('serving skills', () => {
     expect(registered.filter((entry) => entry.startsWith('command:')).sort()).toEqual(['command:mine', 'command:moxen-handoff', 'command:moxen-threads'])
   })
 
-  test('leaves out Moxen skills it is told to hide, and the user\'s own when they are switched off', async ($, on) => {
+  test('skips the copies an older Moxen left in a project', async ($, on) => {
     const files: Files = {
       '/proj/.agents/skills/mine/SKILL.md': '---\ndescription: Mine\n---\nmine',
       '/proj/.agents/skills/moxen-threads/SKILL.md': THREADS,
       '/proj/.agents/skills/moxen-threads/.moxen-skill.json': '{}',
       '/proj/.agents/skills/moxen-orchestrate/SKILL.md': '---\ndescription: Orchestrate copy\n---\nx',
       '/proj/.agents/skills/moxen-orchestrate/.moxen-skill.json': '{}',
-      '/bundled/moxen-research/SKILL.md': '---\ndescription: Research\n---\nx',
-      '/bundled/moxen-doctor/SKILL.md': '---\ndescription: Doctor\n---\nx',
     }
     const fs = tree(files)
-    mock.env(on, { HOME: '/home/u', MOXEN_SKILLS_DIR: '/bundled', MOXEN_SKILLS_HIDE: 'moxen-orchestrate,moxen-research', MOXEN_OWN_SKILLS: '0' })
+    mock.env(on, { HOME: '/home/u' })
     const registered: string[] = []
     on('fs.list', async (_$, e) => ({ value: fs.list((e as { path: string }).path) }))
     on('fs.exists', async (_$, e) => ({ value: fs.exists((e as { path: string }).path) }))
@@ -128,6 +126,6 @@ describe('serving skills', () => {
     on('session.start', async (_$, e) => ({ cwd: e.cwd }))
     await $.session.start({ cwd: '/proj', surface: null, isInteractive: false })
 
-    expect(registered.filter((entry) => entry.startsWith('command:')).sort()).toEqual(['command:moxen-doctor', 'command:moxen-threads'])
+    expect(registered.filter((entry) => entry.startsWith('command:')).sort()).toEqual(['command:mine'])
   })
 })

@@ -1,5 +1,0 @@
-# Credits
-
-The retrospective's shape comes from [Matt Pocock](https://github.com/mattpocock)'s [`retro`](https://github.com/mattpocock/skills/tree/main/skills/engineering/retro) skill: suggesting improvements to the agent's environment rather than reviewing the code, the seven categories to look in (navigation, automated checks, coding standards, steering files, tool economy, no-ops, information access) with their "use when" triggers, the implementation-versus-review framing, and the advice on where each kind of rule belongs. Much of that text is carried over closely.
-
-What Moxen changed: reading another session through `moxen threads search` and `threads read`, reading the repo's own check scripts and CI before proposing a new check, and dropping the `writing-for-agents` step, since that skill is not part of this repo. `moxen-retro` does not depend on `retro` as a skill (a hard dependency would break standalone installs), so the content is copied in rather than pointed at; this file is the attribution a dependency would otherwise have carried.

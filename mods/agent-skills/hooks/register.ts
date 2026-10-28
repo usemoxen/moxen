@@ -12,15 +12,10 @@ import type { Register } from 'claude-code'
  *     returns a skill's instructions (what the built-in Skill tool does);
  *   - to the person, as a `/<name>` command that runs the skill.
  *
- * Looked up, first match wins by name: `<project>/.agents/skills`,
- * `~/.agents/skills`, then the folder named by `MOXEN_SKILLS_DIR` (Moxen's own
- * bundled skills, which it sets for the sessions it starts). A skill that
- * `.claude/skills` already provides is left to Claude Code.
- *
- * Moxen's skills are the bundled ones and the copies it marked
- * (`.moxen-skill.json`). For the sessions it starts, Moxen may also set
- * `MOXEN_SKILLS_HIDE` (comma-separated names of its skills to leave out) and
- * `MOXEN_OWN_SKILLS=0` (offer only Moxen's skills, none of the user's).
+ * Looked up, first match wins by name: `<project>/.agents/skills`, then
+ * `~/.agents/skills`. A skill that `.claude/skills` already provides is left
+ * to Claude Code. Moxen ships no skills of its own: a copy an older Moxen left
+ * in a project (marked `.moxen-skill.json`) is skipped.
  */
 
 type Skill = {
@@ -98,10 +93,7 @@ export const register: Register = (on) => {
 
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
-    const bundled = (await $.env.get('MOXEN_SKILLS_DIR')) ?? ''
-    const hidden = new Set(((await $.env.get('MOXEN_SKILLS_HIDE')) ?? '').split(',').map((name) => name.trim()).filter((name) => name !== ''))
-    const ownSkills = (await $.env.get('MOXEN_OWN_SKILLS')) !== '0'
-    const roots = [`${e.cwd}/.agents/skills`, home === '' ? '' : `${home}/.agents/skills`, bundled].filter((root) => root !== '')
+    const roots = [`${e.cwd}/.agents/skills`, home === '' ? '' : `${home}/.agents/skills`].filter((root) => root !== '')
     const claudeRoots = [`${e.cwd}/.claude/skills`, home === '' ? '' : `${home}/.claude/skills`].filter((root) => root !== '')
 
     const found = new Map<string, Skill>()
@@ -118,16 +110,14 @@ export const register: Register = (on) => {
         const dir = `${root}/${entry.name}`
         const file = `${dir}/SKILL.md`
         if (!(await $.fs.exists(file))) continue
-        const moxens = root === bundled || (await $.fs.exists(`${dir}/${MARKER_FILE}`))
-        if (!moxens && !ownSkills) continue
-        if (moxens && hidden.has(entry.name)) continue
+        if (await $.fs.exists(`${dir}/${MARKER_FILE}`)) continue
         let provided = false
         for (const claudeRoot of claudeRoots) provided ||= await $.fs.exists(`${claudeRoot}/${entry.name}/SKILL.md`)
         if (provided) continue
         try {
           const { meta, body } = parseSkill(await $.fs.read(file))
           const name = meta.name && /^[\w-]{1,64}$/.test(meta.name) ? meta.name : entry.name
-          if (found.has(name) || (moxens && hidden.has(name))) continue
+          if (found.has(name)) continue
           found.set(name, {
             name,
             description: meta.description ?? `The ${name} skill`,

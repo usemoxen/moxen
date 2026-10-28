@@ -15,8 +15,7 @@
  * prints (`runtime`, `auth`, `dispatch`, `verification`, `opened`) are its
  * own compatibility surface and stay there.
  */
-import { locateBundledSkills } from "../providers/bundledskills.js";
-import { resolveSessionSkills, type SessionSkills } from "../skills/delivery.js";
+import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor } from "./idle.js";
 import * as Effect from "effect/Effect";
 import { mkdir, readFile } from "node:fs/promises";
@@ -154,7 +153,7 @@ interface InstructionsUpdate {
 }
 
 /** The part of a session setup `ensureDriverSession` takes. */
-function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }) {
+function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }) {
   return {
     mcpServers: setup.mcpServers,
     disabledMcpTools: setup.disabledMcpTools,
@@ -163,9 +162,6 @@ function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: st
     checklist: setup.checklist,
     instructions: setup.instructions,
     store: setup.store,
-    moxenSkills: setup.skills.mode,
-    ...(setup.skills.folder ? { moxenSkillsFolder: setup.skills.folder } : {}),
-    hiddenMoxenSkills: setup.skills.hidden,
     delegated: setup.delegated,
     idleTtlMs: setup.idleTtlMs,
     moxenMemory: setup.moxenMemory,
@@ -232,7 +228,7 @@ async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
   instanceId: string = thread.modelSelection.instanceId,
-): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
+): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
@@ -258,6 +254,8 @@ async function sessionSetup(
   const [resolved, fromProject] = await Promise.all([
     resolveMcpServers({ ...base, ...ctx.config.mcpServers }, workspaceRoot),
     projectInstructions(workspaceRoot),
+    // Moxen ships no skills now: copies an older Moxen made in this checkout (`.moxen-skill.json`) come out.
+    thread.env.path.trim() === "" ? Promise.resolve([]) : removeProjectSkills(thread.env.path),
   ]);
   // A built-in server the config left as it was keeps everything its
   // config-shaped entry dropped: in-process hosting, `alwaysLoad`. One the
@@ -315,15 +313,6 @@ async function sessionSetup(
     instructions: memoryIndex === undefined ? plan.systemPrompt : `${plan.systemPrompt}\n\n${memoryIndexSection(memoryIndex)}`,
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
-    skills: await resolveSessionSkills({
-      config: ctx.config,
-      kind,
-      workspaceRoot,
-      workingDirectory: thread.env.path,
-      delegated: delegation !== null,
-      orchestration: reach.orchestration,
-      bundledDir: locateBundledSkills(),
-    }),
     delegated: delegation !== null,
     idleTtlMs: sessionTtlFor(ctx.config, kind),
     moxenMemory: memory !== "off",

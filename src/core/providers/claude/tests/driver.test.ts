@@ -80,61 +80,21 @@ describe("claude driver turns", () => {
     expect(transport.created[1]!.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   });
 
-  it("loads the agent-skills mod into a session, and points it at moxen's own skills only when they are served", async () => {
-    const skillsMod = { path: "/pkg/mods/agent-skills", bundledSkillsDir: "/pkg/skills" };
+  it("loads the agent-skills mod for the user's own .agents/skills, and only then", async () => {
+    const skillsMod = { path: "/pkg/mods/agent-skills" };
     const on = new FakeTransport([[initMessage()]]);
     await Effect.runPromise(new ClaudeDriver({ transport: on, skillsMod }).startSession(START));
     expect(on.created[0]!.options.plugins).toEqual([{ type: "local", path: "/pkg/mods/agent-skills" }]);
-    expect(on.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBe("/pkg/skills");
 
     // Off by default, so a session without it is exactly what it was.
     const absent = new FakeTransport([[initMessage()]]);
     await Effect.runPromise(new ClaudeDriver({ transport: absent }).startSession(START));
     expect(absent.created[0]!.options.plugins).toBeUndefined();
-    expect(absent.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBeUndefined();
 
-    // Installed in the project already, or a delegated task: nothing points the mod at the bundled folder.
-    for (const moxenSkills of ["project", "none"] as const) {
-      const quiet = new FakeTransport([[initMessage()]]);
-      await Effect.runPromise(new ClaudeDriver({ transport: quiet, skillsMod }).startSession({ ...START, moxenSkills }));
-      expect(quiet.created[0]!.options.plugins).toEqual([{ type: "local", path: "/pkg/mods/agent-skills" }]);
-      expect(quiet.created[0]!.options.env?.["MOXEN_SKILLS_DIR"]).toBeUndefined();
-    }
-
-  });
-
-  it("with the user's own .agents/skills switched off, loads the mod only where Moxen's skills need it, and offers none of the user's", async () => {
-    const skillsMod = { path: "/pkg/mods/agent-skills", bundledSkillsDir: "/pkg/skills" };
-    const start = async (input: Partial<typeof START> & Record<string, unknown>) => {
-      const transport = new FakeTransport([[initMessage()]]);
-      await Effect.runPromise(new ClaudeDriver({ transport, skillsMod, settings: { agentSkills: false } }).startSession({ ...START, ...input }));
-      return transport.created[0]!.options;
-    };
-    // Served: only the mod can deliver them, so it loads, told to leave the user's skills out.
-    const served = await start({});
-    expect(served.plugins).toEqual([{ type: "local", path: "/pkg/mods/agent-skills" }]);
-    expect(served.env?.["MOXEN_OWN_SKILLS"]).toBe("0");
-    // Copied into .agents/skills, which Claude Code does not read itself: the mod again.
-    expect((await start({ moxenSkills: "project", moxenSkillsFolder: ".agents" })).plugins).toHaveLength(1);
-    // Copied into .claude/skills, or none for this session: nothing needs it.
-    expect((await start({ moxenSkills: "project", moxenSkillsFolder: ".claude" })).plugins).toBeUndefined();
-    expect((await start({ moxenSkills: "none" })).plugins).toBeUndefined();
-  });
-
-  it("hides Moxen's skills a session must not have, from Claude Code's own folder and from the mod", async () => {
-    const skillsMod = { path: "/pkg/mods/agent-skills", bundledSkillsDir: "/pkg/skills" };
-    const transport = new FakeTransport([[initMessage()]]);
-    await Effect.runPromise(new ClaudeDriver({ transport, skillsMod }).startSession({ ...START, moxenSkills: "project", moxenSkillsFolder: ".claude", hiddenMoxenSkills: ["moxen-orchestrate", "moxen-research"] }));
-    const options = transport.created[0]!.options;
-    expect(options.disallowedTools).toEqual(expect.arrayContaining(["Skill(moxen-orchestrate)", "Skill(moxen-research)"]));
-    expect(options.env?.["MOXEN_SKILLS_HIDE"]).toBe("moxen-orchestrate,moxen-research");
-    expect(options.env?.["MOXEN_OWN_SKILLS"]).toBeUndefined();
-
-    // Served: only the mod offers them, so it alone is told, and no rule can catch a user's skill of that name.
-    const served = new FakeTransport([[initMessage()]]);
-    await Effect.runPromise(new ClaudeDriver({ transport: served, skillsMod }).startSession({ ...START, hiddenMoxenSkills: ["moxen-research"] }));
-    expect(served.created[0]!.options.disallowedTools ?? []).not.toContain("Skill(moxen-research)");
-    expect(served.created[0]!.options.env?.["MOXEN_SKILLS_HIDE"]).toBe("moxen-research");
+    // The user's own .agents/skills switched off: nothing needs the mod.
+    const off = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: off, skillsMod, settings: { agentSkills: false } }).startSession(START));
+    expect(off.created[0]!.options.plugins).toBeUndefined();
   });
 
   it("takes the final answer from the result, not every interim note", async () => {

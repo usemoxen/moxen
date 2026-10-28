@@ -27,8 +27,6 @@ export interface OpencodeSettings {
   /** Password for an external server (never inherited from env there). */
   readonly serverPassword: string;
   readonly minVersion: string;
-  /** Tell a spawned server about moxen's bundled skills (its config's `skills` list). */
-  readonly bundledSkills: boolean;
   /** Written into a spawned server's `compaction` config; null leaves OpenCode's own. */
   readonly autoCompact: boolean | null;
   readonly compactBuffer: number | null;
@@ -41,7 +39,6 @@ export function normalizeOpencodeSettings(raw: Partial<OpencodeSettings> = {}): 
     serverUrl: raw.serverUrl?.trim() ?? "",
     serverPassword: raw.serverPassword ?? "",
     minVersion: raw.minVersion?.trim() ? raw.minVersion.trim() : OPENCODE_MIN_VERSION,
-    bundledSkills: raw.bundledSkills ?? true,
     autoCompact: raw.autoCompact ?? null,
     compactBuffer: raw.compactBuffer ?? null,
   };
@@ -75,15 +72,9 @@ export function resolveSpawnedServerPassword(
  * let the server update itself under us). Every other user key is kept as is.
  * Permissions are deliberately not injected: v2's default (allow all) matches
  * what moxen has always run with.
- * `skillsDirs` (moxen's bundled skills) are added to the config's `skills`
- * list, after any the user already named and once each: OpenCode reads that
- * list as extra skill sources next to `.agents/skills` and `.claude/skills`,
- * and combines the lists of every config it finds.
  * `disabledNativeTools` (the provider's setting) switches OpenCode's own tools
  * off: `websearch: false`, and a `deny` rule per other tool, appended to the
  * user's own `permissions` (the last matching rule wins, so ours hold).
- * `deniedSkills` (Moxen's skills a session must not have, `core/skills/delivery.ts`) become `skill` deny
- * rules, appended the same way: OpenCode hides a denied skill from the model and refuses to load it.
  * `moxenPrompt` sets the `system` of the `build` agent (the one Moxen's sessions run) to Moxen's prompt, which replaces the base
  * prompt OpenCode picks for the model family; an agent the user already gave a `system` keeps theirs.
  * Unparseable content is replaced, not merged — a corrupt config would
@@ -92,12 +83,10 @@ export function resolveSpawnedServerPassword(
  */
 export function buildServerConfigContent(
   existing: string | undefined,
-  skillsDirs: readonly string[] = [],
   compaction: { readonly auto?: boolean | null; readonly buffer?: number | null } = {},
   disabledNativeTools?: string,
   /** Replace OpenCode's base prompt for its `build` agent with Moxen's (`prompt.ts`). */
   moxenPrompt = false,
-  deniedSkills: readonly string[] = [],
 ): string {
   let parsed: Record<string, unknown> = {};
   if (existing && existing.trim().length > 0) {
@@ -110,8 +99,6 @@ export function buildServerConfigContent(
       parsed = {};
     }
   }
-  const named = Array.isArray(parsed.skills) ? (parsed.skills as unknown[]).filter((entry): entry is string => typeof entry === "string") : [];
-  const skills = [...named, ...skillsDirs.filter((dir) => !named.includes(dir))];
   // Only what Moxen's settings name overrides the user's own `compaction`; the rest of it stays.
   const own = parsed.compaction !== null && typeof parsed.compaction === "object" && !Array.isArray(parsed.compaction) ? (parsed.compaction as Record<string, unknown>) : {};
   const set = { ...(compaction.auto != null ? { auto: compaction.auto } : {}), ...(compaction.buffer != null ? { buffer: compaction.buffer } : {}) };
@@ -119,14 +106,12 @@ export function buildServerConfigContent(
   const off = opencodeDisabledToolConfig(disabledNativeTools);
   const agents = moxenPrompt ? withMoxenSystem(parsed.agents, buildOpencodeSystemPrompt(disabledNativeTools)) : parsed.agents;
   const ownRules = Array.isArray(parsed.permissions) ? (parsed.permissions as unknown[]) : [];
-  const denies = deniedSkills.map((id) => ({ action: "skill", resource: id, effect: "deny" }));
   return JSON.stringify({
     ...parsed,
-    ...(skills.length > 0 ? { skills } : {}),
     ...(Object.keys(merged).length > 0 ? { compaction: merged } : {}),
     ...(agents !== undefined ? { agents } : {}),
     ...(off.websearch === false ? { websearch: false } : {}),
-    ...(off.permissions || denies.length > 0 ? { permissions: [...ownRules, ...(off.permissions ?? []), ...denies] } : {}),
+    ...(off.permissions ? { permissions: [...ownRules, ...off.permissions] } : {}),
     share: "disabled",
     update: "disable",
   });

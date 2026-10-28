@@ -104,7 +104,6 @@ describe("web tools in a session", () => {
       config,
       sessionsDir: path.join(dir, "sessions"),
       home: dir,
-      bundledSkillsDir: null,
       sleep: async () => {},
       env: {},
       transport: (request) => {

@@ -203,7 +203,7 @@ mid-session is started again by the next call, at most three times. The tool set
 is fixed for the session (it keeps the server's prompt cache): changing
 `mcpServers` says so once and applies to a new thread. Skills (`SKILL.md`
 folders in the project's `.claude/skills` and `.agents/skills`, the home
-directory's, and moxen's bundled ones when they are served) are listed in a
+directory's) are listed in a
 `skill` tool and loaded on request. A worktree-isolated session is held to its
 worktree for edits, commands and MCP arguments alike, following symlinks.
 

@@ -34,7 +34,6 @@ function driverWith(script: Step[], window = 262_144, compaction: Record<string,
     sessionsDir,
     // Nothing from the real home directory or the package: a test sees only its own skills.
     home: dir,
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);
@@ -198,7 +197,6 @@ describe("automatic compaction", () => {
       config: profile(100_000),
       sessionsDir: path.join(scratch, "s"),
       home: scratch,
-      bundledSkillsDir: null,
       transport: (request) => {
         tools = request.tools;
         return (async function* () {

@@ -11,13 +11,12 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeConfig, setConfigValue } from "../config.js";
-import { describeSettings, readSetting } from "../configschema.js";
+import { describeSettings, readSetting, settingDescriptor } from "../configschema.js";
 import { configuredModel } from "../catalog/selection.js";
 import { moxenToolsOf } from "../mcp.js";
 import { describeMcpServers } from "../mcpview.js";
 import { resolveCompactionSettings, resolveHarnessTarget } from "../providers/harness/profiles.js";
 import { searchKeyFor, webPolicy } from "../providers/harness/web/settings.js";
-import { providerDelivery, providerSkillsOf, skillsDeliveryOf, type SkillsProviderKind } from "../skills/delivery.js";
 import { driverProviders, longThreadPolicy } from "../threads/longthreads.js";
 
 /** A Claude Code user from before the reshaping, with a local server behind the Harness. */
@@ -95,12 +94,12 @@ describe("an old config, loaded", () => {
     expect(describeMcpServers(config).find((item) => item.id === "moxen")?.status).toMatch(/^Replaces Moxen's built-in tools/);
   });
 
-  it("serves Moxen's skills, and keeps them from the providers whose older switch was off while they were served (7/12)", () => {
-    expect(skillsDeliveryOf(config).value).toBe("serve");
-    const delivered = (kind: SkillsProviderKind) => providerDelivery(skillsDeliveryOf(config).value, providerSkillsOf(config, kind).value);
-    expect(delivered("claude")).toBe("off");
-    expect(delivered("opencode")).toBe("off");
-    expect(delivered("harness")).toBe("serve");
+  it("still loads the skills switches Moxen no longer has a use for, and offers none of them (7/12, MXN-138)", () => {
+    expect(readSetting(config, "installSkills")).toBe(false);
+    expect(readSetting(config, "providers.opencode.bundledSkills")).toBe(false);
+    for (const key of ["skills.moxen", "installSkills", "providers.claude.moxenSkills", "providers.opencode.moxenSkills", "providers.harness.moxenSkills", "providers.opencode.bundledSkills"]) {
+      expect(settingDescriptor(key)?.hidden, key).toBe(true);
+    }
   });
 
   it("sends the profile's requests as before: no reasoning back, no template flag for it, images to the model (8/12)", () => {
@@ -142,12 +141,5 @@ describe("the other shapes old files came in", () => {
     const brave = normalizeConfig({ providers: { harness: { webSearch: "brave", webSearchKeyEnv: "BRAVE_API_KEY" } } });
     expect(searchKeyFor(brave.providers?.harness, "brave")).toEqual({ keyEnv: "BRAVE_API_KEY" });
     expect(searchKeyFor(brave.providers?.harness, "exa")).toEqual({});
-  });
-
-  it("the older skills switches while copying change nothing: copies reach every provider, as they did (7/12)", () => {
-    const copying = normalizeConfig({ providers: { claude: { agentSkills: false }, opencode: { bundledSkills: false } } });
-    for (const kind of ["claude", "opencode", "harness"] as const) {
-      expect(providerDelivery(skillsDeliveryOf(copying).value, providerSkillsOf(copying, kind).value)).toBe("copy");
-    }
   });
 });

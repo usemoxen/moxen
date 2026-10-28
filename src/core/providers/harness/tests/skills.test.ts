@@ -27,33 +27,28 @@ describe("parseSkillFile", () => {
 });
 
 describe("discoverSkills", () => {
-  it("takes a skill of the same name from the project before the user's folder before the bundled one", () => {
+  it("takes a skill of the same name from the project before the user's folder, and skips one with no description", () => {
     const cwd = path.join(dir, "work");
     const home = path.join(dir, "home");
-    const bundled = path.join(dir, "bundled");
     write(path.join(cwd, ".agents", "skills"), "same", "---\ndescription: project\n---\nbody");
     write(path.join(home, ".claude", "skills"), "same", "---\ndescription: user\n---\nbody");
-    write(path.join(bundled), "same", "---\ndescription: bundled\n---\nbody");
-    write(path.join(bundled), "no-description", "# Only a heading\n");
-    const found = discoverSkills({ cwd, home, bundledDir: bundled, mode: "served" });
+    write(path.join(home, ".agents", "skills"), "no-description", "# Only a heading\n");
+    const found = discoverSkills({ cwd, home });
     expect(found.map((skill) => [skill.name, skill.description])).toEqual([["same", "project"]]);
   });
 
   it("falls back to the folder's name, and to the first line of text, for a skill that states neither", () => {
     write(path.join(dir, "work", ".claude", "skills"), "plain", "Does the plain thing.\n\nMore.");
-    expect(discoverSkills({ cwd: path.join(dir, "work"), home: path.join(dir, "home"), bundledDir: null, mode: "project" })).toMatchObject([{ name: "plain", description: "Does the plain thing." }]);
+    expect(discoverSkills({ cwd: path.join(dir, "work"), home: path.join(dir, "home") })).toMatchObject([{ name: "plain", description: "Does the plain thing." }]);
   });
 
-  it("leaves out Moxen's skills it is told to hide, bundled or copied, but never a user's skill of that name", () => {
+  it("skips a copy an older Moxen left in the project, never a user's own skill", () => {
     const cwd = path.join(dir, "work");
     const home = path.join(dir, "home");
-    const bundled = path.join(dir, "bundled");
-    write(bundled, "moxen-research", "---\ndescription: research\n---\nbody");
-    write(bundled, "moxen-threads", "---\ndescription: threads\n---\nbody");
     write(path.join(cwd, ".claude", "skills"), "moxen-orchestrate", "---\ndescription: copy\n---\nbody");
     fs.writeFileSync(path.join(cwd, ".claude", "skills", "moxen-orchestrate", ".moxen-skill.json"), "{}");
-    write(path.join(home, ".agents", "skills"), "mine", "---\nname: moxen-hidden\ndescription: mine\n---\nbody");
-    const found = discoverSkills({ cwd, home, bundledDir: bundled, mode: "served", hidden: ["moxen-orchestrate", "moxen-research", "moxen-hidden"] });
-    expect(found.map((skill) => skill.name)).toEqual(["moxen-hidden", "moxen-threads"]);
+    write(path.join(home, ".agents", "skills"), "mine", "---\nname: moxen-research\ndescription: mine\n---\nbody");
+    const found = discoverSkills({ cwd, home });
+    expect(found.map((skill) => skill.name)).toEqual(["moxen-research"]);
   });
 });

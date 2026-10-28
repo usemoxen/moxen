@@ -33,7 +33,6 @@ function driverWith(script: ModelEvent[][]) {
     sessionsDir: path.join(dir, "sessions"),
     // Nothing from the real home directory or the package: a test sees only its own skills.
     home: dir,
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);

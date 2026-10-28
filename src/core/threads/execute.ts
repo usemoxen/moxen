@@ -27,7 +27,6 @@ import type { McpServerSpec } from "../mcp.js";
 
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
-import { locateBundledSkills } from "../providers/bundledskills.js";
 import { HarnessDriver } from "../providers/harness/driver.js";
 import { OpenCodeDriver } from "../providers/opencode/driver.js";
 import type {
@@ -219,7 +218,7 @@ export function driverForInstance(
   // different binary or config directory. The schema says as much
   // (`appliesAt: "server-restart"`), so a change applies to the next server start.
   if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver({ ...(providers?.claude ? { settings: providers.claude } : {}), skillsMod: locateSkillsMod() });
-  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}), bundledSkillsDir: locateBundledSkills() });
+  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
@@ -533,10 +532,6 @@ export async function ensureDriverSession(
     readonly moxenPrompt?: boolean;
     readonly checklist?: boolean;
     readonly instructions?: string | null;
-    /** How moxen's own skills reach the session (`ProviderSessionStartInput.moxenSkills` and the fields beside it). */
-    readonly moxenSkills?: "project" | "served" | "none";
-    readonly moxenSkillsFolder?: ".claude" | ".agents";
-    readonly hiddenMoxenSkills?: readonly string[];
     readonly delegated?: boolean;
     /** Moxen memory is on for this session (`ProviderSessionStartInput.moxenMemory`). */
     readonly moxenMemory?: boolean;
@@ -572,9 +567,6 @@ export async function ensureDriverSession(
       ...(options.checklist === false ? { checklist: false } : {}),
       ...(instructions ? { instructions } : {}),
       ...(isolation ? { isolation } : {}),
-      ...(options.moxenSkills ? { moxenSkills: options.moxenSkills } : {}),
-      ...(options.moxenSkillsFolder ? { moxenSkillsFolder: options.moxenSkillsFolder } : {}),
-      ...(options.hiddenMoxenSkills && options.hiddenMoxenSkills.length > 0 ? { hiddenMoxenSkills: options.hiddenMoxenSkills } : {}),
       ...(options.delegated === true ? { delegated: true } : {}),
       ...(options.moxenMemory === true ? { moxenMemory: true } : {}),
     }),

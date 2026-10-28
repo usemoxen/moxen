@@ -6,14 +6,11 @@
  *
  * Where they come from follows what the Claude and OpenCode drivers read, so a
  * project behaves the same under any of them: the project's `.claude/skills`
- * and `.agents/skills`, the user's own in the same two folders of the home
- * directory, and, in `served` mode, the skills bundled with moxen. A skill by
- * the same name is taken from the first of those only. In `none` mode (a
- * delegated task, or Moxen's skills switched off for the Harness) the skills
- * moxen copied into the project (`.moxen-skill.json`) are left out too; the
- * user's and the project's own stay. `hidden` names Moxen's skills to leave out
- * otherwise (the delegation skills, without delegation tools): only Moxen's own
- * copies or bundled skills, never a user's skill of the same name.
+ * and `.agents/skills`, then the user's own in the same two folders of the
+ * home directory. A skill by the same name is taken from the first of those
+ * only. Moxen ships no skills of its own; a copy an older Moxen left in a
+ * project (marked `.moxen-skill.json`) is skipped until the session start
+ * takes it out.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -27,8 +24,6 @@ const MAX_DESCRIPTION_CHARS = 300;
 /** A skill's text is not pruned later, so it is capped when it is read. */
 const MAX_BODY_CHARS = 40_000;
 
-export type SkillsMode = "project" | "served" | "none";
-
 export interface Skill {
   readonly name: string;
   readonly description: string;
@@ -39,11 +34,6 @@ export interface Skill {
 
 export interface DiscoverSkillsInput {
   readonly cwd: string;
-  readonly mode: SkillsMode;
-  /** Moxen's bundled `skills/` folder, when the package has one. */
-  readonly bundledDir: string | null;
-  /** Moxen's skills to leave out, by folder or name. */
-  readonly hidden?: readonly string[];
   readonly home?: string;
 }
 
@@ -86,7 +76,7 @@ function readSkill(dir: string): Skill | null {
   return { name, description: description.length > MAX_DESCRIPTION_CHARS ? `${description.slice(0, MAX_DESCRIPTION_CHARS - 1)}…` : description, dir, file };
 }
 
-function skillDirs(folder: string, skipManaged: boolean): string[] {
+function skillDirs(folder: string): string[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(folder, { withFileTypes: true });
@@ -96,7 +86,7 @@ function skillDirs(folder: string, skipManaged: boolean): string[] {
   return entries
     .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
     .map((entry) => path.join(folder, entry.name))
-    .filter((dir) => !(skipManaged && fs.existsSync(path.join(dir, MARKER_FILE))))
+    .filter((dir) => !fs.existsSync(path.join(dir, MARKER_FILE)))
     .sort();
 }
 
@@ -108,17 +98,12 @@ export function discoverSkills(input: DiscoverSkillsInput): Skill[] {
     path.join(input.cwd, ".agents", "skills"),
     path.join(home, ".claude", "skills"),
     path.join(home, ".agents", "skills"),
-    ...(input.mode === "served" && input.bundledDir ? [input.bundledDir] : []),
   ];
-  const hidden = new Set(input.hidden ?? []);
   const found = new Map<string, Skill>();
   for (const folder of folders) {
-    const bundled = folder === input.bundledDir;
-    for (const dir of skillDirs(folder, input.mode === "none")) {
+    for (const dir of skillDirs(folder)) {
       const skill = readSkill(dir);
       if (!skill || found.has(skill.name)) continue;
-      const moxens = bundled || fs.existsSync(path.join(dir, MARKER_FILE));
-      if (moxens && (hidden.has(skill.name) || hidden.has(path.basename(dir)))) continue;
       found.set(skill.name, skill);
     }
   }

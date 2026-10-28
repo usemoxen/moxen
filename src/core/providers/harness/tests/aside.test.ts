@@ -30,7 +30,6 @@ function driverWith(script: Array<ModelEvent[] | Error>, sessionsDir = path.join
     config,
     sessionsDir,
     home: dir,
-    bundledSkillsDir: null,
     sleep: async () => {},
     transport: (request) => {
       requests.push(request);

@@ -16,7 +16,7 @@ export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] 
 
 /** What the server tells a model about itself, whatever the transport. */
 export const MOXEN_MCP_INSTRUCTIONS =
-  "moxen runs coding agents as threads. Do not delegate unless the user asks you to (or a skill they invoked says to): each subagent starts cold and costs the user usage, so do the work yourself by default. " +
+  "moxen runs coding agents as threads. Do not delegate unless the user asks you to (or put the thread in Research or Orchestrate mode): each subagent starts cold and costs the user usage, so do the work yourself by default. " +
   "When they do ask, use delegate to hand a self-contained task to a subagent thread " +
   "(any provider and model, in its own git worktree). When it settles, a <task-notification> message arrives in your conversation " +
   "with its headline and branch, mid-turn or as a turn of its own. Do not poll task_status: keep working or end your turn, " +

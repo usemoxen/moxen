@@ -195,14 +195,10 @@ export interface EnsureOpencodeServerInput {
   readonly settings: OpencodeSettings;
   readonly workingDirectory: string;
   readonly env?: NodeJS.ProcessEnv;
-  /** Extra skill folders for a spawned server (moxen's bundled skills); an external server is not ours to configure. */
-  readonly skillsDirs?: readonly string[];
   /** The provider's `disabledNativeTools` setting, written into the server's config (`buildServerConfigContent`). */
   readonly disabledNativeTools?: string;
   /** Moxen's system prompt in place of OpenCode's (the provider's `moxenPrompt` setting). */
   readonly moxenPrompt?: boolean;
-  /** Moxen's skills the server must hide (`buildServerConfigContent`). */
-  readonly deniedSkills?: readonly string[];
 }
 
 export interface OpencodeTransport {
@@ -699,7 +695,7 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
     const password = resolveSpawnedServerPassword(settings, baseEnv);
     const childEnv: NodeJS.ProcessEnv = {
       ...baseEnv,
-      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, input.skillsDirs, { auto: settings.autoCompact, buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true, input.deniedSkills ?? []),
+      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, { auto: settings.autoCompact, buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true),
       OPENCODE_PASSWORD: password,
       OPENCODE_SERVER_PASSWORD: password,
       OPENCODE_DISABLE_AUTOUPDATE: "1",

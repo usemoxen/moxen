@@ -79,24 +79,6 @@ export interface ProviderSessionStartInput {
    * instruction is already part of `instructions`.
    */
   readonly isolation?: WorktreeIsolation;
-  /**
-   * Where moxen's own skills come from for this session (`core/skills/delivery.ts`).
-   * `project`: they were copied into the project's skills folder
-   * (`moxenSkillsFolder`), which the provider reads, so nothing else may offer
-   * them (they would load twice). `served`: the provider is pointed at the
-   * bundled folder (the default when absent). `none`: this session does not get
-   * them (a delegated task, or the user switched them off for this provider).
-   */
-  readonly moxenSkills?: "project" | "served" | "none";
-  /** Where the project's copies are, when it has them (`project`, or `none` hiding them). Claude Code reads `.claude/skills` itself, `.agents/skills` only through its mod. */
-  readonly moxenSkillsFolder?: ".claude" | ".agents";
-  /**
-   * Moxen's skills this session must not offer although the project's folder
-   * or the bundled one has them, by every name they answer to: all of the
-   * project's copies for `none`, the delegation skills for a provider without
-   * delegation tools. A driver hides them with its provider's own rules.
-   */
-  readonly hiddenMoxenSkills?: readonly string[];
   /** A delegated task: nobody is there to answer a question, so the driver asks none. */
   readonly delegated?: boolean;
   /**

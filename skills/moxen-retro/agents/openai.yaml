@@ -1,4 +1,0 @@
-interface:
-  display_name: "Moxen retro"
-  short_description: "Retrospective on a coding session: suggest improvements to the agent's environment"
-  default_prompt: "Use $moxen-retro to run a retrospective on this session."
