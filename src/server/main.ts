@@ -10,6 +10,7 @@
 import type { CliConfig } from "../core/types.js";
 import { DirectConnection } from "./connection.js";
 import { defaultEndpoint } from "./transport/endpoint.js";
+import { RemoteAccess } from "./transport/remoteaccess.js";
 import { serve, type ServerHandle } from "./transport/serve.js";
 
 export interface RunServerOptions {
@@ -30,6 +31,8 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
     // The server owns every session, so it runs scheduled turns too — with
     // or without a client attached.
     connection.startScheduling();
+    // Off unless `remote.enabled`; closed with the connection.
+    await connection.attachRemoteAccess(new RemoteAccess({ api: connection }));
     return handle;
   } catch (cause) {
     await connection.close();

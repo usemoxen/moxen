@@ -62,6 +62,23 @@ export async function readSecret(name: string): Promise<string | null> {
   }
 }
 
+/**
+ * `readSecret` for a value whose absence has consequences: null only when the
+ * keychain answered that there is none, and a throw when it could not answer
+ * (locked, unavailable, no keychain at all). The remote listener's key is
+ * one such value: treating a locked keychain as "no key" would replace the
+ * key and unpair every device.
+ */
+export async function readSecretStrict(name: string): Promise<string | null> {
+  const value = await store().get({ service: SERVICE, name });
+  if (value === null || value === "") {
+    cache.delete(name);
+    return null;
+  }
+  cache.set(name, value);
+  return value;
+}
+
 /** Load a referenced secret into the cache so `cachedSecret` can answer. Never throws. */
 export async function primeSecret(ref: string | undefined): Promise<void> {
   if (!isSecretRef(ref)) return;

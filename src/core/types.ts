@@ -58,7 +58,19 @@ export interface CliConfig {
   /** Per-provider settings, read when that provider's driver is built. */
   providers?: ProvidersConfig;
   updates?: UpdatesConfig;
+  /** The server, reached from other machines (`server/transport/remoteaccess.ts`). */
+  remote?: RemoteConfig;
 }
+
+export interface RemoteConfig {
+  /** Listen for paired devices beyond this machine. Off unless set. */
+  enabled?: boolean;
+  /** Which addresses: the local network, the tailnet, or both (the default). */
+  interfaces?: RemoteInterfaces;
+  port?: number;
+}
+
+export type RemoteInterfaces = "lan" | "tailscale" | "both";
 
 export interface UpdatesConfig {
   /** Ask the npm registry for the newest Claude Code and OpenCode when the settings page opens. On by default. */

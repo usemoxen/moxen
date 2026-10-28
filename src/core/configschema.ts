@@ -49,6 +49,9 @@ import { describeProviderSkills, providerSkillsOf, skillsDeliveryOf, type Skills
 import { moxenToolsOf } from "./mcp.js";
 import { driverKindOfInstance, type CliConfig } from "./types.js";
 
+/** The TCP port remote access listens on unless `remote.port` says otherwise. */
+export const DEFAULT_REMOTE_PORT = 47_317;
+
 /** Where a setting shows up. Order is the order a settings page renders. */
 export const SETTING_SECTIONS = [
   "general",
@@ -992,6 +995,45 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     section: "general",
     kind: { type: "boolean" },
     defaultValue: true,
+  },
+
+  // -- remote access (the server, reached from another machine) -------------
+  {
+    key: "remote.enabled",
+    label: "Remote access",
+    description:
+      "Let paired devices on your network or tailnet drive this machine's Moxen server, over TLS. Off, the server listens on this machine only. Takes effect at once while the server runs.",
+    section: "general",
+    group: "Remote access",
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  {
+    key: "remote.interfaces",
+    label: "Listen on",
+    description: "Which of this machine's addresses remote access listens on: the local network, Tailscale, or both. Never all addresses at once.",
+    section: "general",
+    group: "Remote access",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("both", "LAN and Tailscale"),
+        choice("lan", "Local network", "Private addresses such as 192.168.x and 10.x."),
+        choice("tailscale", "Tailscale", "This machine's tailnet address only."),
+      ],
+    },
+    defaultValue: "both",
+    visibleWhen: { key: "remote.enabled", in: ["true"] },
+  },
+  {
+    key: "remote.port",
+    label: "Port",
+    description: "The TCP port remote access listens on.",
+    section: "general",
+    group: "Remote access",
+    kind: { type: "integer", min: 1024, max: 65535 },
+    defaultValue: DEFAULT_REMOTE_PORT,
+    visibleWhen: { key: "remote.enabled", in: ["true"] },
   },
 
   // -- git and forges --------------------------------------------------------

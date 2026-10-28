@@ -23,6 +23,7 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
+import type { RemoteAccessStatus } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
   CancelledTask,
@@ -396,6 +397,8 @@ export type Query =
    * every thread on it. Empty until a session reports.
    */
   | { readonly type: "usage.limits" }
+  /** Remote access as the server sees it; `available` false when there is no server (in-process). */
+  | { readonly type: "remote.status" }
   /**
    * A background task's output, best-effort: the driver may have no way to
    * read it (unsupported provider, task gone, file not yet written).
@@ -464,6 +467,7 @@ export interface QueryResults {
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
   "thread.subagent": SubagentTranscript;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
+  "remote.status": RemoteAccessStatus & { readonly available: boolean };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
   "harness.profile.export": { readonly id: string; readonly text: string };
@@ -1145,6 +1149,7 @@ export function decodeQuery(value: unknown): Query {
     case "providers.list":
     case "doctor":
     case "usage.limits":
+    case "remote.status":
     case "settings.read":
     case "provider.latest":
       return { type };

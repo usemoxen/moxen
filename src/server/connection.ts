@@ -37,7 +37,7 @@ import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../cor
 import { defaultRuntimeMode, resolveModelSelection } from "../core/catalog/selection.js";
 import { defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
-import { describeSettings, listTarget } from "../core/configschema.js";
+import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
 import { mergeProbed, probeSettledSomething, runProbe, testProfile } from "../core/providers/harness/probe.js";
 import { readCommitDetail, readCommitDiff, readOverview } from "../core/git/history.js";
@@ -121,6 +121,7 @@ import type { CheckpointFileStat, StoredCheckpoint, StoredThread, TurnStatus } f
 import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
 import type { ClientApi } from "./api.js";
+import type { RemoteAccess } from "./transport/remoteaccess.js";
 import {
   decodeCommand,
   decodeQuery,
@@ -171,6 +172,7 @@ export interface DirectConnectionOptions {
 
 export class DirectConnection implements ClientApi {
   private readonly storeRoot: string;
+  private remoteAccess: RemoteAccess | null = null;
   private readonly factories: TurnDriverFactories;
   private readonly shellPollMs: number;
   private readonly threadPollMs: number;
@@ -794,7 +796,19 @@ export class DirectConnection implements ClientApi {
         // have written since, and a settings page that silently reverts a
         // neighbour's edit is worse than one that is a beat behind.
         const { config, path } = await this.readConfigFile();
-        await saveConfig(path, await setConfigValueSecure(config, command.key, command.value));
+        const next = await setConfigValueSecure(config, command.key, command.value);
+        await saveConfig(path, next);
+        if (this.remoteAccess && command.key.startsWith("remote.")) {
+          try {
+            await this.remoteAccess.apply(next.remote);
+          } catch (cause) {
+            // Put back what was listening: a setting that says "on" while
+            // nothing listens would be a lie the next restart repeats.
+            await saveConfig(path, config);
+            await this.remoteAccess.apply(config.remote).catch(() => undefined);
+            throw cause;
+          }
+        }
         return { ...(await this.settingsSnapshot()), accepted: true };
       }
       case "settings.duplicate": {
@@ -1216,6 +1230,11 @@ export class DirectConnection implements ClientApi {
       }
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "remote.status": {
+        if (this.remoteAccess) return { available: true, ...this.remoteAccess.status() };
+        const remote = (await this.loadConfig()).remote;
+        return { available: false, enabled: remote?.enabled === true, interfaces: remote?.interfaces ?? "both", port: remote?.port ?? DEFAULT_REMOTE_PORT, listening: [] };
+      }
       case "settings.read":
         return await this.settingsSnapshot();
       case "harness.profile.export": {
@@ -1303,8 +1322,21 @@ export class DirectConnection implements ClientApi {
     return { ...payload, settings: { ...payload.settings, providerModelPreferences: preferences } };
   }
 
+  /**
+   * The server's remote listener (`./transport/remoteaccess.ts`), when this
+   * connection is served by one: `remote.*` settings then apply at once.
+   * Applies the current config; a failure is kept in `remote.status`
+   * rather than stopping the server, which still serves this machine.
+   */
+  async attachRemoteAccess(remoteAccess: RemoteAccess): Promise<void> {
+    this.remoteAccess = remoteAccess;
+    const remote = await this.loadConfig().then((config) => config.remote, () => undefined);
+    await remoteAccess.apply(remote).catch(() => undefined);
+  }
+
   async close(): Promise<void> {
     this.closed = true;
+    await this.remoteAccess?.close().catch(() => undefined);
     if (this.pruneTimer !== null) clearInterval(this.pruneTimer);
     this.pruneTimer = null;
     if (this.schedulingStarted) onScheduledTurnDue(null);

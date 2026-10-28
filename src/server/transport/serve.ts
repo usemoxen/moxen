@@ -64,7 +64,7 @@ export async function serve(options: ServeOptions): Promise<ServerHandle> {
 
   const server = net.createServer((socket) => {
     sockets.add(socket);
-    handleSocket(socket, api, () => void close());
+    handleSocket(socket, api, { remote: false, shutdown: () => void close() });
     socket.once("close", () => sockets.delete(socket));
   });
 
@@ -90,7 +90,21 @@ export async function serve(options: ServeOptions): Promise<ServerHandle> {
   return { endpoint, closed, close };
 }
 
-function handleSocket(socket: net.Socket, api: ClientApi, shutdown: () => void): void {
+/** How one socket is served: where it came from, and what it may do. */
+export interface SocketContext {
+  /** Accepted by the remote listener (`./remoteaccess.ts`) rather than the local endpoint. */
+  readonly remote: boolean;
+  /** Stop the server. Never offered to a remote socket. */
+  readonly shutdown: () => void;
+  /**
+   * Remote sockets only: vets the `hello` params before the socket is
+   * greeted, throwing to refuse. Until pairing exists every remote hello is
+   * refused, so an enabled listener grants nothing.
+   */
+  readonly admit?: (params: Record<string, unknown>) => Promise<void> | void;
+}
+
+export function handleSocket(socket: net.Socket, api: ClientApi, context: SocketContext): void {
   socket.setEncoding("utf8");
   const reader = new LineReader();
   const subscriptions = new Map<number, () => void>();
@@ -118,13 +132,17 @@ function handleSocket(socket: net.Socket, api: ClientApi, shutdown: () => void):
       const params = (message.params ?? {}) as Record<string, unknown>;
 
       if (method === "hello") {
-        reply(id, () => {
+        reply(id, async () => {
           if (params.protocol !== PROTOCOL_VERSION) {
             throw new CliError(
               "PROTOCOL_MISMATCH",
               `This moxen server speaks protocol ${PROTOCOL_VERSION}; the client speaks ${String(params.protocol)}. Restart the server so both run the same version.`,
               { details: { server: PROTOCOL_VERSION, client: params.protocol } },
             );
+          }
+          if (context.remote) {
+            if (!context.admit) throw new CliError("REMOTE_NOT_PAIRED", "This moxen server does not accept remote clients yet.");
+            await context.admit(params);
           }
           greeted = true;
           const hello: HelloResult = { protocol: PROTOCOL_VERSION, server: "moxen", pid: process.pid };
@@ -177,8 +195,12 @@ function handleSocket(socket: net.Socket, api: ClientApi, shutdown: () => void):
           break;
         }
         case "shutdown":
+          if (context.remote) {
+            send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
+            break;
+          }
           send({ id, result: null });
-          shutdown();
+          context.shutdown();
           break;
         default:
           send({ id, error: toWireError(new CliError("UNKNOWN_METHOD", `Unknown method ${method}.`)) });

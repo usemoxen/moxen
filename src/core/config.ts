@@ -26,6 +26,7 @@ import type {
   SpeedMode,
   ThreadEnvMode,
   UpdatesConfig,
+  RemoteConfig,
   LongThreadsConfig,
   UiConfig,
   SkillsConfig,
@@ -238,6 +239,8 @@ export function normalizeConfig(raw: unknown): CliConfig {
   if (forge) result.forge = forge;
   const updates = normalizeSection<UpdatesConfig>(input.updates, "updates", ["checkLatest"]);
   if (updates) result.updates = updates;
+  const remote = normalizeSection<RemoteConfig>(input.remote, "remote", ["enabled", "interfaces", "port"]);
+  if (remote) result.remote = remote;
   const providers = normalizeProviders(input.providers);
   if (providers) result.providers = providers;
   return applyEnvironmentOverrides(retireServerProviders(result));
