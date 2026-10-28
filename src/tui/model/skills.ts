@@ -29,6 +29,8 @@ export function detectSkillTrigger(text: string, cursorOffset: number): SkillTri
 const MOXEN_COMMANDS: readonly SkillSummary[] = [
   plainSkill("compact", "Summarize the conversation to free up context"),
   plainSkill("btw", "Ask a side question without adding it to the thread", { shortDescription: "<question>  Ask a side question without adding it to the thread" }),
+  plainSkill("research", "Research mode: researcher agents, a critic and one final report (again: back to Build)"),
+  plainSkill("orchestrate", "Orchestrate mode: tasks delegated to the model that fits each (again: back to Build)"),
 ];
 
 /**

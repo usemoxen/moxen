@@ -24,7 +24,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | `--speed`, `--speed-mode` | `standard`, `fast` |
 | `--thinking-effort` | A model-supported value such as `low`, `medium`, `high`, `xhigh` or `max` |
 | `--permission`, `--runtime-mode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` |
-| `--mode`, `--interaction-mode` | `build`/`default`. Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
+| `--mode`, `--interaction-mode` | `build`/`default`, `research` or `orchestrate` (see [Modes](threads.md#modes-build-research-and-orchestrate)). Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
 | `--checkout`, `--env-mode` | `current`/`local`, `worktree`, or the resolved default via `auto` |
 
 Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is the explicit installation default (`codex` / `gpt-5.4`).
@@ -93,7 +93,7 @@ printf '%s' "New findings that require more work..." \
   | moxen --json threads send --thread <thread-id> --stdin --wake-settled
 ```
 
-The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the thread's modes in the TUI permission picker, since scheduled runs inherit them.
+The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the permission in the TUI permission picker and the mode with Shift+Tab or `/research` / `/orchestrate` in the composer, since scheduled runs inherit them.
 
 `--delivery` selects follow-up policy (default `auto`; every follow-up is recorded as a `thread.turn.start` turn, so the mode governs preconditions and reporting): `queue` records even when busy and reports `queued`, `steer` requires an active turn and reports `steered`, and `restart` interrupts the active turn first and reports `restarted` (`THREAD_NOT_STEERABLE` when idle). `--handoff-note <text>` records provider-switch context as CLI-side metadata without changing the recorded turn.
 
@@ -159,7 +159,7 @@ moxen config set thinkingEffort xhigh
 | `openMode` | Older key, kept so configs and scripts load; nothing is opened | `auto` |
 | `threadEnvMode` | `local`, `worktree` (an older `auto` reads as `local`) | `local` |
 | `runtimeMode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` | `full-access` |
-| `interactionMode` | `default` (Build). An older config's `plan` reads as `default`: plan mode was removed | `default` |
+| `interactionMode` | `default` (Build), `research` or `orchestrate`. An older config's `plan` reads as `default`: plan mode was removed | `default` |
 | `provider` | Provider instance id for model overrides | Unset (inherits thread/project) |
 | `model` | Model slug for overrides | Unset (inherits thread/project) |
 | `speedMode` | Older key, kept so configs load; no provider reads it | Unset |

@@ -742,6 +742,9 @@ export class DirectConnection implements ClientApi {
           if (thread) this.driverFor(thread.modelSelection.instanceId).setRuntimeMode?.(command.threadId, command.runtimeMode);
         }
         return accepted;
+      case "thread.interaction-mode.set":
+        await updateThreadMeta(await this.store(), command.threadId, { interactionMode: command.interactionMode });
+        return accepted;
       case "thread.user-input.respond":
         await this.userInputRespond(command.threadId, command.requestId, command.answers);
         return accepted;

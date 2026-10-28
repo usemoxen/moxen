@@ -177,8 +177,8 @@ function addThreadOptions(command: Command): Command {
     )
     .addOption(
       // `plan` stays accepted here so the refusal is ours (PLAN_MODE_REMOVED, exit 2), not a bare "invalid choice".
-      new Option("--mode, --interaction-mode <mode>", "Thread mode: build (default).")
-        .choices(["default", "build", "plan"]),
+      new Option("--mode, --interaction-mode <mode>", "Thread mode: build (default), research or orchestrate.")
+        .choices(["default", "build", "research", "orchestrate", "plan"]),
     )
     .option("--no-project", "Start without a project, in a fresh scratch folder.")
     .option("--dry-run", "Resolve and print commands without dispatching them.")

@@ -72,6 +72,12 @@ export interface StoredThread {
    * after the history). See `planInstructions`.
    */
   readonly instructionState?: Readonly<Record<string, { readonly baseline: string; readonly delivered: string }>>;
+  /**
+   * The mode each provider's conversation was last told about, keyed like
+   * `providerSessions` (Claude and the Harness; OpenCode's driver keeps its
+   * own). Absent means Build: nothing was said. See `threads/modes.ts`.
+   */
+  readonly modeState?: Readonly<Record<string, InteractionMode>>;
   /** The provider's own subagents, running and latest finished (`subagents.ts`). Absent until the first. */
   readonly nativeSubagents?: readonly StoredNativeSubagent[];
 }

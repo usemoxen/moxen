@@ -176,6 +176,8 @@ export type CommandBody =
       readonly runtimeMode: RuntimeMode;
       readonly interactionMode?: InteractionMode;
     }
+  /** Build, Research or Orchestrate. The session hears of it with the next prompt (`core/threads/modes.ts`). */
+  | { readonly type: "thread.interaction-mode.set"; readonly threadId: string; readonly interactionMode: InteractionMode }
   | {
       readonly type: "thread.user-input.respond";
       readonly threadId: string;
@@ -317,6 +319,7 @@ export interface CommandResults {
   "thread.meta.update": Accepted;
   "thread.model-selection.set": Accepted;
   "thread.runtime-mode.set": Accepted;
+  "thread.interaction-mode.set": Accepted;
   "thread.user-input.respond": Accepted;
   "thread.user-input.dismiss": Accepted;
   "thread.permission.respond": Accepted;
@@ -858,6 +861,11 @@ export function decodeCommand(value: unknown): Command {
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
       };
     }
+    case "thread.interaction-mode.set":
+      if (record.interactionMode === undefined) {
+        throw new CliError("INVALID_THREAD_OPTION", `${type} requires interactionMode.`, { exitCode: 2 });
+      }
+      return { ...meta, type, threadId: threadId(), interactionMode: requestedInteractionMode(record.interactionMode, type) };
     case "thread.user-input.respond":
       return {
         ...meta,

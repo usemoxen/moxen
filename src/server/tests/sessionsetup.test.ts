@@ -245,6 +245,78 @@ describe("a change of instructions on a thread with history", () => {
   });
 });
 
+describe("Research and Orchestrate modes", () => {
+  // OpenCode keeps the mode as an instruction entry (its driver's tests); the others hear of it in the prompt.
+  const CLAUDE = { provider: "claudeAgent", model: "claude-opus-5" } as const;
+  async function world() {
+    const prompts: string[] = [];
+    const harness = await testHarness({ onSendTurn: (input) => prompts.push(input.prompt) });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => ({ ...harness.config }) });
+    return { harness, prompts, connection };
+  }
+  const send = (connection: DirectConnection, threadId: string, text: string) =>
+    connection.dispatch({ type: "thread.turn.start", threadId, message: { text }, wait: true });
+  const setMode = (connection: DirectConnection, threadId: string, interactionMode: "default" | "research" | "orchestrate") =>
+    connection.dispatch({ type: "thread.interaction-mode.set", threadId, interactionMode });
+
+  it("tells the conversation of each switch once, ahead of the next prompt, and that a mode is off on the way back to Build", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const id = created.threadId;
+      expect(prompts).toEqual(["one"]);
+
+      await setMode(connection, id, "research");
+      await send(connection, id, "two");
+      expect(prompts[1]).toContain('<moxen-mode key="moxen-research">');
+      expect(prompts[1]).toContain("Research mode is on");
+      expect(prompts[1]!.endsWith("two")).toBe(true);
+      // The transcript keeps what was typed.
+      expect((await harness.store.readMessages(id)).filter((message) => message.role === "user").map((message) => message.text)).toEqual(["one", "two"]);
+
+      // It lasts: the next prompt carries nothing more.
+      await send(connection, id, "three");
+      expect(prompts[2]).toBe("three");
+
+      await setMode(connection, id, "default");
+      await send(connection, id, "four");
+      expect(prompts[3]).toContain("Research mode is off");
+      expect(prompts[3]).not.toContain("Research mode is on");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("says it again after the turn that carried it is reverted", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const id = created.threadId;
+      await setMode(connection, id, "orchestrate");
+      await send(connection, id, "two");
+      expect(prompts[1]).toContain('<moxen-mode key="moxen-orchestrate">');
+      await connection.dispatch({ type: "thread.conversation.revert", threadId: id, turnCount: 1 });
+      await send(connection, id, "again");
+      expect(prompts[2]).toContain('<moxen-mode key="moxen-orchestrate">');
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("runs a delegated task in Build whatever its parent's mode", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local", interactionMode: "orchestrate", ...CLAUDE });
+      expect(prompts[0]).toContain('<moxen-mode key="moxen-orchestrate">');
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Sub task", isolation: "shared" });
+      expect(delegated.interactionMode).toBe("default");
+      expect(prompts.at(-1)).not.toContain("<moxen-mode");
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
 describe("skills.list", () => {
   it("answers with the provider's inventory, or an empty one for a driver without one", async () => {
     const { harness, connection } = await connected();

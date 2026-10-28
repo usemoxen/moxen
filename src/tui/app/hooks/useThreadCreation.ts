@@ -2,7 +2,7 @@ import { basename, resolve } from "node:path";
 
 import { buildImageAttachments, extractMentions } from "../../../core/attachments.js";
 import { dispatchErrorMessage } from "../../../core/errors.js";
-import type { ModelSelection, RuntimeMode, ProjectEnvelope, ThreadEnvelope } from "../../../core/types.js";
+import type { InteractionMode, ModelSelection, RuntimeMode, ProjectEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import type { ImageAttachmentUpload } from "../../../core/attachments.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PickerName } from "../../features/pickers/pickerTypes.js";
@@ -31,6 +31,8 @@ export function useThreadCreation(params: {
   creatingProjectId: string | null;
   creatingModelSelection: ModelSelection | null;
   creatingRuntimeMode: RuntimeMode | null;
+  /** The mode the draft starts in (`useInteractionMode`): Build unless picked while drafting. */
+  creatingInteractionMode: InteractionMode;
   resetDraft: (id: string) => void;
   writePending: (id: string, next: ImageAttachmentUpload[]) => void;
   setCreating: (creating: boolean) => void;
@@ -54,6 +56,7 @@ export function useThreadCreation(params: {
     creatingProjectId,
     creatingModelSelection,
     creatingRuntimeMode,
+    creatingInteractionMode,
     resetDraft,
     writePending,
     setCreating,
@@ -99,7 +102,7 @@ export function useThreadCreation(params: {
       }
       const threadId = crypto.randomUUID();
       const title = threadTitle(parsed.text);
-      const interactionMode = source?.interactionMode ?? "default";
+      const interactionMode = creatingInteractionMode;
       // The local override picked while drafting wins over whatever the
       // source thread carries — that's the whole point of `creatingModelSelection`.
       // With no source thread the override (or nothing, letting the server

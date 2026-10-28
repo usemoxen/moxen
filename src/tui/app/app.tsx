@@ -9,6 +9,7 @@ import { Timeline } from "../features/timeline/timeline.js";
 import { DiffPanel } from "../features/diffpanel/diffpanel.js";
 import { Composer } from "../features/composer/composer.js";
 import { useSkillInventory } from "../features/composer/useSkillInventory.js";
+import { useInteractionMode } from "../features/composer/useInteractionMode.js";
 import { pickerEntries } from "../model/skills.js";
 import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
@@ -429,6 +430,13 @@ export function App({
     (creating ? null : (selected?.worktreePath ?? null)) ??
     shell.projects.find((project) => project.id === effectiveProjectId)?.workspaceRoot ??
     null;
+  const interaction = useInteractionMode({
+    client,
+    selected,
+    creating,
+    notify: (text) => toasts.push("mode", "info", text, COPY_TOAST_MS),
+    setError,
+  });
   const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
   const pickerSkills = useMemo(() => pickerEntries(skillInventory), [skillInventory]);
 
@@ -840,6 +848,7 @@ export function App({
       creatingProjectId,
       creatingModelSelection,
       creatingRuntimeMode,
+      creatingInteractionMode: interaction.mode,
       resetDraft,
       writePending,
       setCreating,
@@ -2201,6 +2210,18 @@ export function App({
 
   const submitComposer = () => {
     if (editingExternallyRef.current) return;
+    // `/research`, `/orchestrate`: the mode changes first, then any text after the command goes out in it.
+    if (interaction.isModeCommand(draft)) {
+      const text = draft;
+      // The composer's draft key (`useComposer`): the open thread's, or the one a first thread is drafted under.
+      resetDraft(openThreadId ?? "__creating__");
+      void interaction.takeCommand(text).then((rest) => {
+        if (rest === null || rest.length === 0) return;
+        if (creating) createThread(rest);
+        else send(rest);
+      });
+      return;
+    }
     if (creating) createThread(draft);
     else send(draft);
   };
@@ -2473,6 +2494,8 @@ export function App({
                 editingExternally={editingExternally}
                 skills={pickerSkills}
                 onSkillsOpen={refreshSkills}
+                mode={interaction.mode}
+                onCycleMode={interaction.cycleMode}
               />
               )}
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center", marginTop: 1 }}>
@@ -2614,6 +2637,8 @@ export function App({
             onBackgroundClick={() => toggleSideTab("background")}
             planUsage={planGauges}
             onPlanUsageClick={() => toggleSideTab("context")}
+            mode={interaction.mode}
+            onCycleMode={interaction.cycleMode}
           />
           )}
         </box>

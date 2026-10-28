@@ -41,6 +41,24 @@ export const COLOR = {
 } as const;
 
 /**
+ * A thread's mode, on the composer's left edge and in its footer. Amber
+ * (running, warnings) and green (the user's messages) already mean something,
+ * so no mode takes them. Build is the focus colour it always was.
+ */
+export const MODE_COLOR = {
+  default: SURFACE.borderFocus,
+  research: COLOR.diff,
+  orchestrate: "#f0abfc",
+} as const;
+
+/** The other end of each mode's running pulse (`pulseColor` from `MODE_COLOR`). */
+export const MODE_PULSE = {
+  default: "#0ea5e9",
+  research: "#ede9fe",
+  orchestrate: "#fae8ff",
+} as const;
+
+/**
  * Tree-sitter highlight-group palette for code grammars (`keyword`,
  * `string`, `function`, …). `SyntaxStyle.create()` registers no token
  * styles, which paints every token the same default colour —

@@ -8,7 +8,9 @@ import { SyntaxStyle, TextAttributes, bg, decodePasteBytes, fg, italic, stripAns
 import { useHover } from "../../hooks/useHover.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
-import { COLOR, pulseColor, SURFACE, truncate } from "../../theme.js";
+import { COLOR, MODE_COLOR, MODE_PULSE, pulseColor, SURFACE, truncate } from "../../theme.js";
+import { interactionModeLabel } from "../../model/modes.js";
+import type { InteractionMode } from "../../../core/types.js";
 import { thumbGeometry } from "../../model/scrollbar.js";
 import { detectSkillTrigger, filterSkills, insertSkillMention, leadingCommandRange, type SkillTrigger } from "../../model/skills.js";
 import { SkillPicker, SKILL_POPUP_ROWS } from "./skillpicker.js";
@@ -218,6 +220,8 @@ export function Composer({
   onClaimPaste,
   suggestion,
   notice,
+  mode = "default",
+  onCycleMode,
 }: {
   draft: string;
   /**
@@ -304,6 +308,10 @@ export function Composer({
    * where the banner sits over the composer on the pane's own surface.
    */
   notice?: ReactNode;
+  /** The thread's mode: colours the left edge and its running pulse; the footer names any but Build. */
+  mode?: InteractionMode;
+  /** Shift+Tab, or a click on the footer's mode: the next mode (Build → Research → Orchestrate). */
+  onCycleMode?: () => void;
 }) {
   const areaRef = useRef<TextareaRenderable | null>(null);
   /** Each pending image's token in the draft: its extmark and label, by attachment name. */
@@ -599,8 +607,10 @@ export function Composer({
   // Card chrome: border 1, left padding 2, the draft column's right padding
   // 1 and the scrollbar strip 1. The model group keeps two columns of air.
   const footerRoom = width - 5;
+  const modeLabel = mode === "default" ? null : ` · ${interactionModeLabel(mode)}`;
   const leftWidth =
     model.length +
+    (modeLabel === null ? 0 : modeLabel.length) +
     (effort === null || effort === undefined || effort.length === 0 ? 0 : effort.length + 3) +
     (permission === null || permission === undefined || permission.length === 0 ? 0 : permission.length + 3) +
     2;
@@ -639,7 +649,7 @@ export function Composer({
   // static otherwise. Gated internally so idle composers never re-render.
   const borderTick = useAnimTick(running && focused, 400);
   const frameBorderColor =
-    running && focused ? pulseColor(borderTick, SURFACE.borderFocus, "#0ea5e9", 2400) : focused ? SURFACE.borderFocus : SURFACE.border;
+    running && focused ? pulseColor(borderTick, MODE_COLOR[mode], MODE_PULSE[mode], 2400) : focused ? MODE_COLOR[mode] : SURFACE.border;
 
   return (
     // Stacked above its siblings (tasks panel, banners, attachment strip):
@@ -813,6 +823,12 @@ export function Composer({
               onEscape();
               return;
             }
+            // Shift+Tab cycles the thread's mode.
+            if (key.name === "tab" && key.shift === true && onCycleMode !== undefined) {
+              key.preventDefault();
+              onCycleMode();
+              return;
+            }
             // Tab while a turn runs queues the draft behind it.
             if (key.name === "tab" && key.shift !== true && running && onQueue !== undefined && (areaRef.current?.plainText ?? "").trim().length > 0) {
               key.preventDefault();
@@ -873,6 +889,13 @@ export function Composer({
                 hoverColor={COLOR.bright}
                 onClick={onPermissionClick}
               />
+            )}
+            {modeLabel === null ? null : onCycleMode === undefined ? (
+              <text fg={MODE_COLOR[mode]} bg={SURFACE.raised} selectable={false}>
+                {modeLabel}
+              </text>
+            ) : (
+              <HoverText text={modeLabel} color={MODE_COLOR[mode]} hoverColor={COLOR.bright} onClick={onCycleMode} />
             )}
           </box>
           {footerSegments.length === 0 ? null : (

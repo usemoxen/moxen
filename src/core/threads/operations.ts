@@ -63,6 +63,7 @@ import { driverKindOfInstance } from "../types.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { buildRuntimeInstructions, planInstructions, projectInstructions, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
@@ -160,9 +161,49 @@ function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: st
   };
 }
 
-/** The prompt a turn sends the provider: what was typed, with any instruction update ahead of it. */
-function promptWithUpdate(prompt: string, setup: { instructionsUpdate: InstructionsUpdate | null }): string {
-  return withInstructionsUpdate(prompt, setup.instructionsUpdate?.text ?? null);
+/** A mode change the conversation has not heard of yet (`modes.ts`): put before the next prompt, then recorded. */
+interface ModeUpdate extends InstructionsUpdate {
+  readonly mode: InteractionMode;
+}
+
+interface PendingUpdates {
+  readonly instructionsUpdate: InstructionsUpdate | null;
+  readonly modeUpdate: ModeUpdate | null;
+}
+
+/** The prompt a turn sends the provider: what was typed, with any instruction update and mode change ahead of it. */
+function promptWithUpdate(prompt: string, setup: PendingUpdates): string {
+  const withMode = setup.modeUpdate ? withModeChange(prompt, setup.modeUpdate.text, setup.modeUpdate.mode) : prompt;
+  return withInstructionsUpdate(withMode, setup.instructionsUpdate?.text ?? null);
+}
+
+/** What to record once the provider accepted a prompt `promptWithUpdate` built. */
+function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
+  return [setup.instructionsUpdate?.delivered, setup.modeUpdate?.delivered].filter((step): step is () => Promise<void> => step !== undefined);
+}
+
+/**
+ * The mode change a provider's conversation is owed: the thread's mode
+ * against the one it was last told (`StoredThread.modeState`; nothing said
+ * means Build). A conversation with no history has heard nothing. OpenCode
+ * keeps the mode as an instruction entry its driver sets, so it owes none.
+ */
+function pendingModeUpdate(ctx: OperationContext, thread: StoredThread, key: string, history: boolean): ModeUpdate | null {
+  if (key === "opencode") return null;
+  const told = (history ? thread.modeState?.[key] : undefined) ?? "default";
+  const text = modeChange(told, thread.interactionMode);
+  if (text === null) return null;
+  return {
+    text,
+    mode: thread.interactionMode,
+    delivered: async () => {
+      await ctx.store.withThreadLock(thread.id, async () => {
+        const fresh = await ctx.store.readThreadRecord(thread.id);
+        if (!fresh) return;
+        await ctx.store.writeThreadRecord({ ...fresh, modeState: { ...fresh.modeState, [key]: thread.interactionMode } });
+      });
+    },
+  };
 }
 
 /**
@@ -180,7 +221,7 @@ async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
   instanceId: string = thread.modelSelection.instanceId,
-): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null }> {
+): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
@@ -263,6 +304,7 @@ async function sessionSetup(
       plan.update === null
         ? null
         : { text: plan.update, delivered: () => record({ baseline: plan.next.baseline, delivered: plan.update! }) },
+    modeUpdate: pendingModeUpdate(ctx, thread, key, history),
   };
 }
 
@@ -316,13 +358,15 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     return;
   }
   const images = await imagesOf(message.attachments);
+  const steps = deliveredSteps(setup);
   void executeTurn({
     store,
     driver,
     threadId,
     storeTurnId: turn.id,
     prompt: promptWithUpdate(message.text, setup),
-    ...(setup.instructionsUpdate ? { afterSend: setup.instructionsUpdate.delivered } : {}),
+    ...(steps.length > 0 ? { afterSend: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+    interactionMode: thread.interactionMode,
     ...(images.length > 0 ? { images } : {}),
     modelSelection: selection,
     workingDirectory: thread.env.path,
@@ -682,7 +726,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   await driver.updateNativeTools?.(sent.thread.id, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
-  const delivered = [setup.instructionsUpdate?.delivered, rules ? async () => rules.commit() : undefined].filter((step): step is () => Promise<void> => step !== undefined);
+  const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
   const run = executeTurn({
     store,
     driver,
@@ -694,6 +738,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // Always the turn's own model, so a live session switches when the
     // thread's model changed since it started.
     modelSelection: turnModel,
+    interactionMode: sent.thread.interactionMode,
     workingDirectory: sent.thread.env.path,
     ...(onEvent ? { onEvent } : {}),
     ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
@@ -852,7 +897,9 @@ export async function revertThread(
       const instructionState = state
         ? { ...current.instructionState, [key]: { baseline: state.baseline, delivered: state.baseline } }
         : current.instructionState;
-      await store.writeThreadRecord({ ...current, providerSessions: sessions, ...(instructionState ? { instructionState } : {}) });
+      // Likewise a mode change: forget what this provider was told, so the next prompt says it again if it still applies.
+      const { [key]: _told, ...modeState } = current.modeState ?? {};
+      await store.writeThreadRecord({ ...current, providerSessions: sessions, ...(instructionState ? { instructionState } : {}), modeState });
     });
   }
 
@@ -1692,7 +1739,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest):
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
-  const { runtimeMode, interactionMode } = requireParentModes(parent);
+  const { runtimeMode } = requireParentModes(parent);
+  // A task runs in Build whatever its parent's mode: Research and Orchestrate are procedures for the one delegating.
+  const interactionMode: InteractionMode = "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
   if (isolated && !parentEnv.branch) {

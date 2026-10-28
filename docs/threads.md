@@ -45,6 +45,34 @@ One rule, most specific first, the same for `moxen handover`, `moxen threads cre
 
 A follow-up, and a delegated task, keeps its parent thread's selection unless the request overrides it, and never falls back to the settings or the installation default.
 
+## Modes: Build, Research and Orchestrate
+
+A thread is in one mode until the user changes it: **Build** (the default),
+**Research** or **Orchestrate**. Research and Orchestrate are procedures
+for delegating (`core/threads/modes.ts`): Research runs researcher agents,
+a critic and a finalizer towards one report; Orchestrate splits the work
+into tasks, each on the model that fits it. Both share the same steps for
+budget, memory, a model per task and isolation.
+
+- **Switching:** `/research` or `/orchestrate` in the composer (the same
+  command again goes back to Build; with text after it, the text is sent
+  in the new mode), Shift+Tab to cycle, `--mode research|orchestrate` on
+  `moxen handover` / `threads create`, or the `thread.interaction-mode.set`
+  command. There are no trigger words: a false trigger would spend usage on
+  delegated tasks.
+- **Delivery, cache-safe:** never in the system prompt. On Claude and the
+  Moxen Harness the procedure goes ahead of the next prompt as a
+  `<moxen-mode>` block, once; going back to Build sends a short "mode is
+  off" note the same way. Which mode each provider's conversation was told
+  is kept on the thread (`modeState`), and forgotten after a compaction or
+  a revert so the procedure is sent again. On OpenCode it is an instruction
+  entry (`moxen-research` / `moxen-orchestrate`), removed in Build.
+- A new thread starts in Build unless a mode is picked while drafting it,
+  and a delegated task always runs in Build.
+- The TUI shows the mode as the composer's left-edge colour (Build sky,
+  Research violet, Orchestrate fuchsia), its running pulse, and in the
+  footer.
+
 ## The activity ledger
 
 The ledger records lifecycle bookkeeping plus one row per tool call,

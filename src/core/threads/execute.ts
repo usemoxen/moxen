@@ -495,6 +495,7 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       prompt: prompt.text,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      interactionMode: thread.interactionMode,
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
       ...(args.onUsageLimit ? { onUsageLimit: args.onUsageLimit } : {}),
@@ -652,7 +653,11 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
     touchSession(driver, threadId, event.type === "background.tasks.changed" ? event.tasks.length : undefined);
     // A compaction makes the provider read its rule files again: what it holds now is what is on disk.
-    if (event.type === "session.notice" && event.notice === "compacted") void refreshRuleBaseline(driver, threadId);
+    // The summary may drop a mode's procedure, so the next prompt carries it again (`modes.ts`).
+    if (event.type === "session.notice" && event.notice === "compacted") {
+      void refreshRuleBaseline(driver, threadId);
+      void forgetToldModes(store, threadId);
+    }
     if (event.type === "turn.started" && event.origin === "background") {
       void runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle);
       return;
@@ -702,6 +707,18 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   };
   byThread.set(threadId, stop);
   trackSession(driver, threadId, { store, ttlMs: idleTtlMs, unwatch: stop });
+}
+
+/** After a compaction: what any provider was told of the thread's mode may be gone from the conversation. */
+async function forgetToldModes(store: ThreadStore, threadId: string): Promise<void> {
+  await store
+    .withThreadLock(threadId, async () => {
+      const thread = await store.readThreadRecord(threadId);
+      if (!thread?.modeState) return;
+      const { modeState: _told, ...rest } = thread;
+      await store.writeThreadRecord(rest);
+    })
+    .catch(() => undefined);
 }
 
 async function runBackgroundTurn(
@@ -1068,6 +1085,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
             prompt: args.prompt,
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+            ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
           }),
         );
     // Persisted as soon as the turn is under way, not only at settle: a

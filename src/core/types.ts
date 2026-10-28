@@ -6,8 +6,11 @@ export type OpenMode = "auto" | "desktop" | "browser" | "none";
 export type ThreadEnvMode = "auto" | "local" | "worktree";
 export type EffectiveThreadEnvMode = Exclude<ThreadEnvMode, "auto">;
 export type RuntimeMode = "approval-required" | "auto" | "auto-accept-edits" | "full-access";
-/** `"default"` is Build. Plan mode was removed; `core/interactionmode.ts` reads an old `plan` as Build. */
-export type InteractionMode = "default";
+/**
+ * A thread's mode: `"default"` is Build; Research and Orchestrate add their procedure to the conversation
+ * (`threads/modes.ts`). Plan mode was removed; `core/interactionmode.ts` reads an old `plan` as Build.
+ */
+export type InteractionMode = "default" | "research" | "orchestrate";
 export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {

@@ -129,14 +129,14 @@ describe("pickerEntries", () => {
       ],
       skills: [skill({ name: "pdf" }), skill({ name: "review" })],
     })!;
-    expect(entries.map((entry) => entry.name)).toEqual(["compact", "btw", "review", "pdf"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["compact", "btw", "research", "orchestrate", "review", "pdf"]);
     // Moxen's compact wins over the provider's, and a hint rides in front of the description.
     expect(entries[0]!.description).toBe("Summarize the conversation to free up context");
-    expect(entries[2]!.shortDescription).toBe("<pr>  Review a PR");
+    expect(entries[4]!.shortDescription).toBe("<pr>  Review a PR");
   });
 
   it("still offers Moxen's commands when the provider has nothing", () => {
-    expect(pickerEntries({ commands: [], skills: [] })!.map((entry) => entry.name)).toEqual(["compact", "btw"]);
+    expect(pickerEntries({ commands: [], skills: [] })!.map((entry) => entry.name)).toEqual(["compact", "btw", "research", "orchestrate"]);
   });
 });
 

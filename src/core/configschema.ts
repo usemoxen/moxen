@@ -689,12 +689,16 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   {
     key: "interactionMode",
     label: "Start in",
-    description: "The mode new threads start in. Build is the only one until Research and Orchestrate arrive, so a settings page does not offer it; a config that still says plan (removed) reads as Build.",
+    description: "The mode new threads start in. Research and Orchestrate delegate work to other threads, so a settings page offers neither as a default; a config that still says plan (removed) reads as Build.",
     section: "defaults",
     hidden: true,
     kind: {
       type: "enum",
-      choices: [choice("default", "Build")],
+      choices: [
+        choice("default", "Build"),
+        choice("research", "Research", "Runs requests as research: researcher agents, a critic and a final report."),
+        choice("orchestrate", "Orchestrate", "Breaks requests into tasks delegated to the model that fits each."),
+      ],
     },
     defaultValue: "default",
     envOverride: "MOXEN_INTERACTION_MODE",

@@ -1,7 +1,7 @@
 /**
- * A thread's mode. Build (`"default"`, the value envelopes have always
- * carried) is the only one for now; Research and Orchestrate join it as
- * modes of their own (MXN-137).
+ * A thread's mode: Build (`"default"`, the value envelopes have always
+ * carried), Research and Orchestrate (MXN-137, procedures in
+ * `threads/modes.ts`).
  *
  * Plan mode was removed (MXN-136). What was saved with it still loads — a
  * stored thread or a config that says `plan` reads as Build — but asking
@@ -10,7 +10,12 @@
 import { CliError } from "./errors.js";
 import type { InteractionMode } from "./types.js";
 
-export const INTERACTION_MODES: readonly InteractionMode[] = ["default"];
+export const INTERACTION_MODES: readonly InteractionMode[] = ["default", "research", "orchestrate"];
+
+/** How a client names a mode. */
+export function interactionModeLabel(mode: InteractionMode): string {
+  return mode === "research" ? "Research" : mode === "orchestrate" ? "Orchestrate" : "Build";
+}
 
 const isMode = (value: unknown): value is InteractionMode =>
   typeof value === "string" && (INTERACTION_MODES as readonly string[]).includes(value);

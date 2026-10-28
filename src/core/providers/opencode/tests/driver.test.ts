@@ -726,8 +726,35 @@ describe("opencode driver", () => {
       resumedDriver.startSession({ threadId: "thread-2", workingDirectory: "/repo", resumeCursor: "ses_old" }),
     );
     await Effect.runPromise(resumedDriver.sendTurn({ threadId: "thread-2", prompt: "a" }));
+    // A resumed session may still hold a mode's procedure entry from the last process: it goes too.
     expect(resumedTransport.servers[0]!.callsTo("session.instructions")).toMatchObject([
       { args: { sessionID: "ses_old", key: "moxen", value: null } },
+      { args: { sessionID: "ses_old", key: "moxen-research", value: null } },
+      { args: { sessionID: "ses_old", key: "moxen-orchestrate", value: null } },
+    ]);
+  });
+
+  it("keeps the thread's mode as one procedure entry, set once and removed back in Build", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+    const server = transport.servers[0]!;
+    for (const interactionMode of ["research", "research", "orchestrate", "default"] as const) {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "a", interactionMode }));
+      const outcome = driver.awaitTurn("thread-1", sent.turnId);
+      await server.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+      await outcome;
+    }
+    const calls = server.callsTo("session.instructions").map((call) => {
+      const args = call.args as { key: string; value: string | null };
+      return [args.key, args.value === null ? null : "set"];
+    });
+    expect(calls).toEqual([
+      ["moxen-research", "set"],
+      ["moxen-research", null],
+      ["moxen-orchestrate", "set"],
+      ["moxen-orchestrate", null],
     ]);
   });
 

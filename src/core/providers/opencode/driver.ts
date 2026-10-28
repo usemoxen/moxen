@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 
 import { CliError } from "../../errors.js";
 import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolation.js";
+import { modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../../threads/modes.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
 import type { InteractionMode, ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../types.js";
 import { isCompactCommand } from "../spi.js";
@@ -193,11 +194,13 @@ interface OpenCodeSession {
   startedAt: string;
 }
 
-/** The native session's model, agent and `moxen` instruction entry, as last known. `undefined` = not known. */
+/** The native session's model, agent, `moxen` instruction entry and mode entry, as last known. `undefined` = not known. */
 interface AppliedSessionState {
   model: OpencodeModelRef | undefined;
   agent: string | undefined;
   instructions: string | null | undefined;
+  /** The mode whose procedure entry (`moxen-research`, `moxen-orchestrate`) is set; Build has none. */
+  mode: InteractionMode | undefined;
 }
 
 /** A child session OpenCode's `subagent` tool started for a thread's session. */
@@ -775,6 +778,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * Bring the native session to this send's model, agent and instructions.
    * v2 prompts carry none of them, so they are session state; each call is
    * made only when the state it sets differs from what is already applied.
+   * The thread's mode is applied as a procedure entry (`threads/modes.ts`).
    * Moxen has no plan mode (MXN-136): a session an older build left on
    * OpenCode's read-only `plan` agent goes back to `build`; a session on any
    * other agent (the user's `default_agent`) is left alone.
@@ -808,6 +812,20 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         if (session.instructions !== null) throw cause;
       }
       applied.instructions = session.instructions;
+    }
+    // Research and Orchestrate (`threads/modes.ts`): the mode's procedure is an entry of its own, which OpenCode
+    // adds after the conversation so far; switching back to Build removes it.
+    const mode = session.interactionMode;
+    if (applied.mode !== mode) {
+      for (const candidate of PROCEDURE_MODES) {
+        const key = modeInstructionKey(candidate)!;
+        if (candidate === mode) await connection.setInstructions(nativeId, key, modeProcedure(candidate));
+        else if (applied.mode === undefined || applied.mode === candidate) {
+          // Removing an entry the session never had is not a failure.
+          await connection.setInstructions(nativeId, key, null).catch(() => undefined);
+        }
+      }
+      applied.mode = mode;
     }
   }
 
@@ -903,7 +921,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         checklist: input.checklist !== false,
         // A session we just made has no instruction entry; a resumed one may
         // still hold the previous process's, which the first send reconciles.
-        applied: { model: native.model, agent: native.agent, instructions: resumed ? undefined : null },
+        applied: { model: native.model, agent: native.agent, instructions: resumed ? undefined : null, mode: resumed ? undefined : "default" },
         turns: new Map(),
         waiters: new Map(),
         parked: new Map(),
@@ -1337,6 +1355,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         model: forked.model ?? previous.model,
         agent: forked.agent ?? previous.agent,
         instructions: previous.instructions,
+        mode: previous.mode,
       };
       return await Effect.runPromise(this.readThread(threadId));
     });
