@@ -11,7 +11,7 @@ import {
 } from "../../model/activity.js";
 import { createFileContentCache, diffCachedFiles, snapshotFiles } from "../../model/filecache.js";
 import { fetchWorkingTreeDiff } from "../../model/gitdiff.js";
-import { remoteDisk } from "./remoteDisk.js";
+import { serverDisk } from "./serverDisk.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { findPatchFile, splitPatchByFile, type PatchFile } from "../../model/patch.js";
 import { proportionalTarget, type TurnGroup } from "../../model/turns.js";
@@ -39,10 +39,8 @@ export function useDiffPanel(params: {
   setError: (message: string) => void;
   /** Leave binary files out of the file list. */
   hideBinary: boolean;
-  /** The server is on another machine: the live overlay reads its disk through it, not this one's. */
-  remote?: boolean;
 }) {
-  const { client, width, openThreadId, selected, shellProjects, threadState, threadStateRef, groups, selectedIdRef, chatScrollRef, setThreadState, setFocus, setError, hideBinary, remote = false } = params;
+  const { client, width, openThreadId, selected, shellProjects, threadState, threadStateRef, groups, selectedIdRef, chatScrollRef, setThreadState, setFocus, setError, hideBinary } = params;
 
   const [expandedTurn, setExpandedTurn] = useState<number | null>(null);
   const [patch, setPatch] = useState<string | null>(null);
@@ -308,8 +306,9 @@ export function useDiffPanel(params: {
       if (wanted !== lastGitWanted.current) {
         lastGitWanted.current = wanted;
         const fullPaths = [...new Map(gitFullWanted.map((item) => [item.full.toLowerCase(), item])).values()];
-        const disk = remote && id !== null ? remoteDisk(client, id, root) : null;
-        void fetchWorkingTreeDiff(root, [...new Set(gitWanted)], disk?.run, disk?.read)
+        // Keyed by thread: the server only reads inside that thread's folder.
+        const disk = id !== null ? serverDisk(client, id, root) : null;
+        void (disk === null ? Promise.resolve(null) : fetchWorkingTreeDiff(root, [...new Set(gitWanted)], disk.run, disk.read))
           .then(async (files) => {
             if (selectedIdRef.current !== id) return;
             const overlay = files ?? [];
@@ -317,9 +316,9 @@ export function useDiffPanel(params: {
             // miss) fall through to content-cache diffs on non-git projects.
             const missing = fullPaths.filter((item) => findPatchFile(overlay, item.display) === null);
             const cacheDiffs =
-              missing.length === 0
+              missing.length === 0 || disk === null
                 ? []
-                : await diffCachedFiles(root, contentCache.current, missing, disk?.read).catch(() => []);
+                : await diffCachedFiles(root, contentCache.current, missing, disk.read).catch(() => []);
             if (selectedIdRef.current !== id) return;
             gitPatchCache.current = [...overlay, ...cacheDiffs];
             bumpTurnPatches((version) => version + 1);
@@ -340,8 +339,7 @@ export function useDiffPanel(params: {
       const key = `${root}\n${unique.join("\n")}`;
       if (key !== lastSnapshotWanted.current) {
         lastSnapshotWanted.current = key;
-        const read = remote && id !== null ? remoteDisk(client, id, root).read : undefined;
-        void snapshotFiles(root, unique, contentCache.current, read).catch(() => {});
+        if (id !== null) void snapshotFiles(root, unique, contentCache.current, serverDisk(client, id, root).read).catch(() => {});
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -8,7 +8,7 @@ import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
 import { normalizeHarnessConfig } from "./providers/harness/profiles.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
-import { SETTING_KEYS, listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
+import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
 import { isSecretRef, secretRef, writeSecret } from "./secrets.js";
 import type {
   ClaudeProviderConfig,
@@ -60,9 +60,11 @@ const speedModes = new Set<SpeedMode>(["standard", "fast"]);
 /**
  * Every settable key, straight from the schema table — the CLI and the
  * TUI therefore accept exactly the same set. Dotted paths
- * (`providers.claude.binaryPath`) are keys like any other.
+ * (`providers.claude.binaryPath`) are keys like any other. Re-exported, not
+ * copied: the schema imports this module back (through `mcp.ts`), so a copy
+ * taken while it loads would read the table before it exists.
  */
-export const CONFIG_KEYS: readonly string[] = SETTING_KEYS;
+export { SETTING_KEYS as CONFIG_KEYS } from "./configschema.js";
 export type ConfigKey = string;
 
 export function expandHome(value: string): string {

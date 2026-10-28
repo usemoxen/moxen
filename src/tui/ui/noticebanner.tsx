@@ -73,6 +73,7 @@ export function NoticeBanner({
   width,
   flushTop,
   tight: tightProp,
+  inset: insetProp,
 }: {
   notices: readonly Notice[];
   index: number;
@@ -91,12 +92,18 @@ export function NoticeBanner({
    * so the rule would just double it — drop the rule, keep the blank row.
    */
   tight?: boolean;
+  /**
+   * Columns of breathing room on each side. Over the pane that is 2; inside
+   * the composer's own card the card already indents, so it passes 0.
+   */
+  inset?: number;
 }) {
   const notice = notices[Math.min(Math.max(0, index), notices.length - 1)];
   if (notice === undefined) return null;
   const position = notices.indexOf(notice);
   const tight = tightProp === true;
-  const inner = Math.max(0, width - 4);
+  const inset = insetProp ?? 2;
+  const inner = Math.max(0, width - inset * 2);
   const pager = pagerWidth(notices.length);
   const tags = notice.tags ?? [];
   const headWidth = (count: number) => 2 + notice.title.length + tags.slice(0, count).reduce((sum, tag) => sum + 5 + tag.text.length, 0);
@@ -118,7 +125,7 @@ export function NoticeBanner({
   );
   return (
     <box
-      style={{ flexDirection: "column", flexShrink: 0, marginTop: flushTop === true ? 0 : 1, paddingLeft: 2, paddingRight: 2 }}
+      style={{ flexDirection: "column", flexShrink: 0, marginTop: flushTop === true ? 0 : 1, paddingLeft: inset, paddingRight: inset }}
       {...(tight ? {} : { border: ["top"] as const, borderColor: SURFACE.border })}
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>

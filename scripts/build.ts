@@ -8,14 +8,19 @@
  * to re-exec itself under `NODE_ENV=production`. Code splitting keeps the TUI
  * (React, OpenTUI, the grammars) out of the startup path of plain commands.
  */
-import { rm } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 // Absolute paths throughout, so the build does not depend on the caller's cwd.
 const root = join(import.meta.dir, "..");
 const outdir = join(root, "dist");
 
-await rm(outdir, { recursive: true, force: true });
+// Not emptied first: a moxen already running from `dist/` (a TUI, the
+// server) loads chunks and assets — the syntax worker, the grammars — from
+// it as it goes, and `bun run tui` rebuilds while one may be open. Chunks
+// and assets carry a content hash, so this build's files sit beside the
+// last one's; the old ones are pruned below once nothing can still need them.
+const STALE_MS = 24 * 60 * 60 * 1000;
 
 const result = await Bun.build({
   // The server and the moxen MCP server are spawned as their own processes
@@ -57,4 +62,18 @@ for (const output of result.outputs) {
   });
   if (rewritten !== source) await Bun.write(output.path, rewritten);
 }
-console.log(`built ${result.outputs.length} files into ${outdir} (${stripped} file imports rewritten)`);
+// What no build has written for a day: a process that old would have loaded what it needs long ago.
+const current = new Set(result.outputs.map((output) => output.path));
+let pruned = 0;
+const prune = async (dir: string): Promise<void> => {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) await prune(full);
+    else if (!current.has(full) && !current.has(full.replace(/\.map$/, "")) && Date.now() - (await stat(full)).mtimeMs > STALE_MS) {
+      // Windows will not delete a file a running process holds: it waits for the next build.
+      if (await rm(full, { force: true }).then(() => true, () => false)) pruned += 1;
+    }
+  }
+};
+await prune(outdir);
+console.log(`built ${result.outputs.length} files into ${outdir} (${stripped} file imports rewritten, ${pruned} stale removed)`);

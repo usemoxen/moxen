@@ -8,6 +8,12 @@
  * subscriptions survive: the client reconnects and re-subscribes, and
  * because every subscription opens with a full snapshot, the subscriber
  * is back in sync on the first frame, with nothing to replay.
+ *
+ * A server can also die without closing the socket: frozen, its machine
+ * asleep, the network gone. So connecting and the hello have a deadline,
+ * and while connected the client pings when the server has been quiet;
+ * silence past the heartbeat's timeout counts as a dropped connection.
+ * `linkState` / `onLinkState` say which way it is, for a client to show.
  */
 import net from "node:net";
 import tls from "node:tls";
@@ -58,6 +64,22 @@ interface Subscription {
 
 const RECONNECT_MIN_MS = 200;
 const RECONNECT_MAX_MS = 2_000;
+const CONNECT_TIMEOUT_MS = 10_000;
+const HEARTBEAT: Heartbeat = { intervalMs: 5_000, timeoutMs: 15_000 };
+
+export interface Heartbeat {
+  /** Ping after this long without hearing from the server. */
+  readonly intervalMs: number;
+  /** Drop the connection after this long without hearing from it. */
+  readonly timeoutMs: number;
+}
+
+/** Whether the connection is up — and if not, why and for how long — for a client to show. */
+export type LinkState =
+  | { readonly status: "connected" }
+  | { readonly status: "reconnecting"; readonly since: number; readonly attempts: number; readonly reason: string }
+  /** A refusal no retry fixes (revoked, key changed, protocol): it stopped trying. `code` says which. */
+  | { readonly status: "failed"; readonly reason: string; readonly code: string };
 
 export interface RemoteConnectionOptions {
   /** Reconnect and re-subscribe after the server goes away (default true). */
@@ -69,6 +91,10 @@ export interface RemoteConnectionOptions {
   readonly tls?: RemoteTlsTarget;
   /** Sent with `protocol` in every hello: a remote socket's `pair` or `device`. */
   readonly hello?: Omit<HelloParams, "protocol">;
+  /** Liveness while connected (default 5s / 15s); `false` turns it off. */
+  readonly heartbeat?: Heartbeat | false;
+  /** Deadline for the socket to connect, and again for the hello (default 10s). */
+  readonly connectTimeoutMs?: number;
 }
 
 export interface RemoteTlsTarget {
@@ -92,6 +118,12 @@ export class RemoteConnection implements ClientApi {
   private readonly subscriptions = new Set<Subscription>();
   private closed = false;
   private reconnecting: Promise<void> | null = null;
+  private link: LinkState = { status: "connected" };
+  private readonly linkListeners = new Set<(state: LinkState) => void>();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastHeard = 0;
+  /** Set when this side drops a silent socket: why, for what its pending requests hear. */
+  private dropReason: string | null = null;
   helloResult: HelloResult | null = null;
   /** Over TLS: the pin of the key the server presented. */
   peerFingerprint: string | null = null;
@@ -108,42 +140,122 @@ export class RemoteConnection implements ClientApi {
     return connection;
   }
 
+  get linkState(): LinkState {
+    return this.link;
+  }
+
+  /** Hear every change of `linkState`. Returns the unsubscribe. */
+  onLinkState(listener: (state: LinkState) => void): () => void {
+    this.linkListeners.add(listener);
+    return () => this.linkListeners.delete(listener);
+  }
+
+  private setLink(state: LinkState): void {
+    this.link = state;
+    for (const listener of this.linkListeners) listener(state);
+  }
+
+  private get connectTimeoutMs(): number {
+    return this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+  }
+
   private async open(): Promise<void> {
     const socket = this.options.tls ? await this.openTls(this.options.tls) : await this.openLocal();
     socket.setEncoding("utf8");
     const reader = new LineReader();
     socket.on("data", (chunk: string) => {
+      if (this.socket === socket) this.lastHeard = Date.now();
       for (const line of reader.push(chunk)) this.receive(line);
     });
     socket.on("error", () => undefined);
     socket.once("close", () => this.onClose(socket));
     this.socket = socket;
+    // A frozen server still accepts the connection; only the hello shows it is not answering.
+    const helloDeadline = setTimeout(() => {
+      this.dropReason = `it accepted the connection but did not answer within ${seconds(this.connectTimeoutMs)}`;
+      socket.destroy();
+    }, this.connectTimeoutMs);
     try {
       this.helloResult = (await this.request("hello", { ...this.options.hello, protocol: PROTOCOL_VERSION })) as HelloResult;
     } catch (cause) {
       // A refused hello leaves nothing usable: close it, so a reconnect
       // starts over rather than taking the dead socket for a live one.
       socket.destroy();
+      if (cause instanceof CliError && cause.code === "SERVER_DISCONNECTED") {
+        throw new CliError("SERVER_UNAVAILABLE", cause.message, { cause, details: { endpoint: this.endpoint } });
+      }
       throw cause;
+    } finally {
+      clearTimeout(helloDeadline);
     }
+    this.startHeartbeat(socket);
     for (const subscription of this.subscriptions) await this.resubscribe(subscription);
+  }
+
+  /**
+   * While `socket` is current: ping once the server has been quiet half the
+   * interval, and drop it once it has been quiet past the timeout. Any line
+   * counts as hearing from it, a ping's reply or anything else.
+   */
+  private startHeartbeat(socket: net.Socket): void {
+    const heartbeat = this.options.heartbeat ?? HEARTBEAT;
+    if (heartbeat === false) return;
+    this.stopHeartbeat();
+    this.lastHeard = Date.now();
+    const timer = setInterval(() => {
+      if (this.socket !== socket) {
+        clearInterval(timer);
+        return;
+      }
+      const quiet = Date.now() - this.lastHeard;
+      if (quiet >= heartbeat.timeoutMs) {
+        this.dropReason = `no reply for ${seconds(quiet)}`;
+        socket.destroy();
+      } else if (quiet >= heartbeat.intervalMs / 2) {
+        void this.request("ping").catch(() => undefined);
+      }
+    }, heartbeat.intervalMs / 2);
+    // A one-shot CLI call must still exit when it is done.
+    timer.unref();
+    this.heartbeatTimer = timer;
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  /** `candidate`, or `SERVER_UNAVAILABLE` if it has not connected by the deadline. */
+  private connectDeadline<T extends net.Socket>(candidate: T, reject: (cause: unknown) => void): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      candidate.destroy();
+      reject(
+        new CliError("SERVER_UNAVAILABLE", `No moxen server answered at ${this.endpoint} within ${seconds(this.connectTimeoutMs)}.`, {
+          details: { endpoint: this.endpoint },
+        }),
+      );
+    }, this.connectTimeoutMs);
   }
 
   private openLocal(): Promise<net.Socket> {
     return new Promise<net.Socket>((resolve, reject) => {
       const candidate = net.connect(this.endpoint);
+      const deadline = this.connectDeadline(candidate, reject);
       candidate.once("connect", () => {
-        candidate.off("error", reject);
+        clearTimeout(deadline);
+        candidate.off("error", onError);
         resolve(candidate);
       });
-      candidate.once("error", (cause) =>
+      const onError = (cause: Error): void => {
+        clearTimeout(deadline);
         reject(
           new CliError("SERVER_UNAVAILABLE", `No moxen server is listening at ${this.endpoint}.`, {
             cause,
             details: { endpoint: this.endpoint },
           }),
-        ),
-      );
+        );
+      };
+      candidate.once("error", onError);
     });
   }
 
@@ -155,7 +267,10 @@ export class RemoteConnection implements ClientApi {
   private openTls(target: RemoteTlsTarget): Promise<net.Socket> {
     return new Promise<net.Socket>((resolve, reject) => {
       const candidate = tls.connect({ host: target.host, port: target.port, rejectUnauthorized: false, minVersion: "TLSv1.3" });
+      // An address nobody answers (a machine asleep, a dropped network) would otherwise wait out the OS's own timeout.
+      const deadline = this.connectDeadline(candidate, reject);
       candidate.once("secureConnect", () => {
+        clearTimeout(deadline);
         candidate.off("error", onError);
         const fingerprint = keyFingerprint(candidate.getPeerCertificate(true).raw);
         if (target.fingerprint !== undefined && fingerprint !== target.fingerprint) {
@@ -172,7 +287,8 @@ export class RemoteConnection implements ClientApi {
         this.peerFingerprint = fingerprint;
         resolve(candidate);
       });
-      const onError = (cause: Error): void =>
+      const onError = (cause: Error): void => {
+        clearTimeout(deadline);
         reject(
           new CliError(
             "SERVER_UNAVAILABLE",
@@ -180,6 +296,7 @@ export class RemoteConnection implements ClientApi {
             { cause, details: { endpoint: this.endpoint } },
           ),
         );
+      };
       candidate.once("error", onError);
     });
   }
@@ -230,31 +347,45 @@ export class RemoteConnection implements ClientApi {
   private onClose(socket: net.Socket): void {
     if (this.socket !== socket) return;
     this.socket = null;
+    this.stopHeartbeat();
+    const dropped = this.dropReason;
+    this.dropReason = null;
     for (const subscription of this.subscriptions) subscription.remote = null;
     const inFlight = [...this.pending.values()];
     this.pending.clear();
+    const message =
+      dropped === null
+        ? "The moxen server went away before answering."
+        : `The moxen server at ${this.endpoint} stopped answering (${dropped}).`;
     for (const pending of inFlight) {
-      pending.reject(
-        new CliError("SERVER_DISCONNECTED", "The moxen server went away before answering.", {
-          details: { endpoint: this.endpoint },
-        }),
-      );
+      pending.reject(new CliError("SERVER_DISCONNECTED", message, { details: { endpoint: this.endpoint } }));
     }
-    if (!this.closed && this.options.reconnect !== false && this.subscriptions.size > 0) void this.reconnect();
+    if (!this.closed && this.options.reconnect !== false && this.subscriptions.size > 0) {
+      const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
+      const attempts = this.link.status === "reconnecting" ? this.link.attempts : 0;
+      this.setLink({ status: "reconnecting", since, attempts, reason: dropped === null ? "the connection closed" : dropped });
+      void this.reconnect();
+    }
   }
 
   private reconnect(): Promise<void> {
     this.reconnecting ??= (async () => {
       let delay = RECONNECT_MIN_MS;
+      let attempts = 0;
       while (!this.closed && this.socket === null && this.subscriptions.size > 0) {
         await new Promise((resolve) => setTimeout(resolve, delay));
         try {
           await this.open();
+          this.setLink({ status: "connected" });
         } catch (cause) {
           if (cause instanceof CliError && FATAL_HELLO_CODES.has(cause.code)) {
+            this.setLink({ status: "failed", reason: cause.message, code: cause.code });
             for (const subscription of this.subscriptions) subscription.onError(cause);
             return;
           }
+          attempts += 1;
+          const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
+          this.setLink({ status: "reconnecting", since, attempts, reason: cause instanceof Error ? cause.message : String(cause) });
           delay = Math.min(delay * 2, RECONNECT_MAX_MS);
         }
       }
@@ -345,8 +476,14 @@ export class RemoteConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.stopHeartbeat();
+    this.linkListeners.clear();
     this.subscriptions.clear();
     this.socket?.end();
     this.socket = null;
   }
+}
+
+function seconds(ms: number): string {
+  return `${Math.round(ms / 1000)}s`;
 }

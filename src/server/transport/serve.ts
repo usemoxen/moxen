@@ -10,6 +10,11 @@
  * Each socket must open with `hello` (protocol version check) before any
  * other request. Subscriptions belong to the socket that opened them and
  * end with it.
+ *
+ * A client that pings (`./remote.ts`'s heartbeat) has promised to be heard
+ * from: once it has pinged, a socket silent past `CLIENT_SILENCE_MS` is
+ * taken for a dead peer (a machine asleep, a dropped network) and closed,
+ * releasing its subscriptions. A client that never pings is never timed out.
  */
 import { rm } from "node:fs/promises";
 import net from "node:net";
@@ -27,6 +32,9 @@ import {
   type ServerMessage,
 } from "./wire.js";
 
+/** Three missed heartbeats (`./remote.ts` pings every 2.5s when quiet). */
+export const CLIENT_SILENCE_MS = 30_000;
+
 export interface ServerHandle {
   readonly endpoint: string;
   /** Resolves once the server has stopped (after `close`, or a client's `shutdown`). */
@@ -39,6 +47,8 @@ export interface ServeOptions {
   readonly api: ClientApi;
   /** Runs once the listener has stopped — the owner releases drivers here. */
   readonly onClose?: () => Promise<void>;
+  /** Added to every local socket's hello result (the server's config file). */
+  readonly greeting?: Partial<HelloResult>;
 }
 
 export async function serve(options: ServeOptions): Promise<ServerHandle> {
@@ -64,7 +74,7 @@ export async function serve(options: ServeOptions): Promise<ServerHandle> {
 
   const server = net.createServer((socket) => {
     sockets.add(socket);
-    handleSocket(socket, api, { remote: false, shutdown: () => void close() });
+    handleSocket(socket, api, { remote: false, shutdown: () => void close(), ...(options.greeting ? { greeting: options.greeting } : {}) });
     socket.once("close", () => sockets.delete(socket));
   });
 
@@ -103,6 +113,10 @@ export interface SocketContext {
    * remote hello is refused.
    */
   readonly admit?: (params: Record<string, unknown>, socket: net.Socket) => Promise<Partial<HelloResult>> | Partial<HelloResult>;
+  /** How long a client that pings may go unheard before it is dropped (default `CLIENT_SILENCE_MS`). */
+  readonly silenceMs?: number;
+  /** Added to the hello result. */
+  readonly greeting?: Partial<HelloResult>;
 }
 
 export function handleSocket(socket: net.Socket, api: ClientApi, context: SocketContext): void {
@@ -110,6 +124,17 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   const reader = new LineReader();
   const subscriptions = new Map<number, () => void>();
   let greeted = false;
+  let lastHeard = Date.now();
+  let watchdog: ReturnType<typeof setInterval> | null = null;
+  const silenceMs = context.silenceMs ?? CLIENT_SILENCE_MS;
+  /** Armed by the first ping: from then on this client has said it will keep being heard from. */
+  const watch = (): void => {
+    if (watchdog !== null) return;
+    watchdog = setInterval(() => {
+      if (Date.now() - lastHeard > silenceMs) socket.destroy();
+    }, Math.max(10, silenceMs / 3));
+    watchdog.unref();
+  };
 
   const send = (message: ServerMessage): void => {
     if (!socket.destroyed) socket.write(encode(message));
@@ -133,6 +158,7 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   let queue: Promise<void> = Promise.resolve();
 
   socket.on("data", (chunk: string) => {
+    lastHeard = Date.now();
     for (const line of reader.push(chunk)) {
       const message = parseLine(line);
       queue = queue.then(() => handle(message));
@@ -158,7 +184,7 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
             { details: { server: PROTOCOL_VERSION, client: params.protocol } },
           );
         }
-        let admitted: Partial<HelloResult> = {};
+        let admitted: Partial<HelloResult> = context.greeting ?? {};
         if (context.remote) {
           if (!context.admit) throw new CliError("REMOTE_NOT_PAIRED", "This moxen server does not accept remote clients.");
           admitted = await context.admit(params, socket);
@@ -213,6 +239,10 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
         send({ id, result: null });
         break;
       }
+      case "ping":
+        watch();
+        send({ id, result: null });
+        break;
       case "shutdown":
         if (context.remote) {
           send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
@@ -228,6 +258,7 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   };
 
   socket.once("close", () => {
+    if (watchdog !== null) clearInterval(watchdog);
     for (const unsubscribe of subscriptions.values()) unsubscribe();
     subscriptions.clear();
   });

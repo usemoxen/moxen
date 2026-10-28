@@ -508,7 +508,7 @@ function MessageBody({
       background so the blank separator and image row never seam against it. */
   background: string;
 }) {
-  const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message, homeDir);
+  const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
 
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }}>

@@ -1,8 +1,7 @@
 /**
  * `moxen doctor`: the server's diagnosis of the machine that runs provider
  * sessions (`core/diagnostics/doctor.ts`, via the `doctor` query), plus
- * the two things only this invocation knows — which config file it read,
- * and whether it is talking to a shared server.
+ * the config file that server runs on and how this invocation reached it.
  *
  * Envelope: `{ ok, checks }`, with `checks` keeping its keys and their
  * order (node, git, providers, store, auth, config); `server` is added
@@ -15,16 +14,16 @@ import { connectPairedServer, serverMode } from "../server/client.js";
 import { defaultEndpoint, probe } from "../server/transport/endpoint.js";
 import { activeRemoteServer, cliClient } from "./infra/client.js";
 
-export async function doctor(config: CliConfig, configPath: string, configExists: boolean) {
+export async function doctor(config: CliConfig) {
   const remote = activeRemoteServer();
   if (remote !== null) {
     const connection = await connectPairedServer(remote);
     try {
-      const diagnosis = await connection.query({ type: "doctor" });
+      const [diagnosis, read] = await Promise.all([connection.query({ type: "doctor" }), connection.query({ type: "config.read" })]);
       const { pairedServer: paired } = connection;
       const checks = {
         ...diagnosis,
-        config: { ok: true, path: configPath, exists: configExists },
+        config: { ok: true, path: read.path, exists: read.exists },
         server: { ok: true, mode: "remote" as const, endpoint: connection.endpoint, running: true, name: paired.name, fingerprint: paired.fingerprint },
       };
       return { ok: checks.git.ok && checks.store.ok && (checks.providers.claude.ok || checks.providers.opencode.ok), checks };
@@ -33,13 +32,11 @@ export async function doctor(config: CliConfig, configPath: string, configExists
     }
   }
   const endpoint = defaultEndpoint();
-  const [diagnosis, running] = await Promise.all([
-    (await cliClient(config)).query({ type: "doctor" }),
-    probe(endpoint),
-  ]);
+  const client = await cliClient(config);
+  const [diagnosis, read, running] = await Promise.all([client.query({ type: "doctor" }), client.query({ type: "config.read" }), probe(endpoint)]);
   const checks = {
     ...diagnosis,
-    config: { ok: true, path: configPath, exists: configExists },
+    config: { ok: true, path: read.path, exists: read.exists },
     server: { ok: true, mode: serverMode(), endpoint, running },
   };
   const { providers } = checks;

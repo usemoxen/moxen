@@ -5,11 +5,14 @@
  * older key must still be accepted, and each envelope must keep every field
  * it had (new ones may be added).
  *
- * The CLI gets its own HOME, so nothing here touches the user's store or
- * keychain; no key that holds a secret is set.
+ * The CLI gets its own home folder (HOME, and USERPROFILE, which is what
+ * Windows reads) and store, so nothing here touches the user's; no key
+ * that holds a secret is set. Its config commands go through a server it
+ * starts at this file's endpoint (`./setup.ts`), stopped before the folder
+ * is removed: Windows will not delete files a live process holds.
  */
 import { spawnSync } from "node:child_process";
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -17,6 +20,8 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { CONFIG_KEYS, normalizeConfig, setConfigValue } from "../../core/config.js";
 import { readSetting, secretKeyName, SETTINGS } from "../../core/configschema.js";
+import { rmTempAsync } from "../../core/testing/tmp.js";
+import { stopTestServer } from "./testserver.js";
 
 const CLI = path.resolve("src/cli/index.ts");
 // The CLI runs on Bun (TypeScript directly); vitest itself may run on Node.
@@ -37,14 +42,22 @@ const OLD = {
 const home = mkdtempSync(path.join(os.tmpdir(), "moxen-configcompat-"));
 const file = path.join(home, "config.json");
 writeFileSync(file, JSON.stringify(OLD, null, 2));
-afterAll(() => rmSync(home, { recursive: true, force: true }));
+afterAll(async () => {
+  await stopTestServer();
+  await rmTempAsync(home);
+});
+const env = { ...process.env, HOME: home, USERPROFILE: home, MOXEN_STORE_ROOT: path.join(home, "store"), MOXEN_NO_CONFIG_MIGRATION: "1" };
 
 /** Runs the CLI with stdout to a file: a pipe cuts a long envelope (`config list`) at 64 KB. */
 function cli(...args: string[]): { ok: boolean; data: Record<string, unknown> } {
+  return cliOn(file, ...args);
+}
+
+function cliOn(config: string, ...args: string[]): { ok: boolean; data: Record<string, unknown> } {
   const out = path.join(home, "out.json");
   const fd = openSync(out, "w");
   try {
-    const run = spawnSync(BUN, [CLI, "--config", file, "--json", ...args], { env: { ...process.env, HOME: home }, stdio: ["ignore", fd, "pipe"], encoding: "utf8" });
+    const run = spawnSync(BUN, [CLI, "--config", config, "--json", ...args], { env, stdio: ["ignore", fd, "pipe"], encoding: "utf8" });
     expect(run.status, run.stderr).toBe(0);
   } finally {
     closeSync(fd);
@@ -101,5 +114,12 @@ describe("config on an older file", () => {
     expect(saved.installSkills).toBe(false);
     expect(saved.providers.opencode).toMatchObject(OLD.providers.opencode);
     expect(saved.providers.harness).toMatchObject(OLD.providers.harness);
+  });
+
+  it("`--config ~/…` names the file in the home folder, as the server already running on it sees it", () => {
+    // Not expanded by the shell here (as on Windows): the CLI expands it.
+    for (const tilde of ["~/config.json", `~${path.sep}config.json`]) {
+      expect(cliOn(tilde, "config", "path").data).toEqual({ path: file });
+    }
   });
 });

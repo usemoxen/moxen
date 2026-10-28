@@ -46,7 +46,7 @@ import type { ModelRequest } from "../core/catalog/selection.js";
 import type { SettingView } from "../core/configschema.js";
 import type { McpTestResult } from "../core/mcptest.js";
 import type { HarnessTestResult, ProbeReport } from "../core/providers/harness/probe.js";
-import type { DiscoverResult, HarnessApiFormat } from "../core/types.js";
+import type { CliConfig, DiscoverResult, HarnessApiFormat } from "../core/types.js";
 import type { GitBranch, GitCommit, GitCommitDetail, GitOverview, GitWorktreeStatus } from "../core/git/history.js";
 import type {
   ForgeCheckRun,
@@ -427,6 +427,8 @@ export type Query =
    * actually honours.
    */
   | { readonly type: "settings.read" }
+  /** The server's whole config as `moxen config show` prints it: MCP `env`/`headers` values redacted. */
+  | { readonly type: "config.read" }
   /** One harness profile as a shareable JSON document (no saved key, no probe results); see `profileio.ts`. */
   | { readonly type: "harness.profile.export"; readonly profileId: string }
   /** The newest Claude Code and OpenCode the registry offers (read when `updates.checkLatest` is on). */
@@ -462,6 +464,8 @@ export type Query =
       readonly paths?: readonly string[];
     }
   | { readonly type: "workspace.read"; readonly threadId: string; readonly root: string; readonly path: string }
+  /** A sent message's image by its attachment id: what copying the message takes along. */
+  | { readonly type: "attachment.read"; readonly attachmentId: string }
   /** Which forge this checkout belongs to, and whether its CLI is usable. */
   | { readonly type: "forge.detect"; readonly threadId: string }
   | {
@@ -504,11 +508,13 @@ export interface QueryResults {
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
+  "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
   "git.overview": GitOverview;
   "workspace.git": { readonly stdout: string };
   "workspace.read": { readonly content: string };
+  "attachment.read": { readonly mimeType: string; readonly dataUrl: string };
   "git.commit.diff": { readonly sha: string; readonly diff: string | null };
   "forge.detect": ForgeDetection;
   "forge.requests.list": { readonly requests: readonly ForgeRequest[] };
@@ -1193,6 +1199,7 @@ export function decodeQuery(value: unknown): Query {
     case "remote.status":
     case "remote.devices":
     case "settings.read":
+    case "config.read":
     case "provider.latest":
       return { type };
     case "harness.profile.export":
@@ -1207,6 +1214,8 @@ export function decodeQuery(value: unknown): Query {
     }
     case "workspace.read":
       return { type, threadId: requireThreadId(record.threadId), root: requireField(record.root, type, "root"), path: requireField(record.path, type, "path") };
+    case "attachment.read":
+      return { type, attachmentId: requireField(record.attachmentId, type, "attachmentId") };
     case "git.overview":
       return {
         type,

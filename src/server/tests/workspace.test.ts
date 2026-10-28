@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { workspaceGit, workspaceGitArgs, workspaceRead } from "../workspace.js";
+import { readAttachment, workspaceGit, workspaceGitArgs, workspaceRead } from "../workspace.js";
 
 async function repo(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "moxen-workspace-"));
@@ -44,5 +44,25 @@ describe("workspace reads for remote clients", () => {
     await expect(workspaceRead(root, "../outside.txt")).rejects.toMatchObject({ code: "WORKSPACE_OUTSIDE_THREAD" });
     await expect(workspaceRead(root, os.homedir())).rejects.toMatchObject({ code: "WORKSPACE_OUTSIDE_THREAD" });
     await expect(workspaceRead(root, "missing.txt")).rejects.toMatchObject({ code: "WORKSPACE_READ_FAILED" });
+  });
+});
+
+describe("attachment reads", () => {
+  it("finds an image by id in the store's folder, then the older one, and takes no path", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-attachments-"));
+    const store = path.join(root, "store");
+    const older = path.join(root, "older");
+    await mkdir(store);
+    await mkdir(older);
+    await writeFile(path.join(store, "abc-123.png"), Buffer.from([1, 2, 3]));
+    await writeFile(path.join(older, "old-1.jpg"), Buffer.from([4]));
+    await writeFile(path.join(root, "secret.png"), Buffer.from([9]));
+
+    expect(await readAttachment([store, older], "abc-123")).toEqual({ mimeType: "image/png", dataUrl: "data:image/png;base64,AQID" });
+    expect((await readAttachment([store, older], "old-1")).mimeType).toBe("image/jpeg");
+    await expect(readAttachment([store, older], "missing")).rejects.toMatchObject({ code: "ATTACHMENT_NOT_FOUND" });
+    for (const id of ["../secret", "secret.png", "/etc/passwd", ""]) {
+      await expect(readAttachment([store, older], id)).rejects.toMatchObject({ code: "ATTACHMENT_NOT_FOUND" });
+    }
   });
 });

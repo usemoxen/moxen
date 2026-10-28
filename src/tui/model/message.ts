@@ -1,6 +1,3 @@
-import path from "node:path";
-
-import { appHomeDir } from "../../core/config.js";
 import type { MessageEnvelope } from "../../core/types.js";
 
 export interface ImageReference {
@@ -8,7 +5,6 @@ export interface ImageReference {
   label: string;
   attachmentId: string | null;
   sizeBytes: number | null;
-  filePath: string | null;
 }
 
 export interface RenderedMessage {
@@ -22,17 +18,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function attachmentsDir(homeDir?: string): string {
-  return path.join(homeDir ?? appHomeDir(), "attachments");
-}
-
-function extensionFor(mimeType: unknown): string {
-  if (typeof mimeType !== "string") return ".png";
-  const subtype = mimeType.split("/")[1];
-  if (subtype === undefined || subtype.length === 0) return ".png";
-  return `.${subtype === "jpeg" ? "jpg" : subtype}`;
 }
 
 function asString(value: unknown): string | null {
@@ -54,7 +39,7 @@ function asBytes(value: unknown): number | null {
  * renders as an image row too — otherwise TUI-sent images are invisible in
  * the transcript even though the agent received them.
  */
-export function renderMessage(message: MessageEnvelope, homeDir?: string): RenderedMessage {
+export function renderMessage(message: MessageEnvelope): RenderedMessage {
   const records = asRecord(message.context)?.records;
   const table = new Map<string, Record<string, unknown>>();
   if (Array.isArray(records)) {
@@ -77,10 +62,6 @@ export function renderMessage(message: MessageEnvelope, homeDir?: string): Rende
       label: name.length > 0 ? name : "image",
       attachmentId,
       sizeBytes: typeof record?.sizeBytes === "number" ? record.sizeBytes : null,
-      filePath:
-        attachmentId === null
-          ? null
-          : path.join(attachmentsDir(homeDir), `${attachmentId}${extensionFor(record?.mimeType)}`),
     });
     return "";
   });
@@ -98,13 +79,6 @@ export function renderMessage(message: MessageEnvelope, homeDir?: string): Rende
         label: name,
         attachmentId,
         sizeBytes: asBytes(attachment.sizeBytes),
-        // The server says where it saved the bytes; older rows follow the
-        // home-folder convention.
-        filePath:
-          asString(attachment.path) ??
-          (attachmentId === null
-            ? null
-            : path.join(attachmentsDir(homeDir), `${attachmentId}${extensionFor(attachment.mimeType)}`)),
       });
     }
   }

@@ -33,26 +33,47 @@ through one typed boundary, `ClientApi` (`dispatch` for commands, `query`
 for reads, plus two subscriptions). No client reaches the domain any other
 way; a layering test pins that direction.
 
-A live provider session belongs to the process whose drivers started it.
-Only that process can stream its text, steer it, or answer a question it
-is parked on. So there are three modes, chosen by `MOXEN_SERVER`:
+A live provider session belongs to the process whose drivers started it,
+and only that process can stream its text, steer it, or answer a question
+it is parked on. So exactly one process runs moxen: the server. It owns
+the store, the config, the keychain entries Moxen keeps and every
+provider session, and serves `ClientApi` over a named pipe (unix socket
+elsewhere). Every client reaches every session, and turns outlive the
+client that started them.
 
-- `direct` — each client owns its drivers. A turn dies with the client
-  that started it; another client can read the ledger but not reach the
-  session.
-- `daemon` — one shared server (`moxen server start`) owns every session
-  and serves `ClientApi` over a named pipe (unix socket elsewhere). Every
-  client reaches every session, and turns outlive the client that started
-  them. One writer per session is enforced here.
-- `auto` (the default) — uses a running server when there is one, runs
-  in-process otherwise.
+Clients never change anything themselves. The TUI and every CLI command
+connect to this machine's server, starting it in the background when none
+is running (`moxen server start` runs it in the foreground instead), or
+to a paired server on another machine (below). They never fall back to
+running moxen in-process — that is for the server and for tests only — and
+`MOXEN_SERVER=direct`, which used to ask for it, is refused. Reads of the
+server's files go through it too: the live diff overlay's git and file
+reads, and the images of sent messages. A layering test fails if client
+code imports what writes the config or the keychain, or runs moxen
+in-process. What a client keeps of its own is only what belongs to that
+machine: its list of paired servers and their tokens, the clipboard, its
+copy of the last thing copied, and files it was asked to write there
+(an export).
+
+The server runs on one config file: `~/.moxen/config.json`, or
+`MOXEN_CONFIG`, which `--config` sets for one command. A client that asked
+for a file has it passed to a server it starts, and refuses a running
+server on another file (`SERVER_CONFIG_MISMATCH`, also for a server too old
+to say) rather than reading or writing a config nobody asked for. The old
+config location is brought over by the server when it starts.
 
 The wire opens with a protocol-version handshake. A client newer than a
 long-running server is refused rather than guessed at: restart the server
 after upgrading.
 
-Running two in-process clients against one thread means two writers on one
-ledger. Prefer the shared server when clients overlap.
+A server can be lost without its socket closing — frozen, its machine
+asleep, the network gone — so the client keeps a heartbeat: it pings
+when the server has been quiet, and after 15 seconds of silence (or a
+connect or handshake that takes over 10) it drops the connection, fails
+what was in flight, and keeps reconnecting until a server answers. The
+TUI says so over the composer while it is cut off; it never restarts a
+server itself. The server, in turn, drops a client that pinged and then
+went silent for 30 seconds, releasing its subscriptions.
 
 ## Another machine
 

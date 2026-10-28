@@ -176,6 +176,49 @@ describe("layering", () => {
     expect([...new Set(offenders)].sort()).toEqual([]);
   });
 
+  /**
+   * Clients change nothing themselves: every change goes through a moxen
+   * server (`server/client.ts`). So no client code may import what writes
+   * the config, run moxen in-process (`DirectConnection`, the server's own
+   * entry), or ask `openClient` for in-process. Tests are exempt — they run
+   * the core in-process on their own store on purpose.
+   */
+  it("never lets a client change anything without the server", () => {
+    const WRITERS: Record<string, readonly string[]> = {
+      // `setConfigValue` only returns a new object; these write the file or the keychain.
+      "src/core/config": ["saveConfig", "setConfigValueSecure", "migrateLegacyConfig"],
+      "src/core/secrets": ["*"],
+      "src/server/connection": ["DirectConnection"],
+      "src/server/main": ["*"],
+    };
+    const NAMED = /(?:^|\n)\s*import\s+(type\s+)?\{([^}]*)\}\s*from\s+"([^"]+)"|(?:^|\n)\s*import\s+(?!type\b)[^"{]*from\s+"([^"]+)"/g;
+    // `moxen server start` is the server process itself, run in the foreground.
+    const SERVER_ITSELF = new Set(["src/cli/server.ts"]);
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      const layer = layerOf(file);
+      if ((layer !== "cli" && layer !== "tui") || isTest(file) || SERVER_ITSELF.has(posix(file))) continue;
+      const text = readFileSync(file, "utf8");
+      if (/mode:\s*"direct"/.test(text)) offenders.push(`${posix(file)}: mode "direct"`);
+      for (const match of text.matchAll(NAMED)) {
+        const spec = match[3] ?? match[5];
+        if (spec === undefined || !spec.startsWith(".")) continue;
+        const target = posix(path.normalize(path.join(path.dirname(file), spec))).replace(/\.js$/, "");
+        const banned = WRITERS[target];
+        if (banned === undefined || match[1] !== undefined) continue;
+        const names = (match[2] ?? "*")
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => name.length > 0 && !name.startsWith("type "));
+        for (const name of names) {
+          const bare = name.split(/\s+as\s+/)[0] ?? name;
+          if (banned.includes("*") || banned.includes(bare)) offenders.push(`${posix(file)} -> ${target} ${bare}`);
+        }
+      }
+    }
+    expect(offenders.sort()).toEqual([]);
+  });
+
   it("retires allowlist entries once they stop firing", () => {
     const all = edges();
     const liveDirection = new Set(all.map((edge) => `${edge.file} -> ${edge.target}`));

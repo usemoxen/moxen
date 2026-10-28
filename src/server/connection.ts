@@ -17,6 +17,7 @@
  *   `server.getConfig` payload shape, so `extractProviders` (and the
  *   effort picker) works unmodified.
  */
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { discoverModels } from "../core/providers/harness/discover.js";
 import { primeProfileKey } from "../core/providers/harness/profiles.js";
@@ -35,7 +36,7 @@ import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, resolveModelSelection } from "../core/catalog/selection.js";
-import { defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
+import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
@@ -61,9 +62,9 @@ import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
 import { callMoxenTool, moxenToolsFor } from "./mcp/tools.js";
 import { noteMessageId } from "../core/threads/views.js";
 import { driverProviders } from "../core/threads/longthreads.js";
-import type { McpServerSpec } from "../core/mcp.js";
+import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
-import { workspaceGit, workspaceRead } from "./workspace.js";
+import { readAttachment, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
 import { diffCheckpointRange, diffCheckpointStat } from "../core/checkpoints/git.js";
 import { CliError } from "../core/errors.js";
@@ -1273,6 +1274,10 @@ export class DirectConnection implements ClientApi {
       }
       case "settings.read":
         return await this.settingsSnapshot();
+      case "config.read": {
+        const { config, path, exists } = await this.readConfigFile();
+        return { path, exists, config: config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config };
+      }
       case "harness.profile.export": {
         const { config } = await this.readConfigFile();
         const profile = config.providers?.harness?.profiles?.find((entry) => entry.id === query.profileId.toLowerCase());
@@ -1283,6 +1288,9 @@ export class DirectConnection implements ClientApi {
         return { stdout: await workspaceGit(await this.liveRoot(query.threadId, query.root), query.call, query.paths ?? []) };
       case "workspace.read":
         return { content: await workspaceRead(await this.liveRoot(query.threadId, query.root), query.path) };
+      case "attachment.read":
+        // The store's folder, then where older builds saved them.
+        return await readAttachment([path.join(this.storeRoot, "attachments"), path.join(appHomeDir(), "attachments")], query.attachmentId);
       case "git.overview": {
         const cwd = await this.workspaceFor(query.threadId);
         return await readOverview(cwd, {

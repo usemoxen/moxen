@@ -10,10 +10,6 @@ import {
   CONFIG_KEYS,
   expandHome,
   loadConfig,
-  migrateLegacyConfig,
-  saveConfig,
-  setConfigValueSecure,
-  type ConfigKey,
 } from "../core/config.js";
 import { describeSettings, isSettingKey, listTarget, readSetting, restartRequired, secretKeyName } from "../core/configschema.js";
 import { readListValue } from "../core/configlist.js";
@@ -29,10 +25,9 @@ import {
   viewForgeRequest,
 } from "./git/git.js";
 import { cliClient } from "./infra/client.js";
-import { redactMcpServers } from "../core/mcp.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
-import { activeRemoteServer, preferDirectClient, useRemoteServer } from "./infra/client.js";
+import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
@@ -118,8 +113,11 @@ async function commandContext(): Promise<{
 }> {
   const global = program.opts<GlobalOptions>();
   const loaded = await loadConfig(global.config);
+  // The server's config: one this invocation starts runs on it, a running one must already.
+  // The path as loaded — `~` expanded, which no Windows shell does for us.
+  if (global.config !== undefined) process.env.MOXEN_CONFIG = loaded.path;
   const config = { ...loaded.config };
-  preferDirectClient(global.config !== undefined);
+  configFlagGiven(global.config !== undefined);
   useRemoteServer(global.server ?? null);
   return { config, configPath: loaded.path, configExists: loaded.exists, json: global.json ?? false };
 }
@@ -375,9 +373,10 @@ program
   .description("Open the terminal UI for threads.")
   .action(() =>
     action(async () => {
-      const context = await commandContext();
+      // For its effects: `--config` and `--server` for this invocation.
+      await commandContext();
       const { runTui } = await import("../tui/index.js");
-      await runTui(context.config, context.configPath, activeRemoteServer() ?? undefined);
+      await runTui(activeRemoteServer() ?? undefined);
     }),
   );
 
@@ -559,7 +558,7 @@ remote
 program.command("doctor").description("Check provider binaries, auth, store, and config.").action(() =>
   action(async () => {
     const context = await commandContext();
-    const result = await doctor(context.config, context.configPath, context.configExists);
+    const result = await doctor(context.config);
     writeSuccess(result, context, result.ok ? "moxen CLI is ready." : "moxen CLI has failing checks.");
     if (!result.ok) process.exitCode = 1;
   }),
@@ -577,22 +576,29 @@ program
     }),
   );
 
-/** Config as shown: MCP `env`/`headers` values may be secrets. */
-function displayConfig(config: CliConfig): CliConfig {
-  return config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config;
+/**
+ * The server's config — this machine's or `--server`'s — as it reads it,
+ * MCP `env`/`headers` values redacted. The config commands read and write
+ * through the server only: it owns the file and the keychain, and applies
+ * a change (remote access, say) as it is made.
+ */
+async function serverConfig(context: { config: CliConfig }) {
+  return await (await cliClient(context.config)).query({ type: "config.read" });
 }
 
-const configCommand = program.command("config").description("Inspect or update moxen settings.");
+const configCommand = program.command("config").description("Inspect or update the moxen server's settings.");
 configCommand.command("path").action(() =>
   action(async () => {
     const context = await commandContext();
-    writeSuccess({ path: context.configPath }, context, context.configPath);
+    const { path: file } = await serverConfig(context);
+    writeSuccess({ path: file }, context, file);
   }),
 );
 configCommand.command("show").action(() =>
   action(async () => {
     const context = await commandContext();
-    writeSuccess({ path: context.configPath, exists: context.configExists, config: displayConfig(context.config) }, context);
+    const { path: file, exists, config } = await serverConfig(context);
+    writeSuccess({ path: file, exists, config }, context);
   }),
 );
 configCommand
@@ -605,10 +611,10 @@ configCommand
         throw new CliError("INVALID_CONFIG_KEY", `Unknown config key: ${key}`);
       }
       const context = await commandContext();
-      const next = await setConfigValueSecure(context.config, key as ConfigKey, value);
-      await saveConfig(context.configPath, next);
+      await (await cliClient(context.config)).dispatch({ type: "settings.set", key, value });
+      const { path: file, config } = await serverConfig(context);
       // A secret is never echoed back.
-      writeSuccess({ path: context.configPath, config: displayConfig(next) }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.`);
+      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.`);
     }),
   );
 
@@ -620,10 +626,11 @@ configCommand
     action(async () => {
       if (!isSettingKey(key)) throw new CliError("INVALID_CONFIG_KEY", `Unknown config key: ${key}`);
       const context = await commandContext();
+      const { config } = await serverConfig(context);
       const entry = listTarget(key);
-      const value: unknown = entry ? readListValue(context.config, entry) : readSetting(context.config, key);
+      const value: unknown = entry ? readListValue(config, entry) : readSetting(config, key);
       writeSuccess(
-        { key, value: value ?? null, explicit: entry ? value !== undefined : (describeSettings(context.config).find((view) => view.descriptor.key === key)?.explicit ?? false) },
+        { key, value: value ?? null, explicit: entry ? value !== undefined : (describeSettings(config).find((view) => view.descriptor.key === key)?.explicit ?? false) },
         context,
         value === undefined || value === null ? "" : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value),
       );
@@ -636,9 +643,10 @@ configCommand
   .action(() =>
     action(async () => {
       const context = await commandContext();
+      const { config } = await serverConfig(context);
       // Straight off the schema table, so this listing and the TUI
       // settings page can never describe a key differently.
-      const settings = describeSettings(context.config).map((view) => ({
+      const settings = describeSettings(config).map((view) => ({
         key: view.descriptor.key,
         section: view.descriptor.section,
         label: view.descriptor.label,
@@ -1692,6 +1700,5 @@ efforts
     }),
   );
 
-migrateLegacyConfig();
 await program.parseAsync(process.argv);
 process.exit(process.exitCode ?? 0);

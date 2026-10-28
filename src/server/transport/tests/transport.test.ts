@@ -1,7 +1,9 @@
 import net from "node:net";
+import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { defaultConfigPath } from "../../../core/config.js";
 import { CliError } from "../../../core/errors.js";
 import { testHarness, type TestHarness } from "../../../core/testing/harness.js";
 import type { ShellFrame } from "../../api.js";
@@ -26,7 +28,8 @@ async function served(harness: TestHarness, endpoint = testEndpoint()): Promise<
     config: async () => harness.config,
     shellPollMs: 50,
   });
-  const handle = await serve({ endpoint, api, onClose: () => api.close() });
+  // Says which config it runs on, as `runServer` does: the harness's.
+  const handle = await serve({ endpoint, api, onClose: () => api.close(), greeting: { configPath: defaultConfigPath() } });
   teardown.push(() => handle.close());
   return handle;
 }
@@ -117,20 +120,54 @@ describe("transport", () => {
     expect((await client.query({ type: "projects.list" })).projects).toHaveLength(1);
   });
 
-  it("picks in-process or server by mode", async () => {
+  it("uses this machine's server by default; in-process only when asked in code", async () => {
     const harness = await testHarness();
     const endpoint = testEndpoint();
-    const alone = await openClient({ mode: "auto", endpoint, config: harness.config });
-    teardown.push(() => alone.close());
-    expect(alone).toBeInstanceOf(DirectConnection);
-
     await served(harness, endpoint);
-    const shared = await openClient({ mode: "auto", endpoint });
+    const shared = await openClient({ endpoint });
     teardown.push(() => shared.close());
     expect(shared).toBeInstanceOf(RemoteConnection);
     const forced = await openClient({ mode: "direct", endpoint, config: harness.config });
     teardown.push(() => forced.close());
     expect(forced).toBeInstanceOf(DirectConnection);
+
+    const previous = process.env.MOXEN_SERVER;
+    process.env.MOXEN_SERVER = "direct";
+    try {
+      const refused = await openClient({ endpoint }).catch((error: unknown) => error);
+      expect((refused as CliError).code).toBe("SERVER_MODE_REMOVED");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_SERVER;
+      else process.env.MOXEN_SERVER = previous;
+    }
+  });
+
+  it("refuses a running server on another config than the one asked for", async () => {
+    const harness = await testHarness();
+    const endpoint = testEndpoint();
+    const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const handle = await serve({ endpoint, api, onClose: () => api.close(), greeting: { configPath: "/elsewhere/config.json" } });
+    teardown.push(() => handle.close());
+    // The harness sets MOXEN_CONFIG, as `--config` does.
+    const refused = await openClient({ endpoint }).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(CliError);
+    expect((refused as CliError).code).toBe("SERVER_CONFIG_MISMATCH");
+    expect((refused as CliError).message).toContain("/elsewhere/config.json");
+  });
+
+  it("takes a running server on the same config file however its path is spelled", async () => {
+    const harness = await testHarness();
+    const endpoint = testEndpoint();
+    const wanted = defaultConfigPath();
+    // `dir/./config.json`, and on Windows, where case does not matter, upper-cased too.
+    const spelled = `${path.dirname(wanted)}${path.sep}.${path.sep}${path.basename(wanted)}`;
+    const reported = process.platform === "win32" ? spelled.toUpperCase() : spelled;
+    const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const handle = await serve({ endpoint, api, onClose: () => api.close(), greeting: { configPath: reported } });
+    teardown.push(() => handle.close());
+    const client = await openClient({ endpoint });
+    teardown.push(() => client.close());
+    expect(client).toBeInstanceOf(RemoteConnection);
   });
 
   it("starts a detached server on demand and can stop it", async () => {

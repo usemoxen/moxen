@@ -6,9 +6,10 @@
  * so the queries cannot be bent into running anything else.
  */
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { imageMimeForPath } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
 import type { WorkspaceGitCall } from "./protocol.js";
 
@@ -48,4 +49,25 @@ export async function workspaceRead(root: string, file: string): Promise<string>
   if (info === null || !info.isFile()) throw new CliError("WORKSPACE_READ_FAILED", "No such file.");
   if (info.size > READ_MAX_BYTES) throw new CliError("WORKSPACE_READ_FAILED", "The file is too big to diff live.");
   return await readFile(target, "utf8");
+}
+
+/** Ids the store gives attachments: anything else could name a path. */
+const ATTACHMENT_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+/**
+ * A sent message's image, for a client to copy it: looked up by id alone
+ * in the folders attachments are saved in (`dirs`, the store's first), never
+ * by a path a client sends.
+ */
+export async function readAttachment(dirs: readonly string[], attachmentId: string): Promise<{ mimeType: string; dataUrl: string }> {
+  if (!ATTACHMENT_ID.test(attachmentId)) {
+    throw new CliError("ATTACHMENT_NOT_FOUND", `No attachment ${attachmentId}.`, { details: { attachmentId } });
+  }
+  for (const dir of dirs) {
+    const name = (await readdir(dir).catch(() => [] as string[])).find((entry) => path.parse(entry).name === attachmentId);
+    if (name === undefined) continue;
+    const mimeType = imageMimeForPath(name);
+    return { mimeType, dataUrl: `data:${mimeType};base64,${(await readFile(path.join(dir, name))).toString("base64")}` };
+  }
+  throw new CliError("ATTACHMENT_NOT_FOUND", `No attachment ${attachmentId}.`, { details: { attachmentId } });
 }

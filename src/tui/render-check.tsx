@@ -36,6 +36,7 @@ import { runSettingsSidebarScroll } from "./render-check/scenarios/settingsSideb
 import { runQueueAndSide } from "./render-check/scenarios/queueAndSide.js";
 import { runSidebarTree } from "./render-check/scenarios/sidebarTree.js";
 import { runRemoteAccess } from "./render-check/scenarios/remoteAccess.js";
+import { runServerLink } from "./render-check/scenarios/serverLink.js";
 import { registerSyntaxParsers } from "../core/syntax/register.js";
 
 /**
@@ -102,5 +103,6 @@ await runNoticeBanner();
 await runImageTokens();
 await runSidebarTree();
 await runRemoteAccess();
+await runServerLink();
 
 process.exit(0);

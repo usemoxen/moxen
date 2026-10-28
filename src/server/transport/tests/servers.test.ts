@@ -76,12 +76,14 @@ describe("server addresses", () => {
 });
 
 describe("MOXEN_SERVER", () => {
-  it("is a mode, or else names a paired server", () => {
-    expect(serverMode({})).toBe("auto");
-    expect(serverMode({ MOXEN_SERVER: "Daemon" })).toBe("daemon");
+  it("means this machine's server, or else names a paired one; direct is refused", () => {
+    expect(serverMode({})).toBe("daemon");
+    expect(serverMode({ MOXEN_SERVER: "Auto" })).toBe("daemon");
+    expect(serverMode({ MOXEN_SERVER: "winbox" })).toBe("daemon");
+    expect(() => serverMode({ MOXEN_SERVER: "direct" })).toThrow(/no longer supported/);
     expect(remoteServerName({ MOXEN_SERVER: "daemon" })).toBeNull();
+    expect(remoteServerName({ MOXEN_SERVER: "direct" })).toBeNull();
     expect(remoteServerName({ MOXEN_SERVER: " winbox " })).toBe("winbox");
-    expect(serverMode({ MOXEN_SERVER: "winbox" })).toBe("auto");
   });
 });
 

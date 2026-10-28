@@ -14,6 +14,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { defaultConfigPath } from "../../core/config.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { DirectConnection } from "../../server/connection.js";
 import { serve } from "../../server/transport/serve.js";
@@ -52,7 +53,8 @@ describe("--no-wait through the CLI entry", () => {
     const harness = await testHarness({ leaveTurnsRunning: true });
     const endpoint = endpointFor("moxen-nowait");
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
-    const server = await serve({ endpoint, api: connection, onClose: () => connection.close() });
+    // Says which config it runs on, as `runServer` does: the harness's, which the CLI asks for too.
+    const server = await serve({ endpoint, api: connection, onClose: () => connection.close(), greeting: { configPath: defaultConfigPath() } });
     const env = { ...process.env, MOXEN_NO_CONFIG_MIGRATION: "1", MOXEN_SERVER: "daemon", MOXEN_SERVER_ENDPOINT: endpoint };
     try {
       const created = await runCli(

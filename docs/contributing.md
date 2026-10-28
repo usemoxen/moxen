@@ -39,15 +39,17 @@ exceptions.
   contract every frontend talks through (`dispatch` for commands, `query`
   for reads, `subscribeShell`, `subscribeThread`, `turnDiff`,
   `getConfig`); `protocol.ts` holds the command/query/frame shapes and
-  their runtime decoders; `connection.ts` is the in-process implementation
-  over `core/`; `transport/` serves it over a named pipe / unix socket
+  their runtime decoders; `connection.ts` is the implementation over
+  `core/` that the server runs (and tests, in-process); `transport/` serves it over a named pipe / unix socket
   (`serve.ts`) and implements it remotely (`remote.ts`), and carries remote
   access to another machine: the TLS listener (`remoteaccess.ts`,
   `certificate.ts`), pairing and device tokens (`devices.ts`), and the
-  client's paired servers (`servers.ts`); `client.ts` picks one per
-  `MOXEN_SERVER` (`direct` | `auto` | `daemon`, or a paired server's name)
-  or `--server`; `workspace.ts` backs the live-diff reads a remote client
-  makes; `main.ts` is the
+  client's paired servers (`servers.ts`); `client.ts` is how every client
+  gets one: this machine's server, started when none runs, or a paired one
+  (`--server`, `MOXEN_SERVER=<name>`) — never in-process, which only the
+  server and tests use (`src/cli/tests/setup.ts` sets that up for every test
+  file, and points them away from any real server); `workspace.ts` backs the
+  live-diff and attachment reads a client makes; `main.ts` is the
   server process; `mcp/` is the `moxen` MCP server every top-level provider
   session gets (`delegate` / `task_status` / `task_cancel`, over `ClientApi`).
   **New frontend surface goes here, not into a client.**
@@ -82,7 +84,7 @@ exceptions.
 - New feature-specific state goes in that feature's own hook under `src/tui/features/<feature>/`; cross-cutting state that a single feature can't own goes in `src/tui/app/hooks/`. Shared, stateless-ish runtime hooks live in `src/tui/hooks/`. Avoid adding more raw `useState` to `app.tsx` itself.
 - Every modal renders inside `ModalShell`; notices go through `useToasts`.
 - Interactive chrome gets `useHover()` feedback and `selectable={false}`; only readable text stays selectable.
-- Daily use runs the bundle: `bun run build` writes `dist/` (`scripts/build.ts`), and `moxen` is `bun dist/cli/index.js`. Bundling transpiles once, bakes in `NODE_ENV=production` (including React's production runtime) and splits the TUI out of the startup path of plain commands. The production runtime matters: under Bun's development JSX runtime every React element captures an `Error` stack in native memory, which grew a long session to 10+ GB (MXN-38). `bun run tui` rebuilds and opens the TUI in one step. Running the source directly (`bun src/cli tui`) uses the development runtime — fine for short runs, not for measuring memory or CPU. After changing anything that loads assets or finds files relative to itself, rebuild and check `bun dist/cli/index.js tui`: the tree-sitter grammars and worker are file imports that the build rewrites (see the comment in `scripts/build.ts`), and the server daemon runs `dist/server/daemon.js`.
+- Daily use runs the bundle: `bun run build` writes `dist/` (`scripts/build.ts`), and `moxen` is `bun dist/cli/index.js`. Bundling transpiles once, bakes in `NODE_ENV=production` (including React's production runtime) and splits the TUI out of the startup path of plain commands. The production runtime matters: under Bun's development JSX runtime every React element captures an `Error` stack in native memory, which grew a long session to 10+ GB (MXN-38). `bun run tui` rebuilds, stops the running moxen server (killing it if it will not stop), starts a new one from the new build, and opens the TUI on it (`scripts/tui.ts`), so the server never runs stale code and remote access, which only the server has, is always there. Restarting the server ends any turn it was running. Running the source directly (`bun src/cli tui`) uses the development runtime — fine for short runs, not for measuring memory or CPU. After changing anything that loads assets or finds files relative to itself, rebuild and check `bun dist/cli/index.js tui`: the tree-sitter grammars and worker are file imports that the build rewrites (see the comment in `scripts/build.ts`), and the server daemon runs `dist/server/daemon.js`.
 
 ## Boundaries
 

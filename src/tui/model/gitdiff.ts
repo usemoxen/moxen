@@ -1,6 +1,3 @@
-import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-
 import { createPatch } from "diff";
 
 import { splitPatchByFile, type PatchFile } from "./patch.js";
@@ -26,15 +23,8 @@ export function gitArgs(root: string, ...extra: string[]): string[] {
 
 export type GitRunner = (args: string[]) => Promise<{ stdout: string }>;
 
-/** Live runner with a timeout and output cap (root is baked in by the caller). */
-export function runGit(root: string, args: string[]): Promise<{ stdout: string }> {
-  return new Promise((resolve, reject) => {
-    execFile("git", gitArgs(root, ...args), { timeout: 15_000, maxBuffer: 256 * 1024 }, (error, stdout) => {
-      if (error !== null) reject(error instanceof Error ? error : new Error(String(error)));
-      else resolve({ stdout: typeof stdout === "string" ? stdout : String(stdout) });
-    });
-  });
-}
+/** Reads one file of the thread's folder: the server's `workspace.read` (`features/diffpanel/serverDisk.ts`). */
+export type FileRead = (path: string) => Promise<string>;
 
 function normPath(value: string): string {
   return value.replace(/\\/g, "/").toLowerCase();
@@ -78,8 +68,8 @@ function withTrailingNewline(value: string): string {
 export async function fetchWorkingTreeDiff(
   root: string,
   wanted: readonly string[],
-  run: GitRunner = (args) => runGit(root, args),
-  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+  run: GitRunner,
+  read: FileRead,
 ): Promise<PatchFile[] | null> {
   const want = wanted.map(normPath).filter((path) => path.length > 0 && path !== "…");
   if (want.length === 0) return null;

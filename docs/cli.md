@@ -140,6 +140,8 @@ macOS/Linux equivalent (cron):
 
 ## Settings
 
+Settings are the server's: `config show|get|list|path|set` ask this machine's moxen server (or `--server`'s), which reads and writes its config file and keychain and applies a change straight away. `--config <file>` names the file the server runs on: a server the command starts uses it, and a running server on another file is refused rather than used.
+
 ```bash
 moxen config show
 moxen config set projectPolicy existing

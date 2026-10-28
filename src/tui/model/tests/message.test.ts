@@ -82,7 +82,7 @@ describe("renderMessage", () => {
     expect(rendered.images).toHaveLength(1);
   });
 
-  it("reads a carried attachment from the path the server saved it at", () => {
+  it("names a carried attachment by id, never by a path on the server's disk", () => {
     const rendered = renderMessage({
       id: "m",
       role: "user",
@@ -93,6 +93,7 @@ describe("renderMessage", () => {
       updatedAt: "c",
       attachments: [{ type: "image", id: "a1", name: "shot.png", mimeType: "image/png", sizeBytes: 8, path: "/store/attachments/a1.png" }],
     });
-    expect(rendered.images[0]).toMatchObject({ label: "shot.png", filePath: "/store/attachments/a1.png" });
+    expect(rendered.images[0]).toMatchObject({ label: "shot.png", attachmentId: "a1" });
+    expect(rendered.images[0]).not.toHaveProperty("filePath");
   });
 });

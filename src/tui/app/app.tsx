@@ -18,6 +18,8 @@ import type { ActiveServer } from "../features/remote/server.js";
 import { useRemote } from "../features/remote/useRemote.js";
 import type { PairedServers } from "../../server/transport/servers.js";
 import { devicesBody, remotePaletteSection, serversBody } from "../features/remote/palette.js";
+import { useReconnects, useServerLink } from "../features/remote/useServerLink.js";
+import { linkNoticeText } from "../features/remote/linkNotice.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../features/remote/codemodal.js";
 import { SubagentBar } from "../features/subagentview/subagentbar.js";
 import { describeScheduled } from "../model/schedule.js";
@@ -43,7 +45,6 @@ import {
   extractMentions,
   imageSetError,
   MAX_PENDING_ATTACHMENTS,
-  imageMimeForPath,
 } from "../../core/attachments.js";
 import type { ImageAttachmentUpload } from "../../core/attachments.js";
 import { clipboardFileName } from "../model/hostClipboard.js";
@@ -191,6 +192,10 @@ export function App({
       through `toasts` instead of its own state + timeout effect. */
   const setError = (message: string) => toasts.push("error", "danger", `error: ${message}`, ERROR_DISPLAY_MS);
   /** The palette's Remote section: this server's remote access, and switching between servers. */
+  // Whether the server is answering, and how many times it has come back:
+  // what was fetched once is fetched again then (the server may be a new one).
+  const serverLink = useServerLink(client);
+  const reconnects = useReconnects(serverLink);
   const remoteAccess = useRemote({ client, server, onSwitchServer, push: toasts.push, ...(pairedServers ? { pairedServers } : {}) });
   /** Composer is drafting the first message of a new thread, not a reply. */
   const [creating, setCreating] = useState(launchView !== "thread");
@@ -444,18 +449,25 @@ export function App({
    * into moxen attaches the images again onto its `[Image #N]` tokens.
    */
   const copyMessage = (entry: TimelineEntry) => {
-    const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message, homeDir);
-    const sources = rendered.images.flatMap((image) =>
-      image.filePath === null ? [] : [{ name: image.label, mimeType: imageMimeForPath(image.filePath), path: image.filePath }],
-    );
+    const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
     if (rendered.text.trim().length === 0) {
       setError("nothing to copy");
       return;
     }
-    void copyPrompt(clipboard, rendered.text, sources).then(({ ok, images }) => {
-      if (ok) toasts.push("palette-copy", "info", copiedToast(sources.length, images), COPY_TOAST_MS);
-      else if (clipboard.isRemote()) setError("copy failed — terminal may block OSC 52");
-    });
+    // The images are the server's: it hands over their bytes by id. One it no longer has is left out.
+    void Promise.all(
+      rendered.images.map(async (image) => {
+        if (image.attachmentId === null) return [];
+        const read = await client.query({ type: "attachment.read", attachmentId: image.attachmentId }).catch(() => null);
+        return read === null ? [] : [{ name: image.label, mimeType: read.mimeType, dataUrl: read.dataUrl }];
+      }),
+    )
+      .then(async (found) => {
+        const sources = found.flat();
+        const { ok, images } = await copyPrompt(clipboard, rendered.text, sources);
+        if (ok) toasts.push("palette-copy", "info", copiedToast(sources.length, images), COPY_TOAST_MS);
+        else if (clipboard.isRemote()) setError("copy failed — terminal may block OSC 52");
+      });
   };
   /**
    * A paste that is moxen's own copy of a prompt with images: attach those
@@ -536,7 +548,6 @@ export function App({
     setFocus,
     setError,
     hideBinary: ui?.hideBinaryDiffs !== false,
-    remote,
   });
   /** The right-hand panel: the Diff tab follows the diff panel, the others open here. */
   const sidePanel = useSidePanel(diffPanel.expandedTurn !== null);
@@ -1095,6 +1106,7 @@ export function App({
     setThreadRuntimeMode,
   } = useProviderCatalog({
     client,
+    reconnects,
     selected,
     openThreadId,
     creating,
@@ -1127,7 +1139,7 @@ export function App({
   const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId) ?? null;
   const planUsage = usePlanUsage(
     client,
-    turnKey,
+    `${turnKey}:${reconnects}`,
     ui?.usageRefreshSeconds === undefined ? undefined : ui.usageRefreshSeconds * 1000,
   );
   const threadUsageLimits = currentProvider === null ? null : (planUsage[currentProvider.driver] ?? currentProvider.usageLimits);
@@ -1331,8 +1343,25 @@ export function App({
     if (automaticContinuation !== null) setOpenThreadId(automaticContinuation);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [automaticContinuation]);
+  // A server that stops answering (gone, frozen, its machine asleep): said
+  // first, over everything else, until the connection is back.
+  const linkText = serverLink.status === "connected" ? null : linkNoticeText(serverLink, server, Date.now());
+  // No way out offered here: this server's threads and projects are its own,
+  // and another server's are not a substitute (switching is in the palette).
+  const linkNotice: Notice | null =
+    linkText === null
+      ? null
+      : {
+          key: "server-link",
+          glyph: "◌",
+          glyphColor: linkText.tone === "danger" ? COLOR.danger : COLOR.warn,
+          title: linkText.title,
+          ...(linkText.tone === "warn" ? { tags: [{ text: "reconnecting", color: COLOR.warn }] } : {}),
+          detail: <text fg={COLOR.dim} selectable={false}>{`  ${linkText.detail}`}</text>,
+          actions: [],
+        };
   /** What waits over the composer, most urgent first; the banner pages between them. */
-  const notices: Notice[] = [];
+  const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
   if (usageBanner.banner !== null) {
     const banner = usageBanner.banner;
     notices.push({
@@ -2262,6 +2291,12 @@ export function App({
     );
   };
 
+  /**
+   * The new-thread view's one column: a centred card, never the full pane,
+   * and never narrower than a composer can usefully be.
+   */
+  const creatingWidth = Math.min(76, Math.max(40, width - SIDEBAR_WIDTH - 8));
+
   return (
     <box style={{ flexDirection: "column", flexGrow: 1, backgroundColor: SURFACE.base }}>
       {/* Boot gate: sidebar + transcript stay hidden until both snapshots
@@ -2354,7 +2389,7 @@ export function App({
               style={{
                 flexDirection: "column",
                 flexShrink: 0,
-                width: Math.min(76, Math.max(40, width - SIDEBAR_WIDTH - 8)),
+                width: creatingWidth,
                 zIndex: 1,
               }}
             >
@@ -2375,7 +2410,23 @@ export function App({
                 )}
               </box>
               {requestPanelVisible ? (
-                renderRequestPanel(Math.min(76, Math.max(40, width - SIDEBAR_WIDTH - 8)))
+                // A request panel takes the composer's slot; the server
+                // notice still stands above it, as a card of its own in the
+                // same vocabulary (left spine, raised surface) rather than a
+                // slab over the scene.
+                <box style={{ flexDirection: "column", flexShrink: 0, width: creatingWidth }}>
+                  {linkNotice === null ? null : (
+                    <box
+                      border={["left"]}
+                      borderStyle="heavy"
+                      borderColor={linkNotice.glyphColor}
+                      style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingTop: 1, paddingBottom: 1, backgroundColor: SURFACE.raised }}
+                    >
+                      <NoticeBanner notices={[linkNotice]} index={0} onPage={() => undefined} width={creatingWidth - 3} flushTop tight />
+                    </box>
+                  )}
+                  {renderRequestPanel(creatingWidth)}
+                </box>
               ) : (
               <Composer
                 draft={draft}
@@ -2395,8 +2446,25 @@ export function App({
                 onClaimPaste={claimPaste}
                 submitVerb="creates"
                 running={false}
-                width={Math.min(76, Math.max(40, width - SIDEBAR_WIDTH - 8))}
+                width={creatingWidth}
                 hideHint
+                // Inside the card rather than over the pane: a banner here
+                // would be an opaque box floating on the scene.
+                {...(linkNotice === null
+                  ? {}
+                  : {
+                      notice: (
+                        <NoticeBanner
+                          notices={[linkNotice]}
+                          index={0}
+                          onPage={() => undefined}
+                          width={creatingWidth - 3}
+                          inset={0}
+                          flushTop
+                          tight
+                        />
+                      ),
+                    })}
                 onModelClick={openModelPicker}
                 onEffortClick={openEffortPicker}
                 onPermissionClick={openPermissionPicker}
@@ -2408,7 +2476,7 @@ export function App({
               />
               )}
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center", marginTop: 1 }}>
-                <text fg={COLOR.faint} selectable={false}>{draftingWithoutProject
+                <text fg={COLOR.dim} selectable={false}>{draftingWithoutProject
                   ? "enter creates · click title to pick a project · esc cancels"
                   : "enter creates · click project to change or go without · esc cancels"}</text>
               </box>

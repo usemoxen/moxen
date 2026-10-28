@@ -337,7 +337,10 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
   /** Per layer, before blending: the monitoring field is already faint, so only scenes get the well. */
   private applyWellTo(frame: Frame, id: BackdropScene): void {
     if (!this.wellOn || id === "grid") return;
-    applyWell(frame, frame.width / 2, frame.height / 2, Math.min(46, frame.width * 0.36), Math.min(12, frame.height * 0.3), 0.3);
+    // Sized to the whole foreground column — the title above the card, the
+    // card, and the hint below it: a well that stopped at the card left the
+    // hint over raw scenery, unreadable on a bright frame.
+    applyWell(frame, frame.width / 2, frame.height / 2, Math.min(58, frame.width * 0.5), Math.min(20, frame.height * 0.48), 0.3);
   }
 
   protected override destroySelf(): void {

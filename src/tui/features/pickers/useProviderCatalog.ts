@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { extractProviders, type ProviderSummary } from "../../../core/catalog/summary.js";
 import {
@@ -11,6 +11,9 @@ import { defaultEffortChoice, displayEffort, displayModelName, isEffortDescripto
 import { providerColor } from "../../theme.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PickerName } from "./pickerTypes.js";
+
+/** How soon a catalog read that failed is tried again. */
+const CATALOG_RETRY_MS = 3_000;
 
 /**
  * The catalog loads once per session from `server.getConfig` and feeds both
@@ -37,6 +40,8 @@ export function useProviderCatalog(params: {
   setFocus: (focus: "chat") => void;
   setError: (message: string) => void;
   closePicker: (returnFocus?: "composer" | "chat" | "diff") => void;
+  /** Moves each time the connection comes back (`useReconnects`): the catalog is read again. */
+  reconnects?: number;
 }) {
   const {
     client,
@@ -52,36 +57,57 @@ export function useProviderCatalog(params: {
     setFocus,
     setError,
     closePicker,
+    reconnects = 0,
   } = params;
 
   const [providers, setProviders] = useState<ProviderSummary[] | null>(null);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [providersError, setProvidersError] = useState<string | null>(null);
 
-  const ensureProviders = () => {
-    if (providers !== null || providersLoading) return;
+  /** Which load is current: a reply to an older one (before a reconnect) is dropped. */
+  const generation = useRef(0);
+  const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const load = () => {
+    const mine = (generation.current += 1);
+    if (retry.current !== null) clearTimeout(retry.current);
+    retry.current = null;
     setProvidersLoading(true);
     void client.getConfig().then(
       (response) => {
+        if (mine !== generation.current) return;
         try {
           setProviders(extractProviders(response));
+          setProvidersError(null);
         } catch (cause: unknown) {
           setProvidersError(String(cause).slice(0, 120));
         }
         setProvidersLoading(false);
       },
       (cause: unknown) => {
+        if (mine !== generation.current) return;
         setProvidersError(String(cause).slice(0, 120));
         setProvidersLoading(false);
+        // The server may be restarting: without the catalog the footer
+        // falls back to raw ids and loses its usage gauge, so keep asking.
+        retry.current = setTimeout(load, CATALOG_RETRY_MS);
       },
     );
   };
+  const ensureProviders = () => {
+    if (providers !== null || providersLoading) return;
+    load();
+  };
 
-  // Footer labels need the catalog even when the picker never opens.
+  // Footer labels need the catalog even when the picker never opens; a
+  // reconnect reads it again, since the server answering now may be a new one.
   useEffect(() => {
-    ensureProviders();
+    load();
+    return () => {
+      generation.current += 1;
+      if (retry.current !== null) clearTimeout(retry.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client]);
+  }, [client, reconnects]);
 
   const openModelPicker = () => {
     // Drafting a new thread stores the pick locally (`creatingModelSelection`)

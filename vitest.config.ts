@@ -12,6 +12,8 @@ export default defineConfig({
     // An `include` glob rather than an `exclude` of `upstream/`: allow-listing our own sources
     // stays correct no matter what other checkouts appear beside them.
     include: ["src/**/*.test.ts"],
+    // CLI commands under test run in-process: clients otherwise always start a real server.
+    setupFiles: ["src/cli/tests/setup.ts"],
     // Most suites are integration tests: real git repositories and
     // worktrees, real subprocesses (the CLI entry, process trees), all run
     // in parallel. The 5s default flaked under that load — a test that took

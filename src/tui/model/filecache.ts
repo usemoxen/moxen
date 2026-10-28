@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-
 import { createPatch } from "diff";
 
 import { GIT_DIFF_MAX_BYTES } from "./gitdiff.js";
@@ -99,7 +97,7 @@ export async function snapshotFiles(
   root: string,
   fullPaths: readonly string[],
   cache: FileContentCache,
-  read: FileReader = (path) => readFile(path, "utf8"),
+  read: FileReader,
 ): Promise<void> {
   for (const full of new Set(fullPaths)) {
     const resolved = resolveCachePath(root, full);
@@ -130,7 +128,7 @@ export async function diffCachedFiles(
   root: string,
   cache: FileContentCache,
   wanted: readonly { full: string; display: string }[],
-  read: FileReader = (path) => readFile(path, "utf8"),
+  read: FileReader,
 ): Promise<PatchFile[]> {
   const out: PatchFile[] = [];
   const seen = new Set<string>();

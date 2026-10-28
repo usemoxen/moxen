@@ -166,11 +166,19 @@ export async function testHarness(options: TestHarnessOptions = {}) {
   // Anything that loads the config itself (the server connection) must
   // see defaults, never the developer's own config file.
   process.env.MOXEN_CONFIG = path.join(root, "config.json");
+  // And never the developer's running server: in the default `auto` mode a
+  // client takes any server at the endpoint, and the real one would answer
+  // for (and write into) the real store. Here, `auto` finds none.
+  const previousEndpoint = process.env.MOXEN_SERVER_ENDPOINT;
+  process.env.MOXEN_SERVER_ENDPOINT =
+    process.platform === "win32" ? `\\\\.\\pipe\\${path.basename(root)}` : path.join(root, "server.sock");
   cleanup.push(async () => {
     if (previousStoreRoot === undefined) delete process.env.MOXEN_STORE_ROOT;
     else process.env.MOXEN_STORE_ROOT = previousStoreRoot;
     if (previousConfig === undefined) delete process.env.MOXEN_CONFIG;
     else process.env.MOXEN_CONFIG = previousConfig;
+    if (previousEndpoint === undefined) delete process.env.MOXEN_SERVER_ENDPOINT;
+    else process.env.MOXEN_SERVER_ENDPOINT = previousEndpoint;
     if (previousDefaultModel === undefined) delete process.env.MOXEN_DEFAULT_MODEL;
     else process.env.MOXEN_DEFAULT_MODEL = previousDefaultModel;
     await rmTempAsync(root);

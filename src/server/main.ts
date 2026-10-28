@@ -7,6 +7,7 @@
  * start it (`MOXEN_SERVER=daemon`, see `./client.ts`), which runs this
  * file detached.
  */
+import { defaultConfigPath, migrateLegacyConfig } from "../core/config.js";
 import type { CliConfig } from "../core/types.js";
 import { DirectConnection } from "./connection.js";
 import { defaultEndpoint } from "./transport/endpoint.js";
@@ -20,6 +21,8 @@ export interface RunServerOptions {
 }
 
 export async function runServer(options: RunServerOptions = {}): Promise<ServerHandle> {
+  // The server owns the config file, so it is the one to bring an old one over.
+  if (!options.config) migrateLegacyConfig();
   const connection = new DirectConnection(options.config ? { config: options.config } : {});
   try {
     const handle = await serve({
@@ -27,6 +30,8 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
       api: connection,
       // Stops every driver: provider processes end with the server.
       onClose: () => connection.close(),
+      // Re-read per operation from this file, unless the caller fixed the config itself.
+      ...(options.config ? {} : { greeting: { configPath: defaultConfigPath() } }),
     });
     // The server owns every session, so it runs scheduled turns too — with
     // or without a client attached.

@@ -1,23 +1,34 @@
 /**
- * The CLI's `ClientApi`. Every command talks to the server through this,
- * the same contract the TUI uses: a running moxen server when there is one
- * (`MOXEN_SERVER`, see `server/client.ts`), the in-process connection
- * otherwise.
- *
- * Not closed after a command: closing an in-process connection stops its
- * drivers, which would end the run a `--no-wait` command just started.
- * The process exit ends them. (Over a server, the run lives on there.)
+ * The CLI's `ClientApi`. Every command talks to a moxen server through
+ * this, the same contract the TUI uses: this machine's, started when none
+ * is running, or a paired one (`server/client.ts`). The CLI never runs
+ * moxen in-process; a run a `--no-wait` command starts lives on in the
+ * server after the command exits.
  */
 import type { ClientApi } from "../../server/api.js";
 import { CliError } from "../../core/errors.js";
-import { openClient, remoteServerName, type ClientConnection } from "../../server/client.js";
+import type { ClientConnection, OpenClientOptions } from "../../server/client.js";
+import { remoteServerName } from "../../server/servermode.js";
 import type { TurnDriverFactories } from "../../server/connection.js";
 import type { CliConfig } from "../../core/types.js";
 
 export type { TurnDriverFactories } from "../../server/connection.js";
 
 let factory: ((config: CliConfig) => Promise<ClientConnection>) | null = null;
-let forceDirect = false;
+
+/**
+ * The client factory, loaded on first use: it pulls in the whole server
+ * side (the in-process connection, every driver), which a command that
+ * never opens a client — and every test file that only sets a default — has
+ * no reason to load.
+ */
+async function openClient(options?: OpenClientOptions): Promise<ClientConnection> {
+  return await (await import("../../server/client.js")).openClient(options);
+}
+type TestClient = (config: CliConfig, configPath?: string, drivers?: TurnDriverFactories) => Promise<ClientConnection>;
+/** Tests: what every command gets when a test set no `factory` (`src/cli/tests/setup.ts`). */
+let testDefault: TestClient | null = null;
+let configFlag = false;
 let remoteFlag: string | null = null;
 /** One TLS connection per invocation: each opens a handshake and reads the keychain. */
 let remoteClient: Promise<ClientConnection> | null = null;
@@ -55,30 +66,34 @@ export function setClientFactory(next: ((config: CliConfig) => Promise<ClientCon
   factory = next;
 }
 
-/**
- * An explicit `--config` file applies to this invocation only; a running
- * server resolves defaults from its own config, so such a command stays
- * in-process rather than silently ignoring the flag.
- */
-export function preferDirectClient(value: boolean): void {
-  forceDirect = value;
+/** Tests only: the client every command gets when no test set its own — in-process, never a real server. */
+export function setTestClientDefault(next: TestClient | null): void {
+  testDefault = next;
 }
 
+/**
+ * `--config` was given. It names the config of this machine's server (it
+ * sets `MOXEN_CONFIG`, which `server/client.ts` checks the running server
+ * against); a paired server runs on its own, so the two together are a mistake.
+ */
+export function configFlagGiven(value: boolean): void {
+  configFlag = value;
+}
+
+/** Always a server; `drivers` are a test's, which only the test default (in-process) can take. */
 export async function cliClient(config: CliConfig, drivers?: TurnDriverFactories, configPath?: string): Promise<ClientApi> {
   if (factory) return await factory(config);
+  if (testDefault) return await testDefault(config, configPath, drivers);
+  if (drivers) throw new CliError("INTERNAL", "Driver factories are for tests, which run with a test client default.");
   const remote = activeRemoteServer();
-  if (remote !== null && !drivers) {
-    if (forceDirect) {
+  if (remote !== null) {
+    if (configFlag) {
       throw new CliError("REMOTE_CONFIG_CONFLICT", "--config applies to this machine; a remote server uses its own settings. Drop one of --config and --server.", { exitCode: 2 });
     }
     remoteClient ??= openClient({ server: remote });
     return await remoteClient;
   }
-  return await openClient({
-    // A command that reads back what it just wrote (the harness profile editor) passes the file, not the launch-time object.
-    ...(configPath ? { configPath } : { config }),
-    ...(drivers ? { drivers, mode: "direct" as const } : forceDirect ? { mode: "direct" as const } : {}),
-  });
+  return await openClient();
 }
 
 /**

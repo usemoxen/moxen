@@ -217,6 +217,7 @@ export function Composer({
   onAttachmentRemoved,
   onClaimPaste,
   suggestion,
+  notice,
 }: {
   draft: string;
   /**
@@ -296,6 +297,13 @@ export function Composer({
   onClaimPaste?: (text: string) => string[] | null;
   /** The provider's guess at the next prompt: shown in an empty draft, Tab takes it. */
   suggestion?: string | null;
+  /**
+   * A notice docked into the card's own header, above a hairline rule and
+   * the draft — the creating view's server notice, which over a backdrop
+   * would otherwise need an opaque slab of its own. Omitted in a thread,
+   * where the banner sits over the composer on the pane's own surface.
+   */
+  notice?: ReactNode;
 }) {
   const areaRef = useRef<TextareaRenderable | null>(null);
   /** Each pending image's token in the draft: its extmark and label, by attachment name. */
@@ -698,6 +706,18 @@ export function Composer({
         onMouseDown={onFocus}
         selectable={false}
       >
+        {notice === undefined ? null : (
+          // The card's own status header: the pane's surface stops at the
+          // card, so a notice here needs no slab behind it — the hairline
+          // below is what keeps it off the draft.
+          <box
+            border={["bottom"]}
+            borderColor={SURFACE.border}
+            style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingRight: 1, backgroundColor: SURFACE.raised }}
+          >
+            {notice}
+          </box>
+        )}
         {external ? (
           // The draft lives in `$EDITOR`: the textarea and every footer
           // toggleable (model, effort, permission, context, copy,

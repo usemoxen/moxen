@@ -35,7 +35,12 @@ export type ClientMessage =
       readonly params: { readonly threadId: string; readonly afterSequence?: number };
     }
   | { readonly id: number; readonly method: "unsubscribe"; readonly params: { readonly subscription: number } }
-  | { readonly id: number; readonly method: "shutdown" };
+  | { readonly id: number; readonly method: "shutdown" }
+  /**
+   * The client's heartbeat (`./remote.ts`): answered with `null`. Any reply
+   * proves the server alive — an older server's "unknown method" included.
+   */
+  | { readonly id: number; readonly method: "ping" };
 
 export type ServerMessage =
   | { readonly id: number; readonly result: unknown }
@@ -60,6 +65,8 @@ export interface HelloResult {
   readonly pid: number;
   /** Remote sockets: the server's name (its host), for the client's list of servers. */
   readonly serverName?: string;
+  /** Local sockets: the config file the server runs on, so a client asking for another can refuse. */
+  readonly configPath?: string;
   /** Remote sockets: the device this socket is, once admitted. */
   readonly deviceId?: string;
   /** After `pair` only: the device's token, which the client keeps in its keychain and never shows. */
