@@ -73,6 +73,37 @@ budget, memory, a model per task and isolation.
   Research violet, Orchestrate fuchsia), its running pulse, and in the
   footer.
 
+## Memory
+
+Moxen keeps one memory per project, and one global, for every provider
+(`core/memory/`), modelled on Claude Code's auto memory but owned by Moxen,
+so a change on Claude's side does not change it.
+
+- **Where:** on the server, never in the repository:
+  `<store>/memory/global/` (about the user, for every project) and
+  `<store>/memory/projects/<projectId>/`. One file per memory, with
+  `name`, `description` and `type` (`user`, `feedback`, `project`,
+  `reference`) frontmatter, and `MEMORY.md`, the index, which Moxen writes
+  itself on every save and delete.
+- **Tools:** `memory_read` (no name: the index as it is now),
+  `memory_save` and `memory_delete` on the `moxen` MCP server. The model
+  picks the scope. A delegated task gets `memory_read` only.
+- **Reading:** a conversation starts with both indexes in its runtime
+  instructions (global first, each capped at 200 lines / 25 KB), and keeps
+  the index it began with: a save later does not rewrite a cached prompt.
+  A memory itself is read on demand.
+- **Rules:** always on while memory is (`MEMORY_GUIDANCE` in
+  `threads/instructions.ts`): what to save, what to skip, which scope.
+  Lessons from a session are saved on the agent's own initiative.
+- **Claude Code:** its auto memory is off in Moxen's sessions
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in the process Moxen starts), so
+  there is one memory, not two. The user's own `claude` keeps its memory.
+- **Switching off:** the `memory` setting, or `"memory": false` in a
+  project's `moxen.json`.
+- **Importing Claude's:** only on request: `moxen memory import-claude`,
+  or Import Claude Code memory in the command palette. `user` memories go to
+  the global scope; a memory Moxen already has under the same name stays.
+
 ## The activity ledger
 
 The ledger records lifecycle bookkeeping plus one row per tool call,

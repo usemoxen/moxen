@@ -198,6 +198,13 @@ export function normalizeConfig(raw: unknown): CliConfig {
     const value = asString(input.instructions, "instructions").trim();
     if (value) result.instructions = value;
   }
+  if (input.memory !== undefined) {
+    const raw: unknown = input.memory;
+    const value = raw === true || raw === "true" ? true : raw === false || raw === "false" ? false : null;
+    if (value === null) throw new CliError("INVALID_CONFIG", "memory must be true or false.");
+    // On is the default, so only off is kept.
+    if (!value) result.memory = false;
+  }
   if (input.autoContinueAtUsageLimit !== undefined) {
     // A boolean in the file; `config set` hands it over as text.
     const raw: unknown = input.autoContinueAtUsageLimit;

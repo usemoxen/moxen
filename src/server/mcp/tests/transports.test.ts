@@ -4,7 +4,7 @@ import { sdkMcpServer, zodShape } from "../../../core/providers/claude/transport
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../api.js";
 import { startMcpHttpServer } from "../http.js";
-import { callMoxenTool, checkTodos, MAX_MODELS_PER_PROVIDER, MAX_TODO_CHARS, MAX_TODOS, MOXEN_TOOLS } from "../tools.js";
+import { callMoxenTool, checkTodos, MAX_MODELS_PER_PROVIDER, MAX_TODO_CHARS, MAX_TODOS, MEMORY_TOOLS, MOXEN_TOOLS } from "../tools.js";
 
 function provider(instanceId: string, overrides: Partial<ProviderSummary> = {}, modelCount = 2): ProviderSummary {
   return {
@@ -85,7 +85,7 @@ describe("moxen tools over loopback HTTP", () => {
       expect((await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
 
       const listed = (await (await post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json()) as { result: { tools: Array<{ name: string }> } };
-      expect(listed.result.tools.map((tool) => tool.name)).toEqual(MOXEN_TOOLS.map((tool) => tool.name));
+      expect(listed.result.tools.map((tool) => tool.name)).toEqual([...MOXEN_TOOLS, ...MEMORY_TOOLS].map((tool) => tool.name));
 
       const batch = (await (
         await post([
@@ -100,7 +100,7 @@ describe("moxen tools over loopback HTTP", () => {
       const lent = (await (await post({ jsonrpc: "2.0", id: 4, method: "tools/list" }, spec.headers, `${spec.url}?checklist=1`)).json()) as {
         result: { tools: Array<{ name: string }> };
       };
-      expect(lent.result.tools.map((tool) => tool.name)).toEqual([...MOXEN_TOOLS.map((tool) => tool.name), "todos"]);
+      expect(lent.result.tools.map((tool) => tool.name)).toEqual([...[...MOXEN_TOOLS, ...MEMORY_TOOLS].map((tool) => tool.name), "todos"]);
 
       expect((await fetch(spec.url, { method: "GET", headers: spec.headers })).status).toBe(405);
     } finally {

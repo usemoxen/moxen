@@ -31,6 +31,8 @@ export interface CliConfig {
   mcpRunner?: "npx" | "bunx" | "pnpm" | "yarn";
   /** Appended to every provider session's system prompt (`core/threads/instructions.ts`). */
   instructions?: string;
+  /** Moxen memory (`core/memory/`); false turns it off everywhere. A project's moxen.json can turn it off for itself. */
+  memory?: boolean;
   /**
    * When a plan usage limit stops a turn, schedule a "continue" for just
    * after the limit resets (at most `usageLimitContinues` in a row). Off unless set: it runs

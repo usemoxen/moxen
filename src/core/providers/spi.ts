@@ -99,6 +99,12 @@ export interface ProviderSessionStartInput {
   readonly hiddenMoxenSkills?: readonly string[];
   /** A delegated task: nobody is there to answer a question, so the driver asks none. */
   readonly delegated?: boolean;
+  /**
+   * Moxen memory is on for this session (`core/memory/`): a provider with a
+   * memory of its own keeps it off here (Claude Code's auto memory), so the
+   * agent has one memory, not two that disagree.
+   */
+  readonly moxenMemory?: boolean;
 }
 
 /**

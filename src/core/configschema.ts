@@ -776,6 +776,16 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     defaultValue: undefined,
     appliesAt: "next-session",
   },
+  {
+    key: "memory",
+    label: "Memory",
+    description:
+      "Lets agents keep what they learn across sessions (your preferences, corrections, project decisions) in Moxen's memory, for every provider. Turning it on also turns Claude Code's own auto memory off in Moxen's sessions. A project's moxen.json can turn it off for itself (`\"memory\": false`).",
+    section: "agent",
+    kind: { type: "boolean" },
+    defaultValue: true,
+    appliesAt: "next-session",
+  },
 
   // -- model -----------------------------------------------------------------
   {

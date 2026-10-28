@@ -136,9 +136,86 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
 /** The tools that hand work to other threads: a delegated task is itself the delegation, so it gets none of them. */
 export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel"]);
 
+/** Moxen memory, as a session has it: every tool, `memory_read` alone (a delegated task), or none. */
+export type MemoryAccess = "write" | "read" | "off";
+
+const MEMORY_SCOPE_ADVICE =
+  "global: about the user wherever they work (role, preferences, feedback that holds in every project). project: anything about this codebase or the work on it.";
+
+/** Moxen memory's tools (`core/memory/`): a memory per file, the index written by Moxen. */
+export const MEMORY_TOOLS: readonly McpTool[] = [
+  {
+    name: "memory_read",
+    description:
+      "Read Moxen's persistent memory. With a name: that memory in full (the project's first, then the global, unless scope says which). " +
+      "With no name: the index of every memory as it is now, global first, one line each.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The memory's name, as the index lists it." },
+        scope: { type: "string", enum: ["project", "global"] },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "memory_save",
+    description:
+      "Save one fact to Moxen's persistent memory, read by every later session in its scope; saving under an existing name replaces that memory. " +
+      "For corrections and guidance on how to work, confirmed approaches, decisions and why, external references, and lessons worth keeping; " +
+      "not for what the code, git history or AGENTS.md / CLAUDE.md already record. Moxen updates the index itself. " +
+      MEMORY_SCOPE_ADVICE,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Short kebab-case slug (\"prefers-bun-test\")." },
+        description: { type: "string", description: "One line: what it is about, used to decide when it is relevant." },
+        type: { type: "string", enum: ["user", "feedback", "project", "reference"], description: "user: who they are. feedback: how they want you to work. project: work, goals, decisions. reference: where to find something." },
+        body: { type: "string", description: "The memory: the fact, then why it holds and how to apply it." },
+        scope: { type: "string", enum: ["project", "global"], description: MEMORY_SCOPE_ADVICE },
+      },
+      required: ["name", "description", "type", "body", "scope"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "memory_delete",
+    description: "Delete a memory that turned out to be wrong or no longer holds. Moxen updates the index itself.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        scope: { type: "string", enum: ["project", "global"] },
+      },
+      required: ["name", "scope"],
+      additionalProperties: false,
+    },
+  },
+];
+
+const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_delete"]);
+
+export interface MoxenToolOptions {
+  readonly checklist?: boolean;
+  readonly delegated?: boolean;
+  readonly webFetch?: boolean;
+  /** Absent: write. */
+  readonly memory?: MemoryAccess;
+}
+
+/** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
+function offered(name: string, options: MoxenToolOptions): boolean {
+  if (options.delegated === true && DELEGATION_TOOLS.has(name)) return false;
+  if (options.webFetch === false && name === "web_fetch") return false;
+  const memory = options.memory ?? "write";
+  if (name.startsWith("memory_") && (memory === "off" || (memory === "read" && MEMORY_WRITE_TOOLS.has(name)))) return false;
+  return true;
+}
+
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
-export function moxenToolsFor(options: { readonly checklist?: boolean; readonly delegated?: boolean; readonly webFetch?: boolean }): readonly McpTool[] {
-  const tools = MOXEN_TOOLS.filter((tool) => !(options.delegated === true && DELEGATION_TOOLS.has(tool.name)) && !(options.webFetch === false && tool.name === "web_fetch"));
+export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
+  const tools = [...MOXEN_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
@@ -252,12 +329,15 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly web?: () => Promise<WebPolicy> } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy> } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return { text: `${name} is not available in a delegated task: do the task yourself.`, isError: true };
   if (options.webFetch === false && name === "web_fetch") return { text: "web_fetch is switched off for this provider.", isError: true };
+  if (!offered(name, options) && name.startsWith("memory_")) {
+    return { text: options.memory === "read" ? `${name} is not available in a delegated task: put what is worth remembering in your report.` : "Moxen memory is switched off here.", isError: true };
+  }
   try {
     switch (name) {
       case "delegate":
@@ -275,6 +355,29 @@ export async function callMoxenTool(
       }
       case "web_fetch":
         return await webFetchTool(args, await (options.web ?? (() => currentWebPolicy(api)))());
+      case "memory_read": {
+        const name = argString(args, "name");
+        if (name === undefined) {
+          const listed = await api.query({ type: "memory.list", threadId: parentThreadId });
+          return { text: listed.index ?? "No memories yet.", isError: false };
+        }
+        const memory = await api.query({ type: "memory.read", threadId: parentThreadId, name, ...(args.scope !== undefined ? { scope: args.scope as "project" | "global" } : {}) });
+        return { text: `${memory.name} (${memory.scope}, ${memory.type}): ${memory.description}\n\n${memory.body}`, isError: false };
+      }
+      case "memory_save":
+        return ok(
+          await api.dispatch({
+            type: "memory.save",
+            threadId: parentThreadId,
+            name: argString(args, "name", true)!,
+            description: argString(args, "description", true)!,
+            memoryType: argString(args, "type", true)! as "user",
+            body: argString(args, "body", true)!,
+            scope: argString(args, "scope", true)! as "project",
+          }),
+        );
+      case "memory_delete":
+        return ok(await api.dispatch({ type: "memory.delete", threadId: parentThreadId, name: argString(args, "name", true)!, scope: argString(args, "scope", true)! as "project" }));
       case "task_cancel": {
         const taskId = argString(args, "taskId", true)!;
         const cancelled = await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId });

@@ -23,6 +23,7 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
+import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryScope, type MemoryType } from "../core/memory/memory.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
@@ -205,6 +206,15 @@ export type CommandBody =
   /** The agent's checklist, for a provider with none of its own (moxen's `todos` tool). The whole list. */
   | { readonly type: "thread.plan.set"; readonly threadId: string; readonly plan: readonly ChecklistStep[] }
   | ({ readonly type: "project.ensure" } & EnsureProjectRequest)
+  /**
+   * Moxen memory (`core/memory/`). Addressed by a thread (its project) or a
+   * project; with neither, only the global scope is there. Saving and
+   * deleting rewrite the scope's index.
+   */
+  | ({ readonly type: "memory.save"; readonly name: string; readonly description: string; readonly memoryType: MemoryType; readonly body: string; readonly scope: MemoryScope } & MemoryAddress)
+  | ({ readonly type: "memory.delete"; readonly name: string; readonly scope: MemoryScope } & MemoryAddress)
+  /** Copy Claude Code's auto memory for the project into Moxen's: only ever when the user asks. */
+  | ({ readonly type: "memory.import-claude" } & MemoryAddress)
   | {
       readonly type: "model.visibility.set";
       readonly instanceId: string;
@@ -331,6 +341,9 @@ export interface CommandResults {
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
+  "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean };
+  "memory.delete": { readonly name: string; readonly scope: MemoryScope };
+  "memory.import-claude": ImportResult;
   "settings.set": SettingsSnapshot & Accepted;
   "remote.pairing.start": RemotePairing;
   "remote.pairing.cancel": Accepted;
@@ -397,6 +410,10 @@ export type Query =
   | { readonly type: "skills.list"; readonly instanceId: string; readonly cwd: string }
   /** Background work running in a thread's live session; `live: false` when no session runs here. */
   | { readonly type: "thread.background.list"; readonly threadId: string }
+  /** Every memory a thread or project sees, global first, with the index a session would start with. */
+  | ({ readonly type: "memory.list" } & MemoryAddress)
+  /** One memory; without a scope, the project's first, then the global. */
+  | ({ readonly type: "memory.read"; readonly name: string; readonly scope?: MemoryScope } & MemoryAddress)
   /**
    * What fills the thread's context window now, by category, from its live
    * session; `live: false` when no session runs here (read the last recorded
@@ -505,6 +522,8 @@ export interface QueryResults {
   doctor: Diagnosis;
   "skills.list": SkillInventory;
   "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
+  "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
+  "memory.read": Memory;
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
   "thread.subagent": SubagentTranscript;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
@@ -684,6 +703,16 @@ export function requireThreadId(value: unknown): string {
 
 export function unknownCommand(type: string): CliError {
   return new CliError("UNKNOWN_COMMAND", `Unsupported command type: ${type}.`, { details: { type } });
+}
+
+/** Which memory a request means: a thread's project, a project, or (neither) the global scope alone. */
+export interface MemoryAddress {
+  readonly threadId?: string;
+  readonly projectId?: string;
+}
+
+function decodeMemoryAddress(record: Record<string, unknown>): MemoryAddress {
+  return { ...optionalString(record, "threadId"), ...optionalString(record, "projectId") };
 }
 
 function requireField(value: unknown, command: string, field: string): string {
@@ -962,6 +991,21 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "projectPolicy", ["create", "existing"] as const, type),
         ...optionalBoolean(record, "dryRun"),
       };
+    case "memory.save":
+      return {
+        ...meta,
+        type,
+        ...decodeMemoryAddress(record),
+        name: requireField(record.name, type, "name"),
+        description: requireField(record.description, type, "description"),
+        memoryType: requireEnum(record.memoryType, type, "memoryType", MEMORY_TYPES),
+        body: requireField(record.body, type, "body"),
+        scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES),
+      };
+    case "memory.delete":
+      return { ...meta, type, ...decodeMemoryAddress(record), name: requireField(record.name, type, "name"), scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES) };
+    case "memory.import-claude":
+      return { ...meta, type, ...decodeMemoryAddress(record) };
     case "model.visibility.set":
       if (typeof record.hidden !== "boolean") {
         throw new CliError("INVALID_THREAD_OPTION", `${type} requires hidden.`, { exitCode: 2 });
@@ -1260,6 +1304,15 @@ export function decodeQuery(value: unknown): Query {
       };
     case "thread.background.list":
       return { type, threadId: requireThreadId(record.threadId) };
+    case "memory.list":
+      return { type, ...decodeMemoryAddress(record) };
+    case "memory.read":
+      return {
+        type,
+        ...decodeMemoryAddress(record),
+        name: requireField(record.name, type, "name"),
+        ...(record.scope !== undefined ? { scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES) } : {}),
+      };
     case "thread.context":
       return { type, threadId: requireThreadId(record.threadId) };
     case "thread.subagent":

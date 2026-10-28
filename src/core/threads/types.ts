@@ -69,9 +69,9 @@ export interface StoredThread {
    * fixed when the conversation began, so every resume rebuilds the same
    * prompt and the provider's cached prefix stays valid — and `delivered` is
    * the latest the model has seen (the baseline, or the last update appended
-   * after the history). See `planInstructions`.
+   * after the history). `memory` is the memory index it began with. See `planInstructions`.
    */
-  readonly instructionState?: Readonly<Record<string, { readonly baseline: string; readonly delivered: string }>>;
+  readonly instructionState?: Readonly<Record<string, { readonly baseline: string; readonly delivered: string; readonly memory?: string }>>;
   /**
    * The mode each provider's conversation was last told about, keyed like
    * `providerSessions` (Claude and the Harness; OpenCode's driver keeps its

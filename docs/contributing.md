@@ -25,7 +25,8 @@ exceptions.
   (store, lifecycle, turn runner, tool-activity mapping, read views, and
   `operations.ts` — handover, delegation, send policies — that every
   client calls), `projects/` (registry + workspace resolution),
-  `checkpoints/`, `usage/`, `events/`, `catalog/`, `git/` (read-only local
+  `checkpoints/`, `usage/`, `events/`, `catalog/`, `memory/` (Moxen memory:
+  the per-project and global stores behind the `memory_*` tools), `git/` (read-only local
   history, branches and status — separate from `checkpoints/git.ts`, which
   writes), `forge/` (pull and merge requests through `gh` / `glab`; we drive
   their CLIs so we never hold a token), plus the shared kernel

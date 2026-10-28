@@ -164,6 +164,7 @@ moxen config set thinkingEffort xhigh
 | `model` | Model slug for overrides | Unset (inherits thread/project) |
 | `speedMode` | Older key, kept so configs load; no provider reads it | Unset |
 | `thinkingEffort` | Model-supported effort value | Unset (inherits thread/project) |
+| `memory` | `true`, `false`: Moxen memory (see [Memory](threads.md#memory)). A project's `moxen.json` can say `"memory": false` | `true` |
 
 **Older keys.** Settings reshaped since an older build (for example `ui.autoHandoff`, `providers.claude.autoCompact`, `providers.opencode.compactBuffer`, `installSkills`, `providers.harness.webSearchKey`, `providers.harness.webBrowser`) still load, and `config get` / `config set` still accept them; `config list` lists them too. A newer key wins once it is set; while it is unset, the older key is what applies, and the settings page names it as the Default. Loading a file never rewrites it in the new shape: the file is only written when a setting is changed, and then the older keys stay in it, so an older Moxen build sharing `~/.moxen/config.json` keeps working. The one exception is a value an older build reads the same way, such as `threadEnvMode: "auto"`, saved as `local`.
 
@@ -308,6 +309,8 @@ moxen models list --provider claudeAgent
 moxen models hide --provider opencode --model opencode/muse-spark-1.3-contributor-free
 moxen models show --provider opencode --model opencode/muse-spark-1.3-contributor-free
 moxen efforts list --provider claudeAgent --model claude-sonnet-5
+moxen memory list --cwd .
+moxen memory import-claude --cwd .
 moxen threads create --stdin
 moxen threads list --status active --cwd .
 moxen threads inspect --thread <thread-id>

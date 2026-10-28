@@ -62,7 +62,8 @@ import { isCompactCommand, type ProviderImage, type ProviderRuntimeEvent } from 
 import { driverKindOfInstance } from "../types.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { buildRuntimeInstructions, planInstructions, projectInstructions, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { buildRuntimeInstructions, memoryIndexSection, planInstructions, projectInstructions, projectMemorySetting, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { memoryIndexText } from "../memory/memory.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -132,9 +133,18 @@ export interface OperationContext {
    * over them by name, so `"moxen": null` there removes them. Delegated
    * threads get none: a subagent does not spawn subagents.
    */
-  readonly builtinMcpServers?: (threadId: string, options?: { readonly delegated: boolean; readonly webFetch?: boolean }) => readonly McpServerSpec[];
+  readonly builtinMcpServers?: (threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[];
 }
 
+
+/** Which of Moxen's own tools a session's `moxen` server offers. */
+export interface BuiltinMcpOptions {
+  /** No delegation tools: a delegated task, or a provider with orchestration off. */
+  readonly delegated: boolean;
+  readonly webFetch?: boolean;
+  /** Moxen memory's tools: all three, `memory_read` alone (a delegated task), or none. Absent: write. */
+  readonly memory?: "read" | "write" | "off";
+}
 
 /** Runtime instructions the model has not seen yet: put before the next prompt, then recorded as delivered. */
 interface InstructionsUpdate {
@@ -144,7 +154,7 @@ interface InstructionsUpdate {
 }
 
 /** The part of a session setup `ensureDriverSession` takes. */
-function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null }) {
+function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }) {
   return {
     mcpServers: setup.mcpServers,
     disabledMcpTools: setup.disabledMcpTools,
@@ -158,6 +168,7 @@ function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: st
     hiddenMoxenSkills: setup.skills.hidden,
     delegated: setup.delegated,
     idleTtlMs: setup.idleTtlMs,
+    moxenMemory: setup.moxenMemory,
   };
 }
 
@@ -221,7 +232,7 @@ async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
   instanceId: string = thread.modelSelection.instanceId,
-): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null }> {
+): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; skills: SessionSkills; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
@@ -230,7 +241,13 @@ async function sessionSetup(
   // A delegated thread gets Moxen's tools less the ones that delegate (it does not delegate again), and so does a provider
   // the user turned orchestration off for; `web_fetch` is switched on its own. With both off, the server is left out.
   const reach = moxenToolsOf(providerConfig);
-  const builtin = !reach.orchestration && !reach.webFetch ? [] : (ctx.builtinMcpServers?.(thread.id, { delegated: delegation !== null || !reach.orchestration, webFetch: reach.webFetch }) ?? []);
+  // Moxen memory: the config's switch and the project's moxen.json (`"memory": false`); a delegated task only reads it.
+  const memoryOn = ctx.config.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
+  const memory = !memoryOn ? "off" : delegation !== null ? "read" : "write";
+  const builtin =
+    !reach.orchestration && !reach.webFetch && memory === "off"
+      ? []
+      : (ctx.builtinMcpServers?.(thread.id, { delegated: delegation !== null || !reach.orchestration, webFetch: reach.webFetch, memory }) ?? []);
   const base: Record<string, McpServerEntry> = {};
   for (const built of builtin) {
     // Layered by name like any configured server, in the form a config entry has.
@@ -263,13 +280,22 @@ async function sessionSetup(
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: reach.orchestration && builtin.some((server) => server.name === "moxen"),
+    ...(memory !== "off" && builtin.some((server) => server.name === "moxen") ? { memory } : {}),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
   });
   // What this provider's conversation was given. With no history behind it (no session handle yet) there
   // is nothing cached to protect, so the current text starts it.
   const key = driverKey(instanceId);
   const history = thread.providerSessions?.[key] !== undefined;
-  const plan = planInstructions(history ? thread.instructionState?.[key] : undefined, current);
+  const state = history ? thread.instructionState?.[key] : undefined;
+  const plan = planInstructions(state, current);
+  // The memory index goes in once, when the conversation begins, and stays as it was (`InstructionState.memory`).
+  const memoryIndex = history
+    ? state?.memory
+    : memory === "off"
+      ? undefined
+      : ((await memoryIndexText({ storeRoot: ctx.storeRoot, projectId: thread.projectId ?? null }).catch(() => null)) ?? undefined);
+  const next: InstructionState = { ...plan.next, ...(memoryIndex !== undefined ? { memory: memoryIndex } : {}) };
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {
       const fresh = await ctx.store.readThreadRecord(thread.id);
@@ -278,7 +304,7 @@ async function sessionSetup(
     });
   };
   const recorded = thread.instructionState?.[key];
-  if (recorded?.baseline !== plan.next.baseline || recorded?.delivered !== plan.next.delivered) await record(plan.next);
+  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered || recorded?.memory !== next.memory) await record(next);
   return {
     mcpServers,
     disabledMcpTools,
@@ -286,7 +312,7 @@ async function sessionSetup(
     // OpenCode's own base prompt is replaced by Moxen's unless the user switched that off.
     moxenPrompt: nativeKind === "opencode" && ctx.config.providers?.opencode?.moxenPrompt !== false,
     checklist: providerConfig?.todos !== false,
-    instructions: plan.systemPrompt,
+    instructions: memoryIndex === undefined ? plan.systemPrompt : `${plan.systemPrompt}\n\n${memoryIndexSection(memoryIndex)}`,
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
     skills: await resolveSessionSkills({
@@ -300,10 +326,11 @@ async function sessionSetup(
     }),
     delegated: delegation !== null,
     idleTtlMs: sessionTtlFor(ctx.config, kind),
+    moxenMemory: memory !== "off",
     instructionsUpdate:
       plan.update === null
         ? null
-        : { text: plan.update, delivered: () => record({ baseline: plan.next.baseline, delivered: plan.update! }) },
+        : { text: plan.update, delivered: () => record({ ...next, delivered: plan.update! }) },
     modeUpdate: pendingModeUpdate(ctx, thread, key, history),
   };
 }
@@ -895,7 +922,7 @@ export async function revertThread(
       // has certainly seen only what the conversation began with, so the next prompt carries any update again.
       const state = current.instructionState?.[key];
       const instructionState = state
-        ? { ...current.instructionState, [key]: { baseline: state.baseline, delivered: state.baseline } }
+        ? { ...current.instructionState, [key]: { ...state, delivered: state.baseline } }
         : current.instructionState;
       // Likewise a mode change: forget what this provider was told, so the next prompt says it again if it still applies.
       const { [key]: _told, ...modeState } = current.modeState ?? {};

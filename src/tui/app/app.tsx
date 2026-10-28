@@ -1877,6 +1877,35 @@ export function App({
             ],
           },
           {
+            header: "Memory",
+            rows: [
+              {
+                key: "memory:import-claude",
+                label: "Import Claude Code memory",
+                // Only ever on request: Moxen keeps its own memory, and Claude's stays where it is.
+                ...(selected === null
+                  ? { meta: "open a thread first", disabled: true, onPick: () => {} }
+                  : {
+                      meta: "into this project",
+                      onPick: () => {
+                        closePicker("chat");
+                        void client
+                          .dispatch({ type: "memory.import-claude", threadId: selected.id })
+                          .then((result) =>
+                            toasts.push(
+                              "memory-import",
+                              "info",
+                              result.imported.length === 0 ? "No Claude Code memories to import" : `Imported ${result.imported.length} Claude Code memor${result.imported.length === 1 ? "y" : "ies"}`,
+                              COPY_TOAST_MS,
+                            ),
+                          )
+                          .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+                      },
+                    }),
+              },
+            ],
+          },
+          {
             header: "Providers",
             rows: [
               {

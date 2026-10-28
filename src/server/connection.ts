@@ -56,14 +56,16 @@ import {
 } from "../core/forge/forge.js";
 import { toWsConfigPayload } from "./config-payload.js";
 import { MOXEN_MCP_SERVER_NAME, moxenMcpServerSpec } from "./mcp/main.js";
-import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_DELEGATED_QUERY, MOXEN_NO_WEB_FETCH_ARG, MOXEN_NO_WEB_FETCH_QUERY, moxenInstructions } from "./mcp/stdio.js";
+import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_DELEGATED_QUERY, MOXEN_MEMORY_ARG, MOXEN_MEMORY_QUERY, MOXEN_NO_WEB_FETCH_ARG, MOXEN_NO_WEB_FETCH_QUERY, moxenInstructions } from "./mcp/stdio.js";
 import { startMcpHttpServer, type McpHttpServer } from "./mcp/http.js";
 import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
-import { callMoxenTool, moxenToolsFor } from "./mcp/tools.js";
+import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
 import { noteMessageId } from "../core/threads/views.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { claudeMemoryDir, deleteMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
+import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
 import { readAttachment, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
 import { diffCheckpointRange, diffCheckpointStat } from "../core/checkpoints/git.js";
@@ -111,6 +113,7 @@ import {
   revertThread,
   runDueScheduledTurn,
   startTurn,
+  type BuiltinMcpOptions,
   type OperationContext,
   type StartedTurn,
 } from "../core/threads/operations.js";
@@ -165,7 +168,7 @@ export interface DirectConnectionOptions {
   /** Which file `settings.set` writes; defaults to the resolved config path. */
   readonly configPath?: string;
   /** The `moxen` tools' MCP server per thread; defaults to `mcp/main.ts`. Null turns them off. */
-  readonly builtinMcpServers?: ((threadId: string, options?: { readonly delegated: boolean; readonly webFetch?: boolean }) => readonly McpServerSpec[]) | null;
+  readonly builtinMcpServers?: ((threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[]) | null;
   /** Runs a provider CLI's own updater (tests); defaults to the real one. */
   readonly updateProvider?: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   /** Reads the newest provider versions (tests); defaults to the npm registry. */
@@ -187,7 +190,7 @@ export class DirectConnection implements ClientApi {
   /** The per-provider settings the last config read saw; see `driverFor`. */
   private lastProviders: ProvidersConfig | undefined;
   private lastWeb: WebConfig | undefined;
-  private readonly builtinMcpServers: ((threadId: string, options?: { readonly delegated: boolean; readonly webFetch?: boolean }) => readonly McpServerSpec[]) | null;
+  private readonly builtinMcpServers: ((threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[]) | null;
   private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
@@ -236,7 +239,17 @@ export class DirectConnection implements ClientApi {
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
-      options.builtinMcpServers === undefined ? (threadId, serverOptions) => [this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false)] : options.builtinMcpServers;
+      options.builtinMcpServers === undefined ? (threadId, serverOptions) => [this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
+  }
+
+  /** Where a memory request points: the thread's project, the project named, or neither (global alone). */
+  private async memoryLocation(address: { readonly threadId?: string; readonly projectId?: string }): Promise<MemoryLocation> {
+    if (address.threadId !== undefined) {
+      const thread = await (await this.store()).readThreadRecord(address.threadId);
+      if (!thread) throw new CliError("THREAD_NOT_FOUND", `Thread ${address.threadId} was not found.`, { exitCode: 4, details: { threadId: address.threadId } });
+      return { storeRoot: this.storeRoot, projectId: thread.projectId || null };
+    }
+    return { storeRoot: this.storeRoot, projectId: address.projectId ?? null };
   }
 
   /**
@@ -244,7 +257,7 @@ export class DirectConnection implements ClientApi {
    * config and server mode) outright: providers hand MCP servers a filtered
    * environment (some do), and the tools must reach the same threads.
    */
-  private moxenToolsFor(threadId: string, delegated = false, webFetch = true): McpServerSpec {
+  private moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): McpServerSpec {
     // Hosted in this process: Claude calls the tools in-process, the other
     // providers over loopback HTTP served here — so a delegation always runs
     // in the process that owns its parent's session. Until the HTTP server
@@ -253,7 +266,11 @@ export class DirectConnection implements ClientApi {
       ? { name: MOXEN_MCP_SERVER_NAME, type: "http" as const, ...this.mcpHttp.specFor(threadId), alwaysLoad: true }
       : { ...this.moxenStdioFor(threadId), alwaysLoad: true };
     // A delegated task asks for the tools without the delegation ones; the server holds to it as well.
-    const flags = [...(delegated ? [{ query: MOXEN_DELEGATED_QUERY, arg: MOXEN_DELEGATED_ARG }] : []), ...(webFetch ? [] : [{ query: MOXEN_NO_WEB_FETCH_QUERY, arg: MOXEN_NO_WEB_FETCH_ARG }])];
+    const flags = [
+      ...(delegated ? [{ query: MOXEN_DELEGATED_QUERY, arg: MOXEN_DELEGATED_ARG }] : []),
+      ...(webFetch ? [] : [{ query: MOXEN_NO_WEB_FETCH_QUERY, arg: MOXEN_NO_WEB_FETCH_ARG }]),
+      ...(memory === "write" ? [] : [{ query: `${MOXEN_MEMORY_QUERY}=${memory}`, arg: `${MOXEN_MEMORY_ARG}${memory}` }]),
+    ];
     const fallback =
       flags.length === 0 ? base : base.type === "http" ? { ...base, url: `${base.url}?${flags.map((flag) => flag.query).join("&")}` } : { ...base, args: [...base.args, ...flags.map((flag) => flag.arg)] };
     // The same endpoint, also offering `todos`: for a provider with no checklist.
@@ -264,9 +281,9 @@ export class DirectConnection implements ClientApi {
     return {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
-      instructions: moxenInstructions({ delegated, webFetch }),
-      tools: moxenToolsFor({ delegated, webFetch }),
-      call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch }),
+      instructions: moxenInstructions({ delegated, webFetch, memory }),
+      tools: moxenToolsFor({ delegated, webFetch, memory }),
+      call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
       // Delegation is what these tools are for: never behind a tool search.
@@ -785,6 +802,26 @@ export class DirectConnection implements ClientApi {
       }
       case "model.visibility.set":
         return { hidden: await setModelHidden(this.storeRoot, command.instanceId, command.model, command.hidden) };
+      case "memory.save":
+        return await saveMemory(await this.memoryLocation(command), {
+          name: command.name,
+          description: command.description,
+          type: command.memoryType,
+          body: command.body,
+          scope: command.scope,
+        });
+      case "memory.delete":
+        return await deleteMemory(await this.memoryLocation(command), command.name, command.scope);
+      case "memory.import-claude": {
+        const location = await this.memoryLocation(command);
+        const project = location.projectId === null ? undefined : (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
+        if (project === undefined || project.scratch === true) {
+          throw new CliError("MEMORY_PROJECT_REQUIRED", "Importing Claude Code's memory needs a project: its memory is kept per folder.", { exitCode: 2 });
+        }
+        const config = await this.loadConfig();
+        const from = claudeMemoryDir(resolveClaudeHomePath(config.providers?.claude?.homePath ?? ""), project.workspaceRoot);
+        return await importClaudeMemories(location, from);
+      }
       case "forge.request.create": {
         const { cwd, detection } = await this.forgeContext(command.threadId);
         const created = await createRequest(cwd, detection, {
@@ -1211,6 +1248,12 @@ export class DirectConnection implements ClientApi {
         const { type: _type, ...request } = query;
         return await searchThreadsView(ctx, request);
       }
+      case "memory.list": {
+        const location = await this.memoryLocation(query);
+        return { projectId: location.projectId, memories: await listMemories(location), index: await memoryIndexText(location) };
+      }
+      case "memory.read":
+        return await readMemory(await this.memoryLocation(query), query.name, query.scope);
       case "thread.inspect":
         await recoverOrphanedTurn(ctx, query.threadId);
         return await inspectThreadView(ctx, query.threadId);

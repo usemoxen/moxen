@@ -27,15 +27,15 @@ const SHARED_STEPS = [
   "2. What is left: the `models` result carries `usageLimits` per provider (session and weekly windows, `usedPercent`, `resetsAt`). " +
     "A provider at or near 100% is out of the plan, not a retry. A provider with no `usageLimits` has no data, which is not the same as unlimited. " +
     "Put the bulk of the work where there is headroom, and size the fan-out to what is left.",
-  "3. What each model is good for: read `.moxen/model-notes.md`, then research every model you intend to use whose notes are missing or stale, " +
+  "3. What each model is good for: read what memory has on the models (memory_read), then research every model you intend to use whose notes are missing or stale, " +
     "including the family you run on (your own model can be newer than your training data). Use release notes, published benchmarks, price per token " +
     "and scores per effort level where published. Research replaces trial runs: do not spend a throwaway task to find out what a model can do.",
   "",
   "## Remember, so the next run is cheaper",
-  "Keep two files under `<workspace>/.moxen/` (add `.moxen/` to `.gitignore`; never commit them unless the user asks): " +
-    "`model-notes.md` (per model: tier, strengths, weaknesses, cost surprises, which tasks it suits here) and " +
-    "`orchestrator.md` (what the project is, which delegation shapes worked, which were costly). " +
-    "Trust them until they look stale (about a week, or a model behaves differently). Write what you learned into both before you finish.",
+  "Keep what you learn in Moxen memory (memory_save), one memory per model and one for the project's delegation lessons: " +
+    "per model, its tier, strengths, weaknesses, cost surprises and the tasks it suits (scope global, with the date you checked); " +
+    "for the project, which delegation shapes worked and which were costly (scope project). " +
+    "Trust them until they look stale (about a week, or a model behaves differently), and update them before you finish.",
   "",
   "## A model per task, and say why",
   "For each task: provider, model, effort and a one-line reason. Judge every provider on the same footing: the vendor you run on is not a reason to route work to it.",

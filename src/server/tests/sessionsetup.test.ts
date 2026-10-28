@@ -48,9 +48,9 @@ describe("MCP servers changed while a session lives", () => {
 });
 
 describe("Moxen's own tools, switched per provider", () => {
-  const moxenTools = async (providerConfig: Record<string, unknown>) => {
+  const moxenTools = async (providerConfig: Record<string, unknown>, global: Record<string, unknown> = {}) => {
     // The harness's installation default is OpenCode, so its section is the one in force.
-    const { harness, connection, startOf } = await connected({ providers: { opencode: providerConfig } });
+    const { harness, connection, startOf } = await connected({ ...global, providers: { opencode: providerConfig } });
     try {
       const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local" });
       const servers = (startOf(created.threadId)?.mcpServers ?? []) as Array<{ name: string; tools?: Array<{ name: string }> }>;
@@ -62,15 +62,19 @@ describe("Moxen's own tools, switched per provider", () => {
   };
 
   it("keeps web_fetch with orchestration off, and the delegation tools with web_fetch off", async () => {
-    expect(await moxenTools({})).toEqual(["delegate", "models", "task_cancel", "task_status", "web_fetch"]);
-    expect(await moxenTools({ orchestration: false })).toEqual(["web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", "models", "task_cancel", "task_status"]);
+    const memory = ["memory_delete", "memory_read", "memory_save"];
+    expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", "web_fetch"]);
+    expect(await moxenTools({ orchestration: false })).toEqual([...memory, "web_fetch"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status"]);
   });
 
-  it("drops the server with both off, and reads the older all-at-once switch as both", async () => {
-    expect(await moxenTools({ orchestration: false, webFetch: false })).toBeNull();
-    expect(await moxenTools({ moxenTools: false })).toBeNull();
-    expect(await moxenTools({ moxenTools: false, webFetch: true })).toEqual(["web_fetch"]);
+  it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {
+    const noMemory = { memory: false };
+    expect(await moxenTools({ orchestration: false, webFetch: false }, noMemory)).toBeNull();
+    expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
+    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["web_fetch"]);
+    // Memory alone keeps the server, with its tools only.
+    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_delete", "memory_read", "memory_save"]);
   });
 });
 
@@ -317,6 +321,60 @@ describe("Research and Orchestrate modes", () => {
   });
 });
 
+describe("Moxen memory", () => {
+  it("gives a conversation the index it began with, keeps it through saves, and gives the next conversation the new one", async () => {
+    const prompts: string[] = [];
+    const starts: Array<Record<string, unknown>> = [];
+    const harness = await testHarness({ onStartSession: (input) => starts.push(input), onSendTurn: (input) => prompts.push(input.prompt) });
+    const open = () => new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => ({ ...harness.config }) });
+    const first = open();
+    try {
+      const created = await first.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      const id = created.threadId;
+      // Memory on: its rules, Claude Code's own memory off, and no index while there is nothing in it.
+      expect(String(starts[0]?.instructions)).toContain("You have a persistent memory");
+      expect(String(starts[0]?.instructions)).not.toContain("# Memory index");
+      expect(starts[0]?.moxenMemory).toBe(true);
+
+      await first.dispatch({ type: "memory.save", threadId: id, name: "bun-tests", description: "Tests run with bun", memoryType: "feedback", body: "Use bun test.", scope: "project" });
+      await first.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "two" }, wait: true });
+      // The cached prompt is not rewritten, and no update rides along: the agent saved it, so it knows.
+      expect(prompts[1]).toBe("two");
+      await first.close();
+
+      // A resume (a new process) starts the very same prompt.
+      const second = open();
+      try {
+        await second.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "three" }, wait: true });
+        expect(starts[1]?.instructions).toBe(starts[0]?.instructions);
+        // Another thread in the project begins with the index.
+        const other = await second.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "fresh", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+        const fresh = String(starts.find((input) => input.threadId === other.threadId)?.instructions);
+        expect(fresh).toMatch(/# Memory index\nProject memory \(this codebase and its work\):\n- \[bun-tests\]\(bun-tests\.md\) — Tests run with bun$/);
+      } finally {
+        await second.close();
+      }
+    } finally {
+      await first.close().catch(() => undefined);
+    }
+  });
+
+  it("is off for a project whose moxen.json says so: no tools, no rules, Claude Code's memory left alone", async () => {
+    const { harness, connection, startOf } = await connected();
+    try {
+      await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ memory: false }));
+      const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      const start = startOf(done.threadId)!;
+      expect(String(start.instructions)).not.toContain("persistent memory");
+      expect(start.moxenMemory).toBeUndefined();
+      const moxen = (start.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }>).find((server) => server.name === "moxen");
+      expect(moxen?.tools?.some((tool) => tool.name.startsWith("memory_"))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
 describe("skills.list", () => {
   it("answers with the provider's inventory, or an empty one for a driver without one", async () => {
     const { harness, connection } = await connected();
@@ -342,7 +400,7 @@ describe("session setup", () => {
     try {
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const instructions = startOf(done.threadId)?.instructions ?? "";
-      expect(instructions).toMatch(/^In case you're asked: you are running in Moxen, .* No need to mention this otherwise\.\n\nWhen the work depends on [^\n]*\n\nWhile you work, keep your messages to short progress notes[^\n]*\n\nCommands you run go through the user's own shell[^\n]*\n(?:- [^\n]*\n)+\nA message may begin with a <moxen-instructions-update> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n?)+$/);
+      expect(instructions).toMatch(/^In case you're asked: you are running in Moxen, .* No need to mention this otherwise\.\n\nWhen the work depends on [^\n]*\n\nWhile you work, keep your messages to short progress notes[^\n]*\n\nCommands you run go through the user's own shell[^\n]*\n(?:- [^\n]*\n)+\nA message may begin with a <moxen-instructions-update> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n?)+$/);
     } finally {
       await connection.close();
     }
@@ -366,7 +424,7 @@ describe("session setup", () => {
     try {
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ instructions: "Project rule." }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      expect(startOf(done.threadId)?.instructions).toMatch(/do not mention or quote it\.\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n)+\nConfig rule\.\n\nProject rule\.$/);
+      expect(startOf(done.threadId)?.instructions).toMatch(/do not mention or quote it\.\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n)+\nConfig rule\.\n\nProject rule\.$/);
     } finally {
       await connection.close();
     }

@@ -32,6 +32,7 @@ import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices,
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
+import { importClaudeMemory, listMemory } from "./memory/memory.js";
 import { writeError, writeSuccess } from "./output.js";
 import {
   createHandoverThread,
@@ -1676,6 +1677,32 @@ models
       const context = await commandContext();
       const result = await setModelHidden(context.config, { ...options, hidden: false });
       writeSuccess(result, context, `Showing ${result.model.slug} on ${result.provider.instanceId}.`);
+    }),
+  );
+
+const memory = program.command("memory").description("Moxen memory: what agents keep across sessions, per project and global.");
+memory
+  .command("list")
+  .description("List the memories a project's threads see: the global ones, then the project's.")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .action((options: { cwd?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await listMemory(context.config, options);
+      const lines = result.memories.map((entry) => `${entry.scope}\t${entry.name}\t${entry.type}\t${entry.description}`);
+      writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No memories.");
+    }),
+  );
+memory
+  .command("import-claude")
+  .description("Copy Claude Code's auto memory for this project into Moxen's (user memories go to the global scope). Never done unasked.")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .action((options: { cwd?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await importClaudeMemory(context.config, options);
+      const skipped = result.skipped.length > 0 ? ` Kept ${result.skipped.length} Moxen already had: ${result.skipped.join(", ")}.` : "";
+      writeSuccess(result, context, `Imported ${result.imported.length} memor${result.imported.length === 1 ? "y" : "ies"} from ${result.from}.${skipped}`);
     }),
   );
 

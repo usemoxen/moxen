@@ -538,6 +538,8 @@ export async function ensureDriverSession(
     readonly moxenSkillsFolder?: ".claude" | ".agents";
     readonly hiddenMoxenSkills?: readonly string[];
     readonly delegated?: boolean;
+    /** Moxen memory is on for this session (`ProviderSessionStartInput.moxenMemory`). */
+    readonly moxenMemory?: boolean;
     /** Watch the session for what happens between turns (`watchDriverSession`). */
     readonly store?: ThreadStore;
     /** After a turn the provider starts itself settles (`ExecuteTurnArgs.afterSettle`). */
@@ -574,6 +576,7 @@ export async function ensureDriverSession(
       ...(options.moxenSkillsFolder ? { moxenSkillsFolder: options.moxenSkillsFolder } : {}),
       ...(options.hiddenMoxenSkills && options.hiddenMoxenSkills.length > 0 ? { hiddenMoxenSkills: options.hiddenMoxenSkills } : {}),
       ...(options.delegated === true ? { delegated: true } : {}),
+      ...(options.moxenMemory === true ? { moxenMemory: true } : {}),
     }),
   );
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.

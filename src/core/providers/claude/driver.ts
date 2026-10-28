@@ -166,6 +166,8 @@ interface ClaudeSession {
   readonly moxenSkillsFolder: ".claude" | ".agents" | null;
   /** Moxen's skills this session must not offer (`ProviderSessionStartInput.hiddenMoxenSkills`). */
   readonly hiddenMoxenSkills: readonly string[];
+  /** Moxen memory is on: Claude Code's auto memory is off for this session (`ProviderSessionStartInput.moxenMemory`). */
+  readonly moxenMemory: boolean;
   /**
    * The assistant message streaming now, not yet known to be interim or
    * final. The next tool call or message makes it a note; `result` makes it
@@ -518,6 +520,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         moxenSkills: input.moxenSkills ?? "served",
         moxenSkillsFolder: input.moxenSkillsFolder ?? null,
         hiddenMoxenSkills: input.hiddenMoxenSkills ?? [],
+        moxenMemory: input.moxenMemory === true,
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
         closed: false,
@@ -2361,6 +2364,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     if (served) env["MOXEN_SKILLS_DIR"] = mod!.bundledSkillsDir!;
     if (modNeeded && session.hiddenMoxenSkills.length > 0) env["MOXEN_SKILLS_HIDE"] = session.hiddenMoxenSkills.join(",");
     if (modNeeded && !this.settings.agentSkills) env["MOXEN_OWN_SKILLS"] = "0";
+    // One memory, Moxen's: Claude Code's auto memory is off in this session only, whatever its settings
+    // files say (the variable outranks `autoMemoryEnabled`). The user's own `claude` keeps its memory.
+    if (session.moxenMemory) env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1";
     return {
       cwd: session.workingDirectory,
       ...(modNeeded ? { plugins: [{ type: "local" as const, path: mod!.path }] } : {}),

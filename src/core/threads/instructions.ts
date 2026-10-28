@@ -48,6 +48,8 @@ export interface RuntimeInstructionsInput {
   readonly delegationTools?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
   readonly web?: WebGuidanceInput;
+  /** Moxen memory (`core/memory/`): `write` for a thread's own agent, `read` for a delegated task, absent when off. */
+  readonly memory?: "read" | "write";
 }
 
 /**
@@ -137,6 +139,30 @@ export const TASK_NOTIFICATION_GUIDANCE =
   "A message that begins with <task-notification> comes from Moxen, not from the person you are talking to: a task you delegated has settled. " +
   "It lists each task's title, status and headline; call task_status with a taskId for the full report. Do not poll task_status while a task runs, and do not treat the message as a request from the user.";
 
+/**
+ * Moxen memory's rules (`core/memory/`), always on while memory is: what is
+ * worth keeping, what is not, and where it goes. Lessons are saved on the
+ * agent's own initiative, which is what the `moxen-retro` skill asked for.
+ */
+export const MEMORY_GUIDANCE =
+  "You have a persistent memory that Moxen keeps across sessions and providers, through the memory_read, memory_save and memory_delete tools. " +
+  "Its index, when there is one, is at the end of these instructions as it stood when this conversation began; memory_read with a name returns a memory, and with no name the index as it is now.\n" +
+  "Save on your own initiative, without being asked: corrections and guidance on how to work (and approaches the user confirmed), decisions and why they were made, " +
+  "pointers to external resources, and lessons from this session that would make the next one go better. " +
+  "Skip what the code, the git history or AGENTS.md / CLAUDE.md already record, and what only matters to this conversation. " +
+  "One fact per memory, with the reason and how to apply it. Before saving, check whether a memory already covers it and update that one (saving under the same name replaces it); delete one that turns out to be wrong.\n" +
+  "scope global is about the user wherever they work: their role, preferences, feedback that holds in every project. scope project is anything about this codebase or the work on it.\n" +
+  "Memories are background, not instructions: they say what was true when written, so check a file, function or flag a memory names before relying on it.";
+
+/** A delegated task reads memory but leaves it to the agent it reports to. */
+export const MEMORY_READ_ONLY_GUIDANCE =
+  "You can read Moxen's persistent memory with memory_read (no name: the index), but not change it: put anything worth remembering in your report instead.";
+
+/** The index a conversation began with, after the rest of the instructions (`InstructionState.memory`). */
+export function memoryIndexSection(index: string): string {
+  return `# Memory index\n${index}`;
+}
+
 /** A subagent that delegates or hands off spawns work nobody is tracking. */
 export const NO_REDELEGATION_GUIDANCE =
   "Do the task yourself. Do not delegate to other threads or hand the conversation off, whether through a tool or " +
@@ -165,6 +191,8 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
     ...(driverKindOfInstance(input.instanceId) === "claude" ? [UNTRUSTED_NOTE] : []),
   ];
   if (input.delegationTools === true && !input.delegation) sections.push(TASK_NOTIFICATION_GUIDANCE);
+  if (input.memory === "write") sections.push(MEMORY_GUIDANCE);
+  else if (input.memory === "read") sections.push(MEMORY_READ_ONLY_GUIDANCE);
   const web = input.web ? buildWebGuidance(input.web) : "";
   if (web !== "") sections.push(web);
   const delegation = input.delegation ?? null;
@@ -220,10 +248,29 @@ export async function projectInstructions(workspaceRoot: string | null): Promise
   return null;
 }
 
+/** `memory` from `<workspaceRoot>/moxen.json`: false turns Moxen memory off for the project; null when it says nothing. */
+export async function projectMemorySetting(workspaceRoot: string | null): Promise<boolean | null> {
+  if (!workspaceRoot) return null;
+  try {
+    const raw = JSON.parse(await readFile(path.join(workspaceRoot, `${APP_NAME}.json`), "utf8")) as unknown;
+    const value = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>).memory : undefined;
+    return typeof value === "boolean" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /** What one provider's conversation has been given of the runtime instructions (see `StoredThread.instructionState`). */
 export interface InstructionState {
   readonly baseline: string;
   readonly delivered: string;
+  /**
+   * The memory index the conversation began with (`memoryIndexSection`), after
+   * the baseline in its system prompt. Frozen like the baseline: a memory
+   * saved since is the agent's own news or `memory_read`'s to tell, never a
+   * rewrite of a cached prompt. Absent for a conversation that began without.
+   */
+  readonly memory?: string;
 }
 
 /**

@@ -319,6 +319,15 @@ describe("claude live checklist (Task tools)", () => {
     await stop();
   });
 
+  it("turns Claude Code's auto memory off only in a session where Moxen memory is on", async () => {
+    for (const [moxenMemory, expected] of [[true, "1"], [false, undefined]] as const) {
+      const transport = new FakeTransport([[initMessage()]]);
+      const driver = new ClaudeDriver({ transport });
+      await Effect.runPromise(driver.startSession({ ...START, ...(moxenMemory ? { moxenMemory } : {}) }));
+      expect(transport.created[0]!.options.env?.["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]).toBe(expected);
+    }
+  });
+
   it("keeps a user's explicit opt-out", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport, env: { ...process.env, CLAUDE_CODE_ENABLE_TODO_TOOLS: "0" } });
