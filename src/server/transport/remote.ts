@@ -174,10 +174,11 @@ export class RemoteConnection implements ClientApi {
       });
       const onError = (cause: Error): void =>
         reject(
-          new CliError("SERVER_UNAVAILABLE", `No moxen server answered at ${this.endpoint}: ${cause.message}`, {
-            cause,
-            details: { endpoint: this.endpoint },
-          }),
+          new CliError(
+            "SERVER_UNAVAILABLE",
+            `No moxen server answered at ${this.endpoint} (${cause.message}). Check that its server is running with remote access on (moxen remote status there), and that its firewall lets port ${target.port} in — on Windows, allow Bun when it asks, for private networks.`,
+            { cause, details: { endpoint: this.endpoint } },
+          ),
         );
       candidate.once("error", onError);
     });

@@ -124,6 +124,12 @@ async function commandContext(): Promise<{
   return { config, configPath: loaded.path, configExists: loaded.exists, json: global.json ?? false };
 }
 
+/** `moxen server …` manages this machine's server: a `--server` there is a mistake, not a target. */
+function thisMachineOnly(command: string): void {
+  if (program.opts<GlobalOptions>().server === undefined) return;
+  throw new CliError("REMOTE_NOT_SUPPORTED", `moxen ${command} manages this machine's server. To check a paired one, use moxen --server <name> remote status; it can only be stopped on its own machine.`, { exitCode: 2 });
+}
+
 async function action(run: () => Promise<void>): Promise<void> {
   try {
     await run();
@@ -395,6 +401,7 @@ server
   .action(() =>
     action(async () => {
       const context = await commandContext();
+      thisMachineOnly("server status");
       const result = await serverStatus();
       writeSuccess(
         result,
@@ -410,6 +417,7 @@ server
   .action(() =>
     action(async () => {
       const context = await commandContext();
+      thisMachineOnly("server stop");
       const result = await serverStop();
       writeSuccess(result, context, result.stopped ? `Stopped the moxen server at ${result.endpoint}.` : `No moxen server at ${result.endpoint}.`);
     }),
