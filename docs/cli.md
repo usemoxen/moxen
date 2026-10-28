@@ -250,10 +250,52 @@ have are hidden with the provider's own rules. Each provider's tab says what is 
 `providers.opencode.bundledSkills: false` as off for that provider. `agentSkills` now means only the user's own
 `.agents/skills` on Claude Code.
 
+## Remote access
+
+Drive a moxen server on another machine (see [Another machine](overview.md#another-machine)).
+
+On the machine whose server is shared:
+
+```text
+moxen remote enable [--interfaces lan|tailscale|both] [--port 47317]
+moxen remote status            # where it listens, and the key fingerprint
+moxen remote code              # a pairing code, the address(es) and the fingerprint
+moxen remote devices           # paired devices; id, name, last seen, open connections
+moxen remote revoke <device-id>
+moxen remote disable
+```
+
+On the machine that drives it:
+
+```text
+moxen remote pair <host[:port]> <code> [--name winbox]
+moxen remote servers
+moxen remote forget <name>
+moxen --server winbox threads list
+MOXEN_SERVER=winbox moxen tui
+```
+
+Every `moxen remote` command takes `--json`. The server-side ones go
+through the server, so with `--server <name>` they manage that one. Against
+a remote server, commands that resolve a project from a folder need
+`--cwd` with a path on the server (or `--no-project`): `REMOTE_CWD_REQUIRED`
+otherwise. `moxen --json doctor` reports `checks.server.mode: "remote"` with
+the server's name and key fingerprint. `server status` and `server stop`
+manage this machine's server only and refuse `--server`.
+
+Errors worth knowing: `REMOTE_PAIRING_REFUSED` (wrong, used or expired
+code — show a new one), `REMOTE_DEVICE_REFUSED` (revoked, or the token is
+gone — pair again), `REMOTE_KEY_MISMATCH` (the server presented a different
+key than the one paired: reinstalled, or not the server you think — pair
+again only if you know why), `SERVER_UNAVAILABLE` (not running, remote
+access off, or a firewall in the way).
+
 ## Commands
 
 ```text
 moxen tui
+moxen remote pair <address> <code>
+moxen --server <name> <command>
 moxen --json doctor
 moxen config path|show|set
 moxen projects list

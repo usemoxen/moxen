@@ -150,6 +150,9 @@ describe("remote access listener", () => {
     const closed = new Promise((resolve) => socket.once("close", resolve));
     expect((await remote.apply({ enabled: false, port })).listening).toEqual([]);
     expect(() => remote.startPairing()).toThrow(expect.objectContaining({ code: "REMOTE_DISABLED" }));
+    // Dropped a moment later, not at once: a client that turned it off through
+    // this socket gets its answer first.
+    expect(socket.destroyed).toBe(false);
     await closed;
     await expect(
       new Promise((resolve, reject) => {

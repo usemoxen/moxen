@@ -50,6 +50,13 @@ export function useRemote(params: {
     async (enabled: boolean): Promise<void> => {
       try {
         await client.dispatch({ type: "settings.set", key: "remote.enabled", value: enabled ? "true" : "false" });
+        if (!enabled && server !== null) {
+          // This TUI reaches that server through remote access: off, it is
+          // dropped, so go back to this machine's rather than retry forever.
+          push("remote", "info", `Remote access off on ${server.name} — back to this machine`, 6_000);
+          onSwitchServer?.(null).catch((cause: unknown) => push("remote", "danger", `Could not connect: ${errorText(cause)}`, 10_000));
+          return;
+        }
         const next = await client.query({ type: "remote.status" });
         setStatus(next);
         const where = server ? ` on ${server.name}` : "";
@@ -67,7 +74,7 @@ export function useRemote(params: {
         push("remote", "danger", `Remote access: ${errorText(cause)}`, 8_000);
       }
     },
-    [client, server, push],
+    [client, server, push, onSwitchServer],
   );
 
   /** A fresh pairing code; true when there is one to show. */

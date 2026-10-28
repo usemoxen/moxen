@@ -11,6 +11,7 @@
  * meant to be read out; it is single-use and short-lived.
  */
 import type { CliConfig, RemoteInterfaces } from "../core/types.js";
+import { DEFAULT_REMOTE_PORT } from "../core/configschema.js";
 import { CliError } from "../core/errors.js";
 import { PairedServers } from "../server/transport/servers.js";
 import { cliClient } from "./infra/client.js";
@@ -50,7 +51,14 @@ export async function enableRemote(config: CliConfig, options: { interfaces?: st
 export async function disableRemote(config: CliConfig) {
   const client = await cliClient(config);
   await client.dispatch({ type: "settings.set", key: "remote.enabled", value: "false" });
-  return await client.query({ type: "remote.status" });
+  try {
+    return await client.query({ type: "remote.status" });
+  } catch (cause) {
+    // Turned off through --server, this very connection is one it drops:
+    // the change worked, the follow-up read just could not reach it in time.
+    if (!(cause instanceof CliError) || (cause.code !== "SERVER_DISCONNECTED" && cause.code !== "SERVER_UNAVAILABLE")) throw cause;
+    return { available: true, enabled: false, interfaces: "both" as RemoteInterfaces, port: DEFAULT_REMOTE_PORT, listening: [] };
+  }
 }
 
 export async function pairingCode(config: CliConfig) {

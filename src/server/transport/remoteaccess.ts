@@ -27,6 +27,11 @@ import { DeviceRegistry, type PairedDevice, type PairingCode } from "./devices.j
 import { handleSocket } from "./serve.js";
 import type { HelloResult } from "./wire.js";
 
+/** How long remote sockets outlive a change that drops them, so the reply to that change gets out. */
+const DROP_GRACE_MS = 250;
+/** `close()`'s config: off, with no grace. */
+const CLOSING: RemoteConfig = Object.freeze({ enabled: false });
+
 /** The keychain entry holding the listener's private key. */
 export const REMOTE_TLS_KEY_SECRET = "remote-tls-key";
 
@@ -154,16 +159,16 @@ export class RemoteAccess {
     return run;
   }
 
-  /** Close every listener and remote socket. */
+  /** Close every listener and remote socket, at once: the server is stopping. */
   close(): Promise<RemoteAccessStatus> {
-    return this.apply({ enabled: false });
+    return this.apply(CLOSING);
   }
 
   private async applyNow(config: RemoteConfig | undefined): Promise<RemoteAccessStatus> {
     const enabled = config?.enabled === true;
     const interfaces = config?.interfaces ?? "both";
     const port = config?.port ?? DEFAULT_REMOTE_PORT;
-    await this.stop();
+    this.stop(config === CLOSING ? 0 : DROP_GRACE_MS);
     this.current = { enabled, interfaces, port, listening: [], ...(this.identity ? { fingerprint: this.identity.fingerprint } : {}) };
     if (!enabled) return this.current;
 
@@ -215,13 +220,25 @@ export class RemoteAccess {
     return server;
   }
 
-  private async stop(): Promise<void> {
+  /**
+   * Stop listening at once (the port is free for a rebind as soon as
+   * `close` is called) and drop every remote socket after `graceMs`: the
+   * client that turned remote access off, or moved it, through one of these
+   * sockets must first get its answer — dropped mid-reply it would report
+   * the server gone when the change had worked.
+   */
+  private stop(graceMs = DROP_GRACE_MS): void {
     const servers = this.servers;
     this.servers = [];
     this.devices.cancelPairing();
-    for (const socket of this.sockets.keys()) socket.destroy();
+    for (const server of servers) server.close();
+    const sockets = [...this.sockets.keys()];
     this.sockets.clear();
-    await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    const drop = (): void => {
+      for (const socket of sockets) socket.destroy();
+    };
+    if (graceMs <= 0) drop();
+    else setTimeout(drop, graceMs).unref();
   }
 }
 

@@ -41,8 +41,13 @@ exceptions.
   `getConfig`); `protocol.ts` holds the command/query/frame shapes and
   their runtime decoders; `connection.ts` is the in-process implementation
   over `core/`; `transport/` serves it over a named pipe / unix socket
-  (`serve.ts`) and implements it remotely (`remote.ts`); `client.ts` picks
-  one per `MOXEN_SERVER` (`direct` | `auto` | `daemon`); `main.ts` is the
+  (`serve.ts`) and implements it remotely (`remote.ts`), and carries remote
+  access to another machine: the TLS listener (`remoteaccess.ts`,
+  `certificate.ts`), pairing and device tokens (`devices.ts`), and the
+  client's paired servers (`servers.ts`); `client.ts` picks one per
+  `MOXEN_SERVER` (`direct` | `auto` | `daemon`, or a paired server's name)
+  or `--server`; `workspace.ts` backs the live-diff reads a remote client
+  makes; `main.ts` is the
   server process; `mcp/` is the `moxen` MCP server every top-level provider
   session gets (`delegate` / `task_status` / `task_cancel`, over `ClientApi`).
   **New frontend surface goes here, not into a client.**

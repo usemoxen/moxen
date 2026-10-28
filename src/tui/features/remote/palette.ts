@@ -51,7 +51,8 @@ export function remotePaletteSection(remote: RemoteControls, server: ActiveServe
       {
         key: "remote:toggle",
         label: status?.enabled ? "Turn remote access off" : "Turn remote access on",
-        meta: toggleMeta,
+        // Off on the server this TUI reaches through it cuts this TUI off too.
+        meta: status?.enabled && server !== null ? `disconnects this TUI · ${toggleMeta}` : toggleMeta,
         onPick: () => {
           nav.close();
           void remote.setEnabled(!(status?.enabled ?? false));
