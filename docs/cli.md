@@ -24,7 +24,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | `--speed`, `--speed-mode` | `standard`, `fast` |
 | `--thinking-effort` | A model-supported value such as `low`, `medium`, `high`, `xhigh` or `max` |
 | `--permission`, `--runtime-mode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` |
-| `--mode`, `--interaction-mode` | `build`/`default`, `plan` |
+| `--mode`, `--interaction-mode` | `build`/`default`. Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
 | `--checkout`, `--env-mode` | `current`/`local`, `worktree`, or the resolved default via `auto` |
 
 Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is the explicit installation default (`codex` / `gpt-5.4`).
@@ -159,7 +159,7 @@ moxen config set thinkingEffort xhigh
 | `openMode` | Older key, kept so configs and scripts load; nothing is opened | `auto` |
 | `threadEnvMode` | `local`, `worktree` (an older `auto` reads as `local`) | `local` |
 | `runtimeMode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` | `full-access` |
-| `interactionMode` | `default`, `plan`; older key, plan mode is now chosen per thread | `default` |
+| `interactionMode` | `default` (Build). An older config's `plan` reads as `default`: plan mode was removed | `default` |
 | `provider` | Provider instance id for model overrides | Unset (inherits thread/project) |
 | `model` | Model slug for overrides | Unset (inherits thread/project) |
 | `speedMode` | Older key, kept so configs load; no provider reads it | Unset |

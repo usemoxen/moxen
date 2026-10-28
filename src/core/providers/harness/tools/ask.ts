@@ -68,7 +68,6 @@ function describeAnswer(value: string | readonly string[]): string {
 export function askTool(ask: (questions: readonly AskQuestion[], signal: AbortSignal) => Promise<AskReply>): HarnessTool<AskArgs> {
   return {
     readOnly: false,
-    allowedInPlan: true,
     definition: {
       name: "ask",
       description: [

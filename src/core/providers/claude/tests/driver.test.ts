@@ -3,6 +3,7 @@ import * as Stream from "effect/Stream";
 import { describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../../errors.js";
+import { CLAUDE_NATIVE_TOOLS } from "../../../nativetools.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { ClaudeDriver, claudeContextUsageOf } from "../driver.js";
 import {
@@ -283,22 +284,6 @@ describe("claude driver permissions", () => {
     });
   });
 
-  it("captures ExitPlanMode as a plan then denies", async () => {
-    const transport = new FakeTransport([[initMessage()]]);
-    const driver = new ClaudeDriver({ transport });
-    const eventsPromise = collectEvents(driver, 2);
-    await Effect.runPromise(driver.startSession(START));
-    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "plan it" }));
-    const result = await driver.handlePermissionRequest(
-      "ExitPlanMode",
-      { plan: "# The plan" },
-      permissionCallbackOptions(),
-    );
-    expect(result).toMatchObject({ behavior: "deny" });
-    const events = await eventsPromise;
-    expect(events.map((event) => event.type)).toContain("turn.plan.updated");
-  });
-
   it("answers a question without dropping the input it was asked with", async () => {
     // `updatedInput` replaces the tool input wholesale: answers alone would
     // strip `questions` and fail the tool's own schema on a valid answer.
@@ -338,31 +323,17 @@ describe("claude driver permissions", () => {
     await expect(pending).resolves.toMatchObject({ behavior: "deny" });
   });
 
-  it("lets the agent leave a plan mode it entered itself", async () => {
-    // Denying ExitPlanMode protects a plan the *user* asked for. Applied to
-    // a self-entered plan mode it leaves the agent with no exit at all.
+  it("never offers Claude Code's plan mode tools, whatever the user switched off", async () => {
+    // Moxen has no plan mode (MXN-136): a mode the model entered would leave it unable to change anything.
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
-    await Effect.runPromise(driver.startSession(START));
-    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "plan it" }));
-    expect(
-      await driver.handlePermissionRequest("EnterPlanMode", {}, permissionCallbackOptions()),
-    ).toMatchObject({ behavior: "allow" });
-    expect(
-      await driver.handlePermissionRequest("ExitPlanMode", { plan: "# Plan" }, permissionCallbackOptions()),
-    ).toMatchObject({ behavior: "allow" });
-  });
-
-  it("keeps denying ExitPlanMode when the user asked for plan mode", async () => {
-    const transport = new FakeTransport([[initMessage()]]);
-    const driver = new ClaudeDriver({ transport });
-    await Effect.runPromise(driver.startSession({ ...START, interactionMode: "plan" }));
-    await Effect.runPromise(
-      driver.sendTurn({ threadId: "thread-1", prompt: "plan it", interactionMode: "plan" }),
-    );
-    expect(
-      await driver.handlePermissionRequest("ExitPlanMode", { plan: "# Plan" }, permissionCallbackOptions()),
-    ).toMatchObject({ behavior: "deny" });
+    await Effect.runPromise(driver.startSession({ ...START, disabledNativeTools: ["WebSearch"] }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    expect(transport.created[0]!.options.disallowedTools).toEqual(expect.arrayContaining(["EnterPlanMode", "ExitPlanMode", "WebSearch"]));
+    // Settings lists the tools a user may switch off; one Moxen always blocks is not among them.
+    const switchable = CLAUDE_NATIVE_TOOLS.map((tool) => tool.name);
+    expect(switchable).not.toContain("EnterPlanMode");
+    expect(switchable).not.toContain("ExitPlanMode");
   });
 
   it("allows everything in full-access except questions", async () => {
@@ -547,7 +518,7 @@ describe("claude driver session liveness", () => {
 });
 
 describe("claude driver session controls", () => {
-  it("switches model and plan mode per turn", async () => {
+  it("switches model per turn, and never Claude Code's plan permission mode", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
     await Effect.runPromise(driver.startSession(START));
@@ -556,14 +527,14 @@ describe("claude driver session controls", () => {
         threadId: "thread-1",
         prompt: "hi",
         modelSelection: { instanceId: "claude", model: "new-model" },
-        interactionMode: "plan",
+        interactionMode: "default",
       }),
     );
     const firstOutcome = driver.awaitTurn("thread-1", first.turnId);
     transport.created[0]!.push(successResult("ok"));
     await firstOutcome;
     expect(transport.created[0]!.models).toEqual(["new-model"]);
-    expect(transport.created[0]!.permissionModes).toEqual(["plan"]);
+    expect(transport.created[0]!.permissionModes).toEqual([]);
 
     const second = await Effect.runPromise(
       driver.sendTurn({ threadId: "thread-1", prompt: "again", interactionMode: "default" }),
@@ -571,7 +542,7 @@ describe("claude driver session controls", () => {
     const secondOutcome = driver.awaitTurn("thread-1", second.turnId);
     transport.created[0]!.push(successResult("ok2"));
     await secondOutcome;
-    expect(transport.created[0]!.permissionModes).toEqual(["plan", "bypassPermissions"]);
+    expect(transport.created[0]!.permissionModes).toEqual([]);
   });
 
   it("stops sessions", async () => {

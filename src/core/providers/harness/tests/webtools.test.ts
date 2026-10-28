@@ -160,16 +160,6 @@ describe("web tools in a session", () => {
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringMatching(/Reaching the web needs approval/) });
   });
 
-  it("lets plan mode look things up, with the same approval, but still not change anything", async () => {
-    const { driver, requests, events } = driverWith([call("c1", "web_fetch", { url: `${base}/plan` }), call("c2", "bash", { command: "touch x" }), say("Planned.")]);
-    const { turnId } = await begin(driver, { interactionMode: "plan", runtimeMode: "full-access" });
-    await driver.awaitTurn("t1", turnId);
-    expect(hits).toEqual(["/plan"]);
-    expect(events.some((event) => event.type === "permission.request.opened")).toBe(false);
-    // bash is not even offered in plan mode.
-    expect(String(requests[2]!.messages.at(-1)!.content)).toMatch(/no tool named "bash"/);
-  });
-
   it("tells the model about the web tools only in a prompt that has them, and fetches pages for a subagent too", async () => {
     const { driver, requests } = driverWith([call("p1", "subagent", { description: "look up", prompt: `Fetch ${base}/sub and report.` }), call("s1", "web_fetch", { url: `${base}/sub` }), say("It says it works."), say("Done.")]);
     const { turnId } = await begin(driver, { runtimeMode: "approval-required" });

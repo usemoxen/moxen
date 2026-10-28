@@ -30,8 +30,9 @@ the default outright.
 
 ## Per-provider gaps
 
-- Plan mode maps to Claude's plan permission mode and OpenCode's
-  read-only `plan` agent.
+- Moxen has no plan mode. Claude Code's own plan tools (`EnterPlanMode`,
+  `ExitPlanMode`) are never offered, and an OpenCode session an older build
+  left on its read-only `plan` agent goes back to `build`.
 - After a 5-hour limit Anthropic may keep serving a subscription on spare
   capacity (Claude Code's `/low-priority`). Moxen cannot drive that lane:
   the SDK never forwards the offer, only the slash command reaches us as
@@ -191,7 +192,7 @@ but not rolled back.
 MCP servers (`mcpServers`, global or per project, plus moxen's own tools) are
 connected when the session starts, over stdio or HTTP, and their tools appear as
 `mcp__<server>__<tool>` after the built-in ones. A tool the server marks
-read-only runs without asking and stays in plan mode; any other asks like a shell
+read-only runs without asking; any other asks like a shell
 command does ("don't ask again" covers that one tool) and is refused in a
 delegated task. Results are cut to a head and tail (the whole is saved to a file
 the model is told about) and arrive inside `<untrusted_context>`. A stdio server

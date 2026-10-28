@@ -689,12 +689,12 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   {
     key: "interactionMode",
     label: "Start in",
-    description: "Whether new threads start in plan mode. Plan mode is now a per-thread choice, so a settings page no longer offers this; the key still works for existing configs.",
+    description: "The mode new threads start in. Build is the only one until Research and Orchestrate arrive, so a settings page does not offer it; a config that still says plan (removed) reads as Build.",
     section: "defaults",
     hidden: true,
     kind: {
       type: "enum",
-      choices: [choice("default", "Normal"), choice("plan", "Plan first")],
+      choices: [choice("default", "Build")],
     },
     defaultValue: "default",
     envOverride: "MOXEN_INTERACTION_MODE",

@@ -29,7 +29,7 @@ const IDENTITY =
   "Do the work with your tools: code or commands that only appear in a reply are not applied to anything.";
 
 const HARNESS = `# The harness
-<system-reminder> blocks are instructions from the harness, not from the user. Read them and follow them; when one says you are in plan mode, read and plan and change nothing until it says you may.
+<system-reminder> blocks are instructions from the harness, not from the user. Read them and follow them.
 
 Your tools are called by name with the arguments their definitions list. If a call is rejected for its arguments, read the error and send a corrected call: repeating the same one only fails the same way.`;
 
@@ -90,7 +90,7 @@ export function opencodeKeptTools(disabledNativeTools: string | undefined): Set<
   return new Set(OPENCODE_NATIVE_TOOLS.map((tool) => tool.name).filter((name) => !isNativeToolDisabled(disabledNativeTools, name, "opencode")));
 }
 
-/** The prompt that replaces OpenCode's base prompt for its `build` and `plan` agents. */
+/** The prompt that replaces OpenCode's base prompt for its `build` agent. */
 export function buildOpencodeSystemPrompt(disabledNativeTools?: string): string {
   const tools = opencodeKeptTools(disabledNativeTools);
   // `write` rides with `edit` in OpenCode's permissions.

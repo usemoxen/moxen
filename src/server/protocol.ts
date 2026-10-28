@@ -23,6 +23,7 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
+import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
@@ -651,9 +652,6 @@ export function asRuntimeMode(value: unknown): RuntimeMode {
     : "full-access";
 }
 
-export function asInteractionMode(value: unknown): InteractionMode {
-  return value === "plan" ? "plan" : "default";
-}
 
 export function asModelSelection(value: unknown): ModelSelection | null {
   const record = asRecord(value);
@@ -776,7 +774,7 @@ export function decodeCommand(value: unknown): Command {
         ...(selection ? { modelSelection: selection } : {}),
         // Absent modes stay absent: the server fills them from config.
         ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
-        ...optionalEnum(record, "interactionMode", ["default", "plan"] as const, type),
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...(typeof record.branch === "string" ? { branch: record.branch } : {}),
       };
     }
@@ -857,9 +855,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         runtimeMode: mode as RuntimeMode,
-        ...(record.interactionMode !== undefined
-          ? { interactionMode: asInteractionMode(record.interactionMode) }
-          : {}),
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
       };
     }
     case "thread.user-input.respond":
@@ -912,7 +908,7 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "projectPolicy", ["create", "existing"] as const, type),
         ...optionalEnum(record, "threadEnvMode", ["auto", "local", "worktree"] as const, type),
         ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
-        ...optionalEnum(record, "interactionMode", ["default", "plan"] as const, type),
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...decodeModelRequest(record, type),
         ...optionalBoolean(record, "dryRun"),
         ...optionalBoolean(record, "scratch"),

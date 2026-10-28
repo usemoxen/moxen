@@ -6,7 +6,8 @@ export type OpenMode = "auto" | "desktop" | "browser" | "none";
 export type ThreadEnvMode = "auto" | "local" | "worktree";
 export type EffectiveThreadEnvMode = Exclude<ThreadEnvMode, "auto">;
 export type RuntimeMode = "approval-required" | "auto" | "auto-accept-edits" | "full-access";
-export type InteractionMode = "default" | "plan";
+/** `"default"` is Build. Plan mode was removed; `core/interactionmode.ts` reads an old `plan` as Build. */
+export type InteractionMode = "default";
 export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {

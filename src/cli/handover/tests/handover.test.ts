@@ -157,7 +157,7 @@ describe("createHandoverThread", () => {
       speedMode: "fast",
       thinkingEffort: "high",
       runtimeMode: "approval-required",
-      interactionMode: "plan",
+      interactionMode: "default",
       openMode: "none",
       drivers: harness.drivers,
     });
@@ -178,7 +178,7 @@ describe("createHandoverThread", () => {
       ]),
     );
     expect(createThread.runtimeMode).toBe("approval-required");
-    expect(createThread.interactionMode).toBe("plan");
+    expect(createThread.interactionMode).toBe("default");
     expect(turn.modelSelection).toEqual(createThread.modelSelection);
   });
 

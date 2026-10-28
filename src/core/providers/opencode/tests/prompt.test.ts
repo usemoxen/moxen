@@ -15,8 +15,8 @@ describe("Moxen's system prompt for OpenCode", () => {
     // What the runtime instructions already say is not said twice.
     expect(prompt).not.toContain("progress notes");
     expect(prompt).not.toContain("<task-notification>");
-    // Plan mode is OpenCode's own `plan` agent running this same text: the prompt has to defer to its reminder.
-    expect(prompt).toContain("when one says you are in plan mode");
+    // Moxen has no plan mode, so the prompt does not mention one.
+    expect(prompt).not.toContain("plan mode");
     // The cadence of status updates is the runtime instructions' to set, so the prompt does not set a second one.
     expect(prompt).not.toContain("Before your first tool call");
   });

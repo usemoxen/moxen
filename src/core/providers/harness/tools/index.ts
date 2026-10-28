@@ -6,7 +6,6 @@ import { globTool, grepTool } from "./search.js";
 import type { HarnessTool } from "./types.js";
 
 export { askTool, type AskOption, type AskQuestion, type AskReply } from "./ask.js";
-export { enterPlanModeTool, exitPlanModeTool } from "./plan.js";
 export { todoTool, type TodoItem, type TodoStatus } from "./todo.js";
 
 export type { HarnessTool, ToolContext, ToolIntent, ToolResult } from "./types.js";

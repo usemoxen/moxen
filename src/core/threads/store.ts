@@ -20,6 +20,7 @@ import { CliError } from "../errors.js";
 import type { EventBus } from "../events/bus.js";
 import type { BackendEvent } from "../events/bus.js";
 import { decodeDataUrl, imageExtension, type ImageAttachmentUpload } from "../attachments.js";
+import { storedInteractionMode } from "../interactionmode.js";
 import type {
   StoredActivity,
   StoredAttachment,
@@ -155,7 +156,10 @@ export class ThreadStore {
     if (record === null || typeof record !== "object" || (record as { id?: unknown }).id !== threadId) {
       throw new CliError("STORE_CORRUPT", `Thread record ${threadId} is invalid.`);
     }
-    return record as StoredThread;
+    // A thread saved in a mode since removed (plan) reads as Build.
+    const stored = record as StoredThread;
+    const mode = storedInteractionMode((record as { interactionMode?: unknown }).interactionMode);
+    return stored.interactionMode === mode ? stored : { ...stored, interactionMode: mode };
   }
 
   async writeThreadRecord(thread: StoredThread): Promise<void> {

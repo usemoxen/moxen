@@ -6,6 +6,7 @@ import path from "node:path";
 import { CliError } from "./errors.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
 import { normalizeHarnessConfig } from "./providers/harness/profiles.js";
+import { INTERACTION_MODES } from "./interactionmode.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
 import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
@@ -54,7 +55,9 @@ const runtimeModes = new Set<RuntimeMode>([
   "auto",
   "full-access",
 ]);
-const interactionModes = new Set<InteractionMode>(["default", "plan"]);
+const interactionModes = new Set<InteractionMode>(INTERACTION_MODES);
+/** A saved mode since removed, read as Build (the shared migration rule): plan mode (MXN-136). */
+const REMOVED_INTERACTION_MODES = new Set(["plan"]);
 const speedModes = new Set<SpeedMode>(["standard", "fast"]);
 
 /**
@@ -175,7 +178,8 @@ export function normalizeConfig(raw: unknown): CliConfig {
     result.runtimeMode = value;
   }
   if (input.interactionMode !== undefined) {
-    const value = asString(input.interactionMode, "interactionMode") as InteractionMode;
+    const raw = asString(input.interactionMode, "interactionMode");
+    const value = (REMOVED_INTERACTION_MODES.has(raw) ? "default" : raw) as InteractionMode;
     if (!interactionModes.has(value)) throw new CliError("INVALID_CONFIG", "interactionMode is invalid.");
     result.interactionMode = value;
   }
@@ -418,7 +422,7 @@ function applyEnvironmentOverrides(config: CliConfig): CliConfig {
   const runtimeMode = envOverride("RUNTIME_MODE");
   if (runtimeMode) next.runtimeMode = runtimeMode as RuntimeMode;
   const interactionMode = envOverride("INTERACTION_MODE");
-  if (interactionMode) next.interactionMode = interactionMode as InteractionMode;
+  if (interactionMode) next.interactionMode = (REMOVED_INTERACTION_MODES.has(interactionMode) ? "default" : interactionMode) as InteractionMode;
   const provider = envOverride("PROVIDER");
   if (provider) next.provider = provider;
   const model = envOverride("MODEL");

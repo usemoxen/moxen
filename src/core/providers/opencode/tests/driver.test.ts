@@ -731,26 +731,20 @@ describe("opencode driver", () => {
     ]);
   });
 
-  it("switches to the plan agent once, and back to build when plan mode ends", async () => {
-    const transport = new FakeOpencodeTransport();
+  it("moves a session an older build left on the plan agent back to build, once", async () => {
+    // Moxen has no plan mode (MXN-136); a resumed native session may still be on OpenCode's plan agent.
+    const transport = new FakeOpencodeTransport({ sessionState: { agent: "plan" } });
     const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
     drivers.push(driver);
-    await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+    await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", resumeCursor: "ses_old" }));
     const server = transport.servers[0]!;
-    const turn = async (prompt: string, interactionMode: "plan" | "default") => {
-      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt, interactionMode }));
+    for (const prompt of ["a", "b"]) {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt }));
       const outcome = driver.awaitTurn("thread-1", sent.turnId);
-      await server.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+      await server.push({ type: "session.idle", properties: { sessionID: "ses_old" } });
       await outcome;
-    };
-    await turn("a", "default");
-    expect(server.callsTo("session.switchAgent")).toEqual([]);
-    await turn("b", "plan");
-    await turn("c", "plan");
-    expect(server.callsTo("session.switchAgent").map((call) => (call.args as { agent: string }).agent)).toEqual(["plan"]);
-    await turn("d", "default");
-    await turn("e", "default");
-    expect(server.callsTo("session.switchAgent").map((call) => (call.args as { agent: string }).agent)).toEqual(["plan", "build"]);
+    }
+    expect(server.callsTo("session.switchAgent").map((call) => (call.args as { agent: string }).agent)).toEqual(["build"]);
   });
 
   it("answers /btw through session.generate on the thread's session, without touching it", async () => {
@@ -1411,7 +1405,7 @@ describe("opencode driver on OpenCode v2", () => {
     await Effect.runPromise(driver.rollbackThread("thread-1", 1));
     expect(server.callsTo("session.fork")).toMatchObject([{ args: { sessionID: REAL_SESSION, messageID: "msg_6f89c3f0317c3TtJp3TRZuOMpO" } }]);
     expect(driver.resumeCursor("thread-1")).toBe("opencode-session-fork");
-    // The fork inherits plan mode; default mode leaves it.
+    // The fork inherits the plan agent an older build left it on; Build moves it back.
     await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "x", interactionMode: "default" }));
     expect(server.callsTo("session.switchAgent")).toMatchObject([{ args: { sessionID: "opencode-session-fork", agent: "build" } }]);
   });

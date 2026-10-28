@@ -176,16 +176,6 @@ describe("MCP tools in a session", () => {
     expect(lastResult(requests[2]!)).toContain("ok");
   });
 
-  it("keeps a read-only tool in plan mode and drops the others", async () => {
-    const { driver, requests } = driverWith([answer("plan")]);
-    await start(driver, { mcpServers: [stdioSpec(dir, "files")] });
-    const turn = await run(driver.sendTurn({ threadId: "t1", prompt: "plan", interactionMode: "plan" }));
-    await driver.awaitTurn("t1", turn.turnId);
-    const names = toolNames(requests[0]!);
-    expect(names).toContain("mcp__files__echo");
-    expect(names).not.toContain("mcp__files__write_thing");
-  });
-
   it("tells the model a server is gone when it dies mid-call, and the user at the next turn when one never came up", async () => {
     const { driver, requests, events } = driverWith([call("c1", "mcp__files__die", {}), answer("done")]);
     await start(driver, { mcpServers: [stdioSpec(dir, "files"), { name: "ghost", type: "stdio", command: "/no/such/program", args: [], env: {} }] });

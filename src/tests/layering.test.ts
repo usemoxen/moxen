@@ -58,6 +58,8 @@ const DEPTH: Record<Layer, number> = { core: 0, server: 1, cli: 2, tui: 2 };
 const KERNEL_PREFIXES = [
   "src/core/types",
   "src/core/errors",
+  // Thread modes and how a removed one (plan) reads: vocabulary, like `types`.
+  "src/core/interactionmode",
   "src/core/config",
   "src/core/mcp",
   "src/core/catalog/summary",

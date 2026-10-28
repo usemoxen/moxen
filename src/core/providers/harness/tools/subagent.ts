@@ -18,8 +18,6 @@ export function subagentTool(run: (args: SubagentArgs, context: ToolContext) => 
     readOnly: false,
     // Several in one reply run side by side.
     parallel: true,
-    // Starting one changes nothing; what it does is checked call by call, plan mode included.
-    allowedInPlan: true,
     definition: {
       name: "subagent",
       description: [

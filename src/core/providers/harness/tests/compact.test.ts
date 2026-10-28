@@ -41,7 +41,6 @@ function input(messages: readonly TranscriptMessage[], summarise: Summarise, ove
     overheadTokens: 0,
     scale: 1,
     todos: null,
-    planning: false,
     trimOnly: false,
     summarise,
     ...overrides,
@@ -243,11 +242,10 @@ describe("compact", () => {
   it("keeps the checklist and the reminders that still describe how things stand", async () => {
     const reminder: TranscriptMessage = { role: "system", content: "The runtime instructions have changed. They now read:\nbe brief" };
     const messages = [sys, user("one"), say(filler(200)), reminder, user("two"), say(filler(200)), { role: "system", content: "Your last reply was empty." } as TranscriptMessage, user("three"), say(filler(200))];
-    const outcome = await compact(input(messages, ok, { todos: "- [~] ship it", planning: true }));
+    const outcome = await compact(input(messages, ok, { todos: "- [~] ship it" }));
     if (outcome.kind !== "compacted") throw new Error(outcome.kind);
     const systemEntries = outcome.messages.slice(1).filter((m) => m.role === "system").map((m) => m.content);
     expect(systemEntries.some((text) => text.includes("be brief"))).toBe(true);
-    expect(systemEntries.some((text) => text.startsWith("Plan mode is on"))).toBe(true);
     expect(systemEntries.some((text) => text.includes("was empty"))).toBe(false);
     expect(JSON.stringify(outcome.messages[1])).toContain("ship it");
   });

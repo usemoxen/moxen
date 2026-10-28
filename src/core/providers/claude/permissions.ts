@@ -4,11 +4,9 @@
  * `auto→auto`, `full-access→bypassPermissions` (+
  * `allowDangerouslySkipPermissions`); `approval-required` stays `default`.
  * Launch-arg permission flags fold into the mode rather than passing
- * through. `AskUserQuestion` always surfaces. Plan mode is tracked by who
- * entered it: a plan the *user* asked for is captured and `ExitPlanMode`
- * denied, so the plan reaches them instead of running itself; a plan the
- * *agent* entered via `EnterPlanMode` is captured and then allowed to
- * exit, or the agent is trapped in a mode it cannot leave.
+ * through. `AskUserQuestion` always surfaces. Claude Code's plan mode is
+ * not used: a launch argument asking for it is ignored, and its tools are
+ * never offered (`ALWAYS_DISALLOWED_TOOLS` in `./driver.ts`).
  */
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 
@@ -16,8 +14,6 @@ import type { RuntimeMode } from "../../types.js";
 
 export type ToolClassification =
   | "question"
-  | "plan-enter"
-  | "plan-exit"
   | "file-read"
   | "file-change"
   | "command-execution"
@@ -40,8 +36,6 @@ const COMMAND_TOOLS: ReadonlySet<string> = new Set(["Bash", "BashOutput", "KillS
 
 export function classifyToolUse(toolName: string): ToolClassification {
   if (toolName === "AskUserQuestion") return "question";
-  if (toolName === "EnterPlanMode") return "plan-enter";
-  if (toolName === "ExitPlanMode") return "plan-exit";
   if (FILE_READ_TOOLS.has(toolName)) return "file-read";
   if (FILE_CHANGE_TOOLS.has(toolName)) return "file-change";
   if (COMMAND_TOOLS.has(toolName)) return "command-execution";
@@ -61,7 +55,7 @@ export function permissionModeForRuntimeMode(
 ): PermissionMode {
   if (launchOverride?.permissionMode) {
     const mode = launchOverride.permissionMode;
-    if (mode === "default" || mode === "acceptEdits" || mode === "bypassPermissions" || mode === "plan" || mode === "auto") {
+    if (mode === "default" || mode === "acceptEdits" || mode === "bypassPermissions" || mode === "auto") {
       return mode;
     }
   }

@@ -33,6 +33,7 @@ import {
 } from "../catalog/selection.js";
 import { APP_NAME } from "../config.js";
 import { CliError } from "../errors.js";
+import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames } from "../nativetools.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
@@ -1641,13 +1642,13 @@ function requireParentModes(thread: ThreadEnvelope): { runtimeMode: RuntimeMode;
   const { runtimeMode, interactionMode } = thread;
   if (
     !["approval-required", "auto", "auto-accept-edits", "full-access"].includes(runtimeMode ?? "") ||
-    !["default", "plan"].includes(interactionMode ?? "")
+    interactionMode === undefined
   ) {
     throw new CliError("INVALID_THREAD", `Thread ${thread.id} is missing its runtime or interaction mode.`, {
       details: { threadId: thread.id },
     });
   }
-  return { runtimeMode: runtimeMode as RuntimeMode, interactionMode: interactionMode as InteractionMode };
+  return { runtimeMode: runtimeMode as RuntimeMode, interactionMode: storedInteractionMode(interactionMode) };
 }
 
 function taskOf(child: ThreadEnvelope, taskId = child.id): TaskView {

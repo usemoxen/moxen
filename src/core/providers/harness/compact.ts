@@ -11,7 +11,7 @@
  */
 import { messagesTokens, messageTokens } from "./context.js";
 import { SUMMARY_FRAMING, SUMMARY_NUDGE, TRIMMED_FRAMING, parseSummary, summaryInstruction } from "./compactprompt.js";
-import { INSTRUCTIONS_REMINDER_PREFIXES, PLAN_MODE_REMINDER } from "./prompt.js";
+import { INSTRUCTIONS_REMINDER_PREFIXES } from "./prompt.js";
 import type { CompactionSettings } from "./compactsettings.js";
 import { ChatHttpError } from "./transport/chat.js";
 import type { CompactSummaryRecord, TranscriptMessage } from "./types.js";
@@ -122,13 +122,12 @@ export function renderSummaryMessage(record: CompactSummaryRecord, todos: string
   return parts.join("\n\n");
 }
 
-/** Reminders that describe how things stand now, which survive the compaction: the latest instruction update, and plan mode while it is on. */
-function carriedReminders(dropped: readonly TranscriptMessage[], tail: readonly TranscriptMessage[], planning: boolean): TranscriptMessage[] {
+/** Reminders that describe how things stand now, which survive the compaction: the latest instruction update. */
+function carriedReminders(dropped: readonly TranscriptMessage[], tail: readonly TranscriptMessage[]): TranscriptMessage[] {
   const inTail = (content: string): boolean => tail.some((message) => message.role === "system" && message.content === content);
   const carried: TranscriptMessage[] = [];
   const instructions = [...dropped].reverse().find((message) => message.role === "system" && INSTRUCTIONS_REMINDER_PREFIXES.some((prefix) => message.content.startsWith(prefix)));
   if (instructions && !inTail(instructions.content)) carried.push(instructions);
-  if (planning && !inTail(PLAN_MODE_REMINDER)) carried.push({ role: "system", content: PLAN_MODE_REMINDER });
   return carried;
 }
 
@@ -159,7 +158,6 @@ export interface CompactInput {
   readonly scale: number;
   /** The checklist the model was keeping, as text. */
   readonly todos: string | null;
-  readonly planning: boolean;
   /** Skip the model and only trim: the summariser has failed too often in a row to be worth asking. */
   readonly trimOnly: boolean;
   readonly summarise: Summarise;
@@ -292,7 +290,7 @@ export async function compact(input: CompactInput): Promise<CompactOutcome> {
   const { users, omitted } = carryUsers(previous, dropped);
   // A trimmed result keeps the last real summary rather than dropping what the model once knew.
   const kept = method === "summary" ? summary : (previous?.summary ?? "");
-  const reminders = carriedReminders(dropped, tail, input.planning);
+  const reminders = carriedReminders(dropped, tail);
   const record: CompactSummaryRecord = { n: input.n, summary: kept, users, omittedUsers: omitted, covers: reminders.length + tail.length };
   const body: TranscriptMessage = { role: "user", content: renderSummaryMessage(record, input.todos), compactSummary: record };
   const next: TranscriptMessage[] = [...messages.slice(0, lead), body, ...reminders, ...tail];

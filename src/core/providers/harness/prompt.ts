@@ -101,11 +101,6 @@ function collaborationSection(input: PromptInput): string {
       "- When you are blocked on a decision only the user can make, ask with ask instead of guessing, and put what you recommend first. Do not ask what the project can tell you, and do not ask whether to continue.",
     );
   }
-  if (has(input, "enter_plan_mode")) {
-    lines.push(
-      "- For a change that is large, spans many files or has more than one sound design, call enter_plan_mode first, work out the approach by reading, and present it with exit_plan_mode before you change anything.",
-    );
-  }
   return lines.length === 0 ? "" : ["# Working with the user", ...lines].join("\n");
 }
 
@@ -192,9 +187,6 @@ export function buildSystemPrompt(input: PromptInput): string {
   return parts.join("\n\n");
 }
 
-export const PLAN_MODE_REMINDER = `Plan mode is on. You can read and search the project and ask the user questions, but you cannot change anything: no edits, writes or commands. Work out an approach, then present it by calling exit_plan_mode with the plan: the goal, the files and steps involved, how you will check it, and anything the user must decide. After you present it, stop and wait; do not start the work until the user says to.`;
-
-export const PLAN_MODE_OFF_REMINDER = `Plan mode is off. You may change files and run commands again, within what the user asks for.`;
 
 /** How every `instructionsChangedReminder` begins, which is how a compaction recognises the latest one. */
 export const INSTRUCTIONS_REMINDER_PREFIXES: readonly string[] = ["The runtime instructions"];

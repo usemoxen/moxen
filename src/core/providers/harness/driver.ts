@@ -61,13 +61,13 @@ import { autoCompactThreshold, loopCompactThreshold } from "./compactsettings.js
 import { contextBreakdownOf, contextUsageOf, estimateTokens, messagesTokens, type ContextInput } from "./context.js";
 import { runTurn, type Authorization, type CompactionReport, type LoopEvent, type TurnConfig } from "./loop.js";
 import { CANCELLED_MESSAGE, classificationOf, declinedMessage, decidePermission, sessionAllowKey } from "./permissions.js";
-import { instructionsChangedReminder, instructionsIn, buildSystemPrompt, MCP_SECTION_HEADING, mcpSection, PLAN_MODE_OFF_REMINDER, PLAN_MODE_REMINDER } from "./prompt.js";
+import { instructionsChangedReminder, instructionsIn, buildSystemPrompt, MCP_SECTION_HEADING, mcpSection } from "./prompt.js";
 import { openMcpPool, untrustedContext, type ConnectMcp, type McpPool } from "./mcp.js";
 import { discoverSkills, skillTool, type Skill, type SkillsMode } from "./skills.js";
 import { primeProfileKey, readProfileApiKey, resolveCompactionSettings, resolveHarnessTarget, type ResolvedHarnessTarget } from "./profiles.js";
 import { HarnessTranscript } from "./session.js";
 import { cleanTitle, settledPrefix, SIDE_QUESTION_INSTRUCTION, SIDE_QUESTION_NO_CONTEXT, TITLE_INSTRUCTION } from "./sidequery.js";
-import { askTool, enterPlanModeTool, exitPlanModeTool, todoTool } from "./tools/index.js";
+import { askTool, todoTool } from "./tools/index.js";
 import { subagentTool, type SubagentArgs } from "./tools/subagent.js";
 import { webFetchTool, webSearchTool } from "./tools/web.js";
 import { resolveWebSettings } from "./web/settings.js";
@@ -137,8 +137,6 @@ interface HarnessSession {
   turns: Map<TurnId, HarnessTurn>;
   /** The newest usage the server reported for this transcript; null until one comes, and after a rollback. */
   lastUsage: ModelUsage | null;
-  /** Who turned plan mode on: the user (the turn ends with the plan) or the model (the work goes on after it). */
-  planSource: "user" | "agent" | null;
   /** Approvals and questions the running turn waits on. */
   readonly parked: Map<ApprovalRequestId, ParkedRequest>;
   /** What "allow for this session" answers cover (`permissions.ts`). */
@@ -187,10 +185,10 @@ type ParkedRequest =
   | { readonly kind: "permission"; readonly resolve: (decision: ProviderApprovalDecision | "interrupted") => void }
   | { readonly kind: "input"; readonly resolve: (reply: AskReply | "cancelled") => void };
 
-/** Tools whose activity is shown by their own surface (the tasks panel, the answer panel, the plan), not as a tool row. */
-const SILENT_TOOLS: ReadonlySet<string> = new Set(["todo", "ask", "enter_plan_mode", "exit_plan_mode"]);
+/** Tools whose activity is shown by their own surface (the tasks panel, the answer panel), not as a tool row. */
+const SILENT_TOOLS: ReadonlySet<string> = new Set(["todo", "ask"]);
 /** What the system prompt may say about tools that exist only in some sessions. */
-const SESSION_TOOL_NAMES = ["subagent", "web_fetch", "web_search", "todo", "enter_plan_mode"] as const;
+const SESSION_TOOL_NAMES = ["subagent", "web_fetch", "web_search", "todo"] as const;
 
 /** The tool names `isolationViolation` knows, by ours. */
 const ISOLATION_TOOL_NAMES: Readonly<Record<string, string>> = { edit: "Edit", write: "Write", bash: "Bash" };
@@ -358,7 +356,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         closed: false,
         turns: new Map(),
         lastUsage: null,
-        planSource: interactionMode === "plan" ? "user" : null,
         parked: new Map(),
         allowed: new Set(saved.allowed),
         steering: [],
@@ -378,7 +375,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       };
       if (transcript.messages.length === 0) {
         transcript.append({ role: "system", content: this.systemPrompt(session) });
-        if (interactionMode === "plan") transcript.append({ role: "system", content: PLAN_MODE_REMINDER });
       } else {
         // A resumed session keeps the prompt it was built with (the server's cache is keyed on it);
         // what changed since is said in a reminder instead.
@@ -497,12 +493,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         return { threadId: input.threadId, turnId: turn.id };
       }
 
-      const mode = input.interactionMode ?? session.interactionMode;
-      if (mode !== session.interactionMode) {
-        session.interactionMode = mode;
-        session.planSource = mode === "plan" ? "user" : null;
-        session.transcript.append({ role: "system", content: mode === "plan" ? PLAN_MODE_REMINDER : PLAN_MODE_OFF_REMINDER });
-      }
+      if (input.interactionMode !== undefined) session.interactionMode = input.interactionMode;
       this.launchTurn(session, turn, target, { text: input.prompt, images: input.images });
       return { threadId: input.threadId, turnId: turn.id };
     });
@@ -585,8 +576,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     void runTurn(session.transcript, prompt, turn.id, config, (event) => this.onLoopEvent(session, turn, event), turn.controller.signal)
       .then(async (result) => {
         if (result.lastUsage) session.lastUsage = result.lastUsage;
-        // A plan mode the model entered itself ends with its turn; the user's stays until they turn it off.
-        if (session.planSource === "agent") this.leavePlanMode(session);
         // Room is made while the turn is still open, so nothing else can start on the transcript meanwhile.
         if (result.status === "completed") await this.compactAfterTurn(session, turn, target);
         // Text sent after the model's last step was never read: keep it where the next turn will.
@@ -598,30 +587,15 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       });
   }
 
-  /** The tools the model may call right now: plan mode keeps reading, asking and the two plan tools (both are always listed, so the list's start never changes). */
+  /** The tools the model may call right now. */
   private toolsFor(session: HarnessSession, turn: HarnessTurn | null): readonly HarnessTool<never>[] {
-    const planning = session.interactionMode === "plan";
-    return this.allTools(session, turn).filter((tool) => {
-      const name = tool.definition.name;
-      if (name === "exit_plan_mode" || name === "enter_plan_mode") return true;
-      return !planning || tool.readOnly || tool.allowedInPlan === true;
-    });
+    return this.allTools(session, turn);
   }
 
   /** Every tool this session has, in the order the model is shown them; `turn` is null only when the definitions alone are wanted. */
   private allTools(session: HarnessSession, turn: HarnessTurn | null): readonly HarnessTool<never>[] {
     const extra: unknown[] = session.checklist ? [todoTool((items) => this.publishTodos(session, turn, items))] : [];
     if (session.interactive) extra.push(askTool((questions, signal) => this.askUser(session, turn, questions, signal)));
-    extra.push(
-      enterPlanModeTool({
-        planning: () => session.interactionMode === "plan",
-        enter: () => {
-          session.interactionMode = "plan";
-          session.planSource = "agent";
-        },
-      }),
-      exitPlanModeTool({ planning: () => session.interactionMode === "plan", propose: (plan) => this.proposePlan(session, turn, plan) }),
-    );
     if (session.skillTool) extra.push(session.skillTool);
     // Last, and in a fixed order: the part of the list that depends on configuration comes after the part that does not.
     const subagent = subagentTool((args, context) => (turn ? this.runSubagent(session, turn, args, context) : Promise.resolve({ content: "No turn is running.", isError: true })));
@@ -633,11 +607,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private webTools(): Array<HarnessTool<never>> {
     const settings = () => resolveWebSettings(this.config, this.env, this.web);
     return [webFetchTool(settings), webSearchTool(settings)] as unknown as Array<HarnessTool<never>>;
-  }
-
-  private leavePlanMode(session: HarnessSession): void {
-    session.interactionMode = "default";
-    session.planSource = null;
   }
 
   /**
@@ -656,10 +625,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       if (reason) return { allow: false, reason };
     }
     if (intent.action === "read") return { allow: true };
-    // Reaching the web changes nothing in the project, so plan mode can research; it still asks like any outward call.
-    if (session.interactionMode === "plan" && intent.web === undefined) {
-      return { allow: false, reason: "Plan mode is on, so nothing can be changed or run. Finish the plan and present it with exit_plan_mode." };
-    }
     const verdict = decidePermission({ mode: session.runtimeMode, intent, cwd: session.workingDirectory, interactive: session.interactive, shell: call.name === "powershell" ? "powershell" : "posix" });
     if (verdict.kind === "deny") return { allow: false, reason: verdict.reason };
     if (verdict.kind === "allow") return { allow: true };
@@ -774,17 +739,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       type: "turn.plan.updated",
       raw: { plan: items.map((item) => ({ step: item.content, status: status[item.status] })) },
     });
-  }
-
-  private proposePlan(session: HarnessSession, turn: HarnessTurn | null, plan: string): { endTurn: boolean } {
-    const base = { provider: "harness" as const, threadId: session.threadId, turnId: turn?.id ?? null };
-    this.publish({ ...base, type: "turn.plan.updated", raw: { toolName: "exit_plan_mode", input: { plan }, plan } });
-    this.publish({ ...base, type: "message.part.updated", messageId: `${turn?.id ?? "turn"}-plan`, text: plan });
-    if (session.planSource === "agent") {
-      this.leavePlanMode(session);
-      return { endTurn: false };
-    }
-    return { endTurn: true };
   }
 
   private onLoopEvent(session: HarnessSession, turn: HarnessTurn, event: LoopEvent): void {
@@ -1338,7 +1292,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       overheadTokens,
       scale,
       todos: unit.todos.length > 0 ? unit.todos.map((item) => `- [${item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " "}] ${item.content}`).join("\n") : null,
-      planning: unit.interactionMode === "plan",
       // A manual compaction always tries; automatic ones stop asking a summariser that keeps failing.
       trimOnly: auto && unit.compactFailures >= MAX_CONSECUTIVE_FAILURES,
       summarise,

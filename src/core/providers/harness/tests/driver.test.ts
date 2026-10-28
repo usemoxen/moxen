@@ -214,69 +214,15 @@ describe("HarnessDriver", () => {
     });
   });
 
-  describe("plan mode", () => {
-    const names = (request: ChatRequest) => request.tools.map((tool) => tool.name).sort();
-
-    it("offers reading, asking and exit_plan_mode while the user has plan mode on, and says so once", async () => {
-      const { driver, requests } = driverWith([answer("Plan."), answer("Done.")]);
-      await start(driver);
-      const first = await run(driver.sendTurn({ threadId: "t1", prompt: "plan it", interactionMode: "plan" }));
-      await driver.awaitTurn("t1", first.turnId);
-      expect(names(requests[0]!)).toEqual(["ask", "enter_plan_mode", "exit_plan_mode", "glob", "grep", "read", "subagent", "task_output", "web_fetch", "web_search"]);
-      const second = await run(driver.sendTurn({ threadId: "t1", prompt: "now do it", interactionMode: "default" }));
-      await driver.awaitTurn("t1", second.turnId);
-      expect(names(requests[1]!)).toEqual(expect.arrayContaining(["edit", "bash", "todo", "enter_plan_mode"]));
-      // Both plan tools stay listed outside plan mode, so the list never changes under the model.
-      expect(names(requests[1]!)).toContain("exit_plan_mode");
-      const reminders = requests[1]!.messages.filter((m) => typeof m.content === "string" && m.content.includes("Plan mode is"));
-      expect(reminders.length).toBeGreaterThan(0);
-    });
-
-    it("lets the model enter and exit plan mode in one reply, and tells it plainly when there is nothing to exit", async () => {
-      const both: ModelEvent[] = [
-        { type: "tool.call", call: { id: "c1", name: "enter_plan_mode", arguments: "{}" } },
-        { type: "tool.call", call: { id: "c2", name: "exit_plan_mode", arguments: JSON.stringify({ plan: "Write a.txt." }) } },
-        { type: "finish", reason: "tool-calls" },
-      ];
-      const { driver, requests } = driverWith([both, answer("planned"), call("c3", "exit_plan_mode", { plan: "again" }), answer("fine")]);
-      await start(driver);
-      const first = await run(driver.sendTurn({ threadId: "t1", prompt: "try both" }));
-      await expect(driver.awaitTurn("t1", first.turnId)).resolves.toMatchObject({ status: "completed", text: "planned" });
-      const results = requests[1]!.messages.filter((m) => m.role === "tool").map((m) => String(m.content));
-      expect(results.join("\n")).toContain("plan mode is off");
-      const second = await run(driver.sendTurn({ threadId: "t1", prompt: "exit with no plan mode" }));
-      await driver.awaitTurn("t1", second.turnId);
-      expect(requests[3]!.messages.filter((m) => m.role === "tool").map((m) => String(m.content)).join("\n")).toContain("nothing to exit");
-    });
-
-    it("ends the turn with the plan as its reply when the user asked for plan mode, and leaves the mode on", async () => {
-      const { driver, events } = driverWith([call("c1", "exit_plan_mode", { plan: "# Plan\n1. Do it" }), answer("never asked")]);
-      await start(driver, { interactionMode: "plan" });
-      const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "plan it" }));
-      await expect(driver.awaitTurn("t1", turnId)).resolves.toMatchObject({ status: "completed", text: "# Plan\n1. Do it" });
-      expect(events.find((event) => event.type === "turn.plan.updated")).toMatchObject({ raw: { plan: "# Plan\n1. Do it" } });
-      expect(events.filter((event) => event.type === "tool.execute.started")).toHaveLength(0);
-      const next = await run(driver.sendTurn({ threadId: "t1", prompt: "again" }));
-      await expect(driver.awaitTurn("t1", next.turnId)).resolves.toMatchObject({ status: "completed", text: "never asked" });
-    });
-
-    it("lets the model enter plan mode, refuses changes until it presents the plan, then carries on with the work", async () => {
-      const file = path.join(work, "a.txt");
-      const { driver, requests } = driverWith([
-        call("c1", "enter_plan_mode", {}),
-        call("c2", "write", { file_path: file, content: "too early" }),
-        call("c3", "exit_plan_mode", { plan: "Write a.txt." }),
-        call("c4", "write", { file_path: file, content: "done" }),
-        answer("Finished."),
-      ]);
-      await start(driver);
-      const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "go" }));
-      await expect(driver.awaitTurn("t1", turnId)).resolves.toMatchObject({ status: "completed", text: "Finished." });
-      expect(names(requests[1]!)).toContain("exit_plan_mode");
-      expect(names(requests[1]!)).not.toContain("write");
-      expect(requests[2]!.messages.at(-1)).toMatchObject({ content: expect.stringMatching(/no tool named "write"/) });
-      expect(fs.readFileSync(file, "utf8")).toBe("done");
-    });
+  it("never offers plan mode tools: Moxen has no plan mode", async () => {
+    const { driver, requests } = driverWith([answer("Done.")]);
+    await start(driver);
+    const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "go" }));
+    await driver.awaitTurn("t1", turnId);
+    const names = requests[0]!.tools.map((tool) => tool.name);
+    expect(names).not.toContain("enter_plan_mode");
+    expect(names).not.toContain("exit_plan_mode");
+    expect(names).toEqual(expect.arrayContaining(["edit", "bash", "ask", "todo"]));
   });
 
   it("publishes the todo list the way the tasks panel reads it, and refuses two items in progress", async () => {

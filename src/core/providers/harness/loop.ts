@@ -66,7 +66,7 @@ export interface TurnConfig {
   readonly sampling?: ChatRequest["sampling"];
   readonly effort?: string | undefined;
   readonly maxOutput?: number | undefined;
-  /** The tools offered; a function when the set can change mid-turn (plan mode entered by the model). Read before every request. */
+  /** The tools offered; a function when the set can change mid-turn. Read before every request. */
   readonly tools: readonly HarnessTool<never>[] | (() => readonly HarnessTool<never>[]);
   readonly toolContext: Omit<ToolContext, "signal">;
   readonly authorize: (call: ToolCall, intent: ToolIntent) => Promise<Authorization>;

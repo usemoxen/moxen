@@ -84,7 +84,7 @@ export function resolveSpawnedServerPassword(
  * user's own `permissions` (the last matching rule wins, so ours hold).
  * `deniedSkills` (Moxen's skills a session must not have, `core/skills/delivery.ts`) become `skill` deny
  * rules, appended the same way: OpenCode hides a denied skill from the model and refuses to load it.
- * `moxenPrompt` sets the `system` of the `build` and `plan` agents to Moxen's prompt, which replaces the base
+ * `moxenPrompt` sets the `system` of the `build` agent (the one Moxen's sessions run) to Moxen's prompt, which replaces the base
  * prompt OpenCode picks for the model family; an agent the user already gave a `system` keeps theirs.
  * Unparseable content is replaced, not merged — a corrupt config would
  * break the server boot either way, and replacing keeps the failure
@@ -95,7 +95,7 @@ export function buildServerConfigContent(
   skillsDirs: readonly string[] = [],
   compaction: { readonly auto?: boolean | null; readonly buffer?: number | null } = {},
   disabledNativeTools?: string,
-  /** Replace OpenCode's base prompt for its `build` and `plan` agents with Moxen's (`prompt.ts`). */
+  /** Replace OpenCode's base prompt for its `build` agent with Moxen's (`prompt.ts`). */
   moxenPrompt = false,
   deniedSkills: readonly string[] = [],
 ): string {
@@ -132,11 +132,11 @@ export function buildServerConfigContent(
   });
 }
 
-/** The user's `agents`, with Moxen's prompt as the `system` of `build` and `plan` unless they set one. */
+/** The user's `agents`, with Moxen's prompt as the `system` of `build` unless they set one. */
 function withMoxenSystem(raw: unknown, system: string): Record<string, unknown> {
   const own = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const out: Record<string, unknown> = { ...own };
-  for (const name of ["build", "plan"]) {
+  for (const name of ["build"]) {
     const agent = own[name] !== null && typeof own[name] === "object" && !Array.isArray(own[name]) ? (own[name] as Record<string, unknown>) : {};
     const set = typeof agent.system === "string" && agent.system.trim() !== "";
     out[name] = set ? agent : { ...agent, system };

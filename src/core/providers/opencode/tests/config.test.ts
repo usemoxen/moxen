@@ -96,16 +96,18 @@ describe("opencode config", () => {
     expect(JSON.parse(buildServerConfigContent(undefined, [], {}, ""))).toEqual({ share: "disabled", update: "disable" });
   });
 
-  it("puts Moxen's prompt in as the system of build and plan, keeping one the user wrote and the user's other agents", () => {
+  it("puts Moxen's prompt in as the system of build, keeping one the user wrote and the user's other agents", () => {
     const off = JSON.parse(buildServerConfigContent(undefined, [], {}, undefined, false));
     expect(off).not.toHaveProperty("agents");
-    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { build: { system: "Mine." }, plan: { description: "Plans" }, reviewer: { system: "Review only." } } }), [], {}, "webfetch", true));
-    expect(content.agents.build.system).toBe("Mine.");
-    expect(content.agents.plan.description).toBe("Plans");
-    expect(content.agents.plan.system).toContain("running in the user's terminal, in OpenCode's harness");
+    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { plan: { description: "Plans" }, reviewer: { system: "Review only." } } }), [], {}, "webfetch", true));
+    expect(content.agents.build.system).toContain("running in the user's terminal, in OpenCode's harness");
+    // Moxen's sessions never run OpenCode's plan agent (no plan mode, MXN-136): it is left as the user has it.
+    expect(content.agents.plan).toEqual({ description: "Plans" });
     expect(content.agents.reviewer).toEqual({ system: "Review only." });
     // Built from the tools the server keeps: no web guidance when both web tools are off.
-    expect(content.agents.plan.system).not.toContain("# Using your tools\n- The web");
+    expect(content.agents.build.system).not.toContain("# Using your tools\n- The web");
+    const theirs = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { build: { system: "Mine." } } }), [], {}, undefined, true));
+    expect(theirs.agents.build.system).toBe("Mine.");
   });
 
   it("adds moxen's skills folder to the server config's skills list, once and after the user's own", () => {

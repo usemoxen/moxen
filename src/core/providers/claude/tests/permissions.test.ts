@@ -16,9 +16,11 @@ describe("claude permissions", () => {
   });
 
   it("folds launch-arg permission flags into the mode", () => {
+    // Claude Code's plan mode is never used: a launch argument asking for it falls back to the runtime mode.
     expect(
       permissionModeForRuntimeMode("approval-required", { permissionMode: "plan" }),
-    ).toBe("plan");
+    ).toBe("default");
+    expect(permissionModeForRuntimeMode("approval-required", { permissionMode: "acceptEdits" })).toBe("acceptEdits");
     expect(permissionModeForRuntimeMode("approval-required", { skipPermissions: true })).toBe(
       "bypassPermissions",
     );
@@ -36,7 +38,7 @@ describe("claude permissions", () => {
 
   it("classifies tool uses for request labels", () => {
     expect(classifyToolUse("AskUserQuestion")).toBe("question");
-    expect(classifyToolUse("ExitPlanMode")).toBe("plan-exit");
+    expect(classifyToolUse("ExitPlanMode")).toBe("other");
     expect(classifyToolUse("Read")).toBe("file-read");
     expect(classifyToolUse("Edit")).toBe("file-change");
     expect(classifyToolUse("Bash")).toBe("command-execution");

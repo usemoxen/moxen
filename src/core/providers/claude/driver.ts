@@ -236,11 +236,6 @@ interface ClaudeSession {
   basePermissionMode: PermissionMode;
   runtimeMode: RuntimeMode;
   interactionMode: InteractionMode;
-  /**
-   * Who put the session into plan mode, which decides whether the agent may
-   * leave it. Null when it is not in plan mode.
-   */
-  planModeSource: "user" | "agent" | null;
   toolUseThreads: Map<string, ThreadId>;
   /**
    * Name and input per in-flight `tool_use` id. The matching `tool_result`
@@ -532,6 +527,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         effort: sessionWideEffort(effectiveEffortChoice(input.modelSelection)),
         mcpServers: input.mcpServers && input.mcpServers.length > 0 ? input.mcpServers : null,
         disallowedTools: [
+          ...ALWAYS_DISALLOWED_TOOLS,
           ...(input.disabledMcpTools ?? []),
           ...(input.disabledNativeTools ?? []),
           ...(input.checklist === false ? CHECKLIST_TOOLS : []),
@@ -550,7 +546,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         basePermissionMode,
         runtimeMode: input.runtimeMode ?? "full-access",
         interactionMode: input.interactionMode ?? "default",
-        planModeSource: input.interactionMode === "plan" ? "user" : null,
         toolUseThreads: new Map(),
         toolUseCalls: new Map(),
         lastActiveThreadId: null,
@@ -877,16 +872,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         );
         await session.query.setPermissionMode(session.basePermissionMode);
       }
-      // "plan" maps to the SDK plan mode; "default" restores the base mode.
-      if (input.interactionMode === "plan") {
-        await session.query.setPermissionMode("plan");
-        session.interactionMode = "plan";
-        session.planModeSource = "user";
-      } else if (input.interactionMode === "default") {
-        await session.query.setPermissionMode(session.basePermissionMode);
-        session.interactionMode = "default";
-        session.planModeSource = null;
-      }
+      if (input.interactionMode !== undefined) session.interactionMode = input.interactionMode;
       const turn: TranscriptTurn = {
         id: randomUUID(),
         prompt: input.prompt,
@@ -1055,40 +1041,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     // AskUserQuestion always surfaces, regardless of runtime mode.
     if (toolName === "AskUserQuestion") {
       return this.parkInput(session, toolName, input, callbackOptions);
-    }
-    // The agent may put itself into plan mode. We have to know that it did:
-    // ExitPlanMode below is denied to keep a *user's* plan from executing
-    // itself, and applying that to a self-entered plan mode leaves the
-    // agent in a mode whose only exit we refuse — it goes quiet mid-turn.
-    if (toolName === "EnterPlanMode") {
-      session.interactionMode = "plan";
-      session.planModeSource = "agent";
-      return Promise.resolve({ behavior: "allow" });
-    }
-    // ExitPlanMode is captured as a proposed plan. A plan the user asked
-    // for is then denied, so the CLI does not act on it before they have
-    // seen it; a plan mode the agent entered on its own is released, since
-    // nobody is waiting to approve it.
-    if (toolName === "ExitPlanMode") {
-      const plan = extractPlan(input);
-      session.transcript
-        .filter((turn) => turn.status === "running")
-        .forEach((turn) => {
-          turn.items.push({ kind: "assistant", text: plan ?? "(empty plan)" });
-        });
-      this.publish({
-        type: "turn.plan.updated",
-        provider: "claude",
-        threadId: session.threadId,
-        turnId: session.transcript.find((turn) => turn.status === "running")?.id ?? null,
-        raw: { toolName, input, plan },
-      });
-      if (session.planModeSource === "agent") {
-        session.interactionMode = "default";
-        session.planModeSource = null;
-        return Promise.resolve({ behavior: "allow" });
-      }
-      return Promise.resolve({ behavior: "deny", message: "Recorded as a proposed plan." });
     }
     if (session.sessionAllows.has(sessionAllowKey(toolName))) {
       return Promise.resolve({ behavior: "allow" });
@@ -2454,23 +2406,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     };
   }
 
-  // -- plan mode helper ------------------------------------------------------
-
-  /** Live permission-mode switch (plan mode); outside the SPI, used by the TUI. */
-  readonly setInteractionMode = (
-    threadId: ThreadId,
-    interactionMode: InteractionMode,
-  ): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_TURN_FAILED", `Could not switch interaction mode on thread ${threadId}`, async () => {
-      const session = this.requireSession(threadId);
-      if (interactionMode === "plan") {
-        await session.query.setPermissionMode("plan");
-      } else {
-        await session.query.setPermissionMode(session.basePermissionMode);
-      }
-      session.interactionMode = interactionMode;
-    });
-
   /** Test hook: resolved home dir for the current settings (never touches HOME). */
   resolvedHomeForTests(): string {
     return resolveClaudeHomePath(this.settings.homePath, this.baseEnv);
@@ -2486,11 +2421,6 @@ function summarizeToolInput(input: unknown): string {
   }
 }
 
-function extractPlan(input: Record<string, unknown>): string | null {
-  const plan = input["plan"];
-  return typeof plan === "string" ? plan : null;
-}
-
 /**
  * Opts the session into Claude Code's task-tracking tools (`TaskCreate` /
  * `TaskUpdate` / `TaskList` / `TaskGet`, or `TodoWrite` under
@@ -2500,6 +2430,14 @@ function extractPlan(input: Record<string, unknown>): string | null {
  * explicit value in the user's own environment (e.g. `0`) wins.
  */
 /** Claude Code's to-do tools, in both of their shapes (TodoWrite, and the Task tools that replaced it). */
+/**
+ * Claude Code's own plan mode, never offered in Moxen's sessions: Moxen has no
+ * plan mode (MXN-136), and a mode the model could enter would leave it unable to
+ * change anything. Not the user's to switch on, so `CLAUDE_NATIVE_TOOLS` (the
+ * Settings list of tools that can be switched off) must not list them.
+ */
+export const ALWAYS_DISALLOWED_TOOLS: readonly string[] = ["EnterPlanMode", "ExitPlanMode"];
+
 const CHECKLIST_TOOLS: readonly string[] = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
 
 function withTaskTools(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

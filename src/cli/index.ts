@@ -31,6 +31,7 @@ import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/cl
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
+import { requestedInteractionMode } from "../core/interactionmode.js";
 import { writeError, writeSuccess } from "./output.js";
 import {
   createHandoverThread,
@@ -175,7 +176,8 @@ function addThreadOptions(command: Command): Command {
         .choices(["approval-required", "auto-accept-edits", "auto", "full-access"]),
     )
     .addOption(
-      new Option("--mode, --interaction-mode <mode>", "Build/default or Plan mode.")
+      // `plan` stays accepted here so the refusal is ours (PLAN_MODE_REMOVED, exit 2), not a bare "invalid choice".
+      new Option("--mode, --interaction-mode <mode>", "Thread mode: build (default).")
         .choices(["default", "build", "plan"]),
     )
     .option("--no-project", "Start without a project, in a fresh scratch folder.")
@@ -300,7 +302,7 @@ interface ThreadCommandOptions extends WorkspaceCommandOptions {
   open?: OpenMode;
   envMode?: ThreadEnvMode | "current";
   runtimeMode?: RuntimeMode;
-  interactionMode?: InteractionMode | "build";
+  interactionMode?: InteractionMode | "build" | "plan";
   /** Commander stores `--no-project` as `project: false`. */
   project?: boolean;
   provider?: string;
@@ -356,7 +358,7 @@ function threadCreateOptions(options: ThreadCommandOptions, prompt: string): Thr
     ...(options.envMode ? { threadEnvMode: options.envMode === "current" ? "local" : options.envMode } : {}),
     ...(options.runtimeMode ? { runtimeMode: options.runtimeMode } : {}),
     ...(options.interactionMode
-      ? { interactionMode: options.interactionMode === "build" ? "default" : options.interactionMode }
+      ? { interactionMode: requestedInteractionMode(options.interactionMode === "build" ? "default" : options.interactionMode, "--mode") }
       : {}),
     ...(options.provider ? { provider: options.provider } : {}),
     ...(options.model ? { model: options.model } : {}),

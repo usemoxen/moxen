@@ -11,7 +11,7 @@
  * and question requests park until `respondToRequest` / `respondToUserInput`
  * resolve them (`permission.reply` once/always/reject, a question form is
  * replied to or cancelled). v2 prompts carry only text and files, so the
- * model, agent (plan mode) and runtime instructions are session state,
+ * model, agent and runtime instructions are session state,
  * applied before a prompt only when they changed. Rollback forks the native
  * session; compaction is native (`session.compact`). Token usage is read
  * best-effort off the latest assistant message at turn end, so mid-turn
@@ -775,9 +775,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * Bring the native session to this send's model, agent and instructions.
    * v2 prompts carry none of them, so they are session state; each call is
    * made only when the state it sets differs from what is already applied.
-   * Plan mode runs OpenCode's built-in read-only `plan` agent and leaving it
-   * returns to `build`; a session on any other agent (the user's
-   * `default_agent`) is left alone.
+   * Moxen has no plan mode (MXN-136): a session an older build left on
+   * OpenCode's read-only `plan` agent goes back to `build`; a session on any
+   * other agent (the user's `default_agent`) is left alone.
    */
   private async applySessionState(
     session: OpenCodeSession,
@@ -796,11 +796,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         applied.model = target;
       }
     }
-    const planning = session.interactionMode === "plan";
-    if (planning && applied.agent !== "plan") {
-      await connection.switchAgent(nativeId, "plan");
-      applied.agent = "plan";
-    } else if (!planning && applied.agent === "plan") {
+    if (applied.agent === "plan") {
       await connection.switchAgent(nativeId, "build");
       applied.agent = "build";
     }

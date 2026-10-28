@@ -32,7 +32,6 @@ function hostOf(raw: string): string | null {
 export function webFetchTool(settings: () => WebSettings): HarnessTool<FetchArgs> {
   return {
     readOnly: false,
-    allowedInPlan: true,
     definition: {
       name: "web_fetch",
       description: [
@@ -69,7 +68,6 @@ export function webFetchTool(settings: () => WebSettings): HarnessTool<FetchArgs
 export function webSearchTool(settings: () => WebSettings): HarnessTool<SearchArgs> {
   return {
     readOnly: false,
-    allowedInPlan: true,
     definition: {
       name: "web_search",
       description: [

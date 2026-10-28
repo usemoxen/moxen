@@ -65,12 +65,10 @@ export interface ToolContext {
 
 export interface HarnessTool<Args = Record<string, unknown>> {
   readonly definition: ToolDefinition;
-  /** Safe to run next to other read-only tools, and (with `allowedInPlan`) the only kind plan mode allows. */
+  /** Safe to run next to other read-only tools. */
   readonly readOnly: boolean;
   /** Safe to run next to other calls of its kind in the same reply (several subagents at once), although it is not read-only. */
   readonly parallel?: boolean;
-  /** Offered in plan mode although it is not read-only: it changes nothing in the project (asking the user a question). */
-  readonly allowedInPlan?: boolean;
   intent(args: Args, context: ToolContext): ToolIntent;
   run(args: Args, context: ToolContext): Promise<ToolResult>;
 }
