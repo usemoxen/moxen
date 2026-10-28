@@ -21,7 +21,7 @@ import type {
   SpeedMode,
   ThreadEnvMode,
 } from "../../core/types.js";
-import { awaitTurn, cliClient, type TurnDriverFactories } from "../infra/client.js";
+import { awaitTurn, cliClient, serverCwd, type TurnDriverFactories } from "../infra/client.js";
 import { directAuth, directRuntime } from "../infra/direct.js";
 import type { WorkspaceOptions } from "../projects/projects.js";
 
@@ -48,7 +48,7 @@ export async function createHandoverThread(config: CliConfig, options: ThreadCre
   const client = await cliClient(config, options.drivers);
   const result = await client.dispatch({
     type: "thread.handover",
-    cwd: options.cwd ?? process.cwd(),
+    cwd: serverCwd(options.cwd, { scratch: options.scratch === true }),
     prompt: options.prompt,
     ...(options.workspaceMode !== undefined ? { workspaceMode: options.workspaceMode } : {}),
     ...(options.projectPolicy !== undefined ? { projectPolicy: options.projectPolicy } : {}),

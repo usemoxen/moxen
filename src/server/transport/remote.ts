@@ -10,6 +10,7 @@
  * is back in sync on the first frame, with nothing to replay.
  */
 import net from "node:net";
+import tls from "node:tls";
 
 import { CliError } from "../../core/errors.js";
 import type { ClientApi } from "../api.js";
@@ -31,9 +32,11 @@ import {
   parseLine,
   PROTOCOL_VERSION,
   type ClientMessage,
+  type HelloParams,
   type HelloResult,
   type WireError,
 } from "./wire.js";
+import { keyFingerprint } from "./certificate.js";
 
 type Method = ClientMessage["method"];
 
@@ -59,7 +62,28 @@ const RECONNECT_MAX_MS = 2_000;
 export interface RemoteConnectionOptions {
   /** Reconnect and re-subscribe after the server goes away (default true). */
   readonly reconnect?: boolean;
+  /**
+   * Reach a server on another machine over TLS (`./remoteaccess.ts`)
+   * instead of the local endpoint, which then only labels it.
+   */
+  readonly tls?: RemoteTlsTarget;
+  /** Sent with `protocol` in every hello: a remote socket's `pair` or `device`. */
+  readonly hello?: Omit<HelloParams, "protocol">;
 }
+
+export interface RemoteTlsTarget {
+  readonly host: string;
+  readonly port: number;
+  /**
+   * The server key's pin (`keyFingerprint`): any other key is refused
+   * before a byte is sent. Absent only while pairing, when there is no pin
+   * yet; the pairing code is what vouches for that connection.
+   */
+  readonly fingerprint?: string;
+}
+
+/** Hello refusals no retry can fix: reconnecting stops and subscribers hear it. */
+const FATAL_HELLO_CODES = new Set(["REMOTE_DEVICE_REFUSED", "REMOTE_KEY_MISMATCH", "REMOTE_NOT_PAIRED", "PROTOCOL_MISMATCH"]);
 
 export class RemoteConnection implements ClientApi {
   private socket: net.Socket | null = null;
@@ -69,6 +93,8 @@ export class RemoteConnection implements ClientApi {
   private closed = false;
   private reconnecting: Promise<void> | null = null;
   helloResult: HelloResult | null = null;
+  /** Over TLS: the pin of the key the server presented. */
+  peerFingerprint: string | null = null;
 
   private constructor(
     readonly endpoint: string,
@@ -83,7 +109,28 @@ export class RemoteConnection implements ClientApi {
   }
 
   private async open(): Promise<void> {
-    const socket = await new Promise<net.Socket>((resolve, reject) => {
+    const socket = this.options.tls ? await this.openTls(this.options.tls) : await this.openLocal();
+    socket.setEncoding("utf8");
+    const reader = new LineReader();
+    socket.on("data", (chunk: string) => {
+      for (const line of reader.push(chunk)) this.receive(line);
+    });
+    socket.on("error", () => undefined);
+    socket.once("close", () => this.onClose(socket));
+    this.socket = socket;
+    try {
+      this.helloResult = (await this.request("hello", { ...this.options.hello, protocol: PROTOCOL_VERSION })) as HelloResult;
+    } catch (cause) {
+      // A refused hello leaves nothing usable: close it, so a reconnect
+      // starts over rather than taking the dead socket for a live one.
+      socket.destroy();
+      throw cause;
+    }
+    for (const subscription of this.subscriptions) await this.resubscribe(subscription);
+  }
+
+  private openLocal(): Promise<net.Socket> {
+    return new Promise<net.Socket>((resolve, reject) => {
       const candidate = net.connect(this.endpoint);
       candidate.once("connect", () => {
         candidate.off("error", reject);
@@ -98,16 +145,42 @@ export class RemoteConnection implements ClientApi {
         ),
       );
     });
-    socket.setEncoding("utf8");
-    const reader = new LineReader();
-    socket.on("data", (chunk: string) => {
-      for (const line of reader.push(chunk)) this.receive(line);
+  }
+
+  /**
+   * TLS to another machine. The CA chain is not consulted (the server's
+   * certificate is self-signed); its key is checked against the pin
+   * instead, before the hello — which carries the device's token — is sent.
+   */
+  private openTls(target: RemoteTlsTarget): Promise<net.Socket> {
+    return new Promise<net.Socket>((resolve, reject) => {
+      const candidate = tls.connect({ host: target.host, port: target.port, rejectUnauthorized: false, minVersion: "TLSv1.3" });
+      candidate.once("secureConnect", () => {
+        candidate.off("error", onError);
+        const fingerprint = keyFingerprint(candidate.getPeerCertificate(true).raw);
+        if (target.fingerprint !== undefined && fingerprint !== target.fingerprint) {
+          candidate.destroy();
+          reject(
+            new CliError(
+              "REMOTE_KEY_MISMATCH",
+              `The moxen server at ${this.endpoint} presented a different key than the one paired. It may have been reinstalled — or something is impersonating it. Pair again only if you know why it changed.`,
+              { details: { endpoint: this.endpoint, expected: target.fingerprint, presented: fingerprint } },
+            ),
+          );
+          return;
+        }
+        this.peerFingerprint = fingerprint;
+        resolve(candidate);
+      });
+      const onError = (cause: Error): void =>
+        reject(
+          new CliError("SERVER_UNAVAILABLE", `No moxen server answered at ${this.endpoint}: ${cause.message}`, {
+            cause,
+            details: { endpoint: this.endpoint },
+          }),
+        );
+      candidate.once("error", onError);
     });
-    socket.on("error", () => undefined);
-    socket.once("close", () => this.onClose(socket));
-    this.socket = socket;
-    this.helloResult = (await this.request("hello", { protocol: PROTOCOL_VERSION })) as HelloResult;
-    for (const subscription of this.subscriptions) await this.resubscribe(subscription);
   }
 
   private receive(line: string): void {
@@ -176,7 +249,11 @@ export class RemoteConnection implements ClientApi {
         await new Promise((resolve) => setTimeout(resolve, delay));
         try {
           await this.open();
-        } catch {
+        } catch (cause) {
+          if (cause instanceof CliError && FATAL_HELLO_CODES.has(cause.code)) {
+            for (const subscription of this.subscriptions) subscription.onError(cause);
+            return;
+          }
           delay = Math.min(delay * 2, RECONNECT_MAX_MS);
         }
       }

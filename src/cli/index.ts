@@ -32,7 +32,8 @@ import { cliClient } from "./infra/client.js";
 import { redactMcpServers } from "../core/mcp.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
-import { preferDirectClient } from "./infra/client.js";
+import { activeRemoteServer, preferDirectClient, useRemoteServer } from "./infra/client.js";
+import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
 import { writeError, writeSuccess } from "./output.js";
@@ -100,11 +101,13 @@ program
   .version("0.1.0")
   .option("--json", "Emit stable JSON envelopes.")
   .option("--config <path>", "Use a specific config file.")
+  .option("--server <name>", "Talk to a paired moxen server on another machine (by name or address) instead of this one's. MOXEN_SERVER=<name> does the same.")
   ;
 
 interface GlobalOptions {
   json?: boolean;
   config?: string;
+  server?: string;
 }
 
 async function commandContext(): Promise<{
@@ -117,6 +120,7 @@ async function commandContext(): Promise<{
   const loaded = await loadConfig(global.config);
   const config = { ...loaded.config };
   preferDirectClient(global.config !== undefined);
+  useRemoteServer(global.server ?? null);
   return { config, configPath: loaded.path, configExists: loaded.exists, json: global.json ?? false };
 }
 
@@ -367,7 +371,7 @@ program
     action(async () => {
       const context = await commandContext();
       const { runTui } = await import("../tui/index.js");
-      await runTui(context.config, context.configPath);
+      await runTui(context.config, context.configPath, activeRemoteServer() ?? undefined);
     }),
   );
 
@@ -408,6 +412,139 @@ server
       const context = await commandContext();
       const result = await serverStop();
       writeSuccess(result, context, result.stopped ? `Stopped the moxen server at ${result.endpoint}.` : `No moxen server at ${result.endpoint}.`);
+    }),
+  );
+
+const remote = program
+  .command("remote")
+  .description("Remote access: drive a moxen server on another machine, or let other machines drive this one's.");
+
+remote
+  .command("pair")
+  .description("Pair this machine with a moxen server, using the code it shows (moxen remote code, or the TUI's command palette there).")
+  .argument("<address>", "The server's address, host or host:port, as shown with the code.")
+  .argument("<code>", "The pairing code, e.g. ABCD-EFGH.")
+  .option("--name <name>", "What to call the server here (default: its host name).")
+  .action((address: string, code: string, options: { name?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await pairServer({ address, code, ...(options.name ? { name: options.name } : {}) });
+      const { server: paired } = result;
+      writeSuccess(
+        result,
+        context,
+        `Paired with ${paired.name} at ${paired.host}:${paired.port}.\nKey fingerprint: ${paired.fingerprint}\nCheck it matches the one the server showed. Use it with: moxen --server ${paired.name} …`,
+      );
+    }),
+  );
+
+remote
+  .command("servers")
+  .description("List the servers this machine has paired with.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await listServers();
+      writeSuccess(
+        result,
+        context,
+        result.servers.length === 0
+          ? "No paired servers."
+          : result.servers.map((entry) => `${entry.name}  ${entry.host}:${entry.port}  paired ${entry.pairedAt}`).join("\n"),
+      );
+    }),
+  );
+
+remote
+  .command("forget")
+  .description("Forget a paired server here. To cut it off on the server's side too, revoke this device there.")
+  .argument("<server>", "Its name or address.")
+  .action((name: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await forgetServer(name);
+      writeSuccess(result, context, `Forgot ${result.forgotten.name}.`);
+    }),
+  );
+
+remote
+  .command("status")
+  .description("Whether this machine's server accepts remote clients, and where.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await remoteStatus(context.config);
+      writeSuccess(result, context, describeStatus(result));
+    }),
+  );
+
+remote
+  .command("enable")
+  .description("Let paired devices reach this machine's server over TLS.")
+  .option("--interfaces <which>", "lan, tailscale or both.")
+  .option("--port <port>", "TCP port to listen on.")
+  .action((options: { interfaces?: string; port?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await enableRemote(context.config, options);
+      writeSuccess(result, context, describeStatus(result));
+    }),
+  );
+
+remote
+  .command("disable")
+  .description("Stop listening beyond this machine; paired devices stay paired.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await disableRemote(context.config);
+      writeSuccess(result, context, describeStatus(result));
+    }),
+  );
+
+remote
+  .command("code")
+  .description("Show a pairing code for a new device: single-use, valid for five minutes.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await pairingCode(context.config);
+      writeSuccess(
+        result,
+        context,
+        `Pairing code: ${result.code} (until ${result.expiresAt})\nOn the other machine: moxen remote pair ${result.addresses[0] ?? "<address>"} ${result.code}\nAddresses: ${result.addresses.join(", ")}\nKey fingerprint: ${result.fingerprint}`,
+      );
+    }),
+  );
+
+remote
+  .command("devices")
+  .description("List the devices paired with this machine's server.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await listDevices(context.config);
+      writeSuccess(
+        result,
+        context,
+        result.devices.length === 0
+          ? "No paired devices."
+          : result.devices
+              .map((device) => `${device.id}  ${device.name}  paired ${device.pairedAt}${device.lastSeenAt ? `, last seen ${device.lastSeenAt}` : ""}${device.connections > 0 ? `, ${device.connections} connected` : ""}`)
+              .join("\n"),
+      );
+    }),
+  );
+
+remote
+  .command("revoke")
+  .description("Revoke a paired device: it is disconnected at once and can no longer connect.")
+  .argument("<device-id>", "The id moxen remote devices shows.")
+  .action((deviceId: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await revokeDevice(context.config, deviceId);
+      writeSuccess(result, context, `Revoked ${deviceId}.`);
     }),
   );
 

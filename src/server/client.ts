@@ -9,36 +9,34 @@
  *               outlive the client that started them, and every client
  *               sees (and can act on) every live session.
  *
- * Chosen by `MOXEN_SERVER`; `auto` when unset.
+ * Chosen by `MOXEN_SERVER`; `auto` when unset. Any other value names a
+ * paired server on another machine (`./transport/servers.ts`), as
+ * `--server` does: that one is used over TLS, never started, and never
+ * silently swapped for a local connection when it cannot be reached.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { appEnv } from "../core/config.js";
 import { CliError } from "../core/errors.js";
 import type { CliConfig } from "../core/types.js";
 import type { ClientApi } from "./api.js";
 import { DirectConnection, type TurnDriverFactories } from "./connection.js";
 import { defaultEndpoint, probe } from "./transport/endpoint.js";
 import { RemoteConnection } from "./transport/remote.js";
+import { notPaired, PairedServers, type PairedServer } from "./transport/servers.js";
+import { remoteServerName, serverMode, type ServerMode } from "./servermode.js";
 
-export type ServerMode = "direct" | "auto" | "daemon";
+export { remoteServerName, serverMode, type ServerMode } from "./servermode.js";
 
 /** A `ClientApi` its owner can release. */
 export type ClientConnection = ClientApi & { close(): Promise<void> };
 
-export function serverMode(env: NodeJS.ProcessEnv = process.env): ServerMode {
-  const raw = appEnv("SERVER", env)?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return "auto";
-  if (raw === "direct" || raw === "auto" || raw === "daemon") return raw;
-  throw new CliError("INVALID_CONFIG", `MOXEN_SERVER must be direct, auto, or daemon (got "${raw}").`, {
-    exitCode: 2,
-  });
-}
 
 export interface OpenClientOptions {
   readonly mode?: ServerMode;
+  /** A paired server by name or address (`--server`); wins over `mode` and `MOXEN_SERVER`. */
+  readonly server?: string;
   readonly endpoint?: string;
   /**
    * In-process only: a fixed config, for one-shot callers (the CLI) and
@@ -56,6 +54,8 @@ export interface OpenClientOptions {
 const AUTOSTART_TIMEOUT_MS = 10_000;
 
 export async function openClient(options: OpenClientOptions = {}): Promise<ClientConnection> {
+  const remote = options.server ?? (options.mode === undefined ? remoteServerName() : null);
+  if (remote) return await connectPairedServer(remote);
   const mode = options.mode ?? serverMode();
   const endpoint = options.endpoint ?? defaultEndpoint();
   const direct = (): ClientConnection =>
@@ -69,6 +69,15 @@ export async function openClient(options: OpenClientOptions = {}): Promise<Clien
   if (mode === "auto") return direct();
   await startDaemon(endpoint);
   return await RemoteConnection.connect(endpoint);
+}
+
+/** A connection to a paired server on another machine. Its `pairedServer` says which. */
+export async function connectPairedServer(nameOrAddress: string, servers = new PairedServers()): Promise<RemoteConnection & { readonly pairedServer: PairedServer }> {
+  const server = await servers.find(nameOrAddress);
+  if (!server) throw notPaired(nameOrAddress);
+  const { endpoint, ...options } = await servers.connectionOptions(server);
+  const connection = await RemoteConnection.connect(endpoint, options);
+  return Object.assign(connection, { pairedServer: server });
 }
 
 /**

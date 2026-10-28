@@ -9,7 +9,7 @@ import { registerSyntaxParsers } from "../core/syntax/register.js";
 import { SURFACE } from "./theme.js";
 import { MinSizeGate } from "./ui/terminalgate.js";
 
-export async function runTui(config: CliConfig, configPath: string): Promise<void> {
+export async function runTui(config: CliConfig, configPath: string, server?: string): Promise<void> {
   // Fail fast when there is no pty at all (piped output, `ssh` without
   // `-t`): the renderer cannot size or restore the screen, so a plain
   // error beats a garbled one. Real resizes — local, tmux, or over SSH —
@@ -27,7 +27,8 @@ export async function runTui(config: CliConfig, configPath: string): Promise<voi
   // The path, not the loaded object: the TUI outlives any one edit, and
   // the connection re-reads the file per operation so the settings page
   // (and anything else that changes it) takes effect without a restart.
-  const connection = await openClient({ configPath });
+  // `--server`: a paired server on another machine, whose own config rules there.
+  const connection = await openClient(server ? { server } : { configPath });
   const renderer = await createCliRenderer({ exitOnCtrlC: false, backgroundColor: SURFACE.base });
   const root = createRoot(renderer);
 

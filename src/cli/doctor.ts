@@ -6,14 +6,32 @@
  *
  * Envelope: `{ ok, checks }`, with `checks` keeping its keys and their
  * order (node, git, providers, store, auth, config); `server` is added
- * after them.
+ * after them. Against a paired server on another machine (`--server`),
+ * `server` says so — mode `remote`, its address, name and key pin — and
+ * every other check describes that machine.
  */
 import type { CliConfig } from "../core/types.js";
-import { serverMode } from "../server/client.js";
+import { connectPairedServer, serverMode } from "../server/client.js";
 import { defaultEndpoint, probe } from "../server/transport/endpoint.js";
-import { cliClient } from "./infra/client.js";
+import { activeRemoteServer, cliClient } from "./infra/client.js";
 
 export async function doctor(config: CliConfig, configPath: string, configExists: boolean) {
+  const remote = activeRemoteServer();
+  if (remote !== null) {
+    const connection = await connectPairedServer(remote);
+    try {
+      const diagnosis = await connection.query({ type: "doctor" });
+      const { pairedServer: paired } = connection;
+      const checks = {
+        ...diagnosis,
+        config: { ok: true, path: configPath, exists: configExists },
+        server: { ok: true, mode: "remote" as const, endpoint: connection.endpoint, running: true, name: paired.name, fingerprint: paired.fingerprint },
+      };
+      return { ok: checks.git.ok && checks.store.ok && (checks.providers.claude.ok || checks.providers.opencode.ok), checks };
+    } finally {
+      await connection.close();
+    }
+  }
   const endpoint = defaultEndpoint();
   const [diagnosis, running] = await Promise.all([
     (await cliClient(config)).query({ type: "doctor" }),

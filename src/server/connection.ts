@@ -123,6 +123,7 @@ import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
 import { DeviceRegistry } from "./transport/devices.js";
+import { remoteServerName } from "./servermode.js";
 import {
   decodeCommand,
   decodeQuery,
@@ -276,7 +277,9 @@ export class DirectConnection implements ClientApi {
     const env: Record<string, string> = { ...spec.env, MOXEN_STORE_ROOT: this.storeRoot };
     for (const name of ["MOXEN_CONFIG", "MOXEN_SERVER", "MOXEN_SERVER_ENDPOINT"]) {
       const value = process.env[name];
-      if (value) env[name] = value;
+      // A paired server's name in MOXEN_SERVER is this process's client
+      // choice; the tools must reach the server that owns the thread.
+      if (value && !(name === "MOXEN_SERVER" && remoteServerName() !== null)) env[name] = value;
     }
     return { ...spec, env };
   }

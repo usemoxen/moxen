@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { selectModel, selectProvider, type ProviderSummary } from "../../core/catalog/summary.js";
 import type { CliConfig } from "../../core/types.js";
-import { cliClient } from "../infra/client.js";
+import { activeRemoteServer, cliClient, serverCwd } from "../infra/client.js";
 import { directAuth, directRuntime } from "../infra/direct.js";
 
 export async function listProviders(config: CliConfig, options: { refresh?: boolean }) {
@@ -15,7 +15,8 @@ export async function listProviders(config: CliConfig, options: { refresh?: bool
 
 /** Skills and slash commands one provider resolves for a directory (the cwd by default). */
 export async function listSkills(config: CliConfig, options: { provider: string; cwd?: string }) {
-  const cwd = path.resolve(options.cwd ?? process.cwd());
+  // A remote server resolves its own paths; only a local one is made absolute here.
+  const cwd = activeRemoteServer() === null ? path.resolve(serverCwd(options.cwd)) : serverCwd(options.cwd);
   const inventory = await (await cliClient(config)).query({ type: "skills.list", instanceId: options.provider, cwd });
   return { runtime: directRuntime(), auth: directAuth(), provider: options.provider, cwd, ...inventory };
 }
