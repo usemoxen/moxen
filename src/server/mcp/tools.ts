@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CliError } from "../../core/errors.js";
+import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
@@ -133,8 +134,57 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   },
 ];
 
-/** The tools that hand work to other threads: a delegated task is itself the delegation, so it gets none of them. */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel"]);
+/** Finding and reading other threads (MXN-133). Results stay in the caller's context, so each answer is held to a budget. */
+export const THREAD_TOOLS: readonly McpTool[] = [
+  {
+    name: "thread_search",
+    description:
+      "Find other Moxen threads by what is in them: titles, messages and tool calls, settled threads included. " +
+      "Returns up to limit threads (default 10), each with its id, title, project, status, last activity and up to 3 snippets. " +
+      'scope "project" (the default) searches this project\'s threads; use "all" only when the work you are looking for may have happened in another project. ' +
+      "Then read one with thread_read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Words that must all appear in the same message, tool call or title, in any order." },
+        scope: { type: "string", enum: ["project", "all"] },
+        limit: { type: "number", description: "Threads to return, 1–25 (default 10)." },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "thread_read",
+    description:
+      "Read another Moxen thread a step at a time. With only id: an outline, one line per turn, newest first (before: N goes further back). " +
+      'With turns ("12" or "12-14"): what was written in those turns, each tool call shrunk to one line numbered like 12.3. ' +
+      "With item (\"12.3\"): that tool call's full input and output. Long answers come in pages: the answer names the offset for the rest. " +
+      "Everything returned stays in your context, so read only what you need and never the same range twice. " +
+      'scope "project" (the default) reads this project\'s threads; use "all" for a thread thread_search found in another project.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The thread's id, from thread_search." },
+        turns: { type: "string" },
+        item: { type: "string" },
+        offset: { type: "number", description: "Where the previous page of these turns or this item stopped." },
+        before: { type: "number", description: "Outline: list turns before this number." },
+        scope: { type: "string", enum: ["project", "all"] },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+];
+
+/**
+ * The tools that reach other threads: handing work to them, and finding and
+ * reading them. A delegated task is itself the delegation, so it gets none.
+ */
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "thread_search", "thread_read"]);
 
 /** Moxen memory, as a session has it: every tool, `memory_read` alone (a delegated task), or none. */
 export type MemoryAccess = "write" | "read" | "off";
@@ -215,7 +265,7 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
-  const tools = [...MOXEN_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
+  const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
@@ -355,6 +405,22 @@ export async function callMoxenTool(
       }
       case "web_fetch":
         return await webFetchTool(args, await (options.web ?? (() => currentWebPolicy(api)))());
+      case "thread_search":
+        return await threadSearchTool(api, parentThreadId, args);
+      case "thread_read": {
+        const scope = args.scope === "all" ? "all" : "project";
+        const read = await api.query({
+          type: "thread.agent-read",
+          callerThreadId: parentThreadId,
+          threadId: argString(args, "id", true)!,
+          scope,
+          ...(argString(args, "turns") !== undefined ? { turns: argString(args, "turns")! } : {}),
+          ...(argString(args, "item") !== undefined ? { item: argString(args, "item")! } : {}),
+          ...(typeof args.offset === "number" ? { offset: args.offset } : {}),
+          ...(typeof args.before === "number" ? { before: args.before } : {}),
+        });
+        return { text: read.text, isError: false };
+      }
       case "memory_read": {
         const name = argString(args, "name");
         if (name === undefined) {
@@ -391,6 +457,36 @@ export async function callMoxenTool(
     const code = cause instanceof CliError ? `${cause.code}: ` : "";
     return { text: `${code}${message}`, isError: true };
   }
+}
+
+const SEARCH_SNIPPET_CHARS = 120;
+
+/** `thread_search`: the store's search, scoped to the caller's project unless asked for all, the caller itself left out. */
+async function threadSearchTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>): Promise<ToolResult> {
+  const query = argString(args, "query", true)!;
+  const scope = args.scope === "all" ? "all" : "project";
+  const limit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.min(25, Math.max(1, Math.floor(args.limit))) : 10;
+  const projectId = scope === "project" ? (await api.query({ type: "thread.inspect", threadId: parentThreadId })).thread.projectId : undefined;
+  const found = await api.query({ type: "threads.search", query, limit: limit + 1, hitsPerThread: 3, ...(projectId ? { projectId } : {}) });
+  const threads = found.threads.filter((thread) => thread.threadId !== parentThreadId).slice(0, limit);
+  if (threads.length === 0) {
+    return { text: `No ${scope === "project" ? "thread in this project" : "thread"} matches "${query}".${scope === "project" ? ' Try scope "all" if it may be in another project.' : ""}`, isError: false };
+  }
+  const cut = (text: string) => (text.length <= SEARCH_SNIPPET_CHARS ? text : `${text.slice(0, SEARCH_SNIPPET_CHARS - 1)}…`);
+  const body = threads
+    .map((thread) =>
+      [
+        `- "${thread.title}" · id ${thread.threadId} · project ${thread.projectId} · ${thread.status} · last activity ${thread.updatedAt ?? "unknown"} · ${thread.hitCount} match${thread.hitCount === 1 ? "" : "es"}`,
+        ...thread.hits.map((hit) => `    ${hit.kind}${hit.source ? ` (${hit.source})` : ""}: ${cut(hit.snippet)}`),
+      ].join("\n"),
+    )
+    .join("\n");
+  const others = Math.max(0, found.total - (found.threads.some((thread) => thread.threadId === parentThreadId) ? 1 : 0) - threads.length);
+  const notes = [
+    ...(others > 0 ? [`[Moxen] ${others} more thread${others === 1 ? "" : "s"} matched: narrow the query, or raise limit (at most 25).`] : []),
+    `[Moxen] Read one with thread_read(id${scope === "all" ? ', scope: "all"' : ""}): the outline first, then the turns you need.`,
+  ];
+  return { text: [untrustedContext(body, "moxen:thread_search"), "", ...notes].join("\n"), isError: false };
 }
 
 /**

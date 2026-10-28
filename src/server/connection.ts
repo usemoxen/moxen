@@ -64,6 +64,7 @@ import { noteMessageId } from "../core/threads/views.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { claudeMemoryDir, deleteMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
 import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
 import { readAttachment, workspaceGit, workspaceRead } from "./workspace.js";
@@ -1248,6 +1249,17 @@ export class DirectConnection implements ClientApi {
         const { type: _type, ...request } = query;
         return await searchThreadsView(ctx, request);
       }
+      case "thread.agent-read": {
+        const store = await this.store();
+        const [caller, target] = await Promise.all([store.readThreadRecord(query.callerThreadId), store.readThreadRecord(query.threadId)]);
+        if (!target) throw new CliError("THREAD_NOT_FOUND", `No thread ${query.threadId}.`, { exitCode: 4, details: { threadId: query.threadId } });
+        if ((query.scope ?? "project") === "project" && caller && caller.projectId !== target.projectId) {
+          throw new CliError("THREAD_OUT_OF_SCOPE", `Thread ${query.threadId} belongs to another project: read it with scope "all".`, { exitCode: 2, details: { threadId: query.threadId } });
+        }
+        const budget = agentReadBudget(await latestContextUsage(store, query.callerThreadId), query.maxChars);
+        const { type: _type, callerThreadId: _caller, scope: _scope, maxChars: _max, ...request } = query;
+        return { text: await readThreadForAgent(store, request, budget) };
+      }
       case "memory.list": {
         const location = await this.memoryLocation(query);
         return { projectId: location.projectId, memories: await listMemories(location), index: await memoryIndexText(location) };
@@ -1462,4 +1474,17 @@ function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[]
   return providers.map((provider) =>
     provider.usageLimits === null && live[provider.driver] !== undefined ? { ...provider, usageLimits: live[provider.driver]! } : provider,
   );
+}
+
+/** A thread's latest context reading (`context-window.updated`), or null when its provider never reported one. */
+async function latestContextUsage(store: ThreadStore, threadId: string): Promise<CallerContext | null> {
+  const activities = await store.readActivities(threadId).catch(() => []);
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.kind !== "context-window.updated") continue;
+    const used = activity.payload?.["usedTokens"];
+    const max = activity.payload?.["maxTokens"];
+    if (typeof used === "number") return { usedTokens: used, maxTokens: typeof max === "number" ? max : null };
+  }
+  return null;
 }

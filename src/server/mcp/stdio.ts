@@ -21,6 +21,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "(any provider and model, in its own git worktree). When it settles, a <task-notification> message arrives in your conversation " +
   "with its headline and branch, mid-turn or as a turn of its own. Do not poll task_status: keep working or end your turn, " +
   "and call it once for the full report. " +
+  "thread_search and thread_read find and read other threads, a step at a time. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "web_fetch reads a web page as text; it is not part of delegating.";
 

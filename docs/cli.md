@@ -232,7 +232,7 @@ is said about a tool that is switched off or not attached.
 first, a browser when the site turns it away or builds the page with scripts. It follows the shared Web tools
 settings (`web.browser`, `web.privateNetwork`) on every provider, and never reaches cloud metadata. It is on the
 `moxen` MCP server with the delegation tools, but each is switched on its own per provider:
-`providers.<kind>.orchestration` (delegate, task status, models, cancel) and `providers.<kind>.webFetch`. The
+`providers.<kind>.orchestration` (delegate, task status, models, cancel, thread search and read) and `providers.<kind>.webFetch`. The
 older `moxenTools: false` still turns both off while they are unset. A delegated task keeps `web_fetch` (and the
 checklist) but gets none of the tools that delegate. A configured server named `moxen` replaces Moxen's tools,
 and the MCP tab says so.

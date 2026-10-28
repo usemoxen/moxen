@@ -142,8 +142,19 @@ through the provider's own channel. They say only what Moxen knows: the
 session runs in Moxen, in a worktree, as a delegated task, plus the user's
 own instructions. Every top-level thread also gets the `moxen` MCP server
 (`delegate`, `task_status`, `task_cancel`), so an agent can hand work to a
-subagent thread in a worktree of its own. Delegated threads do not get it;
-`"moxen": null` in `mcpServers` turns it off.
+subagent thread in a worktree of its own, find and read other threads
+(`thread_search`, `thread_read`), and keep Moxen memory (`memory_*`, see
+[threads.md](threads.md#memory)). Delegated threads get only `web_fetch` and
+`memory_read`; `"moxen": null` in `mcpServers` turns it off.
+
+`thread_read` never floods the caller's context: it returns an outline (one
+line per turn, newest first), then the turns asked for (each tool call one
+line, numbered `12.3`), then one tool call in full, in pages. An answer is
+held to 16 K characters, at most 40 K, and to about 5% of the caller's free
+context, so a caller that is nearly full gets only the outline and is told
+why. Every cut names the call that fetches the rest, and the thread's text
+is wrapped as untrusted. Both tools search this project's threads unless the
+model asks for `scope: "all"`.
 
 A session is held to its worktree: file edits, a shell in the main
 checkout, and path redirects outside it are refused (each through the

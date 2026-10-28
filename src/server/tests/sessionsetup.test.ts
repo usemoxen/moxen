@@ -63,9 +63,10 @@ describe("Moxen's own tools, switched per provider", () => {
 
   it("keeps web_fetch with orchestration off, and the delegation tools with web_fetch off", async () => {
     const memory = ["memory_delete", "memory_read", "memory_save"];
-    expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", "web_fetch"]);
+    const threads = ["thread_read", "thread_search"];
+    expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads, "web_fetch"]);
     expect(await moxenTools({ orchestration: false })).toEqual([...memory, "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads]);
   });
 
   it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {

@@ -410,6 +410,22 @@ export type Query =
   | { readonly type: "skills.list"; readonly instanceId: string; readonly cwd: string }
   /** Background work running in a thread's live session; `live: false` when no session runs here. */
   | { readonly type: "thread.background.list"; readonly threadId: string }
+  /**
+   * Another thread as an agent reads it (`thread_read`): the outline, turns,
+   * or one tool call, held to a budget that shrinks as the caller's context
+   * fills. `scope: "project"` (the default) refuses a thread from another project.
+   */
+  | {
+      readonly type: "thread.agent-read";
+      readonly callerThreadId: string;
+      readonly threadId: string;
+      readonly scope?: "project" | "all";
+      readonly turns?: string;
+      readonly item?: string;
+      readonly offset?: number;
+      readonly before?: number;
+      readonly maxChars?: number;
+    }
   /** Every memory a thread or project sees, global first, with the index a session would start with. */
   | ({ readonly type: "memory.list" } & MemoryAddress)
   /** One memory; without a scope, the project's first, then the global. */
@@ -522,6 +538,7 @@ export interface QueryResults {
   doctor: Diagnosis;
   "skills.list": SkillInventory;
   "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
+  "thread.agent-read": { readonly text: string };
   "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
   "memory.read": Memory;
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
@@ -1304,6 +1321,18 @@ export function decodeQuery(value: unknown): Query {
       };
     case "thread.background.list":
       return { type, threadId: requireThreadId(record.threadId) };
+    case "thread.agent-read":
+      return {
+        type,
+        callerThreadId: requireThreadId(record.callerThreadId),
+        threadId: requireThreadId(record.threadId),
+        ...optionalEnum(record, "scope", ["project", "all"] as const, type),
+        ...optionalString(record, "turns"),
+        ...optionalString(record, "item"),
+        ...optionalNumber(record, "offset", type),
+        ...optionalNumber(record, "before", type),
+        ...optionalNumber(record, "maxChars", type),
+      };
     case "memory.list":
       return { type, ...decodeMemoryAddress(record) };
     case "memory.read":
