@@ -61,7 +61,11 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // click the prompt again.
   await act(async () => setup.mockMouse.click(130, 24));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(10, 6));
+  // Found by its title: the sidebar's rows move whenever a row above them changes.
+  const sidebarRows = setup.captureCharFrame().split("\n");
+  const xash = sidebarRows.findIndex((line) => line.includes("Xash3D RT Streamline"));
+  if (xash === -1) fail("the sidebar does not list t-xash");
+  await act(async () => setup.mockMouse.click(10, xash));
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   await act(async () => setup.mockInput.pressKey("HOME"));

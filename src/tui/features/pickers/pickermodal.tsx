@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
+import { SearchField } from "../../ui/searchfield.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { marqueeWindow } from "../../model/skills.js";
@@ -237,14 +238,7 @@ export function PickerModal({
         <text fg={COLOR.bright} bg={SURFACE.raised}>{title}</text>
         <text fg={COLOR.faint} bg={SURFACE.raised}>{"esc"}</text>
       </box>
-      {filterable ? (
-        <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, paddingLeft: 1 }} backgroundColor={SURFACE.hover} selectable={false}>
-          <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{"⌕  "}</text>
-          <text fg={filter.length === 0 ? COLOR.dim : COLOR.bright} bg={SURFACE.hover} selectable={false}>
-            {filter.length === 0 ? "Search" : `${filter}▏`}
-          </text>
-        </box>
-      ) : null}
+      {filterable ? <SearchField query={filter} active={filter.length > 0} /> : null}
       <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" contentOptions={{ paddingRight: 1 }}>
         {sliding && body.kind === "sliders" ? (
           body.sliders.map((slider, at) => {

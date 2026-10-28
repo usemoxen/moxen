@@ -1,5 +1,9 @@
 import { useHover } from "../../hooks/useHover.js";
 import { MonitoringBackdrop } from "../../ui/backdrop.js";
+import { SearchField } from "../../ui/searchfield.js";
+import type { SidebarSearchView } from "./useSidebarSearch.js";
+import type { ThreadEnvelope } from "../../../core/types.js";
+import type { SidebarMessageHit } from "../../model/sidebarsearch.js";
 import type { SidebarGroup, SidebarMode, SidebarNative, SidebarSections, SidebarThread } from "../../model/sidebar.js";
 import { threadSortTime } from "../../model/shell.js";
 import { COLOR, MARKER, pulseColor, rule, spread, STATUS_COLOR, SURFACE, truncate } from "../../theme.js";
@@ -377,6 +381,85 @@ function GroupHeaderRow({
   );
 }
 
+/** A title match: one line, the thread's title. */
+function SearchTitleRow({ thread, width, open, selected, onOpen }: { thread: ThreadEnvelope; width: number; open: boolean; selected: boolean; onOpen: () => void }) {
+  const { hovered, handlers } = useHover();
+  return (
+    <box
+      style={{ flexDirection: "row", width, height: 1, flexShrink: 0 }}
+      onMouseDown={onOpen}
+      selectable={false}
+      backgroundColor={selected ? SURFACE.user : hovered ? SURFACE.border : SURFACE.panel}
+      {...handlers}
+    >
+      <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
+      <text fg={selected || open ? COLOR.bright : COLOR.text} selectable={false}>{` ${truncate(thread.title, width - 3)}`.padEnd(width - 1)}</text>
+    </box>
+  );
+}
+
+/** A message match: the thread's title, then the matching text dim beneath it. */
+function SearchMessageRow({ hit, width, open, selected, onOpen }: { hit: SidebarMessageHit; width: number; open: boolean; selected: boolean; onOpen: () => void }) {
+  const { hovered, handlers } = useHover();
+  const background = selected ? SURFACE.user : hovered ? SURFACE.border : SURFACE.panel;
+  return (
+    <box style={{ flexDirection: "column", width, flexShrink: 0 }} onMouseDown={onOpen} selectable={false} backgroundColor={background} {...handlers}>
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+        <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
+        <text fg={selected || open ? COLOR.bright : COLOR.text} selectable={false}>{` ${truncate(hit.title, width - 3)}`.padEnd(width - 1)}</text>
+      </box>
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+        <text fg={COLOR.dim} selectable={false}>{`   ${truncate(hit.snippet.replace(/\s+/gu, " "), width - 4)}`.padEnd(width)}</text>
+      </box>
+    </box>
+  );
+}
+
+/** A results group's label (or the empty/searching line), on the panel's own surface so the backdrop stays behind it. */
+function SearchLabel({ text, width, marginTop = 0 }: { text: string; width: number; marginTop?: number }) {
+  return (
+    <box style={{ flexDirection: "row", width, height: 1, flexShrink: 0, marginTop }} backgroundColor={SURFACE.panel}>
+      <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{text.padEnd(width)}</text>
+    </box>
+  );
+}
+
+/** What the sidebar lists while a search is typed: title matches, then "In messages". */
+function SearchResults({ search, width, openThreadId, onOpenThread }: { search: SidebarSearchView; width: number; openThreadId: string | null; onOpenThread: (threadId: string) => void }) {
+  const empty = search.titles.length === 0 && search.messages.length === 0;
+  return (
+    <>
+      {search.titles.length === 0 ? null : <SearchLabel text=" Titles" width={width} />}
+      {search.titles.map((thread) => (
+        <SearchTitleRow
+          key={`title:${thread.id}`}
+          thread={thread}
+          width={width}
+          open={thread.id === openThreadId}
+          selected={thread.id === search.selectedId}
+          onOpen={() => onOpenThread(thread.id)}
+        />
+      ))}
+      {search.messages.length === 0 ? null : <SearchLabel text=" In messages" width={width} marginTop={search.titles.length === 0 ? 0 : 1} />}
+      {search.messages.map((hit) => (
+        <SearchMessageRow
+          key={`message:${hit.threadId}`}
+          hit={hit}
+          width={width}
+          open={hit.threadId === openThreadId}
+          selected={hit.threadId === search.selectedId}
+          onOpen={() => onOpenThread(hit.threadId)}
+        />
+      ))}
+      {search.searching ? (
+        <SearchLabel text=" searching messages…" width={width} marginTop={empty ? 0 : 1} />
+      ) : empty ? (
+        <SearchLabel text=" no matches" width={width} />
+      ) : null}
+    </>
+  );
+}
+
 export function Sidebar({
   sections,
   openThreadId,
@@ -400,6 +483,9 @@ export function Sidebar({
   onTogglePanels,
   onOpenSettings,
   serverName,
+  search,
+  searchFocused = false,
+  onFocusSearch,
 }: {
   sections: SidebarSections;
   openThreadId: string | null;
@@ -441,7 +527,14 @@ export function Sidebar({
   onOpenSettings?: () => void;
   /** A paired server on another machine: named in the title, so it is always clear whose threads these are. */
   serverName?: string;
+  /** The search field under the view switcher; a typed query lists its matches in place of the threads. */
+  search?: SidebarSearchView;
+  /** The search holds the keyboard: the field shows its caret. */
+  searchFocused?: boolean;
+  /** A click on the field gives it the keyboard. */
+  onFocusSearch?: () => void;
 }) {
+  const searching = search !== undefined && search.query.trim().length > 0;
   const remaining = sections.settledTotal - sections.settled.length;
   const runningCount = sections.active.filter((row) => row.status === "running").length;
   const blockedCount = sections.active.filter((row) => row.status === "blocked").length;
@@ -516,7 +609,18 @@ export function Sidebar({
       <box style={{ height: 1, flexShrink: 0, zIndex: 1 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.rule} bg={SURFACE.panel}>{` ${rule(Math.max(0, width - 4))}`}</text>
       </box>
-      {sections.mode === "project" ? (
+      {search === undefined ? null : (
+        <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1, paddingRight: 1, zIndex: 1 }} backgroundColor={SURFACE.panel}>
+          <SearchField
+            query={search.query}
+            active={searchFocused}
+            placeholder={searchFocused ? "Search threads" : "Search threads  /"}
+            marginTop={0}
+            {...(onFocusSearch === undefined ? {} : { onClick: onFocusSearch })}
+          />
+        </box>
+      )}
+      {sections.mode === "project" && !searching ? (
         <box
           style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, zIndex: 1 }}
           backgroundColor={SURFACE.panel}
@@ -558,7 +662,9 @@ export function Sidebar({
         stickyStart="top"
         verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}
       >
-        {sections.mode === "grouped"
+        {searching ? (
+          <SearchResults search={search} width={width - 3} openThreadId={openThreadId} onOpenThread={onOpenThread} />
+        ) : sections.mode === "grouped"
           ? sections.groups.map((group, groupIndex) => {
               const count = String(group.threads.length);
               // Budget after the row's own 1-col left/right padding, the
@@ -575,7 +681,7 @@ export function Sidebar({
               );
             })
           : sections.active.map((row) => activeCard(row, sections.mode === "project"))}
-        {sections.mode === "project" && sections.active.length === 0 ? (
+        {!searching && sections.mode === "project" && sections.active.length === 0 ? (
           <text fg={COLOR.faint}>{" no threads in this project"}</text>
         ) : null}
       </scrollbox>

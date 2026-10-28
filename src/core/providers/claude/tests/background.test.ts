@@ -320,11 +320,19 @@ describe("claude live checklist (Task tools)", () => {
   });
 
   it("turns Claude Code's auto memory off only in a session where Moxen memory is on", async () => {
-    for (const [moxenMemory, expected] of [[true, "1"], [false, undefined]] as const) {
-      const transport = new FakeTransport([[initMessage()]]);
-      const driver = new ClaudeDriver({ transport });
-      await Effect.runPromise(driver.startSession({ ...START, ...(moxenMemory ? { moxenMemory } : {}) }));
-      expect(transport.created[0]!.options.env?.["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]).toBe(expected);
+    // The session's env starts from this process's: a run inside a Moxen
+    // session with memory on inherits the variable, so it is cleared here.
+    const inherited = process.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"];
+    delete process.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"];
+    try {
+      for (const [moxenMemory, expected] of [[true, "1"], [false, undefined]] as const) {
+        const transport = new FakeTransport([[initMessage()]]);
+        const driver = new ClaudeDriver({ transport });
+        await Effect.runPromise(driver.startSession({ ...START, ...(moxenMemory ? { moxenMemory } : {}) }));
+        expect(transport.created[0]!.options.env?.["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]).toBe(expected);
+      }
+    } finally {
+      if (inherited !== undefined) process.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = inherited;
     }
   });
 

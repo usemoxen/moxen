@@ -11,6 +11,7 @@
  */
 import type { ThreadListStatus } from "./types.js";
 import { listThreadsView, type OperationContext, type ThreadListQuery } from "./operations.js";
+import { matchesTerms, searchTerms } from "./views.js";
 import type { StoredActivity, StoredMessage } from "./types.js";
 
 export type ThreadSearchHitKind = "title" | "message" | "tool" | "activity";
@@ -52,25 +53,13 @@ export interface ThreadSearch {
   readonly total: number;
 }
 
+export { matchesTerms, searchTerms };
+
 const DEFAULT_LIMIT = 30;
 const DEFAULT_HITS_PER_THREAD = 3;
 const SNIPPET_RADIUS = 60;
 const MAX_ACTIVITY_TEXT = 8_000;
 const CONCURRENCY = 8;
-
-export function searchTerms(query: string): string[] {
-  return query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((term) => term.length > 0);
-}
-
-/** Whether `text` holds every term. `text` is matched lowercased. */
-export function matchesTerms(text: string, terms: readonly string[]): boolean {
-  if (terms.length === 0) return false;
-  const lower = text.toLowerCase();
-  return terms.every((term) => lower.includes(term));
-}
 
 /** The text around the earliest term in `text`, on one line. */
 export function snippetAround(text: string, terms: readonly string[]): string {

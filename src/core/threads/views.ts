@@ -254,3 +254,21 @@ export function webToolKind(tool: string): "search" | "fetch" | null {
   if (flat.includes("websearch") || /(?:news|image|video|local|place)search/u.test(flat)) return "search";
   return null;
 }
+
+/**
+ * A search query's words, lowercased. Thread search on the server and the
+ * sidebar's title filter in a client split and match the same way.
+ */
+export function searchTerms(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length > 0);
+}
+
+/** Whether `text` holds every term. `text` is matched lowercased. */
+export function matchesTerms(text: string, terms: readonly string[]): boolean {
+  if (terms.length === 0) return false;
+  const lower = text.toLowerCase();
+  return terms.every((term) => lower.includes(term));
+}

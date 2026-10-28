@@ -30,6 +30,7 @@ import { useProviderVersions } from "../features/settings/useProviderVersions.js
 import { longThreadConfigFromSnapshot, uiFromSnapshot, useSettings } from "../features/settings/useSettings.js";
 import { PickerModal, type PickerBody, type PickerSlider } from "../features/pickers/pickermodal.js";
 import { useThreadSearch } from "../features/search/useThreadSearch.js";
+import { useSidebarSearch } from "../features/sidebar/useSidebarSearch.js";
 import { DateTimeModal } from "../ui/datetimemodal.js";
 import { ModalShell } from "../ui/modalshell.js";
 import { RenameModal } from "../ui/renamemodal.js";
@@ -187,7 +188,8 @@ export function App({
   const [shell, setShell] = useState<ShellState>(emptyShellState);
   const [threadState, setThreadState] = useState<ThreadState>(emptyThreadState);
   const { plan, background, tasksVisibleNow, toggleTasksVisible } = useTasksPanel(threadState);
-  const [focus, setFocus] = useState<"chat" | "composer" | "diff">("chat");
+  /** `search` is the sidebar's search field, which takes typed keys while it holds focus. */
+  const [focus, setFocus] = useState<"chat" | "composer" | "diff" | "search">("chat");
   const toasts = useToasts();
   /** Kept as the one call every existing error path already used; now routes
       through `toasts` instead of its own state + timeout effect. */
@@ -233,6 +235,16 @@ export function App({
     toggleSidebarProject,
     cycleSidebarProject,
   } = useSidebar(shell, openThreadId, now);
+  const sidebarSearch = useSidebarSearch(client, shell.threads);
+  /** A sidebar row or search result: it always shows the thread itself, so the parent of an open subagent goes back to the parent. */
+  const openThreadFromSidebar = (threadId: string) => {
+    subagentView.close();
+    setFocus("chat");
+    setCreating(false);
+    setPicker(null);
+    setPickerFilter("");
+    setOpenThreadId(threadId);
+  };
   const {
     quitConfirmOpen,
     quitCancelHover,
@@ -959,6 +971,12 @@ export function App({
       if (key.name === "escape") escapeComposer();
       return;
     }
+    if (focus === "search") {
+      // The sidebar's search takes what is typed; other keys (Ctrl+P and
+      // the rest above) still work from it.
+      sidebarSearch.handleKey(key, { onOpen: openThreadFromSidebar, onLeave: () => setFocus("chat") });
+      return;
+    }
     if (focus === "diff") {
       // Escape always closes the side panel, even mid-turn: it must never
       // stop the thread as a side effect. Stopping a turn is UI-only now (the
@@ -972,8 +990,15 @@ export function App({
     }
     // Escape in the chat pane never kills a running turn; it only closes
     // a subagent's conversation, back to its thread.
+    // An opened search result leaves its query listed; escape here clears it.
     if (key.name === "escape") {
       if (subagentView.target !== null) subagentView.close();
+      else sidebarSearch.clear();
+      return;
+    }
+    // `/` searches the sidebar's threads (Cmd+P stays the global search).
+    if (key.sequence === "/" && key.ctrl !== true && key.meta !== true) {
+      setFocus("search");
       return;
     }
     if (key.name === "i") {
@@ -1092,7 +1117,7 @@ export function App({
     // Drafting a new thread, it opens too, with only what applies before
     // a thread exists (search, a project, servers).
     remoteAccess.refresh();
-    setPaletteReturnFocus(focus);
+    setPaletteReturnFocus(focus === "search" ? "chat" : focus);
     setDeleteArmed(false);
     setPickerFilter("");
     setPicker("command");
@@ -2367,16 +2392,10 @@ export function App({
           screenWidth={width}
           backdrop={ui?.backdrop === "off" ? "off" : ui?.backdrop === "static" ? "static" : "animated"}
           openSubagentId={subagentView.target?.agentId ?? null}
-          onOpenThread={(threadId) => {
-            // A thread row always shows the thread itself: clicking the
-            // parent of an open subagent goes back to the parent.
-            subagentView.close();
-            setFocus("chat");
-            setCreating(false);
-            setPicker(null);
-            setPickerFilter("");
-            setOpenThreadId(threadId);
-          }}
+          onOpenThread={openThreadFromSidebar}
+          search={sidebarSearch.view}
+          searchFocused={focus === "search"}
+          onFocusSearch={() => setFocus("search")}
           onOpenSubagents={(threadId, agentId) => {
             setFocus("chat");
             setCreating(false);

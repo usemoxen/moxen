@@ -89,7 +89,11 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   // and the jump must land on the settled post-open layout, at the top).
   await act(async () => setup.mockMouse.click(110, 1));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 6));
+  // Found by its label: a fixed cell landed on a user message whenever the
+  // picker was not up, opening message actions over the next scenario.
+  const pickerRows = setup.captureCharFrame().split("\n");
+  const turnRow = pickerRows.findIndex((line) => line.includes("Turn 5"));
+  if (turnRow !== -1) await act(async () => setup.mockMouse.click(pickerRows[turnRow]!.indexOf("Turn 5") + 1, turnRow));
   await new Promise((resolve) => setTimeout(resolve, 500));
   await setup.flush();
   console.log("--- diff-turn picked (timeline jumped) ---");
