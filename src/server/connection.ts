@@ -122,6 +122,7 @@ import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
+import { DeviceRegistry } from "./transport/devices.js";
 import {
   decodeCommand,
   decodeQuery,
@@ -791,6 +792,18 @@ export class DirectConnection implements ClientApi {
         return await this.continueThread(command);
       case "thread.side-question":
         return await this.sideQuestion(command);
+      case "remote.pairing.start":
+        return this.requireRemoteAccess().startPairing();
+      case "remote.pairing.cancel":
+        this.remoteAccess?.cancelPairing();
+        return accepted;
+      case "remote.device.revoke":
+        // Without a server there are no sockets to drop, but the device can still be forgotten.
+        if (this.remoteAccess) await this.remoteAccess.revoke(command.deviceId);
+        else if (!(await new DeviceRegistry().revoke(command.deviceId))) {
+          throw new CliError("REMOTE_DEVICE_NOT_FOUND", `No paired device ${command.deviceId}.`, { details: { deviceId: command.deviceId } });
+        }
+        return accepted;
       case "settings.set": {
         // Re-read rather than reusing a cached copy: another client may
         // have written since, and a settings page that silently reverts a
@@ -1230,6 +1243,12 @@ export class DirectConnection implements ClientApi {
       }
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "remote.devices":
+        return {
+          devices: this.remoteAccess
+            ? await this.remoteAccess.listDevices()
+            : (await new DeviceRegistry().list()).map((device) => ({ ...device, connections: 0 })),
+        };
       case "remote.status": {
         if (this.remoteAccess) return { available: true, ...this.remoteAccess.status() };
         const remote = (await this.loadConfig()).remote;
@@ -1328,6 +1347,11 @@ export class DirectConnection implements ClientApi {
    * Applies the current config; a failure is kept in `remote.status`
    * rather than stopping the server, which still serves this machine.
    */
+  private requireRemoteAccess(): RemoteAccess {
+    if (this.remoteAccess) return this.remoteAccess;
+    throw new CliError("REMOTE_NEEDS_SERVER", "Remote access is part of the moxen server. Start it (moxen server start) and try again.");
+  }
+
   async attachRemoteAccess(remoteAccess: RemoteAccess): Promise<void> {
     this.remoteAccess = remoteAccess;
     const remote = await this.loadConfig().then((config) => config.remote, () => undefined);

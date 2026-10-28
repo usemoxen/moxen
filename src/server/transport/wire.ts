@@ -19,7 +19,7 @@ import { CliError, toCliError } from "../../core/errors.js";
 export const PROTOCOL_VERSION = 1;
 
 export type ClientMessage =
-  | { readonly id: number; readonly method: "hello"; readonly params: { readonly protocol: number } }
+  | { readonly id: number; readonly method: "hello"; readonly params: HelloParams }
   | { readonly id: number; readonly method: "dispatch"; readonly params: unknown }
   | { readonly id: number; readonly method: "query"; readonly params: unknown }
   | { readonly id: number; readonly method: "getConfig" }
@@ -43,10 +43,27 @@ export type ServerMessage =
   | { readonly subscription: number; readonly item: unknown }
   | { readonly subscription: number; readonly error: WireError };
 
+/**
+ * A local socket sends `protocol` alone. A remote one (TLS, see
+ * `./remoteaccess.ts`) must also say who it is: `pair` once, with the code
+ * the server showed, and `device` every time after.
+ */
+export interface HelloParams {
+  readonly protocol: number;
+  readonly pair?: { readonly code: string; readonly deviceName: string };
+  readonly device?: { readonly id: string; readonly token: string };
+}
+
 export interface HelloResult {
   readonly protocol: number;
   readonly server: "moxen";
   readonly pid: number;
+  /** Remote sockets: the server's name (its host), for the client's list of servers. */
+  readonly serverName?: string;
+  /** Remote sockets: the device this socket is, once admitted. */
+  readonly deviceId?: string;
+  /** After `pair` only: the device's token, which the client keeps in its keychain and never shows. */
+  readonly token?: string;
 }
 
 /** A `CliError` as it crosses the wire; code, exit code and details survive. */

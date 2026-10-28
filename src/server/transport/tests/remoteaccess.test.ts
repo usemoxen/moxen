@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { createTlsKey, keyFingerprint, tlsIdentity } from "../certificate.js";
+import { DeviceRegistry, type TokenStore } from "../devices.js";
 import { classifyAddress, RemoteAccess, remoteAddresses, type RemoteAddress } from "../remoteaccess.js";
 import { RemoteConnection } from "../remote.js";
 import { serve } from "../serve.js";
@@ -29,13 +34,34 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function remoteAccess(admit?: () => void): Promise<{ remote: RemoteAccess; fingerprint: string }> {
+async function devices(): Promise<DeviceRegistry> {
+  const values = new Map<string, string>();
+  const tokens: TokenStore = {
+    read: async (name) => values.get(name) ?? null,
+    write: async (name, value) => void (value === "" ? values.delete(name) : values.set(name, value)),
+  };
+  const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-remote-"));
+  return new DeviceRegistry({ file: path.join(dir, "devices.json"), tokens });
+}
+
+async function remoteAccess(): Promise<{ remote: RemoteAccess; fingerprint: string }> {
   const harness = await testHarness();
   const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
   const identity = tlsIdentity(createTlsKey());
-  const remote = new RemoteAccess({ api, identity: async () => identity, addresses: () => [LOOPBACK], ...(admit ? { admit } : {}) });
+  const remote = new RemoteAccess({ api, identity: async () => identity, addresses: () => [LOOPBACK], devices: await devices() });
   teardown.push(() => api.close(), () => remote.close());
   return { remote, fingerprint: identity.fingerprint };
+}
+
+const hello = (extra: object = {}) => ({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, ...extra } });
+
+/** Pair a device through a real remote hello; its id and token. */
+async function paired(remote: RemoteAccess, port: number, fingerprint: string): Promise<{ id: string; token: string }> {
+  const { code } = remote.startPairing();
+  const { replies, socket } = await exchange(port, fingerprint, [hello({ pair: { code, deviceName: "test laptop" } })]);
+  socket.destroy();
+  const result = replies[0]?.result as { deviceId: string; token: string };
+  return { id: result.deviceId, token: result.token };
 }
 
 /** A TLS client that trusts nothing but the pin, sending `lines` and collecting replies. */
@@ -109,7 +135,7 @@ describe("remote addresses", () => {
 
 describe("remote access listener", () => {
   it("listens only while enabled, and drops remote sockets when turned off", async () => {
-    const { remote, fingerprint } = await remoteAccess(() => undefined);
+    const { remote, fingerprint } = await remoteAccess();
     const port = await freePort();
 
     expect((await remote.apply(undefined)).listening).toEqual([]);
@@ -117,11 +143,13 @@ describe("remote access listener", () => {
     const status = await remote.apply({ enabled: true, interfaces: "lan", port });
     expect(status).toMatchObject({ enabled: true, port, fingerprint, listening: [LOOPBACK] });
 
-    const { replies, socket } = await exchange(port, fingerprint, [{ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }]);
-    expect(replies[0]).toMatchObject({ id: 1, result: { protocol: PROTOCOL_VERSION } });
+    const device = await paired(remote, port, fingerprint);
+    const { replies, socket } = await exchange(port, fingerprint, [hello({ device })]);
+    expect(replies[0]).toMatchObject({ id: 1, result: { protocol: PROTOCOL_VERSION, deviceId: device.id } });
 
     const closed = new Promise((resolve) => socket.once("close", resolve));
     expect((await remote.apply({ enabled: false, port })).listening).toEqual([]);
+    expect(() => remote.startPairing()).toThrow(expect.objectContaining({ code: "REMOTE_DISABLED" }));
     await closed;
     await expect(
       new Promise((resolve, reject) => {
@@ -135,7 +163,7 @@ describe("remote access listener", () => {
     ).rejects.toThrow();
   });
 
-  it("refuses every remote hello until pairing admits it", async () => {
+  it("refuses a remote hello that is neither a pairing nor a paired device", async () => {
     const { remote, fingerprint } = await remoteAccess();
     const port = await freePort();
     await remote.apply({ enabled: true, port });
@@ -144,15 +172,53 @@ describe("remote access listener", () => {
       { id: 2, method: "query", params: { type: "projects.list" } },
     ]);
     expect(replies.find((reply) => reply.id === 1)).toMatchObject({ error: { code: "REMOTE_NOT_PAIRED" } });
+    const wrong = await exchange(port, fingerprint, [hello({ device: { id: "nobody", token: "nothing" } })]);
+    expect(wrong.replies[0]).toMatchObject({ error: { code: "REMOTE_DEVICE_REFUSED" } });
     expect(replies.find((reply) => reply.id === 2)).toMatchObject({ error: { code: "PROTOCOL_HELLO_REQUIRED" } });
   });
 
-  it("serves an admitted remote client everything but shutdown", async () => {
-    const { remote, fingerprint } = await remoteAccess(() => undefined);
+  it("pairs with a code once, then admits the device by its token alone", async () => {
+    const { remote, fingerprint } = await remoteAccess();
     const port = await freePort();
     await remote.apply({ enabled: true, port });
+    const pairing = remote.startPairing();
+    expect(pairing).toMatchObject({ addresses: [`127.0.0.1:${port}`], fingerprint });
+
+    const first = await exchange(port, fingerprint, [hello({ pair: { code: pairing.code, deviceName: "laptop" } })]);
+    const result = first.replies[0]?.result as Record<string, unknown>;
+    expect(result).toMatchObject({ serverName: os.hostname(), deviceId: expect.any(String), token: expect.any(String) });
+
+    const reused = await exchange(port, fingerprint, [hello({ pair: { code: pairing.code, deviceName: "thief" } })]);
+    expect(reused.replies[0]).toMatchObject({ error: { code: "REMOTE_PAIRING_REFUSED" } });
+
+    const again = await exchange(port, fingerprint, [hello({ device: { id: result.deviceId, token: result.token } })]);
+    expect(again.replies[0]?.result).not.toHaveProperty("token");
+    expect(await remote.listDevices()).toEqual([expect.objectContaining({ id: result.deviceId, name: "laptop", connections: 2 })]);
+  });
+
+  it("revoking a device drops its sockets and refuses it after", async () => {
+    const { remote, fingerprint } = await remoteAccess();
+    const port = await freePort();
+    await remote.apply({ enabled: true, port });
+    const device = await paired(remote, port, fingerprint);
+    const { socket } = await exchange(port, fingerprint, [hello({ device })]);
+    const closed = new Promise((resolve) => socket.once("close", resolve));
+
+    await remote.revoke(device.id);
+    await closed;
+    expect(await remote.listDevices()).toEqual([]);
+    const after = await exchange(port, fingerprint, [hello({ device })]);
+    expect(after.replies[0]).toMatchObject({ error: { code: "REMOTE_DEVICE_REFUSED" } });
+    await expect(remote.revoke(device.id)).rejects.toMatchObject({ code: "REMOTE_DEVICE_NOT_FOUND" });
+  });
+
+  it("serves a paired device everything but shutdown", async () => {
+    const { remote, fingerprint } = await remoteAccess();
+    const port = await freePort();
+    await remote.apply({ enabled: true, port });
+    const device = await paired(remote, port, fingerprint);
     const { replies } = await exchange(port, fingerprint, [
-      { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } },
+      hello({ device }),
       { id: 2, method: "query", params: { type: "projects.list" } },
       { id: 3, method: "shutdown" },
     ]);

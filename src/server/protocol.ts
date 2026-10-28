@@ -23,7 +23,7 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
-import type { RemoteAccessStatus } from "./transport/remoteaccess.js";
+import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
   CancelledTask,
@@ -215,6 +215,14 @@ export type CommandBody =
    * `value` is always text — the schema's parser owns the conversion.
    */
   | { readonly type: "settings.set"; readonly key: string; readonly value: string }
+  /**
+   * Remote access (`transport/remoteaccess.ts`). Turning it on or off is
+   * `settings.set` on `remote.enabled`; these pair and forget devices.
+   * Starting a pairing needs the server and remote access on.
+   */
+  | { readonly type: "remote.pairing.start" }
+  | { readonly type: "remote.pairing.cancel" }
+  | { readonly type: "remote.device.revoke"; readonly deviceId: string }
   /** Copy one entry of a list setting (`key` is the list's, e.g. `providers.harness.profiles`) under a new id. */
   | { readonly type: "settings.duplicate"; readonly key: string; readonly id: string; readonly newId: string }
   /**
@@ -317,6 +325,9 @@ export interface CommandResults {
   "project.ensure": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
   "settings.set": SettingsSnapshot & Accepted;
+  "remote.pairing.start": RemotePairing;
+  "remote.pairing.cancel": Accepted;
+  "remote.device.revoke": Accepted;
   "settings.duplicate": SettingsSnapshot & Accepted;
   "harness.profile.import": SettingsSnapshot & Accepted & { readonly id: string; readonly fileId: string };
   "harness.profile.test": HarnessTestResult;
@@ -399,6 +410,8 @@ export type Query =
   | { readonly type: "usage.limits" }
   /** Remote access as the server sees it; `available` false when there is no server (in-process). */
   | { readonly type: "remote.status" }
+  /** Paired devices, with how many sockets each has open (0 without a server). */
+  | { readonly type: "remote.devices" }
   /**
    * A background task's output, best-effort: the driver may have no way to
    * read it (unsupported provider, task gone, file not yet written).
@@ -468,6 +481,7 @@ export interface QueryResults {
   "thread.subagent": SubagentTranscript;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "remote.status": RemoteAccessStatus & { readonly available: boolean };
+  "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
   "harness.profile.export": { readonly id: string; readonly text: string };
@@ -969,6 +983,11 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "strategy", ["merge", "squash", "rebase"] as const, type),
         ...optionalBoolean(record, "deleteBranch"),
       };
+    case "remote.pairing.start":
+    case "remote.pairing.cancel":
+      return { ...meta, type };
+    case "remote.device.revoke":
+      return { ...meta, type, deviceId: requireField(record.deviceId, type, "deviceId") };
     case "settings.set":
       return {
         ...meta,
@@ -1150,6 +1169,7 @@ export function decodeQuery(value: unknown): Query {
     case "doctor":
     case "usage.limits":
     case "remote.status":
+    case "remote.devices":
     case "settings.read":
     case "provider.latest":
       return { type };

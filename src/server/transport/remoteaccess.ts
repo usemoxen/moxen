@@ -23,7 +23,9 @@ import { readSecretStrict, writeSecret } from "../../core/secrets.js";
 import type { RemoteConfig, RemoteInterfaces } from "../../core/types.js";
 import type { ClientApi } from "../api.js";
 import { createTlsKey, tlsIdentity, type TlsIdentity } from "./certificate.js";
-import { handleSocket, type SocketContext } from "./serve.js";
+import { DeviceRegistry, type PairedDevice, type PairingCode } from "./devices.js";
+import { handleSocket } from "./serve.js";
+import type { HelloResult } from "./wire.js";
 
 /** The keychain entry holding the listener's private key. */
 export const REMOTE_TLS_KEY_SECRET = "remote-tls-key";
@@ -50,12 +52,21 @@ export interface RemoteAccessStatus {
   readonly error?: string;
 }
 
-/** A remote socket's admission check (pairing and device tokens). */
-export type RemoteAdmit = NonNullable<SocketContext["admit"]>;
+export interface RemoteDevice extends PairedDevice {
+  /** Remote sockets this device has open right now. */
+  readonly connections: number;
+}
+
+export interface RemotePairing extends PairingCode {
+  /** Where to reach this server: what the other machine types with the code. */
+  readonly addresses: readonly string[];
+  readonly fingerprint: string;
+}
 
 export interface RemoteAccessOptions {
   readonly api: ClientApi;
-  readonly admit?: RemoteAdmit;
+  /** Paired devices and pairing codes; the user's by default. */
+  readonly devices?: DeviceRegistry;
   /** The identity source; the keychain by default. Tests pass a fixed one. */
   readonly identity?: () => Promise<TlsIdentity>;
   /** The addresses to bind; this machine's, by `remoteAddresses`, by default. Tests bind loopback. */
@@ -64,13 +75,64 @@ export interface RemoteAccessOptions {
 
 export class RemoteAccess {
   private servers: tls.Server[] = [];
-  private readonly sockets = new Set<net.Socket>();
+  /** Every remote socket, with the device it was admitted as (null until hello). */
+  private readonly sockets = new Map<net.Socket, string | null>();
+  private readonly devices: DeviceRegistry;
   private current: RemoteAccessStatus = { enabled: false, interfaces: "both", port: DEFAULT_REMOTE_PORT, listening: [] };
   private identity: TlsIdentity | null = null;
   /** Applies run one at a time: a toggle racing a toggle must not leak a listener. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly options: RemoteAccessOptions) {}
+  constructor(private readonly options: RemoteAccessOptions) {
+    this.devices = options.devices ?? new DeviceRegistry();
+  }
+
+  /**
+   * A pairing code for a new device, with the addresses and pin to reach
+   * this server. Only while listening: a code nobody can use is a lie.
+   */
+  startPairing(): RemotePairing {
+    const { listening, port, fingerprint } = this.current;
+    if (listening.length === 0 || fingerprint === undefined) {
+      throw new CliError("REMOTE_DISABLED", "Turn remote access on before pairing a device.");
+    }
+    return { ...this.devices.startPairing(), addresses: listening.map((entry) => hostPort(entry, port)), fingerprint };
+  }
+
+  cancelPairing(): void {
+    this.devices.cancelPairing();
+  }
+
+  async listDevices(): Promise<RemoteDevice[]> {
+    const counts = new Map<string, number>();
+    for (const deviceId of this.sockets.values()) if (deviceId !== null) counts.set(deviceId, (counts.get(deviceId) ?? 0) + 1);
+    return (await this.devices.list()).map((device) => ({ ...device, connections: counts.get(device.id) ?? 0 }));
+  }
+
+  /** Forget a device and drop its open sockets at once. */
+  async revoke(deviceId: string): Promise<void> {
+    const found = await this.devices.revoke(deviceId);
+    for (const [socket, owner] of this.sockets) if (owner === deviceId) socket.destroy();
+    if (!found) throw new CliError("REMOTE_DEVICE_NOT_FOUND", `No paired device ${deviceId}.`, { details: { deviceId } });
+  }
+
+  /** `hello` on a remote socket: a pairing code once, a device id and token after. */
+  private async admit(params: Record<string, unknown>, socket: net.Socket): Promise<Partial<HelloResult>> {
+    const serverName = os.hostname();
+    const pair = params.pair as Record<string, unknown> | undefined;
+    if (pair && typeof pair === "object") {
+      const { device, token } = await this.devices.pair(pair.code, pair.deviceName);
+      if (this.sockets.has(socket)) this.sockets.set(socket, device.id);
+      return { serverName, deviceId: device.id, token };
+    }
+    const claimed = params.device as Record<string, unknown> | undefined;
+    if (claimed && typeof claimed === "object") {
+      const device = await this.devices.authenticate(claimed.id, claimed.token);
+      if (this.sockets.has(socket)) this.sockets.set(socket, device.id);
+      return { serverName, deviceId: device.id };
+    }
+    throw new CliError("REMOTE_NOT_PAIRED", "This device is not paired with the moxen server. Pair it with a code shown on the server.");
+  }
 
   status(): RemoteAccessStatus {
     return this.current;
@@ -131,12 +193,12 @@ export class RemoteAccess {
 
   private async listen(address: RemoteAddress, port: number, identity: TlsIdentity): Promise<tls.Server> {
     const server = tls.createServer({ cert: identity.cert, key: identity.key, minVersion: "TLSv1.3" }, (socket) => {
-      this.sockets.add(socket);
+      this.sockets.set(socket, null);
       socket.once("close", () => this.sockets.delete(socket));
       handleSocket(socket, this.options.api, {
         remote: true,
         shutdown: () => undefined,
-        ...(this.options.admit ? { admit: this.options.admit } : {}),
+        admit: (params, admitted) => this.admit(params, admitted),
       });
     });
     // A failed handshake (a port scanner, a client that refused our key)
@@ -156,7 +218,8 @@ export class RemoteAccess {
   private async stop(): Promise<void> {
     const servers = this.servers;
     this.servers = [];
-    for (const socket of this.sockets) socket.destroy();
+    this.devices.cancelPairing();
+    for (const socket of this.sockets.keys()) socket.destroy();
     this.sockets.clear();
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   }
@@ -238,4 +301,9 @@ export function classifyAddress(address: string, family: "IPv4" | "IPv6"): Remot
   if (lower.startsWith("fd7a:115c:a1e0:")) return "tailscale";
   if (/^f[cd][0-9a-f]{2}:/.test(lower)) return "lan";
   return null;
+}
+
+/** `192.168.1.20:47317`, or `[fd7a:…]:47317` for IPv6. */
+export function hostPort(entry: RemoteAddress, port: number): string {
+  return entry.family === "IPv6" ? `[${entry.address}]:${port}` : `${entry.address}:${port}`;
 }

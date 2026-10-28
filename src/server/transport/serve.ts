@@ -97,11 +97,12 @@ export interface SocketContext {
   /** Stop the server. Never offered to a remote socket. */
   readonly shutdown: () => void;
   /**
-   * Remote sockets only: vets the `hello` params before the socket is
-   * greeted, throwing to refuse. Until pairing exists every remote hello is
-   * refused, so an enabled listener grants nothing.
+   * Remote sockets only: vets the `hello` params (a pairing code, or a
+   * device's id and token) before the socket is greeted, throwing to
+   * refuse. What it returns is added to the hello result. Without it every
+   * remote hello is refused.
    */
-  readonly admit?: (params: Record<string, unknown>) => Promise<void> | void;
+  readonly admit?: (params: Record<string, unknown>, socket: net.Socket) => Promise<Partial<HelloResult>> | Partial<HelloResult>;
 }
 
 export function handleSocket(socket: net.Socket, api: ClientApi, context: SocketContext): void {
@@ -113,100 +114,118 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   const send = (message: ServerMessage): void => {
     if (!socket.destroyed) socket.write(encode(message));
   };
-  const reply = (id: number, run: () => Promise<unknown> | unknown): void => {
+  const reply = (id: number, run: () => Promise<unknown> | unknown, settled?: () => void): void => {
     void (async () => {
       try {
         send({ id, result: (await run()) ?? null });
       } catch (cause) {
         send({ id, error: toWireError(cause) });
+      } finally {
+        settled?.();
       }
     })();
   };
 
+  // Messages are taken in order. Only `hello` holds the line, until it
+  // settles: a remote one is checked asynchronously (device tokens are in
+  // the keychain), and a request pipelined behind it must not race it and
+  // be refused as un-greeted. Every other reply is sent whenever it is ready.
+  let queue: Promise<void> = Promise.resolve();
+
   socket.on("data", (chunk: string) => {
     for (const line of reader.push(chunk)) {
       const message = parseLine(line);
-      const id = typeof message?.id === "number" ? message.id : null;
-      const method = typeof message?.method === "string" ? message.method : null;
-      if (message === null || id === null || method === null) continue;
-      const params = (message.params ?? {}) as Record<string, unknown>;
-
-      if (method === "hello") {
-        reply(id, async () => {
-          if (params.protocol !== PROTOCOL_VERSION) {
-            throw new CliError(
-              "PROTOCOL_MISMATCH",
-              `This moxen server speaks protocol ${PROTOCOL_VERSION}; the client speaks ${String(params.protocol)}. Restart the server so both run the same version.`,
-              { details: { server: PROTOCOL_VERSION, client: params.protocol } },
-            );
-          }
-          if (context.remote) {
-            if (!context.admit) throw new CliError("REMOTE_NOT_PAIRED", "This moxen server does not accept remote clients yet.");
-            await context.admit(params);
-          }
-          greeted = true;
-          const hello: HelloResult = { protocol: PROTOCOL_VERSION, server: "moxen", pid: process.pid };
-          return hello;
-        });
-        continue;
-      }
-      if (!greeted) {
-        send({ id, error: toWireError(new CliError("PROTOCOL_HELLO_REQUIRED", "Send hello before any request.")) });
-        continue;
-      }
-
-      switch (method) {
-        case "dispatch":
-          reply(id, () => api.dispatch(message.params as never));
-          break;
-        case "query":
-          reply(id, () => api.query(message.params as never));
-          break;
-        case "getConfig":
-          reply(id, () => api.getConfig());
-          break;
-        case "turnDiff":
-          reply(id, () => api.turnDiff(String(params.threadId), Number(params.toTurnCount)));
-          break;
-        case "subscribeShell":
-        case "subscribeThread": {
-          const options = typeof params.afterSequence === "number" ? { afterSequence: params.afterSequence } : {};
-          const onItem = (item: unknown): void => send({ subscription: id, item });
-          const onError = (error: unknown): void => send({ subscription: id, error: toWireError(error) });
-          // Acknowledge first: an implementation may emit its first frame
-          // synchronously, and the client must know the id by then.
-          send({ id, result: { subscription: id } });
-          try {
-            const unsubscribe =
-              method === "subscribeShell"
-                ? api.subscribeShell(options, onItem, onError)
-                : api.subscribeThread(String(params.threadId), options, onItem, onError);
-            subscriptions.set(id, unsubscribe);
-          } catch (cause) {
-            onError(cause);
-          }
-          break;
-        }
-        case "unsubscribe": {
-          const subscription = Number(params.subscription);
-          subscriptions.get(subscription)?.();
-          subscriptions.delete(subscription);
-          send({ id, result: null });
-          break;
-        }
-        case "shutdown":
-          if (context.remote) {
-            send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
-            break;
-          }
-          send({ id, result: null });
-          context.shutdown();
-          break;
-        default:
-          send({ id, error: toWireError(new CliError("UNKNOWN_METHOD", `Unknown method ${method}.`)) });
-      }
+      queue = queue.then(() => handle(message));
     }
   });
+
+  const handle = (message: Record<string, unknown> | null): Promise<void> | undefined => {
+    const id = typeof message?.id === "number" ? message.id : null;
+    const method = typeof message?.method === "string" ? message.method : null;
+    if (message === null || id === null || method === null) return undefined;
+    const params = (message.params ?? {}) as Record<string, unknown>;
+
+    if (method === "hello") {
+      let settle!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      reply(id, async () => {
+        if (params.protocol !== PROTOCOL_VERSION) {
+          throw new CliError(
+            "PROTOCOL_MISMATCH",
+            `This moxen server speaks protocol ${PROTOCOL_VERSION}; the client speaks ${String(params.protocol)}. Restart the server so both run the same version.`,
+            { details: { server: PROTOCOL_VERSION, client: params.protocol } },
+          );
+        }
+        let admitted: Partial<HelloResult> = {};
+        if (context.remote) {
+          if (!context.admit) throw new CliError("REMOTE_NOT_PAIRED", "This moxen server does not accept remote clients.");
+          admitted = await context.admit(params, socket);
+        }
+        greeted = true;
+        const hello: HelloResult = { ...admitted, protocol: PROTOCOL_VERSION, server: "moxen", pid: process.pid };
+        return hello;
+      }, settle);
+      return settled;
+    }
+    if (!greeted) {
+      send({ id, error: toWireError(new CliError("PROTOCOL_HELLO_REQUIRED", "Send hello before any request.")) });
+      return undefined;
+    }
+
+    switch (method) {
+      case "dispatch":
+        reply(id, () => api.dispatch(message.params as never));
+        break;
+      case "query":
+        reply(id, () => api.query(message.params as never));
+        break;
+      case "getConfig":
+        reply(id, () => api.getConfig());
+        break;
+      case "turnDiff":
+        reply(id, () => api.turnDiff(String(params.threadId), Number(params.toTurnCount)));
+        break;
+      case "subscribeShell":
+      case "subscribeThread": {
+        const options = typeof params.afterSequence === "number" ? { afterSequence: params.afterSequence } : {};
+        const onItem = (item: unknown): void => send({ subscription: id, item });
+        const onError = (error: unknown): void => send({ subscription: id, error: toWireError(error) });
+        // Acknowledge first: an implementation may emit its first frame
+        // synchronously, and the client must know the id by then.
+        send({ id, result: { subscription: id } });
+        try {
+          const unsubscribe =
+            method === "subscribeShell"
+              ? api.subscribeShell(options, onItem, onError)
+              : api.subscribeThread(String(params.threadId), options, onItem, onError);
+          subscriptions.set(id, unsubscribe);
+        } catch (cause) {
+          onError(cause);
+        }
+        break;
+      }
+      case "unsubscribe": {
+        const subscription = Number(params.subscription);
+        subscriptions.get(subscription)?.();
+        subscriptions.delete(subscription);
+        send({ id, result: null });
+        break;
+      }
+      case "shutdown":
+        if (context.remote) {
+          send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
+          break;
+        }
+        send({ id, result: null });
+        context.shutdown();
+        break;
+      default:
+        send({ id, error: toWireError(new CliError("UNKNOWN_METHOD", `Unknown method ${method}.`)) });
+    }
+    return undefined;
+  };
 
   socket.once("close", () => {
     for (const unsubscribe of subscriptions.values()) unsubscribe();
