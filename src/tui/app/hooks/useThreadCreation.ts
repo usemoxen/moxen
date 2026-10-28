@@ -23,6 +23,8 @@ export const NO_PROJECT = "__no-project__";
 export function useThreadCreation(params: {
   client: ClientApi;
   cwd: string | undefined;
+  /** The server is on another machine: a typed folder is its path, sent as typed. */
+  remote?: boolean;
   selected: ThreadEnvelope | null;
   pending: ImageAttachmentUpload[];
   shellProjects: ProjectEnvelope[];
@@ -45,6 +47,7 @@ export function useThreadCreation(params: {
   const {
     client,
     cwd,
+    remote = false,
     selected,
     pending,
     shellProjects,
@@ -172,11 +175,16 @@ export function useThreadCreation(params: {
       return;
     }
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    if (remote && (trimmed === "~" || trimmed.startsWith("~/") || !isAbsoluteAnywhere(trimmed))) {
+      // This machine's home and working folder mean nothing on the server.
+      setError("enter the folder's full path on the server");
+      return;
+    }
     if ((trimmed === "~" || trimmed.startsWith("~/")) && home.length === 0) {
       setError("could not resolve ~ — enter a full path");
       return;
     }
-    const workspaceRoot = resolve(trimmed === "~" || trimmed.startsWith("~/") ? home + trimmed.slice(1) : trimmed);
+    const workspaceRoot = remote ? trimmed : resolve(trimmed === "~" || trimmed.startsWith("~/") ? home + trimmed.slice(1) : trimmed);
     const normalized = workspaceRoot.replace(/[/\\]+$/, "");
     const existing = shellProjects.find(
       (project) =>
@@ -187,7 +195,7 @@ export function useThreadCreation(params: {
       return;
     }
     const projectId = crypto.randomUUID();
-    const title = basename(workspaceRoot) || "project";
+    const title = (remote ? workspaceRoot.replace(/[/\\]+$/, "").split(/[/\\]/).pop() : basename(workspaceRoot)) || "project";
     void client
       .dispatch({
         type: "project.create",
@@ -207,4 +215,9 @@ export function useThreadCreation(params: {
   };
 
   return { createThread, startNewThread, pickCreatingProject, submitProjectFolder, openProjectPicker };
+}
+
+/** Absolute on either kind of machine: `/x`, `C:\x` or `C:/x`, or a `\\server\share` path. */
+function isAbsoluteAnywhere(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }

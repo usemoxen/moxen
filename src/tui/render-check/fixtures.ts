@@ -743,6 +743,9 @@ export const client: ClientApi = {
         threads: [entry("t-active", "Fix the webhook handler", "active"), entry("t-old", "Billing refactor", "settled")],
       };
     }
+    if (query.type === "remote.status") {
+      return { available: true, enabled: false, interfaces: "both", port: 47317, listening: [] };
+    }
     if (query.type === "thread.background.output") {
       return { available: true, lines: ["watching build.log", "...still going"] };
     }

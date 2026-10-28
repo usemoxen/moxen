@@ -35,6 +35,7 @@ import { runHandoffModels } from "./render-check/scenarios/handoffModels.js";
 import { runSettingsSidebarScroll } from "./render-check/scenarios/settingsSidebarScroll.js";
 import { runQueueAndSide } from "./render-check/scenarios/queueAndSide.js";
 import { runSidebarTree } from "./render-check/scenarios/sidebarTree.js";
+import { runRemoteAccess } from "./render-check/scenarios/remoteAccess.js";
 import { registerSyntaxParsers } from "../core/syntax/register.js";
 
 /**
@@ -100,5 +101,6 @@ await runQueueAndSide();
 await runNoticeBanner();
 await runImageTokens();
 await runSidebarTree();
+await runRemoteAccess();
 
 process.exit(0);

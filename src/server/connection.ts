@@ -62,7 +62,8 @@ import { callMoxenTool, moxenToolsFor } from "./mcp/tools.js";
 import { noteMessageId } from "../core/threads/views.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import type { McpServerSpec } from "../core/mcp.js";
-import { ensureStoredProject, listStoredProjects } from "../core/projects/projects.js";
+import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
 import { diffCheckpointRange, diffCheckpointStat } from "../core/checkpoints/git.js";
 import { CliError } from "../core/errors.js";
@@ -315,6 +316,19 @@ export class DirectConnection implements ClientApi {
     const thread = await store.readThreadRecord(threadId);
     if (!thread) throw new CliError("THREAD_NOT_FOUND", `No thread ${threadId}.`, { exitCode: 2 });
     return thread.env.path;
+  }
+
+  /** `root` when it is the thread's checkout or its project's root; anything else is refused. */
+  private async liveRoot(threadId: string, root: string): Promise<string> {
+    const store = await this.store();
+    const thread = await store.readThreadRecord(threadId);
+    if (!thread) throw new CliError("THREAD_NOT_FOUND", `No thread ${threadId}.`, { exitCode: 2 });
+    const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === thread.projectId);
+    const allowed = [thread.env.path, project?.workspaceRoot].filter((entry): entry is string => typeof entry === "string");
+    if (!allowed.some((entry) => workspaceRootsEqual(entry, root))) {
+      throw new CliError("WORKSPACE_OUTSIDE_THREAD", "That folder is not this thread's.", { details: { threadId } });
+    }
+    return root;
   }
 
   private async forgeFor(threadId: string, config: ForgeConfig | undefined): Promise<ForgeDetection> {
@@ -1265,6 +1279,10 @@ export class DirectConnection implements ClientApi {
         if (!profile) throw new CliError("PROVIDER_UNKNOWN", `No harness profile "${query.profileId}".`, { details: { profileId: query.profileId } });
         return { id: profile.id, text: `${JSON.stringify(exportProfileDocument(profile), null, 2)}\n` };
       }
+      case "workspace.git":
+        return { stdout: await workspaceGit(await this.liveRoot(query.threadId, query.root), query.call, query.paths ?? []) };
+      case "workspace.read":
+        return { content: await workspaceRead(await this.liveRoot(query.threadId, query.root), query.path) };
       case "git.overview": {
         const cwd = await this.workspaceFor(query.threadId);
         return await readOverview(cwd, {

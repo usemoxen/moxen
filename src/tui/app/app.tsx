@@ -14,6 +14,11 @@ import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
 import { SettingsModal } from "../features/settings/settingsmodal.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
+import type { ActiveServer } from "../features/remote/server.js";
+import { useRemote } from "../features/remote/useRemote.js";
+import type { PairedServers } from "../../server/transport/servers.js";
+import { devicesBody, remotePaletteSection, serversBody } from "../features/remote/palette.js";
+import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../features/remote/codemodal.js";
 import { SubagentBar } from "../features/subagentview/subagentbar.js";
 import { describeScheduled } from "../model/schedule.js";
 import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
@@ -134,6 +139,9 @@ export function App({
   cwd,
   launchView,
   setTerminalTitle,
+  server = null,
+  onSwitchServer,
+  pairedServers,
   ui: launchUi,
   providers: launchProviders,
   longThreads: launchLongThreads,
@@ -160,7 +168,19 @@ export function App({
   providers?: ProvidersConfig;
   /** The global hand-off and compaction lines at launch, read the same way. */
   longThreads?: LongThreadsConfig;
+  /** The paired server on another machine `client` talks to; null for this machine's. */
+  server?: ActiveServer | null;
+  /**
+   * Reconnect the whole app to another server (a paired one by name, or null
+   * for this machine's). Rejects, leaving this one in place, when it cannot
+   * be reached. Omitted in tests, where switching is not offered.
+   */
+  onSwitchServer?: (target: string | null) => Promise<void>;
+  /** Tests: the list of paired servers; this machine's by default. */
+  pairedServers?: PairedServers;
 }) {
+  /** Folders and files named by the server are its machine's, not this one's. */
+  const remote = server !== null;
   const { width, height } = useTerminalDimensions();
   const [shell, setShell] = useState<ShellState>(emptyShellState);
   const [threadState, setThreadState] = useState<ThreadState>(emptyThreadState);
@@ -170,6 +190,8 @@ export function App({
   /** Kept as the one call every existing error path already used; now routes
       through `toasts` instead of its own state + timeout effect. */
   const setError = (message: string) => toasts.push("error", "danger", `error: ${message}`, ERROR_DISPLAY_MS);
+  /** The palette's Remote section: this server's remote access, and switching between servers. */
+  const remoteAccess = useRemote({ client, server, onSwitchServer, push: toasts.push, ...(pairedServers ? { pairedServers } : {}) });
   /** Composer is drafting the first message of a new thread, not a reply. */
   const [creating, setCreating] = useState(launchView !== "thread");
   /** Overrides the model the new thread inherits from its source once the
@@ -514,6 +536,7 @@ export function App({
     setFocus,
     setError,
     hideBinary: ui?.hideBinaryDiffs !== false,
+    remote,
   });
   /** The right-hand panel: the Diff tab follows the diff panel, the others open here. */
   const sidePanel = useSidePanel(diffPanel.expandedTurn !== null);
@@ -597,7 +620,8 @@ export function App({
     plan: exportPlan,
     pending: exportPending,
     contextUsage: threadState.contextUsage,
-    exportDir: exportProject?.workspaceRoot ?? null,
+    // A remote project's folder is on the server: export here, to the launch folder, instead.
+    exportDir: remote ? null : (exportProject?.workspaceRoot ?? null),
     fallbackDir: cwd,
     clipboard,
     toasts,
@@ -798,6 +822,7 @@ export function App({
     useThreadCreation({
       client,
       cwd,
+      remote,
       selected,
       pending,
       shellProjects: shell.projects,
@@ -1044,8 +1069,9 @@ export function App({
 
   /** Opens the command palette, remembering where esc should return focus. */
   const openCommandPalette = () => {
-    // Nothing in it applies to a thread that does not exist yet.
-    if (creating) return;
+    // Drafting a new thread, it opens too, with only what applies before
+    // a thread exists (search, a project, servers).
+    remoteAccess.refresh();
     setPaletteReturnFocus(focus);
     setDeleteArmed(false);
     setPickerFilter("");
@@ -1536,6 +1562,46 @@ export function App({
     }
     // The command palette needs no provider catalog either: only thread,
     // shell, and transcript state the app already holds.
+    if (picker === "remote-servers") return serversBody(remoteAccess, server, () => setPicker(null));
+    if (picker === "remote-devices") return devicesBody(remoteAccess);
+    const remoteSection = () =>
+      remotePaletteSection(remoteAccess, server, {
+        open: (next) => {
+          setPickerFilter("");
+          setPicker(next);
+        },
+        close: () => closePicker(paletteReturnFocus),
+      });
+    if (picker === "command" && creating) {
+      return {
+        kind: "list",
+        sections: [
+          {
+            header: "New thread",
+            rows: [
+              {
+                key: "thread:search",
+                label: "Search threads",
+                meta: "titles, messages, tool calls · settled included",
+                onPick: () => {
+                  setPickerFilter("");
+                  setPicker("search");
+                },
+              },
+              {
+                key: "thread:new-project",
+                label: "Choose project…",
+                onPick: () => {
+                  setPickerFilter("");
+                  setPicker("project");
+                },
+              },
+            ],
+          },
+          remoteSection(),
+        ],
+      };
+    }
     if (picker === "command") {
       const projectPath = shell.projects.find((project) => project.id === selected?.projectId)?.workspaceRoot ?? null;
       const branchName = selected?.branch ?? null;
@@ -1795,6 +1861,7 @@ export function App({
               },
             ],
           },
+          remoteSection(),
           ...(jumpRows.length === 0 ? [] : [{ header: "Jump to message", rows: jumpRows }]),
         ],
       };
@@ -1981,7 +2048,7 @@ export function App({
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**
@@ -2205,6 +2272,7 @@ export function App({
       <box style={{ flexDirection: "row", flexGrow: 1 }}>
         <Sidebar
           sections={sections}
+          {...(server === null ? {} : { serverName: server.name })}
           openThreadId={openThreadId}
           markedThreadIds={markedThreadIds}
           settledExpanded={settledExpanded}
@@ -2771,9 +2839,9 @@ export function App({
         />
       ) : picker === "project-new" ? (
         <RenameModal
-          initialTitle={process.cwd()}
-          title="New project from local folder"
-          placeholder="Folder path"
+          initialTitle={remote ? "" : process.cwd()}
+          title={remote ? `New project from a folder on ${server.name}` : "New project from local folder"}
+          placeholder={remote ? "Folder path on the server" : "Folder path"}
           hint="enter creates · esc back to projects"
           maxLength={500}
           screenWidth={width}
@@ -2786,6 +2854,61 @@ export function App({
           onClose={() => {
             setPickerFilter("");
             setPicker("project");
+          }}
+        />
+      ) : picker === "remote-pair-address" ? (
+        <RenameModal
+          initialTitle={remoteAccess.pairAddress}
+          title="Pair with a server — 1/2"
+          placeholder="Its address, e.g. 192.168.1.20:47317"
+          hint="enter next · esc cancels"
+          maxLength={200}
+          screenWidth={width}
+          screenHeight={height}
+          left={renameGeometry.left}
+          top={renameGeometry.top}
+          width={renameGeometry.width}
+          height={renameGeometry.height}
+          onSubmit={(address) => {
+            if (address.trim().length === 0) return;
+            remoteAccess.setPairAddress(address.trim());
+            setPicker("remote-pair-code");
+          }}
+          onClose={() => closePicker(paletteReturnFocus)}
+        />
+      ) : picker === "remote-pair-code" ? (
+        <RenameModal
+          initialTitle=""
+          title={`Pair with ${remoteAccess.pairAddress} — 2/2`}
+          placeholder="The code it shows, e.g. ABCD-EFGH"
+          hint="enter pairs and connects · esc cancels"
+          maxLength={20}
+          screenWidth={width}
+          screenHeight={height}
+          left={renameGeometry.left}
+          top={renameGeometry.top}
+          width={renameGeometry.width}
+          height={renameGeometry.height}
+          onSubmit={(code) => {
+            if (code.trim().length === 0) return;
+            closePicker(paletteReturnFocus);
+            remoteAccess.pair(code.trim());
+          }}
+          onClose={() => closePicker(paletteReturnFocus)}
+        />
+      ) : picker === "remote-code" && remoteAccess.pairing !== null ? (
+        <PairingCodeModal
+          pairing={remoteAccess.pairing}
+          serverName={server?.name ?? null}
+          screenWidth={width}
+          screenHeight={height}
+          left={Math.max(0, Math.floor((width - Math.min(76, Math.max(30, width - 6))) / 2))}
+          top={Math.max(0, Math.floor((height - PAIRING_PANEL_HEIGHT) / 2))}
+          width={Math.min(76, Math.max(30, width - 6))}
+          height={PAIRING_PANEL_HEIGHT}
+          onClose={() => {
+            remoteAccess.closePairing();
+            closePicker(paletteReturnFocus);
           }}
         />
       ) : picker === "schedule" ? (
@@ -2868,7 +2991,11 @@ export function App({
                       ? "Search threads"
                     : picker === "project"
                       ? "Select project"
-                      : "Message actions"
+                      : picker === "remote-servers"
+                        ? "Switch server"
+                        : picker === "remote-devices"
+                          ? `Paired devices — ${server?.name ?? "this machine"}`
+                          : "Message actions"
           }
           body={pickerBody}
           filter={pickerFilter}
@@ -2894,7 +3021,9 @@ export function App({
                         : "No threads match."
                     : picker === "project"
                       ? "No projects reported by the server."
-                      : "No actions."
+                      : picker === "remote-devices"
+                        ? "No paired devices."
+                        : "No actions."
           }
           screenWidth={width}
           screenHeight={height}
@@ -2904,7 +3033,7 @@ export function App({
           height={(picker === "message" ? messageGeometry : picker === "effort" ? effortGeometry : pickerGeometry).height}
             onClose={() =>
               closePicker(
-                picker === "diff-turn" ? "diff" : picker === "message" ? "chat" : picker === "command" ? paletteReturnFocus : "composer",
+                picker === "diff-turn" ? "diff" : picker === "message" ? "chat" : picker === "command" || picker.startsWith("remote-") ? paletteReturnFocus : "composer",
               )
             }
           />

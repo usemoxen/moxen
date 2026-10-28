@@ -299,6 +299,9 @@ interface Accepted {
   readonly accepted: true;
 }
 
+/** The git reads the live diff overlay makes: changed names, status, and the diff of some paths. */
+export type WorkspaceGitCall = "changed" | "status" | "diff";
+
 export interface CommandResults {
   "project.create": { readonly projectId: string; readonly created: boolean };
   "thread.create": { readonly threadId: string } & Accepted;
@@ -442,6 +445,23 @@ export type Query =
       readonly limit?: number;
     }
   | { readonly type: "git.commit.diff"; readonly threadId: string; readonly sha: string }
+  /**
+   * The running turn's live diff overlay, for a client on another machine
+   * (the TUI's `model/gitdiff.ts` and `model/filecache.ts` read the disk
+   * directly when the server is local). `root` must be the thread's own
+   * folder (its checkout or its project's root): `workspace.git` runs one of
+   * three fixed git reads there, `workspace.read` reads one file under it,
+   * capped like the overlay's own reads.
+   */
+  | {
+      readonly type: "workspace.git";
+      readonly threadId: string;
+      readonly root: string;
+      readonly call: WorkspaceGitCall;
+      /** `diff` only: the repo-relative paths to diff. */
+      readonly paths?: readonly string[];
+    }
+  | { readonly type: "workspace.read"; readonly threadId: string; readonly root: string; readonly path: string }
   /** Which forge this checkout belongs to, and whether its CLI is usable. */
   | { readonly type: "forge.detect"; readonly threadId: string }
   | {
@@ -487,6 +507,8 @@ export interface QueryResults {
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
   "git.overview": GitOverview;
+  "workspace.git": { readonly stdout: string };
+  "workspace.read": { readonly content: string };
   "git.commit.diff": { readonly sha: string; readonly diff: string | null };
   "forge.detect": ForgeDetection;
   "forge.requests.list": { readonly requests: readonly ForgeRequest[] };
@@ -1175,6 +1197,16 @@ export function decodeQuery(value: unknown): Query {
       return { type };
     case "harness.profile.export":
       return { type, profileId: requireField(record.profileId, type, "profileId") };
+    case "workspace.git": {
+      const call = requireField(record.call, type, "call");
+      if (call !== "changed" && call !== "status" && call !== "diff") {
+        throw new CliError("INVALID_QUERY", `workspace.git call must be changed, status or diff (got "${call}").`, { exitCode: 2 });
+      }
+      const paths = Array.isArray(record.paths) ? record.paths.filter((entry): entry is string => typeof entry === "string") : [];
+      return { type, threadId: requireThreadId(record.threadId), root: requireField(record.root, type, "root"), call, ...(paths.length > 0 ? { paths } : {}) };
+    }
+    case "workspace.read":
+      return { type, threadId: requireThreadId(record.threadId), root: requireField(record.root, type, "root"), path: requireField(record.path, type, "path") };
     case "git.overview":
       return {
         type,

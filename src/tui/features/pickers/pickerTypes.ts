@@ -17,4 +17,9 @@ export type PickerName =
   | "settings"
   | "schedule"
   | "search"
+  | "remote-servers"
+  | "remote-devices"
+  | "remote-pair-address"
+  | "remote-pair-code"
+  | "remote-code"
   | null;

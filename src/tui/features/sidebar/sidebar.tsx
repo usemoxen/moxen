@@ -399,6 +399,7 @@ export function Sidebar({
   panelsOpen,
   onTogglePanels,
   onOpenSettings,
+  serverName,
 }: {
   sections: SidebarSections;
   openThreadId: string | null;
@@ -438,6 +439,8 @@ export function Sidebar({
   panelsOpen?: boolean;
   onTogglePanels?: () => void;
   onOpenSettings?: () => void;
+  /** A paired server on another machine: named in the title, so it is always clear whose threads these are. */
+  serverName?: string;
 }) {
   const remaining = sections.settledTotal - sections.settled.length;
   const runningCount = sections.active.filter((row) => row.status === "running").length;
@@ -465,7 +468,7 @@ export function Sidebar({
     <box
       style={{ width, flexDirection: "column", borderStyle: "rounded", backgroundColor: SURFACE.panel }}
       borderColor={SURFACE.border}
-      title=" Threads "
+      title={serverName === undefined ? " Threads " : ` Threads · ${serverName} `}
       titleColor={COLOR.dim}
     >
       {/* One continuous field with the creating view: same lattice (offsets
