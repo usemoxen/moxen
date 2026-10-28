@@ -191,6 +191,24 @@ function roundTrip(
 }
 
 /**
+ * The types a `.` list reply offers. kitty and Ghostty send them as one
+ * DATA packet under the mime `.`, its payload the types space-separated
+ * (newline-terminated); a packet per type under its own mime is taken too.
+ */
+function offeredMimes(mimes: Map<string, Uint8Array[]>): Set<string> {
+  const offered = new Set<string>();
+  for (const [mime, chunks] of mimes) {
+    if (mime !== ".") {
+      offered.add(mime.toLowerCase());
+      continue;
+    }
+    const listing = chunks.map((chunk) => Buffer.from(chunk).toString("utf8")).join("");
+    for (const entry of listing.split(/\s+/)) if (entry.length > 0) offered.add(entry.toLowerCase());
+  }
+  return offered;
+}
+
+/**
  * Reads the first available image off the *terminal's* clipboard over 5522:
  * a prompt-free type list first (fast fallback for non-kitty terminals),
  * then the full transfer for image types only.
@@ -220,15 +238,15 @@ export async function queryTerminalClipboardImages(
       : { status: "denied", code: list.error };
   }
   if (!list.responded) return { status: "unsupported" };
-  const offered = new Set<string>();
-  for (const mime of list.mimes.keys()) offered.add(mime.toLowerCase());
+  const offered = offeredMimes(list.mimes);
   const wanted = TERMINAL_IMAGE_MIMES.filter((mime) => offered.has(mime));
   if (wanted.length === 0) return { status: "no-image" };
 
+  // The best one only: every type asked for is sent in full, and they all count against `maxBytes`.
   const readId = newOsc5522Id();
   const read = await roundTrip(
     { ...deps, write: send },
-    buildOsc5522ReadQuery(wanted.join(" "), { ...queryOptions, id: readId }),
+    buildOsc5522ReadQuery(wanted[0]!, { ...queryOptions, id: readId }),
     readId,
     options?.readTimeoutMs ?? READ_TIMEOUT_MS,
     maxBytes,
@@ -279,7 +297,9 @@ export async function readPastedImage(options?: {
   if (terminal !== null) {
     const outcome = await queryTerminalClipboardImages({ ...terminal, env });
     if (outcome.status === "read") return { bytes: outcome.bytes, mimeType: outcome.mimeType, error: null };
-    if (outcome.status === "no-image") {
+    // Locally the host clipboard is the same one, and may still hold an
+    // image in a type the terminal lists but this does not read (TIFF).
+    if (outcome.status === "no-image" && remote) {
       return { bytes: null, mimeType: null, error: "clipboard has no image — copy one first" };
     }
     if (outcome.status === "denied") {
@@ -298,7 +318,7 @@ export async function readPastedImage(options?: {
     if (outcome.status === "limit-exceeded") {
       return { bytes: null, mimeType: null, error: "image is larger than 10 MB" };
     }
-    // "unsupported": fall through to the host clipboard below.
+    // "unsupported", or "no-image" locally: on to the host clipboard below.
   }
   if (!remote) {
     return (options?.hostReader ?? readClipboardImage)();

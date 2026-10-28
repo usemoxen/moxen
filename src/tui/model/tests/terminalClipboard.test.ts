@@ -125,6 +125,36 @@ describe("queryTerminalClipboardImages", () => {
     }
   });
 
+  it("reads the list as kitty and Ghostty send it: one `.` packet, types space-separated", async () => {
+    const png = new Uint8Array([5, 6, 7]);
+    let step = 0;
+    const { deps, writes } = fakeTerminal((emit) => {
+      step += 1;
+      if (step === 1) {
+        emit(reply("type=read:status=OK"));
+        emit(reply(`type=read:status=DATA:mime=${b64(".")}`, b64("text/plain image/tiff image/png\n")));
+        emit(reply("type=read:status=DONE"));
+      } else {
+        emit(reply("type=read:status=OK"));
+        emit(reply(`type=read:status=DATA:mime=${b64("image/png")}`, Buffer.from(png).toString("base64")));
+        emit(reply("type=read:status=DONE"));
+      }
+    });
+    const outcome = await queryTerminalClipboardImages(deps);
+    expect(outcome).toEqual({ status: "read", mimeType: "image/png", bytes: png });
+    // Only the image type it will use is read.
+    expect(Buffer.from(writes[1]!.split(";")[2]!.replace("\x1b\\", ""), "base64").toString("utf8")).toBe("image/png");
+  });
+
+  it("reports no-image when the `.` list offers no image it reads", async () => {
+    const { deps } = fakeTerminal((emit) => {
+      emit(reply("type=read:status=OK"));
+      emit(reply(`type=read:status=DATA:mime=${b64(".")}`, b64("text/plain image/tiff\n")));
+      emit(reply("type=read:status=DONE"));
+    });
+    expect(await queryTerminalClipboardImages(deps)).toEqual({ status: "no-image" });
+  });
+
   it("reports no-image when the list offers text only", async () => {
     const { deps } = fakeTerminal((emit) => {
       emit(reply("type=read:status=OK"));
@@ -167,6 +197,17 @@ describe("queryTerminalClipboardImages", () => {
 });
 
 describe("readPastedImage", () => {
+  it("locally, tries the host clipboard when the terminal lists no image it reads", async () => {
+    const bytes = new Uint8Array([3, 3]);
+    const { deps } = fakeTerminal((emit) => {
+      emit(reply("type=read:status=OK"));
+      emit(reply(`type=read:status=DATA:mime=${b64(".")}`, b64("image/tiff\n")));
+      emit(reply("type=read:status=DONE"));
+    });
+    const result = await readPastedImage({ env: {}, terminal: deps, hostReader: () => Promise.resolve({ bytes, mimeType: "image/png", error: null }) });
+    expect(result).toEqual({ bytes, mimeType: "image/png", error: null });
+  });
+
   it("returns the terminal image when kitty answers", async () => {
     const png = new Uint8Array([9, 9]);
     let step = 0;
