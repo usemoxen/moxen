@@ -57,8 +57,11 @@ describe("Moxen memory", () => {
   it("imports Claude Code's memories as it writes them, user ones to the global scope, keeping what Moxen already has", async () => {
     const where = await location();
     const claudeHome = await mkdtemp(path.join(os.tmpdir(), "claude-home-"));
-    const from = claudeMemoryDir(claudeHome, "/Users/someone/code/app");
-    expect(from).toBe(path.join(claudeHome, "projects", "-Users-someone-code-app", "memory"));
+    const workspace = path.resolve("/Users/someone/code/app");
+    const from = claudeMemoryDir(claudeHome, workspace);
+    // Claude Code names the folder after the workspace path with every non-alphanumeric as "-";
+    // on Windows the resolved path carries a drive ("C:\Users\…" → "C--Users-…").
+    expect(from).toBe(path.join(claudeHome, "projects", workspace.replace(/[^A-Za-z0-9]/gu, "-"), "memory"));
     await mkdir(from, { recursive: true });
     await writeFile(path.join(from, "MEMORY.md"), "- [Role](user_role.md) — senior engineer\n");
     await writeFile(path.join(from, "user_role.md"), "---\nname: user-role\ndescription: Senior engineer\nmetadata:\n  type: user\n---\n\nSenior engineer.\n");
