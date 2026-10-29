@@ -673,14 +673,16 @@ export function BackgroundTab({
           const started = task.startedAt === null ? null : formatDuration(Math.max(1000, now - Date.parse(task.startedAt)));
           return (
             <Row key={task.taskId} onClick={onOpen}>
-              <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <text fg={COLOR.warn}>{"● "}</text>
-                <text fg={COLOR.dim}>{`${KIND_LABEL[backgroundTaskKind(task)] ?? "Task"} · `}</text>
-                <text fg={COLOR.text}>{truncate(backgroundTaskTitle(task), Math.max(4, inner - 22))}</text>
-                {started === null ? null : <text fg={COLOR.faint}>{`  ${started}`}</text>}
+              <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
+                <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+                  <text fg={COLOR.warn}>{"● "}</text>
+                  <text fg={COLOR.dim}>{`${KIND_LABEL[backgroundTaskKind(task)] ?? "Task"} · `}</text>
+                  <text fg={COLOR.text}>{truncate(backgroundTaskTitle(task), Math.max(4, inner - 22))}</text>
+                </box>
+                {started === null ? null : <text fg={COLOR.faint}>{started}</text>}
               </box>
-              <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <text fg={COLOR.faint}>{`  ${truncate(task.command?.split("\n")[0] ?? "", Math.max(4, inner - 10))}  `}</text>
+              <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
+                <text fg={COLOR.faint}>{`  ${truncate(task.command?.split("\n")[0] ?? "", Math.max(4, inner - 12))}`}</text>
                 <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />
               </box>
             </Row>

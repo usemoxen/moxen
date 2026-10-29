@@ -18,8 +18,8 @@ import { COLOR, SURFACE, truncate } from "../../theme.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 
 const OUTPUT_POLL_MS = 2000;
-/** Wrapped rows of command text shown in the details view before it ellipsizes. */
-const COMMAND_ROWS = 3;
+/** Rows of command text the details view shows at once; longer commands scroll. */
+const COMMAND_ROWS = 8;
 
 const KIND_ORDER: readonly BackgroundTaskKind[] = ["shell", "monitor", "agent", "task"];
 const KIND_SECTION: Record<BackgroundTaskKind, string> = { shell: "Shells", monitor: "Monitors", agent: "Agents", task: "Tasks" };
@@ -32,16 +32,13 @@ function runtimeOf(task: BackgroundTaskRow | null, now: number): string | null {
   return Number.isFinite(startedMs) ? formatDuration(Math.max(0, now - startedMs)) : null;
 }
 
-/** Hard-wraps text to `width` columns, keeping at most `rows` (the last one ellipsized). */
-function wrapRows(text: string, width: number, rows: number): string[] {
+/** Hard-wraps text to `width` columns, keeping every line of a multi-line command. */
+function wrapRows(text: string, width: number): string[] {
   const out: string[] = [];
   for (const line of text.split("\n")) {
     for (let at = 0; at < Math.max(1, line.length); at += width) out.push(line.slice(at, at + width));
   }
-  if (out.length <= rows) return out;
-  const kept = out.slice(0, rows);
-  kept[rows - 1] = truncate(`${kept[rows - 1]}…`, width);
-  return kept;
+  return out;
 }
 
 /**
@@ -167,6 +164,7 @@ export function BackgroundTasksModal({
     const runtime = detailFinished ? null : runtimeOf(detailTask, now);
     const command = detailTask.command?.trim() || null;
     const showCommand = command !== null && command !== title;
+    const commandRows = showCommand ? wrapRows(command, inner - 2) : [];
     const outputLines = output && output.taskId === detailTaskId ? output.lines : [];
     const lineCountLabel = `${outputLines.length} line${outputLines.length === 1 ? "" : "s"}`;
     const heading = `${KIND_TITLE[kind]} · `;
@@ -199,14 +197,17 @@ export function BackgroundTasksModal({
               <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{KIND_SOURCE[kind]}</text>
             </box>
             <box
-              style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1 }}
+              style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1, height: Math.min(commandRows.length, COMMAND_ROWS) }}
               border={["left"]}
               borderColor={SURFACE.border}
               backgroundColor={SURFACE.raised}
             >
-              {wrapRows(command, inner - 2, COMMAND_ROWS).map((row, rowIndex) => (
-                <text key={rowIndex} fg={COLOR.command} bg={SURFACE.raised}>{row}</text>
-              ))}
+              {/* The whole command, scrollable once it outgrows the box. */}
+              <scrollbox style={{ flexGrow: 1 }}>
+                {commandRows.map((row, rowIndex) => (
+                  <text key={rowIndex} fg={COLOR.command} bg={SURFACE.raised}>{row}</text>
+                ))}
+              </scrollbox>
             </box>
           </>
         ) : null}
