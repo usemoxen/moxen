@@ -93,6 +93,16 @@ export interface SkillView {
   running: boolean;
 }
 
+/** One of Moxen's memory tools (`memory_read`, `memory_save`, `memory_delete`): which memory, in which scope. */
+export interface MemoryView {
+  kind: "memory";
+  action: "read" | "save" | "delete";
+  /** The memory's name; null for a read with none, which is the index. */
+  name: string | null;
+  scope: string | null;
+  running: boolean;
+}
+
 export interface WebView {
   kind: "web";
   tool: string;
@@ -210,6 +220,7 @@ export type ActivityView =
   | TaskView
   | QuestionView
   | SkillView
+  | MemoryView
   | WebView
   | ImageView
   | ToolView
@@ -599,6 +610,20 @@ function jsonResult(state: Record<string, unknown>, payload: Record<string, unkn
   return null;
 }
 
+/** What a memory row says it touched: `name (scope)`, or the index when a read names none. */
+export function memoryLabel(view: MemoryView): string {
+  const scope = view.scope === null ? "" : ` (${view.scope})`;
+  if (view.name !== null) return `${view.name}${scope}`;
+  return view.action === "read" ? "index" : `memory${scope}`;
+}
+
+const MEMORY_ACTIONS: Readonly<Record<string, MemoryView["action"]>> = { memory_read: "read", memory_save: "save", memory_delete: "delete" };
+
+/** A memory tool call: the memory it names and the scope, from the call, else from what came back. */
+function memoryView(action: MemoryView["action"], input: Record<string, unknown>, result: Record<string, unknown> | null, running: boolean): MemoryView {
+  return { kind: "memory", action, name: asString(input.name) ?? asString(result?.name) ?? null, scope: asString(input.scope) ?? asString(result?.scope) ?? null, running };
+}
+
 const DELEGATED_STATUS: Record<string, string> = {
   completed: "finished",
   failed: "failed",
@@ -896,6 +921,8 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const moxenTool = moxenToolName(display);
     // moxen's checklist (lent to OpenCode, which has none): the tasks panel shows it.
     if (moxenTool === "todos") return { kind: "todos", title, items: decodeTodos(input.todos), running };
+    const memoryAction = moxenTool === null ? undefined : MEMORY_ACTIONS[moxenTool];
+    if (memoryAction !== undefined) return memoryView(memoryAction, input, jsonResult(state, payload), running);
     if (moxenTool !== null) return moxenToolView(moxenTool, input, jsonResult(state, payload), payload, running);
     // Claude's Agent tool: say which subagent and what for, not its whole
     // prompt (the subagent reads that; the transcript needs the gist).

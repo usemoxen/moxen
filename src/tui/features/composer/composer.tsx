@@ -29,15 +29,18 @@ function HoverText({
   color,
   hoverColor,
   onClick,
+  surface = SURFACE.raised,
 }: {
   text: string;
   color: string;
   hoverColor: string;
   onClick: () => void;
+  /** What the label sits on: the card's surface by default, null outside it (the pane shows through). */
+  surface?: string | null;
 }) {
   const { hovered, handlers } = useHover();
   return (
-    <text fg={hovered ? hoverColor : color} bg={SURFACE.raised} selectable={false} onMouseDown={onClick} {...handlers}>
+    <text fg={hovered ? hoverColor : color} {...(surface === null ? {} : { bg: surface })} selectable={false} onMouseDown={onClick} {...handlers}>
       {text}
     </text>
   );
@@ -70,14 +73,15 @@ function usageColor(percent: number): string {
   return percent >= 90 ? COLOR.danger : percent >= 70 ? COLOR.warn : COLOR.dim;
 }
 
-function PlanUsageSegment({ gauges, onClick }: { gauges: readonly PlanUsageGauge[]; onClick: () => void }) {
+function PlanUsageSegment({ gauges, onClick, surface = SURFACE.raised }: { gauges: readonly PlanUsageGauge[]; onClick: () => void; surface?: string | null }) {
   const { hovered, handlers } = useHover();
+  const on = surface === null ? {} : { bg: surface };
   return (
-    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onClick} selectable={false} {...handlers}>
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} {...(surface === null ? {} : { backgroundColor: surface })} onMouseDown={onClick} selectable={false} {...handlers}>
       {gauges.map((gauge, index) => (
-        <box key={gauge.short} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-          <text fg={hovered ? COLOR.text : COLOR.faint} bg={SURFACE.raised} selectable={false}>{`${index === 0 ? "" : " "}${gauge.short} `}</text>
-          <text fg={hovered ? COLOR.bright : usageColor(gauge.percent)} bg={SURFACE.raised} selectable={false}>{`${Math.round(gauge.percent)}%`}</text>
+        <box key={gauge.short} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} {...(surface === null ? {} : { backgroundColor: surface })}>
+          <text fg={hovered ? COLOR.text : COLOR.faint} {...on} selectable={false}>{`${index === 0 ? "" : " "}${gauge.short} `}</text>
+          <text fg={hovered ? COLOR.bright : usageColor(gauge.percent)} {...on} selectable={false}>{`${Math.round(gauge.percent)}%`}</text>
         </box>
       ))}
     </box>
@@ -308,7 +312,7 @@ export function Composer({
    * where the banner sits over the composer on the pane's own surface.
    */
   notice?: ReactNode;
-  /** The thread's mode: colours the left edge and its running pulse; the footer names any but Build. */
+  /** The thread's mode: colours the left edge and its running pulse; the footer always names it. */
   mode?: InteractionMode;
   /** Shift+Tab, or a click on the footer's mode: the next mode (Build → Research → Orchestrate). */
   onCycleMode?: () => void;
@@ -373,14 +377,7 @@ export function Composer({
         ? "enter steers · tab queues"
         : "enter sends · shift+enter newline";
   const shortHint = submitVerb === "creates" ? "enter creates" : waitingOutLimit === true ? "enter queues" : running ? "enter steers" : "enter sends";
-  const hint =
-    external
-      ? "editing in external editor…"
-      : width >= fullHint.length + 2
-        ? fullHint
-        : width >= midHint.length + 2
-          ? midHint
-          : shortHint;
+  const externalHint = "editing in external editor…";
 
   // The textarea owns its buffer; only an explicit external reset (thread
   // switch, post-send clear — signaled by `resetKey` changing) pushes a value
@@ -536,8 +533,10 @@ export function Composer({
 
   // Each segment carries its width and a drop rank: a narrow composer (a
   // side panel open) sheds the highest ranks first rather than letting the
-  // right-hand group run over the model label.
-  const candidates: Array<{ key: string; node: ReactNode; width: number; drop: number }> = [];
+  // right-hand group run over the model label. `metric` segments are status
+  // (context, plan usage, shells); `action` ones are things to click.
+  type Segment = { key: string; render: (surface: string | null) => ReactNode; width: number; drop: number; group: "metric" | "action" };
+  const candidates: Segment[] = [];
   if (contextUsage !== undefined && contextUsage !== null) {
     const text =
       contextUsage.percent === null
@@ -547,14 +546,8 @@ export function Composer({
       key: "context",
       width: text.length,
       drop: 2,
-      node: (
-        <HoverText
-          text={text}
-          color={COLOR.dim}
-          hoverColor={COLOR.bright}
-          onClick={onContextUsageClick ?? (() => undefined)}
-        />
-      ),
+      group: "metric",
+      render: (surface) => <HoverText text={text} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onContextUsageClick ?? (() => undefined)} surface={surface} />,
     });
   }
   if (planUsage !== undefined && planUsage !== null && planUsage.length > 0) {
@@ -562,7 +555,8 @@ export function Composer({
       key: "plan",
       width: planUsage.reduce((total, gauge, index) => total + gauge.short.length + String(Math.round(gauge.percent)).length + 2 + (index === 0 ? 0 : 1), 0),
       drop: 3,
-      node: <PlanUsageSegment gauges={planUsage} onClick={onPlanUsageClick ?? (() => undefined)} />,
+      group: "metric",
+      render: (surface) => <PlanUsageSegment gauges={planUsage} onClick={onPlanUsageClick ?? (() => undefined)} surface={surface} />,
     });
   }
   if (backgroundSummary !== undefined && backgroundSummary !== null) {
@@ -570,14 +564,8 @@ export function Composer({
       key: "background",
       width: backgroundSummary.length,
       drop: 1,
-      node: (
-        <HoverText
-          text={backgroundSummary}
-          color={COLOR.dim}
-          hoverColor={COLOR.bright}
-          onClick={onBackgroundClick ?? (() => undefined)}
-        />
-      ),
+      group: "metric",
+      render: (surface) => <HoverText text={backgroundSummary} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onBackgroundClick ?? (() => undefined)} surface={surface} />,
     });
   }
   if (onCopyClick !== undefined) {
@@ -585,7 +573,8 @@ export function Composer({
       key: "copy",
       width: 6,
       drop: 5,
-      node: <HoverText text="⧉ copy" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onCopyClick} />,
+      group: "action",
+      render: (surface) => <HoverText text="⧉ copy" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onCopyClick} surface={surface} />,
     });
   }
   if (onExternalEditClick !== undefined) {
@@ -593,7 +582,8 @@ export function Composer({
       key: "external",
       width: 10,
       drop: 4,
-      node: <HoverText text="✎ external" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onExternalEditClick} />,
+      group: "action",
+      render: (surface) => <HoverText text="✎ external" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onExternalEditClick} surface={surface} />,
     });
   }
   if (running && onStopClick !== undefined) {
@@ -601,52 +591,133 @@ export function Composer({
       key: "stop",
       width: 6,
       drop: 0,
-      node: <HoverText text="■ stop" color={COLOR.danger} hoverColor={COLOR.bright} onClick={onStopClick} />,
+      group: "action",
+      render: (surface) => <HoverText text="■ stop" color={COLOR.danger} hoverColor={COLOR.bright} onClick={onStopClick} surface={surface} />,
     });
   }
   // Card chrome: border 1, left padding 2, the draft column's right padding
   // 1 and the scrollbar strip 1. The model group keeps two columns of air.
   const footerRoom = width - 5;
-  const modeLabel = mode === "default" ? null : ` · ${interactionModeLabel(mode)}`;
-  const leftWidth =
-    model.length +
-    (modeLabel === null ? 0 : modeLabel.length) +
-    (effort === null || effort === undefined || effort.length === 0 ? 0 : effort.length + 3) +
-    (permission === null || permission === undefined || permission.length === 0 ? 0 : permission.length + 3) +
-    2;
-  const usedBy = (segments: typeof candidates) => segments.reduce((total, segment, index) => total + segment.width + (index === 0 ? 0 : 5), 0);
-  const fit = (room: number) => {
-    const kept = [...candidates];
-    while (kept.length > 0 && leftWidth + usedBy(kept) > room) {
+  const modeLabel = interactionModeLabel(mode);
+  const usedBy = (segments: readonly Segment[]) => segments.reduce((total, segment, index) => total + segment.width + (index === 0 ? 0 : 5), 0);
+  /** What of `list` fits in `room`, shedding the highest drop rank first (a rank of 0 never goes). */
+  const fitTo = (list: readonly Segment[], room: number, base = 0) => {
+    const kept = [...list];
+    while (kept.length > 0 && base + usedBy(kept) > room) {
       const victim = kept.reduce((worst, segment) => (segment.drop > worst.drop ? segment : worst));
       if (victim.drop === 0) break;
       kept.splice(kept.indexOf(victim), 1);
     }
     return kept;
   };
-  // Whatever does not fit goes behind a "⋯ more" control (which takes room
-  // of its own); the menu lists only the hidden segments, never the ones
-  // still visible in the footer (showing both is what duplicated `stop`).
-  const everything = fit(footerRoom);
-  const kept = everything.length === candidates.length ? everything : fit(footerRoom - MORE_WIDTH);
-  const keptKeys = new Set(kept.map((segment) => segment.key));
-  const overflow = candidates.filter((segment) => !keptKeys.has(segment.key));
+
+  // Every control has a fixed slot, whatever the provider reports, so nothing moves when the model or the
+  // provider does. Top row: mode, model and effort on the left, plan usage and context on the right. Bottom
+  // row: permission and background tasks on the left, copy, external and stop on the right. A control with
+  // nothing to show leaves its slot blank.
+  const permissionText = permission === null || permission === undefined ? "" : permission;
+  const topSelectorsWidth = modeLabel.length + model.length + 3 + (effort === null || effort === undefined || effort.length === 0 ? 0 : effort.length + 3) + 2;
+  const topRightAll = ["plan", "context"].flatMap((key) => candidates.filter((segment) => segment.key === key));
+  const topRightKept = fitTo(topRightAll, footerRoom - topSelectorsWidth);
+  const topHidden = topRightAll.filter((segment) => !topRightKept.includes(segment));
+  const bottomAll = candidates.filter((segment) => segment.key === "background" || segment.group === "action");
+  const bottomBase = permissionText.length + 2;
+  let bottomKept = fitTo(bottomAll, footerRoom, bottomBase);
+  // Whatever does not fit goes behind a "⋯ more" control (which takes room of its own); the menu lists only
+  // the hidden segments, never the ones still visible (showing both is what duplicated `stop`).
+  if (topHidden.length > 0 || bottomKept.length < bottomAll.length) bottomKept = fitTo(bottomAll, footerRoom - MORE_WIDTH, bottomBase);
+  const overflow = [...topHidden, ...bottomAll.filter((segment) => !bottomKept.includes(segment))];
   const hidden = overflow.length > 0;
   const menuShown = moreOpen && hidden && skillTrigger === null;
-  const footerSegments = hidden
+  const bottomShown: Segment[] = hidden
     ? [
-        ...kept,
+        ...bottomKept,
         {
           key: "more",
           width: MORE_WIDTH - 5,
           drop: 0,
-          node: <HoverText text={menuShown ? "▾ more" : "⋯ more"} color={COLOR.dim} hoverColor={COLOR.bright} onClick={() => setMoreOpen((open) => !open)} />,
+          group: "action",
+          render: (surface) => <HoverText text={menuShown ? "▾ more" : "⋯ more"} color={COLOR.dim} hoverColor={COLOR.bright} onClick={() => setMoreOpen((open) => !open)} surface={surface} />,
         },
       ]
-    : kept;
+    : bottomKept;
+  // The permission is a slot of its own: a segment like the others.
+  const permissionSegment: Segment | null =
+    permissionText.length === 0
+      ? null
+      : {
+          key: "permission",
+          width: permissionText.length,
+          drop: 0,
+          group: "metric",
+          render: (surface) => <HoverText text={permissionText} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onPermissionClick ?? (() => undefined)} surface={surface} />,
+        };
+  // The key hint under the card, cut to the longest form that fits.
+  const STATUS_INDENT = 3;
+  const hintRoom = width - STATUS_INDENT;
+  const statusHint = external ? externalHint : [fullHint, midHint, shortHint].find((candidate) => candidate.length <= hintRoom) ?? "";
 
-  // Focused border breathes sky→deeper-sky while a turn runs — subtle glow,
-  // static otherwise. Gated internally so idle composers never re-render.
+  /** Segments in a row on the card's surface, a faint rule between them. */
+  const segmentRow = (list: readonly Segment[]) => (
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+      {list.map((segment, index) => (
+        <box key={segment.key} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+          {index === 0 ? null : (
+            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
+              {"  │  "}
+            </text>
+          )}
+          {segment.render(SURFACE.raised)}
+        </box>
+      ))}
+    </box>
+  );
+  // Mode, model and effort.
+  const selectorsRow = (
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+      {onCycleMode === undefined ? (
+        <text fg={MODE_COLOR[mode]} bg={SURFACE.raised} selectable={false}>
+          {modeLabel}
+        </text>
+      ) : (
+        <HoverText text={modeLabel} color={MODE_COLOR[mode]} hoverColor={COLOR.bright} onClick={onCycleMode} />
+      )}
+      <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
+        {" · "}
+      </text>
+      {onModelClick === undefined ? (
+        <text fg={modelColor ?? COLOR.text} bg={SURFACE.raised} selectable={false}>
+          {model}
+        </text>
+      ) : (
+        <HoverText text={model} color={modelColor ?? COLOR.text} hoverColor={COLOR.bright} onClick={onModelClick} />
+      )}
+      {effort === null || effort === undefined || effort.length === 0 ? null : onEffortClick === undefined ? (
+        <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
+          {` · ${effort}`}
+        </text>
+      ) : (
+        <HoverText text={` · ${effort}`} color={COLOR.warn} hoverColor={COLOR.bright} onClick={onEffortClick} />
+      )}
+    </box>
+  );
+  const spacer = <box style={{ height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} />;
+  const topRow = (
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
+      {selectorsRow}
+      {topRightKept.length === 0 ? null : segmentRow(topRightKept)}
+    </box>
+  );
+  const bottomRow = (
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
+      {segmentRow([...(permissionSegment === null ? [] : [permissionSegment]), ...bottomShown.filter((segment) => segment.group === "metric")])}
+      {segmentRow(bottomShown.filter((segment) => segment.group === "action"))}
+    </box>
+  );
+  const hintShown = !external && hideHint !== true && statusHint.length > 0;
+
+  // Focused border breathes while a turn runs — subtle glow, static
+  // otherwise. Gated internally so idle composers never re-render.
   const borderTick = useAnimTick(running && focused, 400);
   const frameBorderColor =
     running && focused ? pulseColor(borderTick, MODE_COLOR[mode], MODE_PULSE[mode], 2400) : focused ? MODE_COLOR[mode] : SURFACE.border;
@@ -676,7 +747,7 @@ export function Composer({
               backgroundColor={SURFACE.raised}
               onMouseDown={() => setMoreOpen(false)}
             >
-              {segment.node}
+              {segment.render(SURFACE.raised)}
             </box>
           ))}
         </box>
@@ -711,7 +782,7 @@ export function Composer({
           // scrollbar strip sits flush against the card's right edge.
           paddingLeft: 2,
           paddingTop: 1,
-          paddingBottom: 1,
+            paddingBottom: 1,
         }}
         onMouseDown={onFocus}
         selectable={false}
@@ -737,7 +808,7 @@ export function Composer({
           // opens or closes.
           <box
             style={{
-              minHeight: MIN_COMPOSER_LINES + 2,
+              minHeight: MIN_COMPOSER_LINES + 3,
               flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
@@ -759,6 +830,8 @@ export function Composer({
           // inside the column, the strip sits flush outside it.
           <box style={{ flexDirection: "row", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
             <box style={{ flexDirection: "column", flexGrow: 1, paddingRight: 1 }}>
+        {topRow}
+        {spacer}
         <textarea
           ref={areaRef}
           focused={focused && !external}
@@ -771,7 +844,7 @@ export function Composer({
           wrapMode="word"
           syntaxStyle={imageTokenStyle()}
           keyBindings={COMPOSER_KEY_BINDINGS}
-          style={{ minHeight: MIN_COMPOSER_LINES, maxHeight: MAX_COMPOSER_LINES, backgroundColor: SURFACE.raised }}
+          style={{ minHeight: MIN_COMPOSER_LINES - 1, maxHeight: MAX_COMPOSER_LINES, backgroundColor: SURFACE.raised }}
           onContentChange={handleContentChange}
           onPaste={(event: PasteEvent) => {
             const node = areaRef.current;
@@ -851,76 +924,16 @@ export function Composer({
             }
           }}
         />
-        {/* Breathing room between the draft and the model footer. */}
-        <box style={{ height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} />
-        <box
-          style={{
-            flexDirection: "row",
-            height: 1,
-            flexShrink: 0,
-            justifyContent: footerSegments.length > 0 ? "space-between" : "flex-start",
-          }}
-          backgroundColor={SURFACE.raised}
-        >
-          <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-            {onModelClick === undefined ? (
-              <text fg={modelColor ?? COLOR.text} bg={SURFACE.raised} selectable={false}>
-                {model}
-              </text>
-            ) : (
-              <HoverText text={model} color={modelColor ?? COLOR.text} hoverColor={COLOR.bright} onClick={onModelClick} />
-            )}
-            {effort === null || effort === undefined || effort.length === 0 ? null : onEffortClick === undefined ? (
-              <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
-                {` · ${effort}`}
-              </text>
-            ) : (
-              <HoverText text={` · ${effort}`} color={COLOR.warn} hoverColor={COLOR.bright} onClick={onEffortClick} />
-            )}
-            {permission === null || permission === undefined || permission.length === 0 ? null : onPermissionClick ===
-              undefined ? (
-              <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-                {` · ${permission}`}
-              </text>
-            ) : (
-              <HoverText
-                text={` · ${permission}`}
-                color={COLOR.dim}
-                hoverColor={COLOR.bright}
-                onClick={onPermissionClick}
-              />
-            )}
-            {modeLabel === null ? null : onCycleMode === undefined ? (
-              <text fg={MODE_COLOR[mode]} bg={SURFACE.raised} selectable={false}>
-                {modeLabel}
-              </text>
-            ) : (
-              <HoverText text={modeLabel} color={MODE_COLOR[mode]} hoverColor={COLOR.bright} onClick={onCycleMode} />
-            )}
-          </box>
-          {footerSegments.length === 0 ? null : (
-            <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-              {footerSegments.map((segment, index) => (
-                <box key={segment.key} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-                  {index === 0 ? null : (
-                    <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-                      {"  │  "}
-                    </text>
-                  )}
-                  {segment.node}
-                </box>
-              ))}
-            </box>
-          )}
-        </box>
+        {spacer}
+        {bottomRow}
             </box>
             <ComposerScrollbar areaRef={areaRef} />
           </box>
         )}
       </box>
-      {hideHint === true || external ? null : (
+      {!hintShown ? null : (
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-          <text fg={COLOR.faint}>{truncate(hint, Math.max(0, width))}</text>
+          <text fg={COLOR.faint}>{truncate(statusHint, Math.max(0, hintRoom))}</text>
         </box>
       )}
     </box>

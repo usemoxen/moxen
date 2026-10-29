@@ -7,7 +7,7 @@ import { TextAttributes, bold, fg, t } from "@opentui/core";
 import { useHover } from "../../hooks/useHover.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
-import { describeActivity, fileRowCounts, formatMs, readRangeLabel, webToolSource } from "../../model/activity.js";
+import { describeActivity, fileRowCounts, formatMs, memoryLabel, readRangeLabel, webToolSource } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { formatBytes, renderMessage } from "../../model/message.js";
 import { isCompactPrompt, isUsageContinue, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
@@ -348,6 +348,14 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     return (
       <ToolChip rail={COLOR.diff} glyph="★" title="skill" time={time} running={view.running}>
         <text fg={COLOR.tool}>{view.name}</text>
+      </ToolChip>
+    );
+  }
+
+  if (view.kind === "memory") {
+    return (
+      <ToolChip rail={COLOR.diff} glyph="◈" title={`memory ${view.action}`} time={time} running={view.running}>
+        <text fg={COLOR.tool}>{truncate(memoryLabel(view), 72)}</text>
       </ToolChip>
     );
   }

@@ -46,7 +46,7 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
 
   // An agent question arrives mid-run: dismiss the open modal first (pending
   // answers wait for a free UI), then the inline panel replaces the composer.
-  await act(async () => setup.mockMouse.click(130, 24));
+  await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
   await act(async () => {
     emitLiveRef.current?.(userInputRequestedFrame("que_live1"));
@@ -78,7 +78,11 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   await setup.flush();
 
   // Single-select: picking the first option submits and restores the composer.
-  await act(async () => setup.mockMouse.click(60, 21));
+  // The option is found by its label: the panel stands where the composer did, whose height has changed before.
+  const optionRows = setup.captureCharFrame().split("\n");
+  const forwardRow = optionRows.findIndex((line) => line.includes("1. Forward"));
+  if (forwardRow === -1) fail("the single-select question shows no Forward option");
+  await act(async () => setup.mockMouse.click(60, forwardRow));
   await setup.flush();
   console.log("--- answer submitted ---");
   console.log(setup.captureCharFrame());
@@ -139,7 +143,7 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     fail("reply click past window did not open message actions");
 
   // Backdrop-dismiss restores the closed state the answer flow below expects.
-  await act(async () => setup.mockMouse.click(130, 24));
+  await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
 
   // A two-question request: tabs name the questions, answering moves on, and

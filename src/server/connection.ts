@@ -1049,6 +1049,7 @@ export class DirectConnection implements ClientApi {
       // Saved with the message and sent to the provider as images.
       ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       ...(command.modelSelection ? { modelSelection: command.modelSelection } : {}),
+      ...(command.interactionMode ? { interactionMode: command.interactionMode } : {}),
       ...(command.ifBusy ? { ifBusy: command.ifBusy } : {}),
       ...(command.delivery ? { delivery: command.delivery } : {}),
       ...(command.wakeSettled !== undefined ? { wakeSettled: command.wakeSettled } : {}),

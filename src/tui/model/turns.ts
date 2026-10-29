@@ -359,6 +359,9 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
       case "skill":
         bump("skill");
         break;
+      case "memory":
+        bump(`memory-${view.action}`);
+        break;
       case "tool":
         bump("tool");
         break;
@@ -398,6 +401,12 @@ function summarizePart(key: string, count: number): string {
       return `ran ${count} task${plural}`;
     case "skill":
       return `used ${count} skill${plural}`;
+    case "memory-read":
+      return `read ${count} ${count === 1 ? "memory" : "memories"}`;
+    case "memory-save":
+      return `saved ${count} ${count === 1 ? "memory" : "memories"}`;
+    case "memory-delete":
+      return `deleted ${count} ${count === 1 ? "memory" : "memories"}`;
     case "tool":
       return `used ${count} tool${plural}`;
     default:

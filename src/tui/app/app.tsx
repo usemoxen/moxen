@@ -263,6 +263,16 @@ export function App({
   const providerVersions = useProviderVersions(client, picker === "settings");
   const providerUpdates = useProviderUpdates(client, toasts.push, providerVersions.reload);
   const ui = uiFromSnapshot(settings.snapshot) ?? launchUi;
+  // The provider catalog is read again when the page closes after an edit (a Harness profile, a hidden model).
+  const [settingsChanges, setSettingsChanges] = useState(0);
+  const snapshotAtOpen = useRef<typeof settings.snapshot>(null);
+  const settingsWasOpen = useRef(false);
+  useEffect(() => {
+    const open = picker === "settings";
+    if (open && !settingsWasOpen.current) snapshotAtOpen.current = settings.snapshot;
+    if (!open && settingsWasOpen.current && settings.snapshot !== snapshotAtOpen.current) setSettingsChanges((count) => count + 1);
+    settingsWasOpen.current = open;
+  }, [picker, settings.snapshot]);
   const longThreadConfig: LongThreadConfig = longThreadConfigFromSnapshot(settings.snapshot, launchProviders?.harness?.profiles) ?? {
     ...(launchUi ? { ui: launchUi } : {}),
     ...(launchProviders ? { providers: launchProviders } : {}),
@@ -418,9 +428,7 @@ export function App({
    * stays live.
    */
   const [booted, setBooted] = useState(false);
-  useEffect(() => {
-    if (!booted && isBootReady(shell, openThreadId, threadState)) setBooted(true);
-  }, [booted, shell, openThreadId, threadState]);
+  // The latch itself sits below, after the provider catalog and plan usage it waits for are read.
   const bootReady = booted;
   /** The model selection every picker/footer reads: while drafting a new
       thread this is the local override (once picked) or the source thread's
@@ -446,7 +454,6 @@ export function App({
     client,
     selected,
     creating,
-    notify: (text) => toasts.push("mode", "info", text, COPY_TOAST_MS),
     setError,
   });
   const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
@@ -707,11 +714,14 @@ export function App({
    */
   const dispatchTurn = (prompt: string, attachments: ImageAttachmentUpload[], busyDelivery: "steer" | "queue", scheduledFor?: Date) => {
     if (selected === null) return;
+    const oneOff = interaction.takeOneOff();
     void client
       .dispatch({
         type: "thread.turn.start",
         threadId: selected.id,
         message: { text: prompt, attachments },
+        // `/research` for this prompt only: the thread's own mode is not touched.
+        ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
         // A scheduled message waits in the queue for its time (it cannot steer).
         ...(scheduledFor !== undefined
           ? { scheduledFor: scheduledFor.toISOString() }
@@ -860,7 +870,8 @@ export function App({
       creatingProjectId,
       creatingModelSelection,
       creatingRuntimeMode,
-      creatingInteractionMode: interaction.mode,
+      creatingInteractionMode: interaction.stickyMode,
+      takeOneOff: interaction.takeOneOff,
       resetDraft,
       writePending,
       setCreating,
@@ -1153,6 +1164,7 @@ export function App({
     setFocus,
     setError,
     closePicker,
+    settingsChanges,
   });
   /** The model's own scene behind the new-thread view (and the sidebar's
       window onto it), or null for the monitoring texture. */
@@ -1171,11 +1183,20 @@ export function App({
   const sidePanelOpen = sidePanel.tab !== null && !creating;
   const turnKey = `${selected?.latestTurn?.turnId ?? ""}:${selected?.latestTurn?.state ?? ""}`;
   const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId) ?? null;
+  const [planUsageRead, setPlanUsageRead] = useState(false);
   const planUsage = usePlanUsage(
     client,
     `${turnKey}:${reconnects}`,
     ui?.usageRefreshSeconds === undefined ? undefined : ui.usageRefreshSeconds * 1000,
+    () => setPlanUsageRead(true),
   );
+  // What the composer's footer is drawn from (model names, usage gauges, the layout they pick) is read before
+  // the first frame, so it does not redraw when the answers land. A read that failed counts: the boot screen
+  // names the stalled leg rather than hold the app on a server that cannot answer it.
+  const providersReady = (providers !== null || providersError !== null) && planUsageRead;
+  useEffect(() => {
+    if (!booted && isBootReady(shell, openThreadId, threadState, providersReady)) setBooted(true);
+  }, [booted, shell, openThreadId, threadState, providersReady]);
   const threadUsageLimits = currentProvider === null ? null : (planUsage[currentProvider.driver] ?? currentProvider.usageLimits);
   const planGauges = planUsageGauges(threadUsageLimits);
   const contextBreakdown = useContextBreakdown(
@@ -2264,16 +2285,14 @@ export function App({
 
   const submitComposer = () => {
     if (editingExternallyRef.current) return;
-    // `/research`, `/orchestrate`: the mode changes first, then any text after the command goes out in it.
+    // `/research`, `/orchestrate`: this prompt runs in that mode and the thread keeps its own; alone, the mode is held for the next prompt.
     if (interaction.isModeCommand(draft)) {
-      const text = draft;
       // The composer's draft key (`useComposer`): the open thread's, or the one a first thread is drafted under.
       resetDraft(openThreadId ?? "__creating__");
-      void interaction.takeCommand(text).then((rest) => {
-        if (rest === null || rest.length === 0) return;
-        if (creating) createThread(rest);
-        else send(rest);
-      });
+      const rest = interaction.takeCommand(draft);
+      if (rest === null || rest.length === 0) return;
+      if (creating) createThread(rest);
+      else send(rest);
       return;
     }
     if (creating) createThread(draft);
@@ -2542,6 +2561,8 @@ export function App({
                 editingExternally={editingExternally}
                 skills={pickerSkills}
                 onSkillsOpen={refreshSkills}
+                // The account's plan usage for the provider picked here: the one metric a thread-less draft has.
+                planUsage={planGauges}
                 mode={interaction.mode}
                 onCycleMode={interaction.cycleMode}
               />
@@ -2832,7 +2853,7 @@ export function App({
         )}
       </box>
       ) : (
-        <LoadingScreen stage={bootLoadingStage(shell)} />
+        <LoadingScreen stage={bootLoadingStage(shell, providersReady)} />
       )}
       {toasts.toasts.map((toast, index) => (
         <box

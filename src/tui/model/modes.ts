@@ -1,7 +1,8 @@
 /**
  * The composer's side of a thread's mode (`InteractionMode`): Shift+Tab
- * cycles Build → Research → Orchestrate, and `/research` / `/orchestrate`
- * switch one on, or back to Build when it is already on. The procedures
+ * cycles Build → Research → Orchestrate and stays there, while `/research` /
+ * `/orchestrate` are for one prompt: the thread goes back to its own mode
+ * after it. The procedures
  * themselves are the server's (`core/threads/modes.ts`).
  */
 import { interactionModeLabel } from "../../core/interactionmode.js";
@@ -16,22 +17,19 @@ export function nextInteractionMode(mode: InteractionMode): InteractionMode {
 export { interactionModeLabel };
 
 export interface ModeCommand {
-  /** The mode the thread is in afterwards. */
+  /** The mode the prompt runs in: this one only, the thread's own mode is not changed. */
   readonly mode: InteractionMode;
-  /** Text after the command, sent once the mode is set; empty when there is none. */
+  /** Text after the command, sent in that mode; empty when there is none (the mode is held for the next prompt). */
   readonly rest: string;
 }
 
 /**
- * A draft that opens with `/research` or `/orchestrate`, or null. Alone, the
- * command toggles (the same one again is Build); with text after it, the mode
- * is switched on and the text goes out in it.
+ * A draft that opens with `/research` or `/orchestrate`, or null. With text
+ * after it, that prompt runs in the mode (one-off); alone, it arms the mode
+ * for the next prompt you send.
  */
-export function parseModeCommand(draft: string, current: InteractionMode): ModeCommand | null {
+export function parseModeCommand(draft: string): ModeCommand | null {
   const match = /^\/(research|orchestrate)(?:\s+([\s\S]*))?$/u.exec(draft.trim());
   if (match === null) return null;
-  const named = match[1] as InteractionMode;
-  const rest = (match[2] ?? "").trim();
-  if (rest.length > 0) return { mode: named, rest };
-  return { mode: current === named ? "default" : named, rest: "" };
+  return { mode: match[1] as InteractionMode, rest: (match[2] ?? "").trim() };
 }

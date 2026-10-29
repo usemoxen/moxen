@@ -1,7 +1,7 @@
 import { visibleThreads, type ShellState } from "./shell.js";
 import type { ThreadState } from "./thread.js";
 
-export type BootStage = "threads" | "transcript";
+export type BootStage = "threads" | "providers" | "transcript";
 
 /**
  * Boot gate: the app renders its loading screen until the shell snapshot has
@@ -14,18 +14,26 @@ export type BootStage = "threads" | "transcript";
  * `synchronized` to false via `emptyThreadState()`, so the predicate drops
  * again mid-session — `App` latches it for boot and only the transcript pane
  * re-gates afterwards, never the whole app.
+ *
+ * `providersReady`: the provider catalog and the plan usage have been read (or
+ * failed to be). The composer's footer depends on them (model names, the usage
+ * gauges, which layout it takes), so the first frame waits for them rather than
+ * redraw when they land.
  */
 export function isBootReady(
   shell: ShellState,
   openThreadId: string | null,
   thread: ThreadState,
+  providersReady = true,
 ): boolean {
   if (!shell.synchronized) return false;
+  if (!providersReady) return false;
   if (openThreadId !== null) return thread.synchronized;
   return visibleThreads(shell).length === 0;
 }
 
 /** Which leg of the boot the loading screen names while `isBootReady` is false. */
-export function bootLoadingStage(shell: ShellState): BootStage {
-  return shell.synchronized ? "transcript" : "threads";
+export function bootLoadingStage(shell: ShellState, providersReady = true): BootStage {
+  if (!shell.synchronized) return "threads";
+  return providersReady ? "transcript" : "providers";
 }

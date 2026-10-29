@@ -221,7 +221,7 @@ export async function runSidePanelTabs(): Promise<void> {
   // of its own (a lone "…" with the tab chip under it).
   const suggestion = "kick off a couple more in parallel to stress-test the panels";
   for (const [width, hint] of [[110, "tab  to use it"], [52, "tab  to use it"], [36, "tab"]] as const) {
-    const suggested = await testRender(<Footer width={width} suggestion={suggestion} />, { width: width + 2, height: 8, exitOnCtrlC: false });
+    const suggested = await testRender(<Footer width={width} suggestion={suggestion} />, { width: width + 2, height: 10, exitOnCtrlC: false });
     await suggested.flush();
     const frame = suggested.captureCharFrame();
     console.log(`--- composer: prompt suggestion at ${width} ---`);
@@ -232,23 +232,28 @@ export async function runSidePanelTabs(): Promise<void> {
     if (rows[first + 1]?.trim().startsWith("…") || rows[first + 1]?.includes("tab")) fail(`a ${width}-wide suggestion wrapped onto a second line`);
   }
 
-  const wide = await testRender(<Footer width={110} />, { width: 112, height: 8, exitOnCtrlC: false });
+  const wide = await testRender(<Footer width={110} />, { width: 112, height: 10, exitOnCtrlC: false });
   await wide.flush();
   const wideFrame = wide.captureCharFrame();
   console.log("--- composer footer: plan usage ---");
   console.log(wideFrame);
   if (!wideFrame.includes("5h 42%") || !wideFrame.includes("wk 91%")) fail("composer footer does not show the plan usage gauges");
-  const narrow = await testRender(<Footer width={60} />, { width: 62, height: 8, exitOnCtrlC: false });
+  // Beside an open panel the composer is narrow: the lowest-ranked controls (the plan gauges, then copy) go
+  // behind "⋯ more" while the model group and the rest stay in their slots.
+  const narrow = await testRender(<Footer width={44} />, { width: 46, height: 10, exitOnCtrlC: false });
   await narrow.flush();
   const narrowFrame = narrow.captureCharFrame();
   console.log("--- composer footer: narrow ---");
   console.log(narrowFrame);
-  const footerLine = narrowFrame.split("\n").find((row) => row.includes("Claude Opus 5")) ?? "";
-  if (!footerLine.includes("Full access")) fail("narrow composer footer lost the model group");
-  if (footerLine.includes("external")) fail("narrow composer footer kept its lowest-priority segments");
-  if (!/Full access\s{2,}/.test(footerLine)) fail("narrow composer footer runs its segments into the model group");
-  // What does not fit sits behind "⋯ more", whose menu lists every control.
-  if (!footerLine.includes("⋯ more")) fail("narrow composer footer offers no way to reach its hidden segments");
+  const narrowLines = narrowFrame.split("\n");
+  const topLine = narrowLines.find((row) => row.includes("Claude Opus 5")) ?? "";
+  const bottomLine = narrowLines.find((row) => row.includes("Full access")) ?? "";
+  if (!bottomLine.includes("Full access")) fail("narrow composer lost its permission");
+  if (!topLine.includes("84k/200k")) fail("narrow composer lost the context, which outranks the plan gauges");
+  if (topLine.includes("5h 42%")) fail("narrow composer kept the plan gauges it has no room for");
+  if (!bottomLine.includes("✎ external") || bottomLine.includes("copy")) fail("narrow composer did not shed copy before external");
+  // What does not fit sits behind "⋯ more", whose menu lists every control that was left out.
+  if (!bottomLine.includes("⋯ more")) fail("narrow composer offers no way to reach its hidden controls");
   const narrowRows = narrowFrame.split("\n");
   const moreRow = narrowRows.findIndex((row) => row.includes("⋯ more"));
   await act(async () => narrow.mockMouse.click(narrowRows[moreRow]!.indexOf("⋯ more") + 2, moreRow));
@@ -256,7 +261,7 @@ export async function runSidePanelTabs(): Promise<void> {
   const menu = narrow.captureCharFrame();
   console.log("--- composer footer: more menu ---");
   console.log(menu);
-  for (const expected of ["5h 42%", "⧉ copy", "✎ external", "▾ more"]) {
+  for (const expected of ["5h 42%", "⧉ copy", "▾ more"]) {
     if (!menu.includes(expected)) fail(`the more menu is missing "${expected}"`);
   }
 

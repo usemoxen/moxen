@@ -43,19 +43,21 @@ export const COLOR = {
 /**
  * A thread's mode, on the composer's left edge and in its footer. Amber
  * (running, warnings) and green (the user's messages) already mean something,
- * so no mode takes them. Build is the focus colour it always was.
+ * so no mode takes them. Build's restrained teal, Research's cool lavender,
+ * and Orchestrate's orchid stay distinct; blue remains the app's structural
+ * focus colour instead of competing with Build in the composer.
  */
 export const MODE_COLOR = {
-  default: SURFACE.borderFocus,
+  default: "#72cdbd",
   research: COLOR.diff,
-  orchestrate: "#f0abfc",
+  orchestrate: "#e9a8f5",
 } as const;
 
 /** The other end of each mode's running pulse (`pulseColor` from `MODE_COLOR`). */
 export const MODE_PULSE = {
-  default: "#0ea5e9",
+  default: "#c9f0e8",
   research: "#ede9fe",
-  orchestrate: "#fae8ff",
+  orchestrate: "#f8e0fb",
 } as const;
 
 /**

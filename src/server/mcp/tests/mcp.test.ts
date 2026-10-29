@@ -121,6 +121,22 @@ describe("moxen MCP server", () => {
     }
   });
 
+  it("runs a task in Build or Research as the model asks, and never in Orchestrate", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const modeOf = async (taskId: string) => (await (await openThreadStore(harness.root)).readThreadRecord(taskId))?.interactionMode;
+      const build = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Scout", title: "scout", isolation: "shared" })).text) as { taskId: string };
+      expect(await modeOf(build.taskId)).toBe("default");
+      const research = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Look into it", title: "look", isolation: "shared", mode: "research" })).text) as { taskId: string };
+      expect(await modeOf(research.taskId)).toBe("research");
+      const refused = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Plan it", title: "plan", isolation: "shared", mode: "orchestrate" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("never runs in Orchestrate");
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("tells the parent thread when a delegated task settles, with its facts for a card", async () => {
     const { harness, connection, parentThreadId } = await setup();
     try {

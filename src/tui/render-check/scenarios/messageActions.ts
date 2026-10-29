@@ -59,7 +59,7 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // (it stays open on guard failure, so a bare sidebar click would only land
   // on the backdrop), open t-xash from the sidebar, back to the top, and
   // click the prompt again.
-  await act(async () => setup.mockMouse.click(130, 24));
+  await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
   // Found by its title: the sidebar's rows move whenever a row above them changes.
   const sidebarRows = setup.captureCharFrame().split("\n");

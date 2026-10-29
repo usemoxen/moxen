@@ -67,6 +67,13 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
             "Start the subagent from a copy of your conversation so far (same provider, your checkout) instead of from nothing. " +
             "For side questions that need your context; the task text can then be short.",
         },
+        mode: {
+          type: "string",
+          enum: ["build", "research"],
+          description:
+            "build (default): the subagent does the task directly. research: the subagent works as a researcher (its own tools, read only) and answers in the research report format. " +
+            "A subagent cannot delegate, and Orchestrate is not available to one.",
+        },
       },
       required: ["task", "title"],
       additionalProperties: false,
@@ -550,6 +557,10 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     throw new CliError("INVALID_TOOL_INPUT", "isolation must be worktree or shared.");
   }
   const fork = args.fork === true;
+  const modeArg = argString(args, "mode");
+  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research") {
+    throw new CliError("INVALID_TOOL_INPUT", "mode must be build or research: a subagent never runs in Orchestrate.");
+  }
   const parent = await api.query({ type: "thread.inspect", threadId: parentThreadId });
   // Worktree by default, when there is a branch to cut one from — except a
   // fork, whose copied conversation lives with the parent's checkout.
@@ -569,6 +580,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(model ? { model } : {}),
     ...(effort ? { thinkingEffort: effort } : {}),
     ...(fork ? { fork: true } : {}),
+    ...(modeArg === "research" ? { interactionMode: "research" as const } : {}),
   });
   return {
     taskId: delegated.task.taskId,

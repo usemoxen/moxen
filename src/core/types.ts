@@ -82,6 +82,7 @@ export interface UpdatesConfig {
 
 export type BackdropMode = "animated" | "static" | "off";
 
+
 export interface UiConfig {
   backdrop?: BackdropMode;
   /** Each model's own scene behind the new-thread view; off keeps the monitoring field. On by default. */

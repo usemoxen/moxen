@@ -33,6 +33,8 @@ export function useThreadCreation(params: {
   creatingRuntimeMode: RuntimeMode | null;
   /** The mode the draft starts in (`useInteractionMode`): Build unless picked while drafting. */
   creatingInteractionMode: InteractionMode;
+  /** The `/research` or `/orchestrate` armed for the first prompt, cleared by taking it. */
+  takeOneOff: () => InteractionMode | undefined;
   resetDraft: (id: string) => void;
   writePending: (id: string, next: ImageAttachmentUpload[]) => void;
   setCreating: (creating: boolean) => void;
@@ -57,6 +59,7 @@ export function useThreadCreation(params: {
     creatingModelSelection,
     creatingRuntimeMode,
     creatingInteractionMode,
+    takeOneOff,
     resetDraft,
     writePending,
     setCreating,
@@ -121,11 +124,13 @@ export function useThreadCreation(params: {
         interactionMode,
         ...(scratch ? {} : { branch: source?.branch ?? null }),
       } as const;
+      const oneOff = takeOneOff();
       const start = {
         type: "thread.turn.start",
         threadId,
         message: { text: parsed.text, attachments: [...pending, ...built.attachments] },
         ...(modelSelection === undefined ? {} : { modelSelection }),
+        ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
       } as const;
       void (async () => {
         try {

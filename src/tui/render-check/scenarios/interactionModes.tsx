@@ -9,7 +9,7 @@ import { fail } from "../helpers.js";
 
 /**
  * Shift+Tab cycles Build → Research → Orchestrate → Build. The composer's
- * left edge takes each mode's colour and the footer names any mode but Build.
+ * left edge takes each mode's colour and the footer leads with every mode.
  */
 export async function runInteractionModes(): Promise<void> {
   function Harness() {
@@ -46,11 +46,11 @@ export async function runInteractionModes(): Promise<void> {
     }
     return null;
   };
-  const expectations: ReadonlyArray<{ mode: InteractionMode; label: string | null }> = [
-    { mode: "default", label: null },
-    { mode: "research", label: "Full access · Research" },
-    { mode: "orchestrate", label: "Full access · Orchestrate" },
-    { mode: "default", label: null },
+  const expectations: ReadonlyArray<{ mode: InteractionMode; label: string }> = [
+    { mode: "default", label: "Build" },
+    { mode: "research", label: "Research" },
+    { mode: "orchestrate", label: "Orchestrate" },
+    { mode: "default", label: "Build" },
   ];
   for (const [index, expected] of expectations.entries()) {
     if (index > 0) {
@@ -60,8 +60,7 @@ export async function runInteractionModes(): Promise<void> {
     const frame = setup.captureCharFrame();
     console.log(`--- composer: ${expected.mode} mode ---`);
     console.log(frame);
-    if (expected.label !== null && !frame.includes(expected.label)) fail(`the footer does not name ${expected.mode} mode`);
-    if (expected.label === null && /· (Research|Orchestrate)/u.test(frame)) fail("Build mode is named in the footer");
+    if (!frame.includes(`${expected.label} · Claude Opus 5`)) fail(`the footer does not lead with ${expected.mode} mode`);
     const color = edge();
     if (color !== MODE_COLOR[expected.mode]) fail(`the composer edge is ${color ?? "missing"} in ${expected.mode} mode, not ${MODE_COLOR[expected.mode]}`);
   }

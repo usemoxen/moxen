@@ -494,7 +494,7 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       prompt: prompt.text,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
-      interactionMode: thread.interactionMode,
+      interactionMode: next.interactionMode,
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
       ...(args.onUsageLimit ? { onUsageLimit: args.onUsageLimit } : {}),

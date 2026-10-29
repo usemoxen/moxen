@@ -93,7 +93,7 @@ printf '%s' "New findings that require more work..." \
   | moxen --json threads send --thread <thread-id> --stdin --wake-settled
 ```
 
-The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the permission in the TUI permission picker and the mode with Shift+Tab or `/research` / `/orchestrate` in the composer, since scheduled runs inherit them.
+The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the permission in the TUI permission picker and the mode with Shift+Tab in the composer, since scheduled runs inherit both (`/research` / `/orchestrate` are for one prompt and are not inherited).
 
 `--delivery` selects follow-up policy (default `auto`; every follow-up is recorded as a `thread.turn.start` turn, so the mode governs preconditions and reporting): `queue` records even when busy and reports `queued`, `steer` requires an active turn and reports `steered`, and `restart` interrupts the active turn first and reports `restarted` (`THREAD_NOT_STEERABLE` when idle). `--handoff-note <text>` records provider-switch context as CLI-side metadata without changing the recorded turn.
 

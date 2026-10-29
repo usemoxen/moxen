@@ -9,11 +9,11 @@ import { fail } from "../helpers.js";
 
 /** Footer model segment in the thread view: the "Claude Opus 5" label that
     opens the model picker (the timeline reply header carries the same name
-    plus a timestamp, so the footer is the occurrence sharing a row with the
-    permission segment). */
+    plus a timestamp, so the composer's is the occurrence sharing a row with the
+    mode). */
 function threadFooterModelTarget(setup: TestRendererSetup): { x: number; y: number } {
   const rows = setup.captureCharFrame().split("\n");
-  const y = rows.findIndex((line) => line.includes("Claude Opus 5") && line.includes("Full access"));
+  const y = rows.findIndex((line) => line.includes("Build · Claude Opus 5"));
   if (y === -1) fail("composer footer model segment not visible");
   const x = rows[y]?.indexOf("Claude Opus 5") ?? -1;
   return { x: x === -1 ? 50 : x + 2, y };
@@ -86,9 +86,10 @@ export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
       fail("empty workspace shows the model error without any interaction");
     }
     const rows = creatingFrame.split("\n");
-    const footer = rows.findIndex((line) => line.includes("- · Full access"));
+    // The desktop layout's selectors row: mode, then the model (none yet, so "-").
+    const footer = rows.findIndex((line) => line.includes("Build · -"));
     if (footer === -1) fail("empty creating-view composer footer not visible");
-    const x = rows[footer]?.indexOf("- · Full access") ?? -1;
+    const x = (rows[footer]?.indexOf("Build · -") ?? -2) + "Build · ".length;
     await act(async () => {
       await empty.mockMouse.click(x === -1 ? 50 : x, footer);
     });

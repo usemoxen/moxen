@@ -64,6 +64,8 @@ const RESEARCH = [
   "Research mode is on: the user switched it on, and it stays on until they switch it off. Run the request as a research run:",
   "you orchestrate researcher agents, a critic and a finalizer through Moxen's `delegate` tool, and the end product is one final report, " +
     "with every source, as long and with as many tables or figures as the request needs.",
+  "If you have no `delegate` tool, you are a delegated task: you are the researcher. Do the research yourself with your own tools, read only, " +
+    "and answer in the report format below; skip the roles and caps.",
   "",
   "## Roles",
   "- You: draft the plan (the questions, which run in parallel, what the report must contain), fan researchers out, spawn follow-ups for subtopics they surface, " +

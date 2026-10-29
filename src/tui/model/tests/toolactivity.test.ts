@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { describeActivity } from "../activity.js";
+import { describeActivity, memoryLabel } from "../activity.js";
 import type { ActivityEnvelope } from "../../../core/types.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../core/threads/toolactivity.js";
 
@@ -209,6 +209,19 @@ describe("toolActivityRow", () => {
       });
       expect(completed("execute", { code: 'await tools.moxen.todos({todos: []});\nawait tools.moxen.todos({todos: []});' }, "{}")).toMatchObject({ kind: "todos" });
       expect(completed("execute", { code: "await tools.moxen.todos({todos: []}); search({query: 'x'})" }, "{}")).toMatchObject({ kind: "tool" });
+    });
+
+    it("shows Moxen's memory tools as the memory they touch", () => {
+      expect(completed("moxen_memory_save", { name: "prefers-bun", scope: "global", body: "x" }, '{"name":"prefers-bun","scope":"global","replaced":false,"total":3}')).toEqual({
+        kind: "memory",
+        action: "save",
+        name: "prefers-bun",
+        scope: "global",
+        running: false,
+      });
+      expect(completed("moxen_memory_read", {}, "- [a](a.md): about a")).toEqual({ kind: "memory", action: "read", name: null, scope: null, running: false });
+      expect(memoryLabel({ kind: "memory", action: "read", name: null, scope: null, running: false })).toBe("index");
+      expect(memoryLabel({ kind: "memory", action: "delete", name: "old", scope: "project", running: false })).toBe("old (project)");
     });
 
     it("shows a `subagent` call as the native subagent it started", () => {

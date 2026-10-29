@@ -4,6 +4,7 @@ import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import { describeSettings, restartRequired, settingDescriptor, SETTINGS } from "../../../core/configschema.js";
 import { DEFAULT_CONFIG, normalizeConfig } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
+import { uiFromSnapshot } from "../../features/settings/useSettings.js";
 import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
 
 function provider(instanceId: string, models: Array<{ slug: string; name: string; efforts?: string[]; hidden?: boolean }>, enabled = true): ProviderSummary {
@@ -397,3 +398,11 @@ describe("when a change applies", () => {
   });
 });
 
+
+describe("uiFromSnapshot", () => {
+  it("carries every interface setting the app draws from, so an edit applies without a restart", () => {
+    const config = normalizeConfig({ ui: { backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" } });
+    const ui = uiFromSnapshot({ settings: describeSettings(config) } as never);
+    expect(ui).toMatchObject({ backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" });
+  });
+});

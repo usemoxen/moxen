@@ -79,7 +79,7 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   // … which closes back to the diff on backdrop click (the esc key calls the
   // same `onClose`; the mock's `pressEscape` is sync-void while clicks are the
   // proven in-harness path — the corner is outside the centered panel).
-  await act(async () => setup.mockMouse.click(130, 24));
+  await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
   console.log("--- diff-turn picker (backdrop closed) ---");
   console.log(setup.captureCharFrame());

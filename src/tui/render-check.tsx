@@ -27,6 +27,7 @@ import { runScheduleModal } from "./render-check/scenarios/scheduleModal.js";
 import { runSidePanelTabs } from "./render-check/scenarios/sidePanelTabs.js";
 import { runNoticeBanner } from "./render-check/scenarios/noticeBanner.js";
 import { runImageTokens } from "./render-check/scenarios/imageTokens.js";
+import { runComposerSlots } from "./render-check/scenarios/composerSlots.js";
 import { runInteractionModes } from "./render-check/scenarios/interactionModes.js";
 import { runSettingsAndGit } from "./render-check/scenarios/settingsAndGit.js";
 import { runSettingsModelList, runSettingsSlider } from "./render-check/scenarios/settingsSlider.js";
@@ -62,7 +63,8 @@ await registerSyntaxParsers();
 // tear itself down on the ctrl+c scenario below before the app ever saw it.
 const setup = await testRender(<App client={client} onQuit={() => {}} launchView="thread" />, {
   width: 140,
-  height: 26,
+  // One row more than the composer's older, shorter footer needed: the composer is a row taller now.
+  height: 27,
   exitOnCtrlC: false,
 });
 
@@ -104,6 +106,7 @@ await runQueueAndSide();
 await runNoticeBanner();
 await runImageTokens();
 await runInteractionModes();
+await runComposerSlots();
 await runSidebarTree();
 await runSidebarSearch();
 await runRemoteAccess();

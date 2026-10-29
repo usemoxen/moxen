@@ -26,7 +26,7 @@ export function LoadingScreen({ stage }: { stage: BootStage }) {
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} selectable={false}>
         <text fg={pulseColor(tick, COLOR.dim, COLOR.accent, 2400)} bg={SURFACE.base} selectable={false}>
-          {` ${frame} Loading ${stage === "threads" ? "threads" : "transcript"}… `}
+          {` ${frame} Loading ${stage === "threads" ? "threads" : stage === "providers" ? "providers" : "transcript"}… `}
         </text>
       </box>
       <box style={{ height: 1, flexShrink: 0 }} selectable={false}>

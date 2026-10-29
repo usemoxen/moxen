@@ -83,8 +83,12 @@ export function usePlanUsage(
   client: ClientApi,
   refreshKey: unknown,
   intervalMs: number = USAGE_REFRESH_MS,
+  /** Called when a read has answered or failed: the boot screen waits for the first one. */
+  onFirstRead?: () => void,
 ): Readonly<Record<string, ProviderUsageLimits>> {
   const [limits, setLimits] = useState<Readonly<Record<string, ProviderUsageLimits>>>({});
+  const firstRead = useRef(onFirstRead);
+  firstRead.current = onFirstRead;
   useEffect(() => {
     let cancelled = false;
     const read = (): void => {
@@ -93,7 +97,8 @@ export function usePlanUsage(
         .then((result) => {
           if (!cancelled) setLimits(result.providers);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => firstRead.current?.());
     };
     read();
     const timer = setInterval(read, intervalMs);

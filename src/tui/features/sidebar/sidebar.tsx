@@ -620,6 +620,11 @@ export function Sidebar({
           />
         </box>
       )}
+      {search === undefined ? null : (
+        <box style={{ height: 1, flexShrink: 0, zIndex: 1 }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.rule} bg={SURFACE.panel}>{` ${rule(Math.max(0, width - 4))}`}</text>
+        </box>
+      )}
       {sections.mode === "project" && !searching ? (
         <box
           style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, zIndex: 1 }}

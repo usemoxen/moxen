@@ -43,7 +43,21 @@ describe("isBootReady", () => {
   });
 });
 
+describe("isBootReady, with the provider data", () => {
+  it("holds the gate until the catalog and the plan usage have been read, so the footer does not redraw", () => {
+    expect(isBootReady(syncedShell(), "t-1", syncedThread(), false)).toBe(false);
+    expect(isBootReady(syncedShell(), null, emptyThreadState(), false)).toBe(false);
+    expect(isBootReady(syncedShell(), "t-1", syncedThread(), true)).toBe(true);
+  });
+});
+
 describe("bootLoadingStage", () => {
+  it("names the providers leg once the threads are in and the provider data is not", () => {
+    expect(bootLoadingStage(emptyShellState(), false)).toBe("threads");
+    expect(bootLoadingStage(syncedShell(), false)).toBe("providers");
+    expect(bootLoadingStage(syncedShell(), true)).toBe("transcript");
+  });
+
   it("names the threads leg before the shell lands and the transcript leg after", () => {
     expect(bootLoadingStage(emptyShellState())).toBe("threads");
     expect(bootLoadingStage(syncedShell())).toBe("transcript");

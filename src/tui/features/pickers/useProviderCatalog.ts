@@ -42,6 +42,12 @@ export function useProviderCatalog(params: {
   closePicker: (returnFocus?: "composer" | "chat" | "diff") => void;
   /** Moves each time the connection comes back (`useReconnects`): the catalog is read again. */
   reconnects?: number;
+  /**
+   * Moves each time the settings page closes with something changed (a Harness
+   * profile added, a model hidden): the catalog is read again, so the composer
+   * and the model picker show it without a restart.
+   */
+  settingsChanges?: number;
 }) {
   const {
     client,
@@ -58,6 +64,7 @@ export function useProviderCatalog(params: {
     setError,
     closePicker,
     reconnects = 0,
+    settingsChanges = 0,
   } = params;
 
   const [providers, setProviders] = useState<ProviderSummary[] | null>(null);
@@ -107,7 +114,7 @@ export function useProviderCatalog(params: {
       if (retry.current !== null) clearTimeout(retry.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, reconnects]);
+  }, [client, reconnects, settingsChanges]);
 
   const openModelPicker = () => {
     // Drafting a new thread stores the pick locally (`creatingModelSelection`)

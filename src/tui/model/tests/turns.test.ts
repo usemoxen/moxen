@@ -84,6 +84,25 @@ describe("summarizeWork", () => {
     expect(summarizeWork(entries)).toBe("Ran 2 commands, read 1 file, asked 1 question");
   });
 
+  it("counts Moxen's memory tools apart from other tools", () => {
+    const memory = (id: string, tool: string, input: Record<string, unknown>): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: "",
+        data: { toolName: `mcp__moxen__${tool}`, input },
+      });
+    const entries = [
+      memory("m1", "memory_read", {}),
+      memory("m2", "memory_read", { name: "a-memory" }),
+      memory("m3", "memory_save", { name: "a-memory", scope: "project" }),
+      memory("m4", "memory_delete", { name: "a-memory", scope: "project" }),
+    ];
+    expect(summarizeWork(entries)).toBe("Read 2 memories, saved 1 memory, deleted 1 memory");
+  });
+
   it("tells created files apart from updated ones", () => {
     const updated = toolEntry("f1", "tool.completed", {
       itemType: "file_change",

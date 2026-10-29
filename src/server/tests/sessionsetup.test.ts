@@ -308,6 +308,45 @@ describe("Research and Orchestrate modes", () => {
     }
   });
 
+  it("runs one prompt in a mode without changing the thread's, and tells the conversation when it is over", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const id = created.threadId;
+      await connection.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "two" }, interactionMode: "research", wait: true });
+      expect(prompts[1]).toContain('<moxen-mode key="moxen-research">');
+      expect((await harness.store.readThreadRecord(id))?.interactionMode).toBe("default");
+      expect((await harness.store.readTurns(id)).map((turn) => turn.interactionMode)).toEqual(["default", "research"]);
+
+      // The next prompt is Build again, and the conversation is told so.
+      await send(connection, id, "three");
+      expect(prompts[2]).toContain("Research mode is off");
+      await send(connection, id, "four");
+      expect(prompts[3]).toBe("four");
+
+      // Orchestrate is not a one-off to refuse: it works the same way.
+      await connection.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "five" }, interactionMode: "orchestrate", wait: true });
+      expect(prompts[4]).toContain('<moxen-mode key="moxen-orchestrate">');
+      expect((await harness.store.readThreadRecord(id))?.interactionMode).toBe("default");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("runs a delegated task in Research when its parent asks, and refuses Orchestrate", async () => {
+    const { harness, connection } = await world();
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Look into it", isolation: "shared", interactionMode: "research" });
+      expect(delegated.interactionMode).toBe("research");
+      await expect(
+        connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Plan it", isolation: "shared", interactionMode: "orchestrate" }),
+      ).rejects.toThrow(/never Orchestrate/u);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("runs a delegated task in Build whatever its parent's mode", async () => {
     const { harness, prompts, connection } = await world();
     try {

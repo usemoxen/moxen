@@ -138,6 +138,8 @@ export type CommandBody =
       readonly threadId: string;
       readonly message: ThreadMessageInput;
       readonly modelSelection?: ModelSelection;
+      /** The mode for this prompt only (`/research`); the thread's own mode is unchanged. */
+      readonly interactionMode?: InteractionMode;
       /** What a busy thread does with a plain send: refuse (default) or take it as a steer. */
       readonly ifBusy?: SendIfBusy;
       readonly delivery?: SendDelivery;
@@ -341,8 +343,9 @@ export interface CommandResults {
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
-  "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean };
-  "memory.delete": { readonly name: string; readonly scope: MemoryScope };
+  /** `total`: the memories the scope holds afterwards. */
+  "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number };
+  "memory.delete": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
   "memory.import-claude": ImportResult;
   "settings.set": SettingsSnapshot & Accepted;
   "remote.pairing.start": RemotePairing;
@@ -835,6 +838,7 @@ export function decodeCommand(value: unknown): Command {
         threadId: threadId(),
         message: decodeMessage(record.message),
         ...(selection ? { modelSelection: selection } : {}),
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
         ...optionalEnum(record, "delivery", ["auto", "steer", "restart", "queue"] as const, type),
         ...optionalBoolean(record, "wakeSettled"),
@@ -982,6 +986,7 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "isolation", ["shared", "worktree"] as const, type),
         ...optionalBoolean(record, "notify"),
         ...optionalBoolean(record, "fork"),
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
       };
     case "thread.task.cancel":
       return {

@@ -164,7 +164,7 @@ export interface SaveMemoryInput {
 }
 
 /** Save (or replace) one memory and rewrite its scope's index. */
-export async function saveMemory(location: MemoryLocation, input: SaveMemoryInput): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean }> {
+export async function saveMemory(location: MemoryLocation, input: SaveMemoryInput): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number }> {
   const name = memoryName(input.name);
   const scope = memoryScope(input.scope);
   const type = memoryType(input.type);
@@ -184,7 +184,7 @@ export async function saveMemory(location: MemoryLocation, input: SaveMemoryInpu
   }
   await writeAtomic(path.join(dir, `${name}.md`), render({ name, description, type, body }));
   await writeIndex(dir, scope);
-  return { name, scope, replaced };
+  return { name, scope, replaced, total: existing.length + (replaced ? 0 : 1) };
 }
 
 /** One memory, looked for in `scope` or, without one, the project's first and then the global. */
@@ -200,7 +200,7 @@ export async function readMemory(location: MemoryLocation, rawName: unknown, raw
   throw new CliError("MEMORY_NOT_FOUND", `No memory named ${name}${scopes.length === 1 ? ` in the ${scopes[0]} scope` : ""}.`, { exitCode: 4, details: { name } });
 }
 
-export async function deleteMemory(location: MemoryLocation, rawName: unknown, rawScope: unknown): Promise<{ readonly name: string; readonly scope: MemoryScope }> {
+export async function deleteMemory(location: MemoryLocation, rawName: unknown, rawScope: unknown): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly total: number }> {
   const name = memoryName(rawName);
   const scope = memoryScope(rawScope);
   const dir = memoryDir(location.storeRoot, scope, location.projectId);
@@ -209,7 +209,7 @@ export async function deleteMemory(location: MemoryLocation, rawName: unknown, r
   if (!there) throw new CliError("MEMORY_NOT_FOUND", `No memory named ${name} in the ${scope} scope.`, { exitCode: 4, details: { name, scope } });
   await rm(file, { force: true });
   await writeIndex(dir, scope);
-  return { name, scope };
+  return { name, scope, total: (await readAll(dir, scope)).length };
 }
 
 /** Every memory a thread can see: the global ones, then its project's. */

@@ -362,12 +362,13 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     return;
   }
   const selection = turn.modelSelection ?? thread.modelSelection;
+  const turnThread: StoredThread = { ...thread, interactionMode: turn.interactionMode };
   let driver: TurnDriver;
   let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
     driver = ctx.driverFor(selection.instanceId);
-    setup = await sessionSetup(ctx, thread, selection.instanceId);
-    await ensureDriverSession(driver, thread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+    setup = await sessionSetup(ctx, turnThread, selection.instanceId);
+    await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
     await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
@@ -382,7 +383,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     storeTurnId: turn.id,
     prompt: promptWithUpdate(message.text, setup),
     ...(steps.length > 0 ? { afterSend: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
-    interactionMode: thread.interactionMode,
+    interactionMode: turn.interactionMode,
     ...(images.length > 0 ? { images } : {}),
     modelSelection: selection,
     workingDirectory: thread.env.path,
@@ -720,11 +721,13 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   if (!fresh) return { ...sent, run: null };
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
+  // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
+  const turnThread: StoredThread = { ...sent.thread, interactionMode: sent.turn.interactionMode };
   let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
   let startFailure: unknown = null;
   try {
-    setup = await sessionSetup(ctx, sent.thread, turnModel.instanceId);
-    await ensureDriverSession(driver, sent.thread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id) });
+    setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id) });
   } catch (cause) {
     startFailure = cause;
   }
@@ -754,7 +757,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // Always the turn's own model, so a live session switches when the
     // thread's model changed since it started.
     modelSelection: turnModel,
-    interactionMode: sent.thread.interactionMode,
+    interactionMode: sent.turn.interactionMode,
     workingDirectory: sent.thread.env.path,
     ...(onEvent ? { onEvent } : {}),
     ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
@@ -1477,6 +1480,8 @@ export interface DelegateRequest extends ModelRequest {
    * empty one: same provider, the parent's checkout (`shared`).
    */
   readonly fork?: boolean;
+  /** The mode the task runs in: Build (the default) or Research. Orchestrate is for the one delegating, so it is refused. */
+  readonly interactionMode?: InteractionMode;
 }
 
 export type DelegateIsolation = "shared" | "worktree";
@@ -1756,8 +1761,14 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest):
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
   const { runtimeMode } = requireParentModes(parent);
-  // A task runs in Build whatever its parent's mode: Research and Orchestrate are procedures for the one delegating.
-  const interactionMode: InteractionMode = "default";
+  // A task's mode is the delegating model's choice, Build unless it asks for Research. Orchestrate delegates, and a task never does.
+  if (request.interactionMode === "orchestrate") {
+    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build or Research, never Orchestrate: only the thread that delegates orchestrates.", {
+      exitCode: 2,
+      details: { interactionMode: request.interactionMode },
+    });
+  }
+  const interactionMode: InteractionMode = request.interactionMode ?? "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
   if (isolated && !parentEnv.branch) {

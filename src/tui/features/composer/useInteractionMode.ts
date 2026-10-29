@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { storedInteractionMode } from "../../../core/interactionmode.js";
 import type { InteractionMode, ThreadEnvelope } from "../../../core/types.js";
 import type { ClientApi } from "../../../server/api.js";
-import { interactionModeLabel, nextInteractionMode, parseModeCommand } from "../../model/modes.js";
+import { nextInteractionMode, parseModeCommand } from "../../model/modes.js";
 
 /**
  * The mode the composer shows and changes: the open thread's (a
@@ -17,15 +17,36 @@ export function useInteractionMode(params: {
   client: ClientApi;
   selected: ThreadEnvelope | null;
   creating: boolean;
-  notify: (text: string) => void;
   setError: (message: string) => void;
 }) {
-  const { client, selected, creating, notify, setError } = params;
+  const { client, selected, creating, setError } = params;
   const [creatingMode, setCreatingMode] = useState<InteractionMode>("default");
   const [requested, setRequested] = useState<{ readonly threadId: string; readonly mode: InteractionMode } | null>(null);
   const stored = storedInteractionMode(selected?.interactionMode);
   const threadMode = selected !== null && requested !== null && requested.threadId === selected.id ? requested.mode : stored;
-  const mode = creating ? creatingMode : threadMode;
+  /** The mode a new prompt starts in and `Shift+Tab` cycles: the thread's own. */
+  const stickyMode = creating ? creatingMode : threadMode;
+  // `/research` or `/orchestrate`: the next prompt only. The ref is read at send time, the state draws it.
+  const [oneOff, setOneOff] = useState<InteractionMode | null>(null);
+  const oneOffRef = useRef<InteractionMode | null>(null);
+  const armOneOff = (next: InteractionMode | null) => {
+    oneOffRef.current = next;
+    setOneOff(next);
+  };
+  /** The one-off mode for the prompt being sent now, cleared by taking it; undefined when none is armed. */
+  const takeOneOff = (): InteractionMode | undefined => {
+    const armed = oneOffRef.current;
+    if (armed === null) return undefined;
+    armOneOff(null);
+    return armed;
+  };
+  // A one-off belongs to the draft it was typed in.
+  useEffect(() => {
+    oneOffRef.current = null;
+    setOneOff(null);
+  }, [selected?.id, creating]);
+  /** What the composer shows: the armed one-off, else the thread's mode. */
+  const mode = oneOff ?? stickyMode;
 
   // Once the thread list carries the change, it is the source again.
   useEffect(() => {
@@ -36,10 +57,10 @@ export function useInteractionMode(params: {
     if (creating) setCreatingMode("default");
   }, [creating]);
 
-  /** Switch to `next`; resolves once the server has it, so a send after it runs in the new mode. */
+  /** Switch the thread's mode to `next`; resolves once the server has it, so a send after it runs in the new mode. */
   const setMode = async (next: InteractionMode): Promise<boolean> => {
-    if (next === mode) return true;
-    notify(next === "default" ? `${interactionModeLabel(mode)} mode off: Build` : `${interactionModeLabel(next)} mode on`);
+    armOneOff(null);
+    if (next === stickyMode) return true;
     if (creating) {
       setCreatingMode(next);
       return true;
@@ -58,14 +79,25 @@ export function useInteractionMode(params: {
   };
 
   /**
-   * A `/research` or `/orchestrate` draft: switches the mode and returns the
-   * text to send after it ("" for none), or null when the draft is not one.
+   * A `/research` or `/orchestrate` draft: the mode applies to one prompt and
+   * the thread's own mode stays. Returns the text to send in it ("" for none,
+   * which arms the mode for the next prompt; the same command again disarms),
+   * or null when the draft is not one.
    */
-  const takeCommand = async (draft: string): Promise<string | null> => {
-    const command = parseModeCommand(draft, mode);
+  const takeCommand = (draft: string): string | null => {
+    const command = parseModeCommand(draft);
     if (command === null) return null;
-    return (await setMode(command.mode)) ? command.rest : "";
+    armOneOff(command.rest.length === 0 && oneOffRef.current === command.mode ? null : command.mode);
+    return command.rest;
   };
 
-  return { mode, setMode, cycleMode: () => void setMode(nextInteractionMode(mode)), takeCommand, isModeCommand: (draft: string) => parseModeCommand(draft, mode) !== null };
+  return {
+    mode,
+    stickyMode,
+    setMode,
+    cycleMode: () => void setMode(nextInteractionMode(stickyMode)),
+    takeCommand,
+    takeOneOff,
+    isModeCommand: (draft: string) => parseModeCommand(draft) !== null,
+  };
 }

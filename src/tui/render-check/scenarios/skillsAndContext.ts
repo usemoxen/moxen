@@ -10,7 +10,10 @@ import { fail } from "../helpers.js";
 export async function runSkillsAndContext(setup: TestRendererSetup): Promise<void> {
   // Focus the composer and start the message with `/` (Claude's trigger): the
   // skill picker floats above the composer, live-filtered by what follows.
-  await act(async () => setup.mockMouse.click(60, 19));
+  // The composer is found by its placeholder: its height has changed before.
+  const composerRow = setup.captureCharFrame().split("\n").findIndex((line) => line.includes("Message the agent"));
+  if (composerRow === -1) fail("the composer's placeholder is not on screen");
+  await act(async () => setup.mockMouse.click(60, composerRow));
   await setup.flush();
   await act(async () => setup.mockInput.pressKey("/"));
   await setup.flush();
