@@ -80,6 +80,28 @@ exceptions.
 3. Run `bun run check` (typecheck + tests) before claiming completion.
 4. Extend `render-check.tsx`'s scenarios and `model/*.test.ts` when changing TUI behavior.
 
+## Cross-platform
+
+CI runs the checks on more than one OS, and passing on one doesn't mean it
+passes on the others. When you touch paths, files, processes, temp dirs or
+the home folder, check:
+
+- Don't type POSIX paths into expectations. `path.resolve("/Users/x")` is
+  `C:\Users\x` on Windows. Build the expected value with the same `path` call.
+- Compare paths with `fs.realpathSync.native`, not `realpathSync`. Windows temp
+  dirs can come back as short names like `RUNNER~1`.
+- Use `node:path`, not `/` in code or regexes. Drive letters can be `c:` or `C:`.
+- Windows reads `USERPROFILE`, not `HOME`. Tests that fake the home folder set both.
+- PowerShell and cmd don't expand `~`. Use `expandHome`.
+- Deleting a file in use fails with `EBUSY`/`EPERM`. Handle it, and close
+  handles and stop servers before removing a test folder.
+- Don't use `sh`, `kill`, `ps`, `chmod` or `/tmp`. Skip POSIX-only tests on
+  `win32` and say why in the title.
+- Files are LF. Don't depend on the platform's newline.
+- Wait on a condition, not a fixed `sleep`. Windows is slower.
+
+To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
+
 ## TUI conventions
 
 - New feature-specific state goes in that feature's own hook under `src/tui/features/<feature>/`; cross-cutting state that a single feature can't own goes in `src/tui/app/hooks/`. Shared, stateless-ish runtime hooks live in `src/tui/hooks/`. Avoid adding more raw `useState` to `app.tsx` itself.
