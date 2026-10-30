@@ -32,6 +32,12 @@ export const UI_BLOCK_LIMITS = {
   /** Operations on one image, and shapes in one annotation. */
   ops: 8,
   shapes: 12,
+  /** Bars in a chart. */
+  bars: 12,
+  /** Rows of a key-value list or a status grid. */
+  rows: 20,
+  /** Characters of a label, a key or a unit. */
+  label: 80,
   /** Characters of one text, caption, alt or path. */
   text: 2_000,
 } as const;
@@ -62,6 +68,16 @@ interface UiBase {
   span?: number;
 }
 
+export interface UiBar {
+  label: string;
+  value: number;
+  color?: UiColor;
+}
+
+/** The five states, as the rest of Moxen draws them: running, waiting on someone, failed, up next, done. */
+export const UI_STATES = ["live", "held", "broken", "next", "done"] as const;
+export type UiState = (typeof UI_STATES)[number];
+
 export type UiImage = UiBase & { type: "image"; src: string; alt: string; caption?: string; ops: UiOp[] };
 
 export type UiNode =
@@ -70,7 +86,12 @@ export type UiNode =
   | UiImage
   /** Two images in one: `overlay` lays `b` over `a` at `opacity`; `difference` shows where they differ. */
   | (UiBase & { type: "blend"; mode: "overlay" | "difference"; opacity: number; a: UiImage; b: UiImage; caption?: string })
-  | (UiBase & { type: "text" | "caption"; text: string });
+  | (UiBase & { type: "text" | "caption"; text: string })
+  /** Horizontal bars, scaled to `max` (default: the largest value). */
+  | (UiBase & { type: "chart"; kind: "bar"; title?: string; unit?: string; max?: number; bars: UiBar[] })
+  | (UiBase & { type: "progress"; label: string; value: number; text?: string; color?: UiColor })
+  | (UiBase & { type: "keyvalue"; title?: string; rows: { key: string; value: string }[] })
+  | (UiBase & { type: "status"; title?: string; rows: { label: string; state: UiState; note?: string }[] });
 
 export interface UiBlock {
   v: typeof UI_BLOCK_VERSION;
@@ -142,6 +163,46 @@ function node(value: unknown, depth: number, count: Count): UiNode {
     case "text":
     case "caption":
       return { ...base, type: value.type, text: text(value.text, true) };
+    case "chart": {
+      if (value.kind !== "bar") reject();
+      const bars = list(value.bars, UI_BLOCK_LIMITS.bars).map((bar): UiBar => {
+        if (!isRecord(bar)) reject();
+        return { label: label(bar.label, true), value: amount(bar.value), ...optional("color", bar.color === undefined ? undefined : color(bar.color)) };
+      });
+      const max = value.max === undefined ? undefined : amount(value.max);
+      if (max !== undefined && !(max > 0)) reject();
+      return { ...base, type: "chart", kind: "bar", bars, ...optional("title", optionalLabel(value.title)), ...optional("unit", optionalLabel(value.unit)), ...optional("max", max) };
+    }
+    case "progress":
+      return {
+        ...base,
+        type: "progress",
+        label: label(value.label, true),
+        value: fraction(value.value),
+        ...optional("text", optionalLabel(value.text)),
+        ...optional("color", value.color === undefined ? undefined : color(value.color)),
+      };
+    case "keyvalue":
+      return {
+        ...base,
+        type: "keyvalue",
+        rows: list(value.rows, UI_BLOCK_LIMITS.rows).map((row) => {
+          if (!isRecord(row)) reject();
+          return { key: label(row.key, true), value: text(row.value, true) };
+        }),
+        ...optional("title", optionalLabel(value.title)),
+      };
+    case "status":
+      return {
+        ...base,
+        type: "status",
+        rows: list(value.rows, UI_BLOCK_LIMITS.rows).map((row) => {
+          if (!isRecord(row) || typeof row.state !== "string" || !(UI_STATES as readonly string[]).includes(row.state)) reject();
+          const note = optionalLabel(row.note);
+          return { label: label(row.label, true), state: row.state as UiState, ...optional("note", note) };
+        }),
+        ...optional("title", optionalLabel(value.title)),
+      };
     default:
       return reject();
   }
@@ -152,6 +213,34 @@ function children(parent: Record<string, unknown>, depth: number, count: Count):
   const list = parent.children;
   if (!Array.isArray(list) || list.length === 0 || list.length > UI_BLOCK_LIMITS.children) reject();
   return list.map((child) => node(child, depth + 1, count));
+}
+
+/** A short text: a label, a key, a unit. */
+function label(value: unknown, required: boolean): string {
+  if (value === undefined && !required) return "";
+  if (typeof value !== "string" || value.length === 0 || value.length > UI_BLOCK_LIMITS.label) reject();
+  return value;
+}
+
+function optionalLabel(value: unknown): string | undefined {
+  return value === undefined ? undefined : label(value, true);
+}
+
+/** A number of something: finite, not negative. */
+function amount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) reject();
+  return value;
+}
+
+/** A non-empty list of at most `max` entries. */
+function list(value: unknown, max: number): unknown[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > max) reject();
+  return value;
+}
+
+/** `{ [key]: value }`, or nothing, so an absent field stays absent. */
+function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return value === undefined ? {} : ({ [key]: value } as { [P in K]?: V });
 }
 
 function image(value: unknown, base: UiBase, count: Count): UiImage {

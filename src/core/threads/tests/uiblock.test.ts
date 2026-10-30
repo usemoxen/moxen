@@ -48,6 +48,44 @@ describe("parseUiBlock", () => {
     expect(parseUiBlock(block({ type: "column", children: blends }))).toBeNull();
   });
 
+  it("reads each data component, leaving out what it was not given", () => {
+    const parsed = parseUiBlock(
+      block({
+        type: "column",
+        children: [
+          { type: "chart", kind: "bar", title: "Tokens", unit: "k", bars: [{ label: "input", value: 120, color: "blue" }, { label: "output", value: 30 }] },
+          { type: "progress", label: "Tests", value: 0.42, text: "38 of 90" },
+          { type: "keyvalue", rows: [{ key: "branch", value: "main" }] },
+          { type: "status", title: "CI", rows: [{ label: "build", state: "done" }, { label: "deploy", state: "held", note: "waiting on approval" }] },
+        ],
+      }),
+    );
+    expect(parsed?.root).toEqual({
+      type: "column",
+      gap: 1,
+      children: [
+        { type: "chart", kind: "bar", title: "Tokens", unit: "k", bars: [{ label: "input", value: 120, color: "blue" }, { label: "output", value: 30 }] },
+        { type: "progress", label: "Tests", value: 0.42, text: "38 of 90" },
+        { type: "keyvalue", rows: [{ key: "branch", value: "main" }] },
+        { type: "status", title: "CI", rows: [{ label: "build", state: "done" }, { label: "deploy", state: "held", note: "waiting on approval" }] },
+      ],
+    });
+  });
+
+  it("allows a bar past the chart's max, and a max alone sets the scale", () => {
+    expect(parseUiBlock(block({ type: "chart", kind: "bar", max: 10, bars: [{ label: "a", value: 12 }] }))?.root).toMatchObject({ max: 10 });
+  });
+
+  it("refuses more bars or rows than the caps, and a label over its cap", () => {
+    const bars = (count: number) => Array.from({ length: count }, (_, at) => ({ label: `b${at}`, value: at }));
+    expect(parseUiBlock(block({ type: "chart", kind: "bar", bars: bars(UI_BLOCK_LIMITS.bars) }))).not.toBeNull();
+    expect(parseUiBlock(block({ type: "chart", kind: "bar", bars: bars(UI_BLOCK_LIMITS.bars + 1) }))).toBeNull();
+    const rows = Array.from({ length: UI_BLOCK_LIMITS.rows + 1 }, (_, at) => ({ key: `k${at}`, value: "v" }));
+    expect(parseUiBlock(block({ type: "keyvalue", rows }))).toBeNull();
+    expect(parseUiBlock(block({ type: "keyvalue", rows: rows.slice(0, UI_BLOCK_LIMITS.rows) }))).not.toBeNull();
+    expect(parseUiBlock(block({ type: "progress", label: "x".repeat(UI_BLOCK_LIMITS.label + 1), value: 0.5 }))).toBeNull();
+  });
+
   it("ignores fields it does not know, so a later version can add one", () => {
     expect(parseUiBlock(block(image("/a.png", { future: true }), { note: "x" }))?.root).toMatchObject({ type: "image", src: "/a.png" });
   });
@@ -71,6 +109,18 @@ describe("parseUiBlock", () => {
     ["a pad to an extreme shape", block(image("/a.png", { ops: [{ op: "pad", aspect: 40 }] }))],
     ["an annotation with no shapes", block(image("/a.png", { ops: [{ op: "annotate", shapes: [] }] }))],
     ["an annotation colour it does not know", block(image("/a.png", { ops: [{ op: "annotate", shapes: [{ shape: "box", x: 0, y: 0, w: 0.5, h: 0.5, color: "#ff0000" }] }] }))],
+    ["a chart of a kind it does not know", block({ type: "chart", kind: "pie", bars: [{ label: "a", value: 1 }] })],
+    ["a chart with no bars", block({ type: "chart", kind: "bar", bars: [] })],
+    ["a bar with a negative value", block({ type: "chart", kind: "bar", bars: [{ label: "a", value: -1 }] })],
+    ["a bar with a value that is not a number", block({ type: "chart", kind: "bar", bars: [{ label: "a", value: "3" }] })],
+    ["a bar with no label", block({ type: "chart", kind: "bar", bars: [{ value: 3 }] })],
+    ["a chart whose max is zero", block({ type: "chart", kind: "bar", max: 0, bars: [{ label: "a", value: 1 }] })],
+    ["a progress past 1", block({ type: "progress", label: "tests", value: 1.5 })],
+    ["a progress with no label", block({ type: "progress", value: 0.5 })],
+    ["a key-value list with no rows", block({ type: "keyvalue", rows: [] })],
+    ["a key-value row with no key", block({ type: "keyvalue", rows: [{ value: "x" }] })],
+    ["a status row in a state it does not know", block({ type: "status", rows: [{ label: "build", state: "green" }] })],
+    ["a status row with no label", block({ type: "status", rows: [{ state: "done" }] })],
     ["a blend of something that is not an image", block({ type: "blend", mode: "overlay", a: image("/a.png"), b: { type: "text", text: "x" } })],
     ["a blend with a mode it does not know", block({ type: "blend", mode: "multiply", a: image("/a.png"), b: image("/b.png") })],
   ])("is not a block for %s", (_name, json) => {
