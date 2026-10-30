@@ -877,12 +877,12 @@ export function App({
     return shrunk;
   };
 
-  const attachPaths = (kind: "file" | "folder") => {
+  const attachPaths = () => {
     if (selected === null || creating) {
       toasts.push("attach-paths", "info", t("attachPaths.openThread"), COPY_TOAST_MS);
       return;
     }
-    void filePaths.attach(kind);
+    void filePaths.attach();
   };
 
   const pasteImage = () => {
@@ -2789,8 +2789,7 @@ export function App({
             onQueue={() => {
               if (!editingExternallyRef.current) send(draft, "queue");
             }}
-            onAttachFilesClick={() => attachPaths("file")}
-            onAttachFolderClick={() => attachPaths("folder")}
+            onAttachClick={attachPaths}
             onCopyClick={copyDraft}
             onExternalEditClick={editDraftExternally}
             editingExternally={editingExternally}

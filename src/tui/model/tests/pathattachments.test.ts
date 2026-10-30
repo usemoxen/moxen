@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { tempDir } from "../../../core/testing/tmp.js";
-import { attachmentsFromPaths, parsePickerOutput, pickerCommand } from "../filepicker.js";
+import { attachmentsFromPaths, parsePickerOutput, pickerCommand, WINDOWS_FOLDER_PLACEHOLDER } from "../filepicker.js";
 import { addPaths, pathLabel, promptWithPaths, quotePath } from "../pathattachments.js";
 
 describe("paths in the prompt", () => {
@@ -40,21 +40,24 @@ describe("paths in the prompt", () => {
 
 describe("the OS file dialog", () => {
   it("is opened with argv on every platform, the prompt as an argument and never inside a shell string", () => {
-    const mac = pickerCommand("file", "darwin", "Pick; rm -rf /")!;
+    const mac = pickerCommand("darwin", "Pick; rm -rf /")!;
     expect(mac.command).toBe("osascript");
     expect(mac.args.at(-1)).toBe("Pick; rm -rf /");
-    expect(mac.args.join("\n")).toContain("choose file");
-    expect(pickerCommand("folder", "darwin", "x")!.args.join("\n")).toContain("choose folder");
+    // One panel for files and folders together.
+    expect(mac.args.join("\n")).toContain("canChooseFiles = true");
+    expect(mac.args.join("\n")).toContain("canChooseDirectories = true");
 
-    const windows = pickerCommand("file", "win32", "x")!;
+    const windows = pickerCommand("win32", "x")!;
     expect(windows.command).toBe("powershell.exe");
     expect(windows.args.join("\n")).toContain("OpenFileDialog");
     expect(windows.args.join("\n")).toContain("Multiselect = $true");
-    expect(pickerCommand("folder", "win32", "x")!.args.join("\n")).toContain("FolderBrowserDialog");
 
-    const linux = pickerCommand("folder", "linux", "x")!;
-    expect(linux.command).toBe("zenity");
-    expect(linux.args).toContain("--directory");
+    expect(pickerCommand("linux", "x")!.command).toBe("zenity");
+  });
+
+  it("takes Open on the Windows placeholder name as the folder the dialog was in", async () => {
+    const dir = realpathSync.native(tempDir("moxen-pick-"));
+    expect(await attachmentsFromPaths([path.join(dir, WINDOWS_FOLDER_PLACEHOLDER)])).toEqual([{ path: dir, kind: "folder" }]);
   });
 
   it("reads one path per line, without blank lines or the trailing separator a folder comes with", () => {

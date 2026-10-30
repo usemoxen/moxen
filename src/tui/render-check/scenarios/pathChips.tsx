@@ -54,8 +54,8 @@ export async function runPathChips(): Promise<void> {
         submitVerb="sends"
         running={false}
         width={composerWidth}
-        onAttachFilesClick={() => clicked.push("file")}
-        onAttachFolderClick={() => clicked.push("folder")}
+        onAttachClick={() => clicked.push("attach")}
+        permission="Full access"
       />
     </box>,
     { width: composerWidth, height: 14, exitOnCtrlC: false },
@@ -67,10 +67,11 @@ export async function runPathChips(): Promise<void> {
   console.log("--- composer: attach buttons ---");
   console.log(footer.captureCharFrame());
   const lines = footer.captureCharFrame().split("\n");
-  for (const [label, kind] of [["+ file", "file"], ["+ folder", "folder"]] as const) {
-    const at = lines.findIndex((line) => line.includes(label));
-    if (at === -1) fail(`the composer has no ${label} button`);
-    await act(async () => footer.mockMouse.click(lines[at]!.indexOf(label) + 2, at));
-    if (clicked.at(-1) !== kind) fail(`${label} did not ask for a ${kind} dialog`);
-  }
+  const at = lines.findIndex((line) => line.includes("+ attach"));
+  if (at === -1) fail("the composer has no attach button");
+  // It leads the bottom row, before the permission, flush with the card's text column.
+  if (lines[at]!.indexOf("+ attach") > lines[at]!.indexOf("Full access")) fail("the attach button is not first in the bottom row");
+  if (lines[at]!.indexOf("+ attach") !== lines.find((line) => line.includes("Message the agent"))!.indexOf("Message the agent")) fail("the attach button is not left-aligned with the draft");
+  await act(async () => footer.mockMouse.click(lines[at]!.indexOf("+ attach") + 2, at));
+  if (clicked.length !== 1) fail("the attach button did not open the dialog");
 }

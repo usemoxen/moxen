@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 
 import { t } from "../../i18n/index.js";
 import { pickPaths } from "../../model/filepicker.js";
-import { addPaths, type PathAttachment, type PathKind } from "../../model/pathattachments.js";
+import { addPaths, type PathAttachment } from "../../model/pathattachments.js";
 import type { useToasts } from "../../hooks/useToasts.js";
 
 const TOAST_MS = 4_000;
@@ -18,13 +18,13 @@ export function useFileAttachments(threadId: string | null, toasts: ReturnType<t
 
   const write = useCallback((id: string, next: PathAttachment[]) => setByThread((current) => ({ ...current, [id]: next })), []);
 
-  const attach = async (kind: PathKind): Promise<void> => {
+  const attach = async (): Promise<void> => {
     if (!enabled) {
       // The dialog picks paths on this machine; a paired server's agent could not read them.
       toasts.push("attach-paths", "warn", t("attachPaths.local"), TOAST_MS);
       return;
     }
-    const result = await pickPaths(kind, kind === "file" ? t("attachPaths.pickFiles") : t("attachPaths.pickFolder"));
+    const result = await pickPaths(t("attachPaths.pick"));
     if (result.status === "unavailable") {
       toasts.push("attach-paths", "warn", t("attachPaths.unavailable", { why: result.reason.slice(0, 80) }), TOAST_MS);
       return;

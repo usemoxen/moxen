@@ -8,7 +8,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { runProcess } from "../../core/infra/process.js";
-import type { PathAttachment, PathKind } from "./pathattachments.js";
+import type { PathAttachment } from "./pathattachments.js";
 
 export interface PickerCommand {
   command: string;
@@ -18,54 +18,53 @@ export interface PickerCommand {
 /** Long enough for a person to browse; the dialog is theirs to close. */
 const PICKER_TIMEOUT_MS = 30 * 60_000;
 
-const WINDOWS_SCRIPT = (kind: PathKind) =>
-  [
-    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
-    "Add-Type -AssemblyName System.Windows.Forms",
-    // An invisible topmost owner, so the dialog opens in front of the terminal and not behind it.
-    "$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0; StartPosition = 'CenterScreen' }",
-    "$owner.Show()",
-    kind === "file"
-      ? "$dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Multiselect = $true"
-      : "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {",
-    kind === "file" ? "  $dialog.FileNames | ForEach-Object { Write-Output $_ }" : "  Write-Output $dialog.SelectedPath",
-    "}",
-    "$owner.Close()",
-  ].join("\n");
+/** The placeholder name the Windows dialog offers: pressing Open with it, inside a folder, picks that folder. */
+export const WINDOWS_FOLDER_PLACEHOLDER = "Select this folder";
+
+const WINDOWS_SCRIPT = [
+  "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+  "Add-Type -AssemblyName System.Windows.Forms",
+  // An invisible topmost owner, so the dialog opens in front of the terminal and not behind it.
+  "$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0; StartPosition = 'CenterScreen' }",
+  "$owner.Show()",
+  // Windows has no dialog for files and folders together. This one picks files; with no file chosen,
+  // Open on the placeholder name picks the folder the dialog is in (it need not exist, so the check is off).
+  `$dialog = New-Object System.Windows.Forms.OpenFileDialog -Property @{ Multiselect = $true; CheckFileExists = $false; ValidateNames = $false; FileName = '${WINDOWS_FOLDER_PLACEHOLDER}' }`,
+  "if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {",
+  "  $dialog.FileNames | ForEach-Object { Write-Output $_ }",
+  "}",
+  "$owner.Close()",
+].join("\n");
+
+/**
+ * macOS: an NSOpenPanel that takes files and folders at once, which
+ * AppleScript's `choose file` / `choose folder` cannot. The prompt arrives as
+ * the script's first argument.
+ */
+const MAC_SCRIPT = [
+  "ObjC.import('AppKit');",
+  "function run(argv) {",
+  "  const app = $.NSApplication.sharedApplication;",
+  "  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);",
+  "  app.activateIgnoringOtherApps(true);",
+  "  const panel = $.NSOpenPanel.openPanel;",
+  "  panel.canChooseFiles = true;",
+  "  panel.canChooseDirectories = true;",
+  "  panel.allowsMultipleSelection = true;",
+  "  panel.message = argv[0];",
+  "  if (panel.runModal !== $.NSModalResponseOK) return '';",
+  "  const out = [];",
+  "  for (let index = 0; index < panel.URLs.count; index += 1) out.push(ObjC.unwrap(panel.URLs.objectAtIndex(index).path));",
+  "  return out.join('\\n');",
+  "}",
+].join("\n");
 
 /** The command that opens the dialog on `platform`, or null where there is no tool to open one with. */
-export function pickerCommand(kind: PathKind, platform: NodeJS.Platform, prompt: string): PickerCommand | null {
-  if (platform === "darwin") {
-    // `choose file` and `choose folder` both take several picks; the paths come back one per line.
-    const choose = kind === "file" ? "choose file" : "choose folder";
-    return {
-      command: "osascript",
-      args: [
-        "-e",
-        "on run argv",
-        "-e",
-        `set picked to ${choose} with prompt (item 1 of argv) with multiple selections allowed`,
-        "-e",
-        'set out to ""',
-        "-e",
-        "repeat with entry in picked",
-        "-e",
-        "set out to out & POSIX path of entry & linefeed",
-        "-e",
-        "end repeat",
-        "-e",
-        "return out",
-        "-e",
-        "end run",
-        prompt,
-      ],
-    };
-  }
-  if (platform === "win32") {
-    return { command: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_SCRIPT(kind)] };
-  }
-  return { command: "zenity", args: ["--file-selection", "--title", prompt, ...(kind === "file" ? ["--multiple"] : ["--directory", "--multiple"]), "--separator", "\n"] };
+export function pickerCommand(platform: NodeJS.Platform, prompt: string): PickerCommand | null {
+  if (platform === "darwin") return { command: "osascript", args: ["-l", "JavaScript", "-e", MAC_SCRIPT, prompt] };
+  if (platform === "win32") return { command: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_SCRIPT] };
+  // zenity cannot pick files and folders together: files.
+  return { command: "zenity", args: ["--file-selection", "--multiple", "--title", prompt, "--separator", "\n"] };
 }
 
 /** The dialog's output as paths: one per line, blank lines and the folder's trailing separator dropped. */
@@ -87,7 +86,8 @@ export function parsePickerOutput(output: string): string[] {
 export async function attachmentsFromPaths(paths: readonly string[]): Promise<PathAttachment[]> {
   const found: PathAttachment[] = [];
   for (const picked of paths) {
-    const absolute = path.resolve(picked);
+    // Open on the placeholder name picked the folder it was in.
+    const absolute = path.basename(picked) === WINDOWS_FOLDER_PLACEHOLDER ? path.resolve(path.dirname(picked)) : path.resolve(picked);
     const stat = await fs.stat(absolute).catch(() => null);
     if (stat === null) continue;
     found.push({ path: absolute, kind: stat.isDirectory() ? "folder" : "file" });
@@ -98,8 +98,8 @@ export async function attachmentsFromPaths(paths: readonly string[]): Promise<Pa
 export type PickResult = { status: "picked"; items: PathAttachment[] } | { status: "cancelled" } | { status: "unavailable"; reason: string };
 
 /** Opens the dialog and waits for it. Closing it without a pick is `cancelled`, not an error. */
-export async function pickPaths(kind: PathKind, prompt: string, platform: NodeJS.Platform = process.platform): Promise<PickResult> {
-  const command = pickerCommand(kind, platform, prompt);
+export async function pickPaths(prompt: string, platform: NodeJS.Platform = process.platform): Promise<PickResult> {
+  const command = pickerCommand(platform, prompt);
   if (command === null) return { status: "unavailable", reason: platform };
   let result;
   try {

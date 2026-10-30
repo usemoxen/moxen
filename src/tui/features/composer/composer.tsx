@@ -208,8 +208,7 @@ export function Composer({
   onStopClick,
   onCopyClick,
   onExternalEditClick,
-  onAttachFilesClick,
-  onAttachFolderClick,
+  onAttachClick,
   editingExternally,
   submitVerb,
   running,
@@ -271,9 +270,8 @@ export function Composer({
   onCopyClick?: () => void;
   /** Opens the draft in `$EDITOR`; omitted hides the segment. Alt+E also triggers it. */
   onExternalEditClick?: () => void;
-  /** Opens the OS dialog to attach files / a folder: their paths go in the prompt. */
-  onAttachFilesClick?: () => void;
-  onAttachFolderClick?: () => void;
+  /** Opens the OS dialog to attach files and folders: their paths go in the prompt. First control of the bottom row. */
+  onAttachClick?: () => void;
   /** The draft is open in the external editor — textarea unfocuses and hints pause. */
   editingExternally?: boolean;
   submitVerb: "creates" | "sends";
@@ -652,26 +650,6 @@ export function Composer({
       render: (surface) => <HoverText text={backgroundSummary} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onBackgroundClick ?? (() => undefined)} surface={surface} />,
     });
   }
-  if (onAttachFilesClick !== undefined) {
-    const text = tr("composer.attachFile");
-    candidates.push({
-      key: "attach-file",
-      width: text.length,
-      drop: 7,
-      group: "action",
-      render: (surface) => <HoverText text={text} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onAttachFilesClick} surface={surface} />,
-    });
-  }
-  if (onAttachFolderClick !== undefined) {
-    const text = tr("composer.attachFolder");
-    candidates.push({
-      key: "attach-folder",
-      width: text.length,
-      drop: 6,
-      group: "action",
-      render: (surface) => <HoverText text={text} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onAttachFolderClick} surface={surface} />,
-    });
-  }
   if (onCopyClick !== undefined) {
     candidates.push({
       key: "copy",
@@ -725,7 +703,9 @@ export function Composer({
   const topRightKept = fitTo(topRightAll, footerRoom - topSelectorsWidth);
   const topHidden = topRightAll.filter((segment) => !topRightKept.includes(segment));
   const bottomAll = candidates.filter((segment) => segment.key === "background" || segment.group === "action");
-  const bottomBase = permissionText.length + 2;
+  const attachText = onAttachClick === undefined ? "" : tr("composer.attach");
+  // The attach control leads the bottom row and never goes behind "more".
+  const bottomBase = permissionText.length + 2 + (attachText.length === 0 ? 0 : attachText.length + 5);
   let bottomKept = fitTo(bottomAll, footerRoom, bottomBase);
   // Whatever does not fit goes behind a "⋯ more" control (which takes room of its own); the menu lists only
   // the hidden segments, never the ones still visible (showing both is what duplicated `stop`).
@@ -755,6 +735,16 @@ export function Composer({
           drop: 0,
           group: "metric",
           render: (surface) => <HoverText text={permissionText} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onPermissionClick ?? (() => undefined)} surface={surface} />,
+        };
+  const attachSegment: Segment | null =
+    onAttachClick === undefined
+      ? null
+      : {
+          key: "attach",
+          width: attachText.length,
+          drop: 0,
+          group: "metric",
+          render: (surface) => <HoverText text={attachText} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onAttachClick} surface={surface} />,
         };
   // The key hint under the card, cut to the longest form that fits.
   const STATUS_INDENT = 3;
@@ -814,7 +804,7 @@ export function Composer({
   );
   const bottomRow = (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-      {segmentRow([...(permissionSegment === null ? [] : [permissionSegment]), ...bottomShown.filter((segment) => segment.group === "metric")])}
+      {segmentRow([...(attachSegment === null ? [] : [attachSegment]), ...(permissionSegment === null ? [] : [permissionSegment]), ...bottomShown.filter((segment) => segment.group === "metric")])}
       {segmentRow(bottomShown.filter((segment) => segment.group === "action"))}
     </box>
   );
