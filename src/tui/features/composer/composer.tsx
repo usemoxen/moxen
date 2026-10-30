@@ -208,6 +208,8 @@ export function Composer({
   onStopClick,
   onCopyClick,
   onExternalEditClick,
+  onAttachFilesClick,
+  onAttachFolderClick,
   editingExternally,
   submitVerb,
   running,
@@ -269,6 +271,9 @@ export function Composer({
   onCopyClick?: () => void;
   /** Opens the draft in `$EDITOR`; omitted hides the segment. Alt+E also triggers it. */
   onExternalEditClick?: () => void;
+  /** Opens the OS dialog to attach files / a folder: their paths go in the prompt. */
+  onAttachFilesClick?: () => void;
+  onAttachFolderClick?: () => void;
   /** The draft is open in the external editor — textarea unfocuses and hints pause. */
   editingExternally?: boolean;
   submitVerb: "creates" | "sends";
@@ -645,6 +650,26 @@ export function Composer({
       drop: 1,
       group: "metric",
       render: (surface) => <HoverText text={backgroundSummary} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onBackgroundClick ?? (() => undefined)} surface={surface} />,
+    });
+  }
+  if (onAttachFilesClick !== undefined) {
+    const text = tr("composer.attachFile");
+    candidates.push({
+      key: "attach-file",
+      width: text.length,
+      drop: 7,
+      group: "action",
+      render: (surface) => <HoverText text={text} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onAttachFilesClick} surface={surface} />,
+    });
+  }
+  if (onAttachFolderClick !== undefined) {
+    const text = tr("composer.attachFolder");
+    candidates.push({
+      key: "attach-folder",
+      width: text.length,
+      drop: 6,
+      group: "action",
+      render: (surface) => <HoverText text={text} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onAttachFolderClick} surface={surface} />,
     });
   }
   if (onCopyClick !== undefined) {

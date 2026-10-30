@@ -877,8 +877,7 @@ export function App({
     return shrunk;
   };
 
-  const attachFromPalette = (kind: "file" | "folder") => {
-    closePicker("composer");
+  const attachPaths = (kind: "file" | "folder") => {
     if (selected === null || creating) {
       toasts.push("attach-paths", "info", t("attachPaths.openThread"), COPY_TOAST_MS);
       return;
@@ -1816,23 +1815,6 @@ export function App({
             ],
           },
           {
-            header: t("palette.attach"),
-            rows: [
-              {
-                key: "attach:files",
-                label: t("attachPaths.files"),
-                meta: t("attachPaths.hint"),
-                onPick: () => attachFromPalette("file"),
-              },
-              {
-                key: "attach:folder",
-                label: t("attachPaths.folder"),
-                meta: t("attachPaths.hint"),
-                onPick: () => attachFromPalette("folder"),
-              },
-            ],
-          },
-          {
             header: t("palette.thread"),
             rows: [
               {
@@ -2662,7 +2644,7 @@ export function App({
                 onModelClick={openModelPicker}
                 onEffortClick={openEffortPicker}
                 onPermissionClick={openPermissionPicker}
-                onCopyClick={copyDraft}
+            onCopyClick={copyDraft}
                 onExternalEditClick={editDraftExternally}
                 editingExternally={editingExternally}
                 skills={pickerSkills}
@@ -2807,6 +2789,8 @@ export function App({
             onQueue={() => {
               if (!editingExternallyRef.current) send(draft, "queue");
             }}
+            onAttachFilesClick={() => attachPaths("file")}
+            onAttachFolderClick={() => attachPaths("folder")}
             onCopyClick={copyDraft}
             onExternalEditClick={editDraftExternally}
             editingExternally={editingExternally}
