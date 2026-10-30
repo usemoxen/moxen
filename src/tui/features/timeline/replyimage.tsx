@@ -15,6 +15,14 @@ import { openImageViewer } from "./imageviewer.js";
 /** Reads an image a reply shows, by the path the reply names (`image.read`). Provided by `Timeline`. */
 export const ReplyImageReaderContext = createContext<AttachmentReader | null>(null);
 
+/**
+ * Which message an image belongs to. A file can be rewritten at the same path
+ * between two replies (a screenshot saved over the last one), so an image is
+ * remembered per message and path: the same message never fetches it twice,
+ * and a later one that names the path gets the file as it is then.
+ */
+export const ReplyImageScopeContext = createContext<string>("");
+
 /** The widest and tallest a reply's image is drawn, in cells, pane permitting. */
 const MAX_COLUMNS = 72;
 const MAX_ROWS = 24;
@@ -39,17 +47,18 @@ function mosaicOf(image: LoadedImage, columns: number, rows: number) {
 /** The image a path names: null while the bytes come, "failed" when they cannot. */
 function useLoadedImage(path: string): LoadedImage | null | "failed" {
   const reader = useContext(ReplyImageReaderContext);
+  const scope = useContext(ReplyImageScopeContext);
   const [image, setImage] = useState<LoadedImage | null | "failed">(null);
   useEffect(() => {
     if (reader === null) return;
     let live = true;
-    void loadImage(reader, path).then((loaded) => {
+    void loadImage(reader, path, `${scope}\u0000${path}`).then((loaded) => {
       if (live) setImage(loaded ?? "failed");
     });
     return () => {
       live = false;
     };
-  }, [reader, path]);
+  }, [reader, path, scope]);
   return image;
 }
 

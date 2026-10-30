@@ -126,6 +126,7 @@ export async function runImageThumbs(): Promise<void> {
   await runImageOps();
   await runUiData();
   await runUiFacts();
+  await runReplyImageScope(png);
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -631,4 +632,55 @@ async function runUiFacts(): Promise<void> {
   if (at === -1 || !narrow[at + 1]!.includes("a long")) fail("a key should stand above its value in a pane too narrow to share");
   const gallery = narrow.findIndex((line) => line.includes("! gallery"));
   if (gallery === -1 || !narrow[gallery + 1]!.includes("a component")) fail("a note should go under its label in a pane too narrow for it beside");
+}
+
+/**
+ * A file a reply names can be rewritten at the same path before the next reply
+ * (a screenshot saved over the last one). The same message fetches its image
+ * once however often it is drawn; a later message naming the path fetches it
+ * again, so it is not shown the file as it was.
+ */
+async function runReplyImageScope(png: Buffer): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+  const asked: string[] = [];
+  let show: (first: boolean, second: boolean) => void = () => {};
+  const entry = (id: string) => ({ id, text: "![a shot](/tmp/rewritten.png)", streaming: false, message: null }) as never;
+  function Harness() {
+    const [shown, set] = useState({ first: true, second: false });
+    show = (first, second) => set({ first, second });
+    return (
+      <ReplyImageReaderContext.Provider
+        value={async (path) => {
+          asked.push(path);
+          return { mimeType: "image/png", dataUrl };
+        }}
+      >
+        <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+          {shown.first ? <MessageBody entry={entry("first")} homeDir={undefined} background={SURFACE.base} /> : null}
+          {shown.second ? <MessageBody entry={entry("second")} homeDir={undefined} background={SURFACE.base} /> : null}
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width: 40, height: 30, exitOnCtrlC: false });
+  const settle = () =>
+    act(async () => {
+      for (let waited = 0; waited < 300; waited += 25) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await setup.flush();
+      }
+    });
+  const fetched = () => asked.length;
+  await settle();
+  if (fetched() !== 1) fail(`a reply's image should be fetched once, fetched ${fetched()} times`);
+  await act(async () => show(false, false));
+  await settle();
+  await act(async () => show(true, false));
+  await settle();
+  if (fetched() !== 1) fail("drawing the same message again fetched its image again");
+  await act(async () => show(true, true));
+  await settle();
+  if (fetched() !== 2) fail(`a later reply naming the same path should fetch the file as it is now (fetched ${fetched()} times in all)`);
 }

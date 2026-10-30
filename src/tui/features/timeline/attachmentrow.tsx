@@ -21,18 +21,24 @@ export const AttachmentReaderContext = createContext<AttachmentReader | null>(nu
 const MAX_CACHED = 16;
 const cache = new Map<string, Promise<LoadedImage | null>>();
 
-export function loadImage(reader: AttachmentReader, attachmentId: string): Promise<LoadedImage | null> {
-  const hit = cache.get(attachmentId);
+/**
+ * The image `attachmentId` names. `cacheKey` is what a fetch is remembered
+ * under, the id itself by default: an attachment never changes under its id,
+ * but a file a reply names can be rewritten at the same path, so those are
+ * remembered per message (`ReplyImageScopeContext`).
+ */
+export function loadImage(reader: AttachmentReader, attachmentId: string, cacheKey: string = attachmentId): Promise<LoadedImage | null> {
+  const hit = cache.get(cacheKey);
   if (hit !== undefined) return hit;
   const pending = reader(attachmentId)
     .then((read) => imageFromDataUrl(read.dataUrl))
     .catch(() => null)
     .then((image) => {
       // A miss is not remembered: the next hover asks again.
-      if (image === null) cache.delete(attachmentId);
+      if (image === null) cache.delete(cacheKey);
       return image;
     });
-  cache.set(attachmentId, pending);
+  cache.set(cacheKey, pending);
   if (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value as string);
   return pending;
 }

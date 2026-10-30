@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
 import { chipSegments, splitChipBlocks, splitReplyImages, type ReplyBlock } from "../../model/messagechips.js";
-import { ReplyImage, ReplyImageReaderContext } from "./replyimage.js";
+import { ReplyImage, ReplyImageReaderContext, ReplyImageScopeContext } from "./replyimage.js";
 import { UiBlockView } from "./uiblockview.js";
 import { splitUiBlocks, type UiBlock } from "../../../core/threads/uiblock.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
@@ -592,56 +592,58 @@ export function MessageBody({
       );
 
   return (
-    <box style={{ flexDirection: "column", flexGrow: 1 }}>
-      {rendered.text.length === 0
-        ? null
-        : parts.map((block, index) =>
-            block.kind === "ui" ? (
-              <UiBlockView key={index} block={block.block} />
-            ) : block.kind === "image" ? (
-              <ReplyImage key={index} path={block.path} alt={block.alt} />
-            ) : block.kind === "chips" ? (
-              <text key={index} fg={COLOR.text} wrapMode="word" selectable>
-                {chipSegments(block.text).map((segment, at) =>
-                  segment.chip ? (
-                    <span key={at} fg={PICK_FG} bg={PICK_BG} attributes={TextAttributes.BOLD}>
-                      {segment.text}
-                    </span>
-                  ) : (
-                    segment.text
-                  ),
-                )}
-              </text>
-            ) : (
-              <markdown
-                key={index}
-                content={block.text}
-                fg={COLOR.text}
-                syntaxStyle={syntaxStyle()}
-                streaming={entry.streaming}
-                // `<markdown>` defaults to non-selectable like every Renderable —
-                // message bodies are exactly the content a user drags to copy.
-                selectable
-              />
-            ),
-          )}
-      {rendered.images.length === 0 ? null : (
-        <box style={{ flexDirection: "column", flexShrink: 0 }}>
-          <box style={{ height: 1, flexShrink: 0 }} backgroundColor={background} />
-          <box style={{ flexDirection: "row", flexWrap: "wrap", flexShrink: 0, columnGap: 3, rowGap: 0 }}>
-            {rendered.images.map((image) => (
-              <AttachmentRow
-                key={image.contextId}
-                attachmentId={image.attachmentId}
-                label={image.label}
-                sizeBytes={image.sizeBytes}
-                background={background}
-              />
-            ))}
+    <ReplyImageScopeContext.Provider value={entry.id}>
+      <box style={{ flexDirection: "column", flexGrow: 1 }}>
+        {rendered.text.length === 0
+          ? null
+          : parts.map((block, index) =>
+              block.kind === "ui" ? (
+                <UiBlockView key={index} block={block.block} />
+              ) : block.kind === "image" ? (
+                <ReplyImage key={index} path={block.path} alt={block.alt} />
+              ) : block.kind === "chips" ? (
+                <text key={index} fg={COLOR.text} wrapMode="word" selectable>
+                  {chipSegments(block.text).map((segment, at) =>
+                    segment.chip ? (
+                      <span key={at} fg={PICK_FG} bg={PICK_BG} attributes={TextAttributes.BOLD}>
+                        {segment.text}
+                      </span>
+                    ) : (
+                      segment.text
+                    ),
+                  )}
+                </text>
+              ) : (
+                <markdown
+                  key={index}
+                  content={block.text}
+                  fg={COLOR.text}
+                  syntaxStyle={syntaxStyle()}
+                  streaming={entry.streaming}
+                  // `<markdown>` defaults to non-selectable like every Renderable —
+                  // message bodies are exactly the content a user drags to copy.
+                  selectable
+                />
+              ),
+            )}
+        {rendered.images.length === 0 ? null : (
+          <box style={{ flexDirection: "column", flexShrink: 0 }}>
+            <box style={{ height: 1, flexShrink: 0 }} backgroundColor={background} />
+            <box style={{ flexDirection: "row", flexWrap: "wrap", flexShrink: 0, columnGap: 3, rowGap: 0 }}>
+              {rendered.images.map((image) => (
+                <AttachmentRow
+                  key={image.contextId}
+                  attachmentId={image.attachmentId}
+                  label={image.label}
+                  sizeBytes={image.sizeBytes}
+                  background={background}
+                />
+              ))}
+            </box>
           </box>
-        </box>
-      )}
-    </box>
+        )}
+      </box>
+    </ReplyImageScopeContext.Provider>
   );
 }
 
