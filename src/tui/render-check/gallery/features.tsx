@@ -50,15 +50,25 @@ const UI_GRID = uiBlock({
     { type: "grid", columns: 2, children: [image("one", "Shot 1"), image("two", "Shot 2"), image("three", "Shot 3", { span: 2 })] },
   ],
 });
+/** Four colour sets for the stand-in pictures, so images of one block look like different pictures. */
+const PALETTES: ReadonlyArray<readonly [number[], number[], number[], number[]]> = [
+  [[220, 80, 80], [80, 120, 220], [80, 160, 90], [230, 190, 70]],
+  [[120, 80, 200], [60, 180, 190], [230, 120, 60], [200, 200, 80]],
+  [[40, 120, 90], [220, 100, 140], [90, 90, 210], [240, 220, 170]],
+  [[200, 60, 120], [240, 170, 60], [60, 150, 200], [100, 190, 120]],
+  [[70, 70, 90], [210, 90, 70], [110, 200, 160], [230, 230, 110]],
+];
+
 /** A 240×160 picture of four colour quadrants with a white disc, so a crop, a mark and a difference show on it. `shifted` moves the disc. */
-const quadrants = (shifted: boolean): Buffer => {
+const quadrants = (shifted: boolean, palette = 0): Buffer => {
   const w = 240;
   const h = 160;
   const px = new Uint8Array(w * h * 4);
   const [cx, cy] = shifted ? [150, 90] : [120, 80];
+  const [topLeft, topRight, bottomLeft, bottomRight] = PALETTES[palette % PALETTES.length]!;
   for (let y = 0; y < h; y += 1) {
     for (let x = 0; x < w; x += 1) {
-      const colour = x < w / 2 ? (y < h / 2 ? [220, 80, 80] : [80, 160, 90]) : y < h / 2 ? [80, 120, 220] : [230, 190, 70];
+      const colour = x < w / 2 ? (y < h / 2 ? topLeft! : bottomLeft!) : y < h / 2 ? topRight! : bottomRight!;
       px.set(Math.hypot(x - cx, y - cy) < 28 ? [255, 255, 255] : colour, (y * w + x) * 4);
       px[(y * w + x) * 4 + 3] = 255;
     }
@@ -66,6 +76,16 @@ const quadrants = (shifted: boolean): Buffer => {
   return Buffer.from(encodeRgbaPng(w, h, px, w * 4, true));
 };
 const QUADRANTS = [quadrants(false), quadrants(true)];
+/** A different picture for each path (the same path always the same one), so a pair or a grid in the gallery shows different images. */
+const PICTURE_CACHE = new Map<string, Buffer>();
+const PICTURE_READER: AttachmentReader = async (path) => {
+  let bytes = PICTURE_CACHE.get(path);
+  if (bytes === undefined) {
+    bytes = quadrants(path.length % 2 === 0, [...path].reduce((all, char) => all + char.charCodeAt(0), 0));
+    PICTURE_CACHE.set(path, bytes);
+  }
+  return { mimeType: "image/png", dataUrl: `data:image/png;base64,${bytes.toString("base64")}` };
+};
 const OPS_READER: AttachmentReader = async (path) => ({ mimeType: "image/png", dataUrl: `data:image/png;base64,${QUADRANTS[path.includes("after") ? 1 : 0]!.toString("base64")}` });
 const BEFORE = { type: "image" as const, src: "/tmp/before.png", alt: "", ops: [] };
 const AFTER = { type: "image" as const, src: "/tmp/after.png", alt: "", ops: [] };
@@ -635,7 +655,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     width: 76,
     height: 18,
     element: () => (
-      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+      <ReplyImageReaderContext.Provider value={PICTURE_READER}>
         <Stage width={76} height={18}>
           <UiBlockView block={UI_PAIR} />
         </Stage>
@@ -652,7 +672,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     width: 76,
     height: 44,
     element: () => (
-      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+      <ReplyImageReaderContext.Provider value={PICTURE_READER}>
         <Stage width={76} height={44}>
           <UiBlockView block={UI_GRID} />
         </Stage>
@@ -802,7 +822,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     width: 30,
     height: 22,
     element: () => (
-      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+      <ReplyImageReaderContext.Provider value={PICTURE_READER}>
         <Stage width={30} height={22}>
           <UiBlockView block={UI_PAIR} />
         </Stage>
