@@ -40,7 +40,22 @@ function mosaicOf(image: LoadedImage, columns: number, rows: number) {
  * real one black). A click opens it full screen. While the bytes come, or if
  * they cannot, a text row stands in for it.
  */
-export function ReplyImage({ path, alt }: { path: string; alt: string }) {
+export function ReplyImage({
+  path,
+  alt,
+  caption,
+  maxColumns,
+  fill = false,
+}: {
+  path: string;
+  alt: string;
+  /** Said under the image instead of its alt text or path. */
+  caption?: string | undefined;
+  /** The cells a `moxen-ui` block gives this image; a lone image takes what the screen allows. */
+  maxColumns?: number;
+  /** Inside a `moxen-ui` block: take the height the row gives, with the caption at its foot, so captions side by side line up. */
+  fill?: boolean;
+}) {
   const reader = useContext(ReplyImageReaderContext);
   const modalOpen = useModalOpen();
   const { width: screenWidth } = useTerminalDimensions();
@@ -58,7 +73,7 @@ export function ReplyImage({ path, alt }: { path: string; alt: string }) {
     };
   }, [reader, path]);
 
-  const label = alt.length > 0 ? alt : path;
+  const label = caption !== undefined && caption.length > 0 ? caption : alt.length > 0 ? alt : path;
   if (image === null || image === "failed") {
     return (
       <text fg={image === "failed" ? COLOR.faint : COLOR.dim} selectable={false}>
@@ -66,12 +81,17 @@ export function ReplyImage({ path, alt }: { path: string; alt: string }) {
       </text>
     );
   }
-  const cells = thumbnailCells(image.size, Math.max(8, Math.min(MAX_COLUMNS, screenWidth - SIDE_ROOM)), MAX_ROWS);
+  const cells = thumbnailCells(image.size, Math.max(8, maxColumns ?? Math.min(MAX_COLUMNS, screenWidth - SIDE_ROOM)), MAX_ROWS);
   if (cells === null) return <text fg={COLOR.dim} selectable={false}>{`▣ ${label}`}</text>;
   const mosaic = modalOpen ? mosaicOf(image, cells.columns, cells.rows) : null;
   return (
     <box
-      style={{ flexDirection: "column", flexShrink: 0, width: cells.columns }}
+      style={{
+        flexDirection: "column",
+        flexShrink: 0,
+        width: cells.columns,
+        ...(fill ? { flexGrow: 1, justifyContent: "space-between" as const } : {}),
+      }}
       onMouseDown={() => openImageViewer({ ...image, label, sizeBytes: image.bytes.length })}
       {...handlers}
     >

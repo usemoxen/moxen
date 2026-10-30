@@ -4,6 +4,8 @@ import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
+import { UiBlockView } from "../../features/timeline/uiblockview.js";
+import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
@@ -32,6 +34,20 @@ import { Caption, Stage, type GalleryEntry } from "./registry.js";
 const noop = (): void => {};
 const GALLERY_PNG = solidPng(240, 120, [64, 140, 220, 255]);
 const GALLERY_IMAGE_READER: AttachmentReader = async () => ({ mimeType: "image/png", dataUrl: `data:image/png;base64,${GALLERY_PNG.toString("base64")}` });
+const uiBlock = (root: unknown): UiBlock => {
+  const block = parseUiBlock(JSON.stringify({ v: 1, root }));
+  if (block === null) throw new Error("the gallery's moxen-ui block is not valid");
+  return block;
+};
+const image = (name: string, caption: string, extra: Record<string, unknown> = {}) => ({ type: "image", src: `/tmp/${name}.png`, caption, ...extra });
+const UI_PAIR = uiBlock({ type: "row", children: [image("before", "Before"), image("after", "After")] });
+const UI_GRID = uiBlock({
+  type: "column",
+  children: [
+    { type: "text", text: "Three screens, the last one wide:" },
+    { type: "grid", columns: 2, children: [image("one", "Shot 1"), image("two", "Shot 2"), image("three", "Shot 3", { span: 2 })] },
+  ],
+});
 const SCROLL = { current: null };
 const skill = (name: string, description: string | null, overrides: Partial<SkillSummary> = {}): SkillSummary => ({
   name,
@@ -552,6 +568,57 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     drive: async () => {
       closeImageViewer();
       await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+    },
+  },
+  {
+    id: "ui-block-pair",
+    group: "timeline",
+    title: "UiBlockView, two images side by side with captions",
+    width: 76,
+    height: 18,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+        <Stage width={76} height={18}>
+          <UiBlockView block={UI_PAIR} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    },
+  },
+  {
+    id: "ui-block-grid",
+    group: "timeline",
+    title: "UiBlockView, a grid with a wide cell and a text row",
+    width: 76,
+    height: 44,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+        <Stage width={76} height={44}>
+          <UiBlockView block={UI_GRID} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    },
+  },
+  {
+    id: "ui-block-narrow",
+    group: "timeline",
+    title: "UiBlockView, a pair stacked in a pane too narrow for two",
+    width: 30,
+    height: 22,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+        <Stage width={30} height={22}>
+          <UiBlockView block={UI_PAIR} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
     },
   },
 ];

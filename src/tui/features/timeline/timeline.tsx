@@ -4,8 +4,10 @@ import type { ReactNode, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
-import { chipSegments, splitChipBlocks, splitReplyImages } from "../../model/messagechips.js";
+import { chipSegments, splitChipBlocks, splitReplyImages, type ReplyBlock } from "../../model/messagechips.js";
 import { ReplyImage, ReplyImageReaderContext } from "./replyimage.js";
+import { UiBlockView } from "./uiblockview.js";
+import { splitUiBlocks, type UiBlock } from "../../../core/threads/uiblock.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 
 import { useHover } from "../../hooks/useHover.js";
@@ -582,13 +584,21 @@ export function MessageBody({
   background: string;
 }) {
   const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
+  // What the text is made of: a person's message holds chips; a reply holds `moxen-ui` blocks and lone images between its markdown.
+  const parts: ReadonlyArray<ReturnType<typeof splitChipBlocks>[number] | ReplyBlock | { kind: "ui"; block: UiBlock }> = chips
+    ? splitChipBlocks(rendered.text)
+    : splitUiBlocks(rendered.text).flatMap((segment): Array<ReplyBlock | { kind: "ui"; block: UiBlock }> =>
+        segment.kind === "ui" ? [segment] : splitReplyImages(segment.text),
+      );
 
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }}>
       {rendered.text.length === 0
         ? null
-        : (chips ? splitChipBlocks(rendered.text) : splitReplyImages(rendered.text)).map((block, index) =>
-            block.kind === "image" ? (
+        : parts.map((block, index) =>
+            block.kind === "ui" ? (
+              <UiBlockView key={index} block={block.block} />
+            ) : block.kind === "image" ? (
               <ReplyImage key={index} path={block.path} alt={block.alt} />
             ) : block.kind === "chips" ? (
               <text key={index} fg={COLOR.text} wrapMode="word" selectable>

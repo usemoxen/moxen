@@ -119,6 +119,7 @@ export async function runImageThumbs(): Promise<void> {
   await runViewer(png);
   runShrink();
   await runReplyImage(png);
+  await runUiBlock(png);
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -346,4 +347,94 @@ async function runReplyImage(png: Buffer): Promise<void> {
   await act(async () => setOpen(false));
   await settle(300);
   if (asked.filter((path) => path === "/tmp/chart.png").length !== 1) fail("the image was fetched more than once");
+}
+
+/**
+ * A `moxen-ui` block lays images out as the reply says: two side by side with
+ * their captions, a grid, and stacked when the pane is too narrow to read them
+ * squeezed. A resize re-lays them out without fetching again, and under a
+ * modal each is text cells. A block that is not valid stays the code it is.
+ */
+async function runUiBlock(png: Buffer): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+  const asked: string[] = [];
+  const pair = JSON.stringify({
+    v: 1,
+    root: {
+      type: "column",
+      children: [
+        { type: "text", text: "Before and after the fix:" },
+        { type: "row", children: [{ type: "image", src: "/tmp/before.png", caption: "Before" }, { type: "image", src: "/tmp/after.png", caption: "After" }] },
+        { type: "grid", columns: 2, children: [1, 2, 3].map((n) => ({ type: "image", src: `/tmp/g${n}.png`, caption: `Shot ${n}`, span: n === 3 ? 2 : 1 })) },
+      ],
+    },
+  });
+  const text = `Here it is.\n\n\`\`\`moxen-ui\n${pair}\n\`\`\`\n\nBroken:\n\`\`\`moxen-ui\n{ nope\n\`\`\`\nDone.`;
+  const width = 80;
+  const height = 60;
+  let setOpen: (open: boolean) => void = () => {};
+  function Harness() {
+    const [open, set] = useState(false);
+    setOpen = set;
+    return (
+      <ReplyImageReaderContext.Provider
+        value={async (path) => {
+          asked.push(path);
+          return { mimeType: "image/png", dataUrl };
+        }}
+      >
+        <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+          <MessageBody entry={{ text, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+          {open ? (
+            <ModalShell screenWidth={width} screenHeight={height} left={30} top={25} width={30} height={5} onClose={() => {}}>
+              <text>{"modal"}</text>
+            </ModalShell>
+          ) : null}
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
+  const settle = (ms: number) =>
+    act(async () => {
+      for (let waited = 0; waited < ms; waited += 25) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await setup.flush();
+      }
+    });
+  const lines = () => setup.captureCharFrame().split("\n");
+  const rowOf = (needle: string) => lines().findIndex((line) => line.includes(needle));
+  await settle(600);
+  console.log("--- moxen-ui block: a pair and a grid ---");
+  console.log(setup.captureCharFrame());
+  if (rowOf("Here it is.") === -1 || rowOf("Done.") === -1) fail("the text around a moxen-ui block is gone");
+  if (!lines().some((line) => line.includes("Before") && line.includes("After"))) fail("a row of two images does not show them side by side, captions on one line");
+  if (!lines().some((line) => line.includes("Shot 1") && line.includes("Shot 2"))) fail("a grid of two columns does not put two images in a row");
+  if (rowOf("Shot 3") <= rowOf("Shot 1")) fail("the third grid image should wrap under the first two");
+  if (rowOf("{ nope") === -1) fail("a block that is not valid should stay as code");
+  if (rowOf('"type"') !== -1) fail("a valid block's JSON is shown instead of its images");
+  const fetched = asked.length;
+  if (new Set(asked).size !== 5) fail(`five images should have been asked for once each, asked ${asked.join(",")}`);
+
+  // A pane too narrow to read the pair side by side stacks it; the bytes are not asked for again.
+  await act(async () => setup.resize(28, height));
+  await settle(500);
+  console.log("--- moxen-ui block: stacked in a narrow pane ---");
+  console.log(setup.captureCharFrame());
+  if (rowOf("Before") === -1 || rowOf("After") === -1 || rowOf("Before") === rowOf("After")) fail("a pair in a narrow pane should stack");
+  if (asked.length !== fetched) fail("resizing fetched the images again");
+  await act(async () => setup.resize(width, height));
+  await settle(500);
+  if (!lines().some((line) => line.includes("Before") && line.includes("After"))) fail("the pair did not go back side by side when the pane widened");
+
+  await act(async () => setOpen(true));
+  await settle(500);
+  console.log("--- moxen-ui block: as text cells under a modal ---");
+  console.log(setup.captureCharFrame());
+  if (setup.captureCharFrame().includes("█")) fail("a real image is still drawn under a modal");
+  if (lines().filter((line) => line.includes("▀")).length < 6) fail("the block's images are not drawn as text cells under a modal");
+  await act(async () => setOpen(false));
+  await settle(300);
 }
