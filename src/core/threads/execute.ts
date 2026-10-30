@@ -425,6 +425,8 @@ export interface ExecuteTurnArgs {
   readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
   /** Once the turn has settled and any queued turn is under way: where the server hands off or compacts a long thread unasked. */
   readonly afterSettle?: () => Promise<void>;
+  /** Each live context reading the turn records while it runs: where the server compacts a thread that crosses its line mid-turn. */
+  readonly onContextReading?: (usage: ContextWindowUsage) => void;
 }
 
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -1038,23 +1040,19 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   const cwd = args.workingDirectory?.trim() ? args.workingDirectory.trim() : null;
   const recordTools = recordTurnActivity(store, threadId, storeTurnId, args.modelSelection ?? null, args.onUsageLimit);
   const onEvent = args.onEvent;
-  const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
-    recordTools.onEvent(event);
-    onEvent?.(event);
-  });
-  recordingTurns.set(threadId, (recordingTurns.get(threadId) ?? 0) + 1);
-  // Pre-turn capture first: the diff base must predate any provider write.
-  const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
-  const controller = new AbortController();
-  store.trackRunning(storeTurnId, () => controller.abort());
   // Live context readings while the turn runs: a long turn otherwise showed
   // the reading from before it started until it ended. Only a moved number
-  // is written, and a slow provider never stacks readings up.
+  // is written, and a slow provider never stacks readings up. A reading is
+  // taken every `LIVE_CONTEXT_MS`, and at once (at most every `EVENT_CONTEXT_MS`)
+  // when the provider reports a request's usage, so a context growing fast
+  // between two ticks is seen near the line, not past it.
   let lastLiveReading: string | null = null;
   let liveReading = false;
-  const liveContext = setInterval(() => {
+  let lastLiveAt = 0;
+  const readLive = (): void => {
     if (liveReading) return;
     liveReading = true;
+    lastLiveAt = Date.now();
     void recordContextUsage(store, driver, threadId, storeTurnId, (usage) => {
       // Cost moves on its own (a long tool run between requests does not
       // grow the context, but the requests before it cost something).
@@ -1062,10 +1060,21 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       if (reading === lastLiveReading) return false;
       lastLiveReading = reading;
       return true;
-    }).finally(() => {
+    }, args.onContextReading).finally(() => {
       liveReading = false;
     });
-  }, LIVE_CONTEXT_MS);
+  };
+  const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
+    recordTools.onEvent(event);
+    onEvent?.(event);
+    if (event.type === "token-usage.updated" && args.onContextReading !== undefined && Date.now() - lastLiveAt >= EVENT_CONTEXT_MS) readLive();
+  });
+  recordingTurns.set(threadId, (recordingTurns.get(threadId) ?? 0) + 1);
+  // Pre-turn capture first: the diff base must predate any provider write.
+  const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
+  const controller = new AbortController();
+  store.trackRunning(storeTurnId, () => controller.abort());
+  const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
   const onAbort = (): void => {
     Effect.runFork(driver.interruptTurn(threadId));
@@ -1127,6 +1136,9 @@ const CONTEXT_USAGE_TIMEOUT_MS = 10_000;
 /** How often a running turn's context reading refreshes. */
 const LIVE_CONTEXT_MS = 30_000;
 
+/** The least time between readings an event asks for. */
+const EVENT_CONTEXT_MS = 3_000;
+
 /**
  * Record how full the context window is as the turn ends — before its
  * outcome, so whoever sees the turn settle also sees the reading. The
@@ -1140,6 +1152,8 @@ async function recordContextUsage(
   turnId: string,
   /** Live readings pass this to skip writing a row when nothing moved. */
   shouldRecord: (usage: ContextWindowUsage) => boolean = () => true,
+  /** Told of each reading that was written. */
+  onRecorded?: (usage: ContextWindowUsage) => void,
 ): Promise<void> {
   if (!driver.contextUsage) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1165,6 +1179,7 @@ async function recordContextUsage(
       createdAt: store.nowIso(),
     })
     .catch(() => undefined);
+  onRecorded?.(usage);
 }
 
 async function settleTurn(

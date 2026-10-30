@@ -209,7 +209,12 @@ OpenCode's `compaction.auto`) and, past Compact at, shows a card or sends
 `/compact` itself once no turn is running and nothing is queued. Because the
 provider's own is off, `ask` does not wait forever: a delegated task is
 compacted at the line, and any thread halfway from the line to a full window is
-compacted unasked, with a notice saying why. A compaction that left the thread
+compacted unasked, with a notice saying why. A turn that is running does not
+get to run past the line: when a context reading during it (each request's usage
+is read as it arrives) is over the line that would compact the thread once the turn
+ended (`auto`, a delegated task, or past the hard line on `ask`), Moxen stops the
+turn, compacts, and sends a continue so the task goes on from where it was
+(`compactMidTurn` in `core/threads/operations.ts`). A compaction that left the thread
 past its line is not repeated until it has dropped below it once. `off`: nobody
 compacts. With Claude Code compacting by itself, a model's own Compact at size
 becomes that model's auto-compact window (100K to 1M) when its session starts;

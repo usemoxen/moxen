@@ -319,6 +319,10 @@ export function driverProviders(config: LongThreadConfig): ProvidersConfig | und
 /** The prompt that asks a provider to compact its conversation (the server interprets it as a maintenance turn). */
 export const COMPACT_PROMPT = "/compact";
 
+/** What goes on after Moxen compacted a thread in the middle of a turn: the task picks up where it was stopped. */
+export const COMPACTED_CONTINUE_PROMPT =
+  "Moxen compacted this conversation because its context reached the limit, and stopped your turn to do it. Continue the task you were working on, from where you left off.";
+
 /**
  * Where an unanswered "ask" stops waiting: halfway from the line to a full
  * window (80% -> 90%). Moxen switched Claude Code's own compaction off, so

@@ -57,7 +57,7 @@ import type {
   WorkspaceMode,
   WorkspaceResolution,
 } from "../types.js";
-import { isCompactCommand, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
+import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
@@ -86,7 +86,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
-import { COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
+import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
@@ -487,9 +487,73 @@ export async function scheduleUsageContinue(
 
 // -- long threads --------------------------------------------------------------
 
-/** The runner hook that hands off or compacts a long thread once a turn settles, when the settings say to do it unasked. */
-function longThreadHook(ctx: OperationContext, threadId: string): { afterSettle: () => Promise<void> } {
-  return { afterSettle: async () => void (await actOnLongThread(ctx, threadId)) };
+/**
+ * Threads whose running turn Moxen interrupted because the context crossed
+ * the compaction line: once that turn settles the thread is compacted, and
+ * the work is picked up again.
+ */
+const compactingMidTurn = new Set<string>();
+
+/**
+ * The runner's hooks for a long thread: once a turn settles, hand off or
+ * compact it when the settings say to do it unasked; and while a turn runs,
+ * compact when its context crosses the line, which waiting for the turn to
+ * end would let run on past it.
+ */
+function longThreadHook(
+  ctx: OperationContext,
+  threadId: string,
+): { afterSettle: () => Promise<void>; onContextReading: (usage: ContextWindowUsage) => void } {
+  return {
+    afterSettle: async () => {
+      const resume = compactingMidTurn.delete(threadId);
+      const action = await actOnLongThread(ctx, threadId, { wait: resume });
+      if (resume) await resumeAfterCompaction(ctx, threadId, action);
+    },
+    onContextReading: (usage) => void compactMidTurn(ctx, threadId, usage).catch(() => undefined),
+  };
+}
+
+/**
+ * A running turn's context reading past the line Moxen compacts at: stop the
+ * turn at once (its settling compacts the thread, `afterSettle`) so the
+ * thread never goes on past the line, and the work resumes afterwards. Only
+ * where the turn's end would compact: Moxen's own compaction, on Automatic or
+ * past its hard line, and not when a hand-off is due first. The rule that
+ * keeps a compaction that did not help from repeating (`usedSinceCompact`)
+ * is the loop's guard.
+ */
+export async function compactMidTurn(ctx: OperationContext, threadId: string, usage: ContextWindowUsage): Promise<boolean> {
+  if (compactingMidTurn.has(threadId)) return false;
+  const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
+  if (snapshot === null || !snapshot.turnRunning) return false;
+  // As it will stand when the turn has settled.
+  const action = planLongThreadAction(ctx.config, { ...snapshot, turnRunning: false, usedTokens: usage.usedTokens, maxTokens: usage.maxTokens });
+  if (action?.kind !== "compact") return false;
+  compactingMidTurn.add(threadId);
+  const interrupted = await interruptTurn(ctx.store, threadId).catch(() => null);
+  if (interrupted === null || !interrupted.interrupted) {
+    compactingMidTurn.delete(threadId);
+    return false;
+  }
+  await ctx.store.appendLedger(threadId, "activity", {
+    id: ctx.store.newId(),
+    threadId,
+    turnId: interrupted.turn?.id ?? null,
+    kind: "notice",
+    summary: "Compacting: the thread reached its line mid-turn",
+    payload: { notice: "other", detail: "Moxen stopped the turn to compact the conversation, and will carry on with the task afterwards." },
+    createdAt: ctx.store.nowIso(),
+  });
+  ctx.store.emit(threadId, "activity");
+  return true;
+}
+
+/** After a mid-turn compaction: the task goes on from where it stopped. */
+async function resumeAfterCompaction(ctx: OperationContext, threadId: string, action: LongThreadAction | null): Promise<void> {
+  // A hand-off in its place moved the work to a new thread: nothing to resume here.
+  if (action?.kind === "handoff") return;
+  await startTurn(ctx, { threadId, prompt: COMPACTED_CONTINUE_PROMPT, onEvent: () => undefined });
 }
 
 /**
@@ -497,7 +561,7 @@ function longThreadHook(ctx: OperationContext, threadId: string): { afterSettle:
  * server should, without anyone asking. Returns what it did. Called after
  * every turn settles, so a thread no client has open is looked after too.
  */
-export async function actOnLongThread(ctx: OperationContext, threadId: string): Promise<LongThreadAction | null> {
+export async function actOnLongThread(ctx: OperationContext, threadId: string, options: { wait?: boolean } = {}): Promise<LongThreadAction | null> {
   const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
   if (snapshot === null) return null;
   const action = planLongThreadAction(ctx.config, snapshot);
@@ -519,7 +583,9 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string): 
     });
     ctx.store.emit(threadId, "activity");
   }
-  await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, onEvent: () => undefined });
+  const started = await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, onEvent: () => undefined });
+  // A turn waiting to go on after it needs the compaction done first.
+  if (options.wait === true) await started.run;
   return action;
 }
 
