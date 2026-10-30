@@ -9,6 +9,8 @@ import { SURFACE } from "../../theme.js";
 import { resetModalOpen } from "../../ui/modalopen.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { fail } from "../helpers.js";
+import { imageDimensions } from "../../../core/attachments.js";
+import { encodeRgbaPng, shrinkImage } from "../../model/imageshrink.js";
 import { solidPng } from "../png.js";
 
 /**
@@ -113,6 +115,7 @@ export async function runImageThumbs(): Promise<void> {
   if (hasPreviewBorder()) fail("hovering an image the server no longer has showed a preview");
   await runComposerHover(png);
   await runViewer(png);
+  runShrink();
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -267,4 +270,14 @@ async function runViewer(png: Buffer): Promise<void> {
   await settle(400);
   if (find("▣ clip.png") === -1) fail("clicking an image token in the composer did not open the viewer");
   closeImageViewer();
+}
+
+/** The real native decoder shrinks an over-limit image (unit tests run under Node, where it cannot load). */
+function runShrink(): void {
+  const wide = encodeRgbaPng(9000, 300, new Uint8Array(9000 * 300 * 4).fill(180), 9000 * 4, false);
+  const shrunk = shrinkImage("wide.jpg", wide);
+  if (shrunk === null) fail("an image 9000 px wide was not shrunk");
+  const size = imageDimensions(shrunk.bytes);
+  if (size?.width !== 1568 || size.height !== 52) fail(`shrunk to ${size?.width}x${size?.height}, not 1568x52`);
+  if (shrunk.name !== "wide.png") fail(`the shrunk copy is named ${shrunk.name}`);
 }

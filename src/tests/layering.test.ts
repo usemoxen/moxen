@@ -74,6 +74,8 @@ const KERNEL_PREFIXES = [
   // How stats are worded and how the heatmap is laid out: pure rules over a `usage.stats` result, shared with the image card the server draws.
   "src/core/usage/present",
   "src/core/attachments",
+  // The PNG writer (and its CRC) the stats card is drawn with; the image shrinker writes its resized copy with it.
+  "src/core/usage/png",
   "src/core/syntax",
   "src/core/infra/",
 ];

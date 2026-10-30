@@ -48,6 +48,7 @@ import {
   attachmentFromBytes,
   buildImageAttachments,
   extractMentions,
+  IMAGE_LIMITS,
   imageSetError,
   MAX_PENDING_ATTACHMENTS,
 } from "../../core/attachments.js";
@@ -124,6 +125,7 @@ import { ActionText, AgentsTab, BackgroundTab, InfoTab, type DelegatedInfo, Cont
 import { ImagePreviewLayer } from "../features/timeline/imagepreview.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, useImageViewer } from "../features/timeline/imageviewer.js";
 import { openImageExternally } from "../model/imageopen.js";
+import { shrinkImage } from "../model/imageshrink.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
@@ -820,7 +822,9 @@ export function App({
       dispatchTurn(trimmed, [], busyDelivery, scheduledFor);
       return;
     }
-    void buildImageAttachments(parsed.paths, cwd ?? process.cwd()).then((built) => {
+    void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
+      shrinkForAttach(name, mimeType, bytes, pending.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
+    ).then((built) => {
       if (built.error !== null) {
         setError(built.error.slice(0, 120));
         return;
@@ -848,6 +852,19 @@ export function App({
    */
   /** An image's token was deleted from the draft: it no longer goes with the message. */
   const detachImage = (name: string) => setPending((current) => current.filter((attachment) => attachment.name !== name));
+
+  /** Brings an image over a limit under it, and says so: it used to be refused. */
+  const shrinkForAttach = (name: string, mimeType: string, bytes: Uint8Array, many = pending.length >= IMAGE_LIMITS.manyImages) => {
+    const shrunk = shrinkImage(name, bytes, many);
+    if (shrunk === null) return { name, mimeType, bytes };
+    toasts.push(
+      `shrunk:${name}`,
+      "info",
+      t("attach.shrunk", { name, from: `${shrunk.from.width}×${shrunk.from.height}`, to: `${shrunk.to.width}×${shrunk.to.height}` }),
+      COPY_TOAST_MS,
+    );
+    return shrunk;
+  };
 
   const pasteImage = () => {
     setFocus("composer");
@@ -877,7 +894,8 @@ export function App({
         setError(result.error.slice(0, 120));
         return;
       }
-      const built = attachmentFromBytes(clipboardFileName(result.mimeType), result.mimeType, result.bytes);
+      const prepared = shrinkForAttach(clipboardFileName(result.mimeType), result.mimeType, result.bytes);
+      const built = attachmentFromBytes(prepared.name, prepared.mimeType, prepared.bytes);
       if (built.error !== null) {
         setError(built.error.slice(0, 120));
         return;
@@ -908,6 +926,7 @@ export function App({
       creatingInteractionMode: interaction.stickyMode,
       takeOneOff: interaction.takeOneOff,
       resetDraft,
+      prepareImage: shrinkForAttach,
       writePending,
       setCreating,
       setCreatingModelSelection,

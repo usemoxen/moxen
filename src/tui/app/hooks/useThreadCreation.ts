@@ -1,7 +1,7 @@
 import { t } from "../../i18n/index.js";
 import { basename, resolve } from "node:path";
 
-import { buildImageAttachments, extractMentions } from "../../../core/attachments.js";
+import { buildImageAttachments, extractMentions, type ImagePreparer } from "../../../core/attachments.js";
 import { dispatchErrorMessage } from "../../../core/errors.js";
 import type { InteractionMode, ModelSelection, RuntimeMode, ProjectEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import type { ImageAttachmentUpload } from "../../../core/attachments.js";
@@ -28,6 +28,8 @@ export function useThreadCreation(params: {
   remote?: boolean;
   selected: ThreadEnvelope | null;
   pending: ImageAttachmentUpload[];
+  /** Brings an image over a limit under it as it is attached by `@path`. */
+  prepareImage?: ImagePreparer;
   shellProjects: ProjectEnvelope[];
   creatingProjectId: string | null;
   creatingModelSelection: ModelSelection | null;
@@ -55,6 +57,7 @@ export function useThreadCreation(params: {
     remote = false,
     selected,
     pending,
+    prepareImage,
     shellProjects,
     creatingProjectId,
     creatingModelSelection,
@@ -99,7 +102,7 @@ export function useThreadCreation(params: {
       return;
     }
     const parsed = extractMentions(trimmed);
-    void buildImageAttachments(parsed.paths, cwd ?? process.cwd()).then((built) => {
+    void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), prepareImage).then((built) => {
       if (built.error !== null) {
         setError(built.error.slice(0, 120));
         return;

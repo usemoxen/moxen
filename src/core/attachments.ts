@@ -62,6 +62,24 @@ export const IMAGE_LIMITS = {
   base64BytesPerMessage: 30 * 1024 * 1024,
 } as const;
 
+/** The long edge a shrunk image is brought to: the model downscales to about this anyway, so nothing it could see is lost. */
+export const SHRINK_TARGET_EDGE = 1568;
+
+/** The most a client reads of one image to shrink it, where the API's own cap would have refused it. */
+export const MAX_SHRINKABLE_BYTES = 40 * 1024 * 1024;
+
+/**
+ * Whether an image is over a limit that shrinking cures: too many bytes for
+ * the per-image cap, or a side longer than the API allows (2000 px once a
+ * message holds more than 20 images, which `many` says).
+ */
+export function imageNeedsShrink(bytes: Uint8Array, many = false): boolean {
+  if (bytes.length > MAX_IMAGE_BYTES) return true;
+  const size = imageDimensions(bytes);
+  const limit = many ? IMAGE_LIMITS.manyImagesMaxDimension : IMAGE_LIMITS.maxDimension;
+  return size !== null && Math.max(size.width, size.height) > limit;
+}
+
 /** The largest file that stays under the per-image cap once base64-encoded. */
 export const MAX_IMAGE_BYTES = Math.floor((IMAGE_LIMITS.base64BytesPerImage * 3) / 4);
 export const MAX_PENDING_ATTACHMENTS = IMAGE_LIMITS.imagesPerMessage;
@@ -180,9 +198,14 @@ export function attachmentFromBytes(
   return { attachment: { type: "image", name, mimeType, sizeBytes: bytes.length, dataUrl }, error: null };
 }
 
+/** An image brought under the limits by a client, standing in for the file it read. */
+export type ImagePreparer = (name: string, mimeType: string, bytes: Uint8Array) => { name: string; mimeType: string; bytes: Uint8Array } | null;
+
 export async function buildImageAttachments(
   paths: readonly string[],
   cwd: string,
+  /** Offered every file first; a client that can shrink an image over a limit returns the smaller copy. */
+  prepare?: ImagePreparer,
 ): Promise<{ attachments: ImageAttachmentUpload[]; error: string | null }> {
   const attachments: ImageAttachmentUpload[] = [];
   for (const mention of paths) {
@@ -192,8 +215,10 @@ export async function buildImageAttachments(
     if (!stat.isFile()) return { attachments, error: `not a file: ${mention}` };
     const mimeType = MIME_BY_EXTENSION[path.extname(resolved).toLowerCase()];
     if (mimeType === undefined) return { attachments, error: `${mention} is not a gif/jpeg/png/webp image` };
-    const bytes = await fs.readFile(resolved);
-    const built = attachmentFromBytes(path.basename(resolved), mimeType, bytes);
+    if (stat.size > MAX_SHRINKABLE_BYTES) return { attachments, error: `${mention} is ${megabytes(stat.size)}; an image can be ${megabytes(MAX_SHRINKABLE_BYTES)}` };
+    const read = await fs.readFile(resolved);
+    const prepared = prepare?.(path.basename(resolved), mimeType, read) ?? { name: path.basename(resolved), mimeType, bytes: read };
+    const built = attachmentFromBytes(prepared.name, prepared.mimeType, prepared.bytes);
     if (built.error !== null) return { attachments, error: built.error };
     attachments.push(built.attachment);
   }

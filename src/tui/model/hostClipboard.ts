@@ -8,7 +8,7 @@
 import { t } from "../i18n/index.js";
 import { createHostClipboard } from "@opentui/core";
 
-import { MAX_IMAGE_BYTES } from "../../core/attachments.js";
+import { MAX_SHRINKABLE_BYTES } from "../../core/attachments.js";
 
 const EXTENSION_BY_MIME: Record<string, string> = {
   "image/gif": ".gif",
@@ -23,7 +23,7 @@ export async function readClipboardImage(): Promise<
 > {
   let host;
   try {
-    host = createHostClipboard({ maxReadBytes: MAX_IMAGE_BYTES, timeoutMs: 10_000 });
+    host = createHostClipboard({ maxReadBytes: MAX_SHRINKABLE_BYTES, timeoutMs: 10_000 });
   } catch (cause) {
     return { bytes: null, mimeType: null, error: t("clip.unavailable", { why: String(cause).slice(0, 80) }) };
   }

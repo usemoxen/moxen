@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { buildImageAttachments, attachmentFromBytes, extractMentions, IMAGE_LIMITS, imageDimensions, imageSetError, MAX_IMAGE_BYTES } from "../attachments.js";
+import { buildImageAttachments, attachmentFromBytes, extractMentions, IMAGE_LIMITS, imageDimensions, imageNeedsShrink, imageSetError, MAX_IMAGE_BYTES } from "../attachments.js";
 import { tempDir } from "../testing/tmp.js";
 
 describe("extractMentions", () => {
@@ -55,6 +55,38 @@ describe("buildImageAttachments", () => {
     expect(MAX_IMAGE_BYTES).toBe(7_864_320);
     expect(attachmentFromBytes("shot.png", "image/png", new Uint8Array(MAX_IMAGE_BYTES + 1)).error).toMatch(/can be 7\.5 MB \(10 MB encoded\)/);
     expect(attachmentFromBytes("shot.bmp", "image/bmp", new Uint8Array([1])).error).toMatch(/not a gif/);
+  });
+
+  it("attaches the smaller copy a client prepares for an image over a limit, under its own name", async () => {
+    const dir = tempDir("moxen-attach-");
+    const file = path.join(dir, "huge.jpg");
+    // Over the per-image cap, which refused it before a client could shrink it.
+    writeFileSync(file, new Uint8Array(MAX_IMAGE_BYTES + 1));
+    const small = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const seen: number[] = [];
+    const result = await buildImageAttachments([file], dir, (name, mimeType, bytes) => {
+      seen.push(bytes.length);
+      expect(mimeType).toBe("image/jpeg");
+      return { name: name.replace(/\.jpg$/u, ".png"), mimeType: "image/png", bytes: small };
+    });
+    expect(seen).toEqual([MAX_IMAGE_BYTES + 1]);
+    expect(result.error).toBeNull();
+    expect(result.attachments[0]).toMatchObject({ name: "huge.png", mimeType: "image/png", sizeBytes: small.length });
+  });
+
+  it("says which images need shrinking: over the byte cap, or a side over the limit", () => {
+    expect(imageNeedsShrink(new Uint8Array(MAX_IMAGE_BYTES + 1))).toBe(true);
+    expect(imageNeedsShrink(new Uint8Array(100))).toBe(false);
+    const header = (width: number, height: number) => {
+      const bytes = new Uint8Array(24);
+      bytes.set([0x89, 0x50, 0x4e, 0x47]);
+      new DataView(bytes.buffer).setUint32(16, width);
+      new DataView(bytes.buffer).setUint32(20, height);
+      return bytes;
+    };
+    expect(imageNeedsShrink(header(8001, 10))).toBe(true);
+    expect(imageNeedsShrink(header(3000, 2000))).toBe(false);
+    expect(imageNeedsShrink(header(3000, 2000), true)).toBe(true);
   });
 
   it("builds an inline data-url attachment from a png", async () => {
