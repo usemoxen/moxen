@@ -126,6 +126,9 @@ import { ImagePreviewLayer } from "../features/timeline/imagepreview.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, useImageViewer } from "../features/timeline/imageviewer.js";
 import { openImageExternally } from "../model/imageopen.js";
 import { shrinkImage } from "../model/imageshrink.js";
+import { promptWithPaths } from "../model/pathattachments.js";
+import { useFileAttachments } from "../features/composer/useFileAttachments.js";
+import { PathChips } from "../features/composer/pathchips.js";
 import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
@@ -372,6 +375,8 @@ export function App({
     setPending,
     editDraftExternally,
   } = useComposer(openThreadId, clipboard, toasts, setError, setFocus);
+  /** Files and folders attached with the OS dialog: only on this machine's own server, whose agent can read their paths. */
+  const filePaths = useFileAttachments(openThreadId, toasts, !remote);
   /** Dedupes the "selection" event, which keeps firing while dragging and
       once more on release — only the settled, non-empty, changed text
       triggers a copy+toast. */
@@ -818,9 +823,14 @@ export function App({
     }
     const sourceId = selected.id;
     const parsed = extractMentions(trimmed);
-    if (parsed.paths.length === 0 && pending.length === 0) {
+    const attachedPaths = filePaths.items;
+    const finish = () => {
       resetDraft(sourceId);
-      dispatchTurn(trimmed, [], busyDelivery, scheduledFor);
+      filePaths.clear(sourceId);
+    };
+    if (parsed.paths.length === 0 && pending.length === 0) {
+      finish();
+      dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor);
       return;
     }
     void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
@@ -837,9 +847,9 @@ export function App({
         setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
         return;
       }
-      resetDraft(sourceId);
+      finish();
       writePending(sourceId, []);
-      dispatchTurn(parsed.text, [...pending, ...built.attachments], busyDelivery, scheduledFor);
+      dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor);
     });
   };
 
@@ -865,6 +875,15 @@ export function App({
       COPY_TOAST_MS,
     );
     return shrunk;
+  };
+
+  const attachFromPalette = (kind: "file" | "folder") => {
+    closePicker("composer");
+    if (selected === null || creating) {
+      toasts.push("attach-paths", "info", t("attachPaths.openThread"), COPY_TOAST_MS);
+      return;
+    }
+    void filePaths.attach(kind);
   };
 
   const pasteImage = () => {
@@ -1793,6 +1812,23 @@ export function App({
                 label: t("app.copy_last_assistant_message_7b49"),
                 ...(lastAssistantMessage === null ? {} : { meta: t("chars", { count: lastAssistantMessage.length }) }),
                 onPick: () => copyPaletteText(lastAssistantMessage, t("app.no_assistant_message_yet_de11")),
+              },
+            ],
+          },
+          {
+            header: t("palette.attach"),
+            rows: [
+              {
+                key: "attach:files",
+                label: t("attachPaths.files"),
+                meta: t("attachPaths.hint"),
+                onPick: () => attachFromPalette("file"),
+              },
+              {
+                key: "attach:folder",
+                label: t("attachPaths.folder"),
+                meta: t("attachPaths.hint"),
+                onPick: () => attachFromPalette("folder"),
               },
             ],
           },
@@ -2740,6 +2776,8 @@ export function App({
           ) : requestPanelVisible ? (
             renderRequestPanel(chatWidth)
           ) : (
+          <>
+          <PathChips items={filePaths.items} onRemove={filePaths.remove} width={chatWidth} />
           <Composer
             draft={draft}
             resetKey={composerResetKey}
@@ -2783,6 +2821,7 @@ export function App({
             mode={interaction.mode}
             onCycleMode={interaction.cycleMode}
           />
+          </>
           )}
         </box>
         )}

@@ -3,6 +3,7 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
+import { PathChips } from "../../features/composer/pathchips.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
 import { solidPng } from "../png.js";
@@ -516,5 +517,25 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 });
       await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
     },
+  },
+  {
+    id: "path-chips",
+    group: "composer",
+    title: "PathChips, files and folders attached to the next message",
+    width: 70,
+    height: 3,
+    element: () => (
+      <Stage width={70} height={3}>
+        <PathChips
+          items={[
+            { path: "/Users/me/My Docs/report-final-v2.pdf", kind: "file" },
+            { path: "/Users/me/projects/moxen/src", kind: "folder" },
+            { path: "/Users/me/a-file-with-a-really-long-name-that-has-to-be-cut-short.txt", kind: "file" },
+          ]}
+          onRemove={noop}
+          width={70}
+        />
+      </Stage>
+    ),
   },
 ];
