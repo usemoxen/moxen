@@ -25,10 +25,4 @@ describe("thumbGeometry", () => {
     expect(thumbGeometry(30, 10, 99)).toEqual(thumbGeometry(30, 10, 20));
     expect(thumbGeometry(30, 10, -4)).toEqual(thumbGeometry(30, 10, 0));
   });
-
-  it("maps onto a longer track (full-card strip)", () => {
-    expect(thumbGeometry(30, 10, 10, 12)).toEqual({ start: 4, size: 4 });
-    expect(thumbGeometry(30, 10, 20, 12)).toEqual({ start: 8, size: 4 });
-    expect(thumbGeometry(30, 10, 0, 12)).toEqual({ start: 0, size: 4 });
-  });
 });

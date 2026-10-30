@@ -61,8 +61,7 @@ import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type Pro
 import { driverKindOfInstance } from "../types.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { buildRuntimeInstructions, memoryIndexSection, planInstructions, projectInstructions, projectMemorySetting, withInstructionsUpdate, type InstructionState } from "./instructions.js";
-import { memoryIndexText } from "../memory/memory.js";
+import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -287,13 +286,7 @@ async function sessionSetup(
   const history = thread.providerSessions?.[key] !== undefined;
   const state = history ? thread.instructionState?.[key] : undefined;
   const plan = planInstructions(state, current);
-  // The memory index goes in once, when the conversation begins, and stays as it was (`InstructionState.memory`).
-  const memoryIndex = history
-    ? state?.memory
-    : memory === "off"
-      ? undefined
-      : ((await memoryIndexText({ storeRoot: ctx.storeRoot, projectId: thread.projectId ?? null }).catch(() => null)) ?? undefined);
-  const next: InstructionState = { ...plan.next, ...(memoryIndex !== undefined ? { memory: memoryIndex } : {}) };
+  const next: InstructionState = plan.next;
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {
       const fresh = await ctx.store.readThreadRecord(thread.id);
@@ -302,7 +295,7 @@ async function sessionSetup(
     });
   };
   const recorded = thread.instructionState?.[key];
-  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered || recorded?.memory !== next.memory) await record(next);
+  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
   return {
     mcpServers,
     disabledMcpTools,
@@ -310,7 +303,7 @@ async function sessionSetup(
     // OpenCode's own base prompt is replaced by Moxen's unless the user switched that off.
     moxenPrompt: nativeKind === "opencode" && ctx.config.providers?.opencode?.moxenPrompt !== false,
     checklist: providerConfig?.todos !== false,
-    instructions: memoryIndex === undefined ? plan.systemPrompt : `${plan.systemPrompt}\n\n${memoryIndexSection(memoryIndex)}`,
+    instructions: plan.systemPrompt,
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
     delegated: delegation !== null,

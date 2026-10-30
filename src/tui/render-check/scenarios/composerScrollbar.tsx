@@ -131,9 +131,9 @@ export async function runComposerScrollbar(): Promise<void> {
   const thumbs = thumbColumns(setup);
   if (thumbs.length === 0) fail("composer shows no scrollbar on an overflowing draft");
   // The strip sits flush at the card's right edge — aligned with the
-  // timeline pane border above it — not beside the textarea: no diff panel
-  // is open here, so the card edge is gutter + outer pane width off the
-  // sidebar. (140 is this render's explicit width.)
+  // timeline pane border above it — and runs down the draft's own rows: no
+  // diff panel is open here, so the card edge is gutter + outer pane width
+  // off the sidebar. (140 is this render's explicit width.)
   const edge = SIDEBAR_WIDTH + CHAT_GUTTER + (140 - SIDEBAR_WIDTH - CHAT_GUTTER * 2) - 1;
   if (!thumbs.every((col) => col === edge)) {
     fail(`composer scrollbar is not at the card edge (thumb cols ${thumbs.join(",")}, edge ${edge})`);

@@ -12,6 +12,9 @@ export type { HarnessTool, ToolContext, ToolIntent, ToolResult } from "./types.j
 export { ReadState } from "./types.js";
 export { validateToolArguments } from "./validate.js";
 
+/** Every harness session's own tools, before the session's conditionals (`ask`, `skill`) and its MCP servers. */
+export const SESSION_TOOL_NAMES = ["subagent", "web_fetch", "web_search", "todo"] as const;
+
 /** The tools every harness session starts with, in the order the model is shown them. */
 export function builtinTools(shells: AvailableShells = availableShells()): readonly HarnessTool<never>[] {
   const shellTools = [shells.bash ? makeShellTool(shells.bash) : null, shells.powershell ? makeShellTool(shells.powershell) : null].filter((tool) => tool !== null);

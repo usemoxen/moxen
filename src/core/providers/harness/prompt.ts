@@ -53,7 +53,7 @@ function toolSection(input: PromptInput): string {
       has(input, "glob") ? "find files with glob, not find or ls" : null,
       has(input, "edit") ? "change files with edit or write, not sed, awk or echo redirection" : null,
     ].filter((entry): entry is string => entry !== null);
-    lines.push(`- Use the dedicated tools instead of the shell for file work: ${dedicated.join("; ")}. Keep ${shell} for builds, tests, git and other commands.`);
+    lines.push(`- Use the dedicated tools for file work by default: ${dedicated.join("; ")}. Keep ${shell} for builds, tests, git and other commands.`);
   }
   if (shell !== null && has(input, "task_output")) {
     lines.push(
@@ -66,7 +66,7 @@ function toolSection(input: PromptInput): string {
     lines.push("- Fewer round trips beat smaller outputs: ask grep for context lines so you do not need a second call to read the match, and read small files whole. For a large file, read only the range you need.");
   }
   if (has(input, "edit")) {
-    lines.push("- To change a file you must have read it. edit takes the exact text from the file (whitespace included) and fails if it is not found or not unique, so copy it from what you read and include enough surrounding lines. Do not edit the same file twice in one reply; one call may carry the whole change.");
+    lines.push("- To change a file you must have read it. edit takes the exact text from the file (whitespace included) and fails if it is not found or not unique, so copy it from what you read and include enough surrounding lines. Do not edit the same file twice in one reply; one call may carry the whole change. For one mechanical change across many files, a script is right: run it, then read the diff.");
   }
   if (has(input, "subagent")) {
     lines.push(

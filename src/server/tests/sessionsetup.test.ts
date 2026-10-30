@@ -362,7 +362,7 @@ describe("Research and Orchestrate modes", () => {
 });
 
 describe("Moxen memory", () => {
-  it("gives a conversation the index it began with, keeps it through saves, and gives the next conversation the new one", async () => {
+  it("keeps the memory index out of the prompt, and points the rules at memory_read for it", async () => {
     const prompts: string[] = [];
     const starts: Array<Record<string, unknown>> = [];
     const harness = await testHarness({ onStartSession: (input) => starts.push(input), onSendTurn: (input) => prompts.push(input.prompt) });
@@ -371,9 +371,9 @@ describe("Moxen memory", () => {
     try {
       const created = await first.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const id = created.threadId;
-      // Memory on: its rules, Claude Code's own memory off, and no index while there is nothing in it.
+      // Memory on: its rules say where the index lives, and none of it is shipped in the prompt.
       expect(String(starts[0]?.instructions)).toContain("You have a persistent memory");
-      expect(String(starts[0]?.instructions)).not.toContain("# Memory index");
+      expect(String(starts[0]?.instructions)).toContain("memory_read with no name returns the index");
       expect(starts[0]?.moxenMemory).toBe(true);
 
       await first.dispatch({ type: "memory.save", threadId: id, name: "bun-tests", description: "Tests run with bun", memoryType: "feedback", body: "Use bun test.", scope: "project" });
@@ -382,15 +382,16 @@ describe("Moxen memory", () => {
       expect(prompts[1]).toBe("two");
       await first.close();
 
-      // A resume (a new process) starts the very same prompt.
+      // A resume (a new process) starts the very same prompt, and a new thread gets no index either:
+      // memory_read is the one place it is read, so it cannot go stale behind a cached prompt.
       const second = open();
       try {
         await second.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "three" }, wait: true });
         expect(starts[1]?.instructions).toBe(starts[0]?.instructions);
-        // Another thread in the project begins with the index.
         const other = await second.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "fresh", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
         const fresh = String(starts.find((input) => input.threadId === other.threadId)?.instructions);
-        expect(fresh).toMatch(/# Memory index\nProject memory \(this codebase and its work\):\n- \[bun-tests\]\(bun-tests\.md\) — Tests run with bun$/);
+        expect(fresh).not.toContain("bun-tests");
+        expect(fresh).not.toContain("# Memory index");
       } finally {
         await second.close();
       }
@@ -439,8 +440,23 @@ describe("session setup", () => {
     const { harness, connection, startOf } = await connected();
     try {
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      const instructions = startOf(done.threadId)?.instructions ?? "";
-      expect(instructions).toMatch(/^In case you're asked: you are running in Moxen, .* No need to mention this otherwise\.\n\nWhen the work depends on [^\n]*\n\nWhile you work, keep your messages to short progress notes[^\n]*\n\nCommands you run go through the user's own shell[^\n]*\n(?:- [^\n]*\n)+\nA message may begin with a <moxen-instructions-update> block[^\n]*\n\nA message may begin with a <moxen-mode> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n?)+$/);
+      const instructions = String(startOf(done.threadId)?.instructions ?? "");
+      expect(instructions.startsWith("# Environment\n\nIn case you're asked: you are running in Moxen,")).toBe(true);
+      expect([...instructions.matchAll(/^# (.+)$/gm)].map((match) => match[1])).toEqual([
+        "Environment",
+        "Look it up",
+        "Progress notes",
+        "Showing images",
+        "Shell",
+        "Messages from Moxen",
+        "Memory",
+        "Web",
+      ]);
+      // One provenance sentence for every block Moxen sends, and the web tips last.
+      expect(instructions).toContain("Some messages come from Moxen, not from the person you are talking to.");
+      expect(instructions).toContain("<task-notification>");
+      expect(instructions).toContain("You have a persistent memory");
+      expect(instructions).toContain("Using the web tools well:");
     } finally {
       await connection.close();
     }
@@ -464,7 +480,10 @@ describe("session setup", () => {
     try {
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ instructions: "Project rule." }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      expect(startOf(done.threadId)?.instructions).toMatch(/do not mention or quote it\.\n\nA message may begin with a <moxen-mode> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n)+\nConfig rule\.\n\nProject rule\.$/);
+      const text = String(startOf(done.threadId)?.instructions ?? "");
+      expect(text.endsWith("Config rule.\n\nProject rule.")).toBe(true);
+      expect(text.indexOf("Using the web tools well:")).toBeGreaterThan(text.indexOf("# Memory"));
+      expect(text.indexOf("Using the web tools well:")).toBeLessThan(text.indexOf("Config rule."));
     } finally {
       await connection.close();
     }

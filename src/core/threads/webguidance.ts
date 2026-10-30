@@ -101,6 +101,7 @@ export function buildWebGuidance(input: WebGuidanceInput): string {
 
   const tips: string[] = [];
   if (searchOn && claude) tips.push('WebSearch: when it has a mode option, use "extended" for anything recent or time-sensitive ("standard" can return older results); allowed_domains and blocked_domains cannot be combined.');
+  if (searchOn && !claude) tips.push("websearch: it returns titles, URLs and snippets, not page text; read the page before relying on what a snippet cut off.");
   if (fetchOn && claude) tips.push('WebFetch: the prompt decides what comes back, so an answer that a page does not mention something may only mean the prompt did not ask; responses are cached for 15 minutes, and offset reads on through a long page.');
   if (fetchOn && !claude) tips.push("webfetch: returns text (markdown by default); it cannot read images or other binary files.");
   for (const tool of [...mcpSearch, ...mcpFetch]) tips.push(tool.tip);

@@ -114,8 +114,8 @@ const MIN_COMPOSER_LINES = 3;
 /**
  * The textarea scrolls internally past `MAX_COMPOSER_LINES` with no native
  * bar (a `<scrollbox>` cannot wrap a textarea), so the composer draws its
- * own 1-column strip at the card's right edge: faint track, accent thumb,
- * blank while the draft fits.
+ * own 1-column strip at the card's right edge, as tall as the draft's
+ * visible rows: faint track, accent thumb, blank while the draft fits.
  *
  * The textarea wraps and scrolls while it renders — after React has already
  * drawn this strip — so reading its rows during React's render always lags
@@ -150,13 +150,15 @@ function ComposerScrollbar({ areaRef }: { areaRef: RefObject<TextareaRenderable 
   // at the viewport height) or lineCount (which ignores word wrap).
   const total = area.lineInfo.lineStartCols.length;
   const viewRows = Math.min(MAX_COMPOSER_LINES, Math.max(MIN_COMPOSER_LINES, total));
-  // Breathing box + footer box below the textarea inside the card.
-  const trackLen = viewRows + 2;
-  const thumb = thumbGeometry(total, viewRows, area.scrollY, trackLen);
+  // The track is the textarea's own rows: the card's selector row and the
+  // spacer under it sit above the draft and stay clear of the strip.
+  const trackTop = 2;
+  const thumb = thumbGeometry(total, viewRows, area.scrollY);
   if (thumb === null) return blank;
   return (
-    <box style={{ width: 1, flexShrink: 0 }} selectable={false}>
-      {Array.from({ length: trackLen }, (_, row) => {
+    <box style={{ width: 1, flexShrink: 0, flexDirection: "column" }} selectable={false}>
+      <box style={{ height: trackTop, flexShrink: 0 }} backgroundColor={SURFACE.raised} />
+      {Array.from({ length: viewRows }, (_, row) => {
         const onThumb = row >= thumb.start && row < thumb.start + thumb.size;
         return (
           <text key={row} fg={onThumb ? COLOR.accent : COLOR.faint} bg={COLOR.faint} selectable={false}>
@@ -974,9 +976,9 @@ export function Composer({
             </text>
           </box>
         ) : (
-          // The scrollbar strip spans the whole card at its right edge (like the
-          // timeline bar at the pane edge): content keeps its own right inset
-          // inside the column, the strip sits flush outside it.
+          // The scrollbar strip runs down the card's right edge beside the
+          // draft, starting at the draft's first row: content keeps its own
+          // right inset inside the column, the strip sits flush outside it.
           <box style={{ flexDirection: "row", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
             <box style={{ flexDirection: "column", flexGrow: 1, paddingRight: 1 }}>
         {topRow}

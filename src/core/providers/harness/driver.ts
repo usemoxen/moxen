@@ -66,7 +66,7 @@ import { discoverSkills, skillTool, type Skill } from "./skills.js";
 import { primeProfileKey, readProfileApiKey, resolveCompactionSettings, resolveHarnessTarget, type ResolvedHarnessTarget } from "./profiles.js";
 import { HarnessTranscript } from "./session.js";
 import { cleanTitle, settledPrefix, SIDE_QUESTION_INSTRUCTION, SIDE_QUESTION_NO_CONTEXT, TITLE_INSTRUCTION } from "./sidequery.js";
-import { askTool, todoTool } from "./tools/index.js";
+import { askTool, SESSION_TOOL_NAMES, todoTool } from "./tools/index.js";
 import { subagentTool, type SubagentArgs } from "./tools/subagent.js";
 import { webFetchTool, webSearchTool } from "./tools/web.js";
 import { resolveWebSettings } from "./web/settings.js";
@@ -184,8 +184,6 @@ type ParkedRequest =
 
 /** Tools whose activity is shown by their own surface (the tasks panel, the answer panel), not as a tool row. */
 const SILENT_TOOLS: ReadonlySet<string> = new Set(["todo", "ask"]);
-/** What the system prompt may say about tools that exist only in some sessions. */
-const SESSION_TOOL_NAMES = ["subagent", "web_fetch", "web_search", "todo"] as const;
 
 /** The tool names `isolationViolation` knows, by ours. */
 const ISOLATION_TOOL_NAMES: Readonly<Record<string, string>> = { edit: "Edit", write: "Write", bash: "Bash" };

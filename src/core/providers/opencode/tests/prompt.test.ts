@@ -12,6 +12,9 @@ describe("Moxen's system prompt for OpenCode", () => {
     expect(prompt).toContain("oldString");
     expect(prompt).not.toContain("Moxen's safety check");
     expect(prompt).not.toContain("web_fetch");
+    // The dedicated tools are the default, not the only way: the Shell section says when the shell is better.
+    expect(prompt).toContain("Use the dedicated tools for file work by default");
+    expect(prompt).toContain("One mechanical change across many files is a script");
     // What the runtime instructions already say is not said twice.
     expect(prompt).not.toContain("progress notes");
     expect(prompt).not.toContain("<task-notification>");

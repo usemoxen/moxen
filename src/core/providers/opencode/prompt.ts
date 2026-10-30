@@ -47,13 +47,13 @@ function toolSection(tools: ReadonlySet<string>): string {
       has(tools, "edit") ? "change files with edit or write, not sed, awk or echo redirection" : null,
     ].filter((entry): entry is string => entry !== null);
     paragraphs.push(
-      `Use the dedicated tools for file work (${dedicated.join("; ")}): they cost less than their shell equivalents and show the user exactly what changed. Keep shell for builds, tests, git and other commands, and do not chain commands with separators like \`echo "===="\`, which turn the output to noise.`,
+      `Use the dedicated tools for file work by default (${dedicated.join("; ")}): they cost less than their shell equivalents and show the user exactly what changed. Keep shell for builds, tests, git and other commands, and do not chain commands with separators like \`echo "===="\`, which turn the output to noise.`,
     );
   }
   paragraphs.push("Call independent tools together in one reply, for example several reads or searches, to save time; call dependent ones one after another, since the second needs what the first returns.");
   if (has(tools, "edit")) {
     paragraphs.push(
-      'Read a file before you change it. edit replaces the exact text in oldString with newString, whitespace included, and fails if oldString is not found, or is not unique unless replaceAll is true; copy it from what you read and include enough surrounding lines to make it unique. write is for new files and complete rewrites, so prefer edit for a targeted change, and prefer changing an existing file to creating a new one. Do not create documentation files (README, *.md) unless asked. One edit call can carry a whole change to a file, so do not edit the same file twice in one reply. Write the real code: "// ... rest of file" is not a substitute for it.',
+      'Read a file before you change it. edit replaces the exact text in oldString with newString, whitespace included, and fails if oldString is not found, or is not unique unless replaceAll is true; copy it from what you read and include enough surrounding lines to make it unique. write is for new files and complete rewrites, so prefer edit for a targeted change, and prefer changing an existing file to creating a new one. One mechanical change across many files is a script, not a dozen edits: run it, then read the diff. Do not create documentation files (README, *.md) unless asked. One edit call can carry a whole change to a file, so do not edit the same file twice in one reply. Write the real code: "// ... rest of file" is not a substitute for it.',
     );
   }
   if (has(tools, "subagent")) {

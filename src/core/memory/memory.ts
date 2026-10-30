@@ -34,9 +34,9 @@ export type MemoryType = (typeof MEMORY_TYPES)[number];
 export const MAX_MEMORY_CHARS = 8_000;
 export const MAX_DESCRIPTION_CHARS = 200;
 export const MAX_NAME_CHARS = 64;
-/** Memories one scope holds; the index a session reads stays readable. */
+/** Memories one scope holds; the index `memory_read` returns stays readable. */
 export const MAX_MEMORIES = 200;
-/** What of an index goes into a session, as Claude's auto memory caps its own. */
+/** What of an index `memory_read` returns, as Claude's auto memory caps its own. */
 export const MAX_INDEX_LINES = 200;
 export const MAX_INDEX_CHARS = 25_000;
 
@@ -292,7 +292,7 @@ export async function listMemories(location: MemoryLocation): Promise<Memory[]> 
   return [...global, ...project];
 }
 
-/** One scope's index as a session reads it: capped in lines and characters, with a note saying what was left out. */
+/** One scope's index as `memory_read` returns it: capped in lines and characters, with a note saying what was left out. */
 function cappedIndex(memories: readonly Memory[]): string {
   const lines: string[] = [];
   let used = 0;
@@ -308,7 +308,7 @@ function cappedIndex(memories: readonly Memory[]): string {
 }
 
 /**
- * The indexes as a session starts with them, global first, each under its
+ * The indexes `memory_read` returns with no name, global first, each under its
  * own cap; null when there are no memories at all.
  */
 export async function memoryIndexText(location: MemoryLocation): Promise<string | null> {

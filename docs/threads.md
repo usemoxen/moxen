@@ -29,9 +29,20 @@ When a plan limit stops a turn, a continue can be scheduled for just after
 the reset: `autoContinueAtUsageLimit`, or `providers.<kind>.autoContinueAtUsageLimit`
 for one provider, at most `usageLimitContinues` (default 2) in a row.
 
-Runtime instructions end with the user's own, in this order: the global
-`instructions`, the provider's `providers.<kind>.instructions`, the project's
-`moxen.json` `instructions`, then (on the Moxen Harness) the profile's.
+Runtime instructions are headed sections — Environment, Look it up, Progress
+notes (OpenCode adds Checklist and Subagents), Shell, Messages from Moxen,
+Memory, Web, and for a delegated task Your task — followed by the user's own
+instructions, in this order: the global `instructions`, the provider's
+`providers.<kind>.instructions`, the project's `moxen.json` `instructions`,
+then (on the Moxen Harness) the profile's. The Environment section names the
+app, Moxen; which harness it is comes from the provider's own base prompt, so
+no section says it twice.
+
+The Shell section is built from the machine (`core/threads/shells.ts`): its
+platform, the login shell and the shells found on `PATH`, and whether the
+command-line tools are the BSD ones or GNU. A Windows session is told which
+shell its harness runs commands in. The text therefore differs per machine,
+which is safe because a conversation's copy is frozen when it begins.
 
 ## What a new thread starts with
 
@@ -98,10 +109,10 @@ so a change on Claude's side does not change it.
 - **Tools:** `memory_read` (no name: the index as it is now),
   `memory_save` and `memory_delete` on the `moxen` MCP server. The model
   picks the scope. A delegated task gets `memory_read` only.
-- **Reading:** a conversation starts with both indexes in its runtime
-  instructions (global first, each capped at 200 lines / 25 KB), and keeps
-  the index it began with: a save later does not rewrite a cached prompt.
-  A memory itself is read on demand.
+- **Reading:** the index is not shipped in the runtime instructions: it can
+  reach 200 lines / 25 KB, and `memory_read` with no name returns it as it is
+  now, so the rules point there instead of duplicating it. A memory itself is
+  read on demand, and the agent decides which ones the work touches.
 - **Rules:** always on while memory is (`MEMORY_GUIDANCE` in
   `threads/instructions.ts`): what to save, what to skip, which scope.
   Lessons from a session are saved on the agent's own initiative.

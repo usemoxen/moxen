@@ -138,9 +138,11 @@ native session handle is stored on the thread and passed back at start. A
 handle the provider no longer recognizes starts fresh instead of failing.
 
 Beyond the prompt, a session starts with short runtime instructions sent
-through the provider's own channel. They say only what Moxen knows: the
-session runs in Moxen, in a worktree, as a delegated task, plus the user's
-own instructions. Every top-level thread also gets the `moxen` MCP server
+through the provider's own channel. They say only what Moxen knows — the
+session runs in Moxen, in a worktree, as a delegated task, how its shell and
+tools behave on this machine, how to use Moxen memory and the web tools it
+has — under one heading per subject, and end with the user's own
+instructions. Every top-level thread also gets the `moxen` MCP server
 (`delegate`, `task_status`, `task_cancel`), so an agent can hand work to a
 subagent thread in a worktree of its own, find and read other threads
 (`thread_search`, `thread_read`), and keep Moxen memory (`memory_*`, see
