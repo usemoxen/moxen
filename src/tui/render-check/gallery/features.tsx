@@ -3,6 +3,7 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
+import { ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
@@ -534,5 +535,23 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         />
       </Stage>
     ),
+  },
+  {
+    id: "reply-image",
+    group: "timeline",
+    title: "ReplyImage, an image a reply shows",
+    width: 70,
+    height: 22,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={GALLERY_IMAGE_READER}>
+        <Stage width={70} height={22}>
+          <ReplyImage path="/tmp/chart.png" alt="quarterly chart" />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      closeImageViewer();
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+    },
   },
 ];

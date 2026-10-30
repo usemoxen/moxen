@@ -67,7 +67,7 @@ import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "..
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
 import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
-import { readAttachment, workspaceGit, workspaceRead } from "./workspace.js";
+import { readAttachment, readImageFile, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
 import { diffCheckpointRange, diffCheckpointStat } from "../core/checkpoints/git.js";
 import { CliError } from "../core/errors.js";
@@ -1359,6 +1359,8 @@ export class DirectConnection implements ClientApi {
       case "attachment.read":
         // The store's folder, then where older builds saved them.
         return await readAttachment([path.join(this.storeRoot, "attachments"), path.join(appHomeDir(), "attachments")], query.attachmentId);
+      case "image.read":
+        return await readImageFile(await this.workspaceFor(query.threadId), query.path);
       case "git.overview": {
         const cwd = await this.workspaceFor(query.threadId);
         return await readOverview(cwd, {

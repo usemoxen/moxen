@@ -72,3 +72,40 @@ export function splitChipBlocks(text: string): Block[] {
   flush();
   return blocks;
 }
+
+/** A line that is one markdown image with a local path: what a reply writes to show a picture. */
+const REPLY_IMAGE_LINE = /^\s*!\[([^\]\n]*)\]\(([^)\s]+)\)\s*$/u;
+
+export type ReplyBlock = { kind: "markdown"; text: string } | { kind: "image"; alt: string; path: string };
+
+/** True for a path on this machine: not a URL (`https:`, `data:`, `moxen-context:`) whose bytes are not the server's to read. */
+function isLocalPath(target: string): boolean {
+  return !/^[a-z][a-z0-9+.-]*:\/\//iu.test(target) && !/^(?:data|moxen-context|mailto):/iu.test(target);
+}
+
+/**
+ * A reply cut at the lines that show an image, each its own block, outside
+ * code fences; the text between stays markdown, as it was.
+ */
+export function splitReplyImages(text: string): ReplyBlock[] {
+  if (!text.includes("![")) return [{ kind: "markdown", text }];
+  const blocks: ReplyBlock[] = [];
+  let fence = false;
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length > 0) blocks.push({ kind: "markdown", text: current.join("\n") });
+    current = [];
+  };
+  for (const line of text.split("\n")) {
+    if (/^\s*(```|~~~)/u.test(line)) fence = !fence;
+    const match = fence ? null : REPLY_IMAGE_LINE.exec(line);
+    if (match !== null && isLocalPath(match[2]!)) {
+      flush();
+      blocks.push({ kind: "image", alt: match[1]!, path: match[2]! });
+    } else {
+      current.push(line);
+    }
+  }
+  flush();
+  return blocks;
+}

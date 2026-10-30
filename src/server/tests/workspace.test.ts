@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { readAttachment, workspaceGit, workspaceGitArgs, workspaceRead } from "../workspace.js";
+import { readAttachment, readImageFile, workspaceGit, workspaceGitArgs, workspaceRead } from "../workspace.js";
 
 async function repo(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "moxen-workspace-"));
@@ -64,5 +64,19 @@ describe("attachment reads", () => {
     for (const id of ["../secret", "secret.png", "/etc/passwd", ""]) {
       await expect(readAttachment([store, older], id)).rejects.toMatchObject({ code: "ATTACHMENT_NOT_FOUND" });
     }
+  });
+});
+
+describe("readImageFile", () => {
+  it("reads an image by absolute path or relative to the thread's folder, and refuses what is not an image", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-image-read-"));
+    await writeFile(path.join(dir, "shot.PNG"), Buffer.from([1, 2, 3]));
+    await writeFile(path.join(dir, "notes.txt"), "secret");
+    const expected = { mimeType: "image/png", dataUrl: "data:image/png;base64,AQID" };
+    expect(await readImageFile(dir, path.join(dir, "shot.PNG"))).toEqual(expected);
+    expect(await readImageFile(dir, "shot.PNG")).toEqual(expected);
+    // Any file the user can read, but only an image: a text file named in a reply is not sent to a client.
+    await expect(readImageFile(dir, "notes.txt")).rejects.toMatchObject({ code: "IMAGE_NOT_SUPPORTED" });
+    await expect(readImageFile(dir, "missing.png")).rejects.toMatchObject({ code: "IMAGE_NOT_FOUND" });
   });
 });

@@ -11,6 +11,8 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { fail } from "../helpers.js";
 import { imageDimensions } from "../../../core/attachments.js";
 import { encodeRgbaPng, shrinkImage } from "../../model/imageshrink.js";
+import { MessageBody } from "../../features/timeline/timeline.js";
+import { ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { solidPng } from "../png.js";
 
 /**
@@ -116,6 +118,7 @@ export async function runImageThumbs(): Promise<void> {
   await runComposerHover(png);
   await runViewer(png);
   runShrink();
+  await runReplyImage(png);
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -280,4 +283,67 @@ function runShrink(): void {
   const size = imageDimensions(shrunk.bytes);
   if (size?.width !== 1568 || size.height !== 52) fail(`shrunk to ${size?.width}x${size?.height}, not 1568x52`);
   if (shrunk.name !== "wide.png") fail(`the shrunk copy is named ${shrunk.name}`);
+}
+
+/** An image a reply names is drawn in the transcript; under a modal it is drawn as text cells, which the dimming layer does not turn black. */
+async function runReplyImage(png: Buffer): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const width = 80;
+  const height = 34;
+  const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+  const asked: string[] = [];
+  let setOpen: (open: boolean) => void = () => {};
+  function Harness() {
+    const [open, set] = useState(false);
+    setOpen = set;
+    return (
+      <ReplyImageReaderContext.Provider
+        value={async (path) => {
+          asked.push(path);
+          if (path === "/tmp/gone.png") throw new Error("IMAGE_NOT_FOUND");
+          return { mimeType: "image/png", dataUrl };
+        }}
+      >
+        <box style={{ flexDirection: "column", width, height }} backgroundColor={SURFACE.base}>
+          <MessageBody
+            entry={{ text: "Here is the chart:\n![quarterly chart](/tmp/chart.png)\nAnd one that is gone:\n![missing](/tmp/gone.png)\nDone.", streaming: false, message: null } as never}
+            homeDir={undefined}
+            background={SURFACE.base}
+          />
+          {open ? (
+            <ModalShell screenWidth={width} screenHeight={height} left={30} top={25} width={30} height={5} onClose={() => {}}>
+              <text>{"modal"}</text>
+            </ModalShell>
+          ) : null}
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
+  const settle = (ms: number) =>
+    act(async () => {
+      for (let waited = 0; waited < ms; waited += 25) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await setup.flush();
+      }
+    });
+  const frame = () => setup.captureCharFrame();
+  await settle(500);
+  console.log("--- reply image: drawn in the transcript ---");
+  console.log(frame());
+  if (!frame().includes("Here is the chart:") || !frame().includes("Done.")) fail("the text around a reply's image is gone");
+  if (frame().split("\n").filter((line) => line.includes("█")).length < 6) fail("the reply's image is not drawn");
+  if (!frame().includes("quarterly chart")) fail("the image has no caption");
+  if (!frame().includes("missing (not found)")) fail("an image the server cannot read is not said to be missing");
+
+  await act(async () => setOpen(true));
+  await settle(500);
+  console.log("--- reply image: as text cells under a modal ---");
+  console.log(frame());
+  if (frame().includes("█")) fail("a real image is still drawn under a modal");
+  if (frame().split("\n").filter((line) => line.includes("▀")).length < 6) fail("the image is not drawn as text cells under a modal");
+  await act(async () => setOpen(false));
+  await settle(300);
+  if (asked.filter((path) => path === "/tmp/chart.png").length !== 1) fail("the image was fetched more than once");
 }

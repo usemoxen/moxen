@@ -9,7 +9,8 @@ import { execFile } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { imageMimeForPath } from "../core/attachments.js";
+import { imageMimeForPath, MAX_SHRINKABLE_BYTES } from "../core/attachments.js";
+import { expandHome } from "../core/config.js";
 import { CliError } from "../core/errors.js";
 import type { WorkspaceGitCall } from "./protocol.js";
 
@@ -49,6 +50,28 @@ export async function workspaceRead(root: string, file: string): Promise<string>
   if (info === null || !info.isFile()) throw new CliError("WORKSPACE_READ_FAILED", "No such file.");
   if (info.size > READ_MAX_BYTES) throw new CliError("WORKSPACE_READ_FAILED", "The file is too big to diff live.");
   return await readFile(target, "utf8");
+}
+
+/** The image types a reply can show (`core/attachments.ts`'s). */
+const SHOWN_IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+
+/**
+ * An image file a reply shows: `file` is absolute (or `~/…`), or relative to
+ * the thread's folder. Any image this machine's user can read, which is the
+ * point (a screenshot the agent took lives wherever it put it); what is
+ * never read is anything that is not a gif, jpeg, png or webp, or is larger
+ * than a client reads to shrink.
+ */
+export async function readImageFile(root: string, file: string): Promise<{ mimeType: string; dataUrl: string }> {
+  const target = path.resolve(root, expandHome(file));
+  if (!SHOWN_IMAGE_EXTENSIONS.has(path.extname(target).toLowerCase())) {
+    throw new CliError("IMAGE_NOT_SUPPORTED", "Only gif, jpeg, png and webp images can be shown.", { details: { path: file } });
+  }
+  const info = await stat(target).catch(() => null);
+  if (info === null || !info.isFile()) throw new CliError("IMAGE_NOT_FOUND", `No image at ${file}.`, { details: { path: file } });
+  if (info.size > MAX_SHRINKABLE_BYTES) throw new CliError("IMAGE_TOO_LARGE", "That image is too large to show.", { details: { path: file } });
+  const mimeType = imageMimeForPath(target);
+  return { mimeType, dataUrl: `data:${mimeType};base64,${(await readFile(target)).toString("base64")}` };
 }
 
 /** Ids the store gives attachments: anything else could name a path. */

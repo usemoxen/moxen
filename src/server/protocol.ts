@@ -519,6 +519,8 @@ export type Query =
   | { readonly type: "workspace.read"; readonly threadId: string; readonly root: string; readonly path: string }
   /** A sent message's image by its attachment id: what copying the message takes along. */
   | { readonly type: "attachment.read"; readonly attachmentId: string }
+  /** An image file a reply shows, by path (absolute, or relative to the thread's folder): any image file the server can read. */
+  | { readonly type: "image.read"; readonly threadId: string; readonly path: string }
   /** Which forge this checkout belongs to, and whether its CLI is usable. */
   | { readonly type: "forge.detect"; readonly threadId: string }
   | {
@@ -573,6 +575,7 @@ export interface QueryResults {
   "workspace.git": { readonly stdout: string };
   "workspace.read": { readonly content: string };
   "attachment.read": { readonly mimeType: string; readonly dataUrl: string };
+  "image.read": { readonly mimeType: string; readonly dataUrl: string };
   "git.commit.diff": { readonly sha: string; readonly diff: string | null };
   "forge.detect": ForgeDetection;
   "forge.requests.list": { readonly requests: readonly ForgeRequest[] };
@@ -1334,6 +1337,8 @@ export function decodeQuery(value: unknown): Query {
       return { type, threadId: requireThreadId(record.threadId), root: requireField(record.root, type, "root"), path: requireField(record.path, type, "path") };
     case "attachment.read":
       return { type, attachmentId: requireField(record.attachmentId, type, "attachmentId") };
+    case "image.read":
+      return { type, threadId: requireThreadId(record.threadId), path: requireField(record.path, type, "path") };
     case "git.overview":
       return {
         type,

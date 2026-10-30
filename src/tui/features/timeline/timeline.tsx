@@ -4,7 +4,8 @@ import type { ReactNode, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
-import { chipSegments, splitChipBlocks } from "../../model/messagechips.js";
+import { chipSegments, splitChipBlocks, splitReplyImages } from "../../model/messagechips.js";
+import { ReplyImage, ReplyImageReaderContext } from "./replyimage.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 
 import { useHover } from "../../hooks/useHover.js";
@@ -586,8 +587,10 @@ export function MessageBody({
     <box style={{ flexDirection: "column", flexGrow: 1 }}>
       {rendered.text.length === 0
         ? null
-        : (chips ? splitChipBlocks(rendered.text) : [{ kind: "markdown" as const, text: rendered.text }]).map((block, index) =>
-            block.kind === "chips" ? (
+        : (chips ? splitChipBlocks(rendered.text) : splitReplyImages(rendered.text)).map((block, index) =>
+            block.kind === "image" ? (
+              <ReplyImage key={index} path={block.path} alt={block.alt} />
+            ) : block.kind === "chips" ? (
               <text key={index} fg={COLOR.text} wrapMode="word" selectable>
                 {chipSegments(block.text).map((segment, at) =>
                   segment.chip ? (
@@ -1522,6 +1525,7 @@ export function Timeline({
   modelLabel,
   homeDir,
   readAttachment,
+  readReplyImage,
   expandedTurn,
   expandedWork,
   scrollRef,
@@ -1549,6 +1553,8 @@ export function Timeline({
   homeDir: string | undefined;
   /** Fetches a sent image's bytes from the server, for the message thumbnails; none, no thumbnails. */
   readAttachment?: AttachmentReader;
+  /** Reads an image a reply shows, by its path (`image.read`). */
+  readReplyImage?: AttachmentReader;
   expandedTurn: number | null;
   expandedWork: ReadonlyMap<string, boolean>;
   scrollRef: RefObject<ScrollBoxRenderable | null>;
@@ -1600,6 +1606,7 @@ export function Timeline({
 
   return (
     <AttachmentReaderContext.Provider value={readAttachment ?? null}>
+    <ReplyImageReaderContext.Provider value={readReplyImage ?? null}>
     <box
       style={{ flexDirection: "column", flexGrow: 1, borderStyle: "rounded", backgroundColor: SURFACE.base }}
       borderColor={focused ? SURFACE.borderFocus : SURFACE.border}
@@ -1696,6 +1703,7 @@ export function Timeline({
         })}
       </scrollbox>
     </box>
+    </ReplyImageReaderContext.Provider>
     </AttachmentReaderContext.Provider>
   );
 }

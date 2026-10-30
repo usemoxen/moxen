@@ -21,7 +21,7 @@ export const AttachmentReaderContext = createContext<AttachmentReader | null>(nu
 const MAX_CACHED = 16;
 const cache = new Map<string, Promise<LoadedImage | null>>();
 
-function loadImage(reader: AttachmentReader, attachmentId: string): Promise<LoadedImage | null> {
+export function loadImage(reader: AttachmentReader, attachmentId: string): Promise<LoadedImage | null> {
   const hit = cache.get(attachmentId);
   if (hit !== undefined) return hit;
   const pending = reader(attachmentId)

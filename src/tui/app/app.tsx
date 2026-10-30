@@ -499,6 +499,10 @@ export function App({
    * into moxen attaches the images again onto its `[Image #N]` tokens.
    */
   /** A sent image's bytes by id, for the transcript thumbnails: the server holds them, which may be a paired machine. */
+  const readReplyImage = useCallback(
+    (path: string) => (openThreadId === null ? Promise.reject(new Error("no thread")) : client.query({ type: "image.read", threadId: openThreadId, path })),
+    [client, openThreadId],
+  );
   const readAttachment = useCallback((attachmentId: string) => client.query({ type: "attachment.read", attachmentId }), [client]);
   const copyMessage = (entry: TimelineEntry) => {
     const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
@@ -2696,6 +2700,7 @@ export function App({
             modelLabel={modelLabelOf}
             homeDir={homeDir}
             readAttachment={readAttachment}
+            readReplyImage={readReplyImage}
             expandedTurn={diffPanel.expandedTurn}
             expandedWork={diffPanel.expandedWork}
             onToggleWork={diffPanel.toggleWork}
