@@ -3,6 +3,7 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
+import { MessageBody } from "../../features/timeline/timeline.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
 import { solidPng } from "../png.js";
@@ -516,5 +517,22 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 });
       await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
     },
+  },
+  {
+    id: "message-chips",
+    group: "timeline",
+    title: "MessageBody, a sent message keeps its image and file chips",
+    width: 70,
+    height: 4,
+    element: () => (
+      <Stage width={70} height={4}>
+        <MessageBody
+          entry={{ text: "check [Image #1] and [📁 out2](</Users/me/My Docs/out2>) and [📄 normalize.py](/Users/me/normalize.py) ok", streaming: false, message: null } as never}
+          homeDir={undefined}
+          background={SURFACE.base}
+          chips
+        />
+      </Stage>
+    ),
   },
 ];
