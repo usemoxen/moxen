@@ -1,3 +1,4 @@
+import { t, tx } from "../../i18n/index.js";
 import { useEffect, useMemo, useState } from "react";
 
 import type { ClientApi, QueryResult } from "../../../server/api.js";
@@ -96,12 +97,12 @@ export function subagentRun(transcript: SubagentTranscript | null): { status: "r
 }
 
 export function subagentState(transcript: SubagentTranscript | null, now: number): string {
-  if (transcript === null) return "loading…";
-  if (!transcript.available || (transcript.messages.length === 0 && transcript.activities.length === 0)) return "no transcript to show";
+  if (transcript === null) return t("sub.loading");
+  if (!transcript.available || (transcript.messages.length === 0 && transcript.activities.length === 0)) return t("sub.no_transcript_to_show_1018");
   const agent = transcript.agent;
-  if (agent === null) return "finished";
-  if (agent.status === "running") return `running ${formatDuration(Math.max(1000, now - Date.parse(agent.startedAt)))}`;
+  if (agent === null) return t("task.finished");
+  if (agent.status === "running") return t("side.runningFor", { time: formatDuration(Math.max(1000, now - Date.parse(agent.startedAt))) });
   const took = agent.stoppedAt === null ? null : Date.parse(agent.stoppedAt) - Date.parse(agent.startedAt);
   const verb = agent.status === "completed" ? "finished" : agent.status;
-  return took === null || !Number.isFinite(took) ? verb : `${verb} in ${formatDuration(Math.max(1000, took))}`;
+  return took === null || !Number.isFinite(took) ? tx(verb) : t("sub.verbIn", { verb: tx(verb), time: formatDuration(Math.max(1000, took)) });
 }

@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
-import { killProcessTree } from "../infra/process.js";
+import { killProcessGroup, killProcessTree } from "../infra/process.js";
 
 const alive = (pid: number): boolean => {
   try {
@@ -50,5 +50,16 @@ describe("killProcessTree", () => {
     }
     if (process.platform === "win32") expect(alive(grandchild)).toBe(false);
     else if (alive(grandchild)) process.kill(grandchild, "SIGKILL");
+  });
+});
+
+describe("killProcessGroup", () => {
+  it("ends a process known only by its pid, and is quiet once it is gone", async () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", detached: true });
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    killProcessGroup(child.pid!);
+    await exited;
+    expect(alive(child.pid!)).toBe(false);
+    expect(() => killProcessGroup(child.pid!)).not.toThrow();
   });
 });

@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -16,9 +17,9 @@ const MAX_TITLE_LENGTH = 80;
  */
 export function RenameModal({
   initialTitle,
-  title = "Rename thread",
-  placeholder = "Thread title",
-  hint = "enter renames · esc cancels",
+  title = t("app.rename_thread_979d"),
+  placeholder = t("ui.thread_title_eae0"),
+  hint = t("ui.enter_renames_esc_cancels_b7b8"),
   maxLength = MAX_TITLE_LENGTH,
   screenWidth,
   screenHeight,

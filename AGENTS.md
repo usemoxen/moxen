@@ -50,7 +50,7 @@ All work has a Linear issue (team Moxen, `MXN-n`).
    checked. Never set Done yourself. Write what happened in the issue.
 4. Big work gets a main issue with sub-issues, labelled. The main issue isn't
    In Review until all its sub-issues are.
-5. Put the key in the commit subject, e.g. `(MXN-151)`.
+5. After the work is finished and moved into In review, commit. Put the key in the commit subject, e.g. `(MXN-151)`.
 
 ## Git
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { answerForForm, OpencodeEventTranslator, opencodeToolName, registerOpencodeMcpServer, toolContentText, translateTimeline, type OpencodeSubscribedEvent } from "../translate.js";
 import {
+  BACKGROUND_SHELL_EVENTS,
   EXECUTION_FAILED_EVENTS,
   PERMISSION_EVENTS,
   QUESTION_EVENTS,
@@ -366,6 +367,39 @@ describe("v2 history translation", () => {
         { id: "d", type: "shell", time: {} },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("v2 background commands", () => {
+  it("lists a command the model sent to the background when its tool call names the shell, and ends it on the session-less exit", () => {
+    const events = run(new OpencodeEventTranslator(), BACKGROUND_SHELL_EVENTS);
+    const shell = events.filter((event) => event.type.startsWith("session.shell."));
+    expect(shell).toEqual([
+      {
+        type: "session.shell.started",
+        properties: { sessionID: "ses_e7738453cffeO6aU9TwL89NK9J", shellID: "sh_188c7c4e300101Dzleap7ff20v", command: "sleep 6 && echo done", status: "running" },
+      },
+      {
+        type: "session.shell.ended",
+        properties: { sessionID: "ses_e7738453cffeO6aU9TwL89NK9J", shellID: "sh_188c7c4e300101Dzleap7ff20v", command: "", status: "exited" },
+      },
+    ]);
+  });
+
+  it("says nothing of a foreground command, or of an exit it never saw start", () => {
+    const translator = new OpencodeEventTranslator();
+    const foreground = BACKGROUND_SHELL_EVENTS.map((event) =>
+      event.type === "session.tool.called" ? { ...event, data: { ...(event.data as object), input: { command: "ls" } } } : event,
+    );
+    expect(run(translator, foreground).filter((event) => event.type.startsWith("session.shell."))).toEqual([]);
+  });
+
+  it("reports a non-zero exit as failed", () => {
+    const translator = new OpencodeEventTranslator();
+    const failed = BACKGROUND_SHELL_EVENTS.map((event) =>
+      event.type === "shell.exited" ? { ...event, data: { id: "sh_188c7c4e300101Dzleap7ff20v", exit: 2, status: "exited" } } : event,
+    );
+    expect(run(translator, failed).at(-1)).toMatchObject({ type: "session.shell.ended", properties: { status: "failed" } });
   });
 });
 

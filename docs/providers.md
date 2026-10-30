@@ -228,10 +228,13 @@ only; `profile test` works for all three.
 searches. A plain request is tried first, with browser-like headers; a page that
 turns it away, or is built by scripts, is loaded in an installed Chrome or
 Chromium (headless, throwaway profile) when `web.browser` allows.
-Searching uses DuckDuckGo by default (no account); `webSearch` can be `exa`,
-`brave` (each with a key of its own, saved in the keychain as
-`webSearchKeys.<service>` or named by `webSearchKeyEnvs.<service>`; both are
-metered, so check your plan's terms) or `searxng` (your instance, `searxngUrl`).
+Searching uses DuckDuckGo by default (no account); `webSearch` can also be
+`searxng` (your instance, `searxngUrl`). Exa and Brave are not built in: add
+their MCP servers from Moxen's own list (MCP servers → Add) and the Harness gets
+their tools and the key they keep in the keychain, so there is one client and
+one key per service. A file that still names `exa` or `brave` as `webSearch`
+loads and searches with DuckDuckGo; its old `webSearchKey*` entries are ignored
+(the keychain entries they pointed at are left for you to delete).
 This machine is always reachable without asking; any other host asks like a
 command does, once per host for the session; the local network needs
 `web.privateNetwork` and cloud metadata addresses are never reached. Results are
@@ -242,10 +245,7 @@ offers Claude Code and OpenCode follows them too, so Never starts no browser on
 any provider. A file from before they were shared still means what it did:
 `providers.harness.webBrowser` and `webBrowserPath` apply to every provider
 while `web.*` is unset, and `providers.harness.webPrivateNetwork` still opens
-the Harness's tools only. The older single `webSearchKey` / `webSearchKeyEnv`
-slot is read for the selected service until any service has a key of its own;
-switching services on the page first files it under the service it was used
-for (the same keychain entry, not a copy).
+the Harness's tools only.
 
 Gaps: the two API formats and the web tools have only been exercised against
 fakes and local fixture sites (no live API, search service or real site), a

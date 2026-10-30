@@ -11,6 +11,8 @@ import { HandoffModelsEditor } from "./handoffmodels.js";
 import { TextField } from "./textfield.js";
 import type { HarnessRun } from "./useSettings.js";
 import { APPLIES_AT_TEXT, type ListItemView } from "../../../core/configschema.js";
+import { currentLanguage, t, tx } from "../../i18n/index.js";
+import { localizeSnapshot } from "../../i18n/settingsview.js";
 import type { DiscoverResult } from "../../../core/types.js";
 import type { HarnessApiFormat } from "../../../core/types.js";
 import { ModalShell } from "../../ui/modalshell.js";
@@ -66,7 +68,7 @@ interface SettingItem {
 }
 
 /** The left column: section labels plus the selection bar and a gap. */
-const TAB_WIDTH = 24;
+const TAB_WIDTH = 25;
 
 /** The sidebar's categories, top to bottom: each names the sections filed under it. */
 const SECTION_CATEGORY: Record<SettingSection, string> = {
@@ -108,7 +110,7 @@ interface SidebarEntry {
 const NESTED_LISTS: readonly string[] = ["providers.harness.profiles", "mcpServers"];
 
 export function SettingsModal({
-  snapshot,
+  snapshot: rawSnapshot,
   loading,
   saving,
   error,
@@ -168,12 +170,17 @@ export function SettingsModal({
   height: number;
   onClose: () => void;
 }) {
+  const language = currentLanguage();
+  // The page draws the snapshot in the current language; what it writes back is by key and value, which stay as they were.
+  const snapshot = useMemo(() => localizeSnapshot(rawSnapshot), [rawSnapshot, language]);
   const inner = Math.max(40, width - 4);
   const paneWidth = Math.max(24, inner - TAB_WIDTH - 3);
   const [tab, setTab] = useState<SettingSection>(SETTING_SECTIONS[0]);
   /** The heading the open page is narrowed to, in a paged section; null shows the whole section. */
   const [pageGroup, setPageGroup] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
+  // A heading is kept by its words, so a page open on one starts over when the language changes under it.
+  useEffect(() => setPageGroup(null), [language]);
   const [editing, setEditing] = useState<string | null>(null);
   /** The setting whose list is open in the right pane, and the highlighted option. */
   const [picking, setPicking] = useState<{ key: string; index: number } | null>(null);
@@ -281,7 +288,7 @@ export function SettingsModal({
     const focus = nested.find((list) => list.key === focusedList);
     if (focus !== undefined) {
       // Inside an entry only what leads to it stays: the list, its siblings and its own headings.
-      out.push({ section: focus.section, group: focus.group, label: `← ${focus.group ?? SECTION_LABEL[focus.section]}`, prefix: "", back: true });
+      out.push({ section: focus.section, group: focus.group, label: `← ${focus.group ?? tx(SECTION_LABEL[focus.section])}`, prefix: "", back: true });
       focus.items.forEach((item, at) => {
         const last = at === focus.items.length - 1;
         out.push({ section: focus.section, group: focus.group, label: item.title, prefix: last ? "└ " : "├ ", profile: item.id, list: focus.key });
@@ -298,7 +305,7 @@ export function SettingsModal({
       list.items.forEach((item, at) => out.push({ section: list.section, group: list.group, label: item.title, prefix: `${indent}${at === list.items.length - 1 ? "└ " : "├ "}`, profile: item.id, list: list.key }));
     for (const section of sections) {
       // A paged section is a category of its own: its pages sit directly under the category heading, with no row for the section.
-      if (!PAGED_SECTIONS.has(section)) out.push({ section, group: null, label: SECTION_LABEL[section], prefix: "" });
+      if (!PAGED_SECTIONS.has(section)) out.push({ section, group: null, label: tx(SECTION_LABEL[section]), prefix: "" });
       if (!snapshot) continue;
       if (!PAGED_SECTIONS.has(section)) {
         for (const list of nested) if (list.section === section && list.group === null) pushEntries(list, "");
@@ -543,32 +550,32 @@ export function SettingsModal({
   const base =
     picking !== null
       ? sliding
-        ? `←→ move · enter picks${resetOption === undefined ? "" : " · d clears it"} · esc back`
+        ? t("settings.hint.slide", { reset: resetOption === undefined ? "" : t("settings.hint.reset") })
         : pickControl?.searchable === true
-          ? "type to filter · ↑↓ choose · enter picks · esc back"
-          : "↑↓ choose · enter picks · esc back"
+          ? t("settings.hint.filter")
+          : t("settings.hint.choose")
       : current?.control.kind === "text" || current?.control.kind === "secret"
-        ? "enter edits · tab next section · esc closes"
+        ? t("settings.hint.edit")
         : current?.control.kind === "toggle"
-          ? "enter switches · tab next section · esc closes"
-          : "enter opens the choices · tab next section · esc closes";
-  const hint = listOpen !== null || handoffOpen !== null ? "" : picking === null && updatable !== null ? `u updates · ${base}` : base;
+          ? t("settings.hint.toggle")
+          : t("settings.hint.open");
+  const hint = listOpen !== null || handoffOpen !== null ? "" : picking === null && updatable !== null ? t("settings.hint.update", { hint: base }) : base;
 
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{"Settings"}</text>
+        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{t("settings.title")}</text>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"esc"}</text>
       </box>
       {snapshot === null ? (
         <box style={{ flexDirection: "column", marginTop: 1 }}>
-          <text fg={COLOR.dim} bg={SURFACE.raised}>{loading ? "Reading settings…" : (error ?? "No settings available.")}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised}>{loading ? t("settings.reading") : (error ?? t("settings.none"))}</text>
         </box>
       ) : (
         <>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
             <text fg={COLOR.faint} bg={SURFACE.raised}>
-              {truncate(snapshot.exists ? snapshot.path : `${snapshot.path} (not created yet)`, inner)}
+              {truncate(snapshot.exists ? snapshot.path : t("settings.notCreated", { path: snapshot.path }), inner)}
             </text>
           </box>
           <box style={{ flexDirection: "row", flexGrow: 1, marginTop: 1 }}>
@@ -588,7 +595,7 @@ export function SettingsModal({
                 const heads = top && focusedList === null && (before === undefined || SECTION_CATEGORY[before.section] !== category);
                 return (
                   <Fragment key={`${entry.section}#${entry.group ?? ""}#${entry.profile ?? ""}#${entry.heading ?? ""}${entry.back === true ? "#back" : ""}`}>
-                    {heads ? <CategoryHeading label={category} first={at === 0} width={TAB_WIDTH} /> : null}
+                    {heads ? <CategoryHeading label={tx(category)} first={at === 0} width={TAB_WIDTH} /> : null}
                     <SectionTab
                       id={`settings-side-${at}`}
                       label={entry.label}
@@ -689,10 +696,10 @@ export function SettingsModal({
                   </box>
                   <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                     {pickOptions.length <= 1 && pickItem.descriptor.kind.type === "string" && providers === null ? (
-                      <text fg={COLOR.dim} bg={SURFACE.raised}>{"Loading the provider catalog…"}</text>
+                      <text fg={COLOR.dim} bg={SURFACE.raised}>{t("settings.loadingCatalog")}</text>
                     ) : null}
                     {pickControl?.searchable === true ? (
-                      <SearchField query={query} width={paneWidth} />
+                      <SearchField query={query} width={paneWidth} hint={pickItem.descriptor.kind.type === "string" && pickItem.descriptor.kind.source !== undefined ? t("settings.search") : t("settings.searchGeneric")} />
                     ) : null}
                     {sliding ? (
                       <>
@@ -737,7 +744,7 @@ export function SettingsModal({
                     )}
                     {sliding ? null : <FullDescription option={pickOptions[picking.index]} width={paneWidth} />}
                     {pickControl?.searchable === true && pickOptions.length === 0 ? (
-                      <text fg={COLOR.dim} bg={SURFACE.raised}>{"  Nothing matches."}</text>
+                      <text fg={COLOR.dim} bg={SURFACE.raised}>{t("settings.nothingMatches")}</text>
                     ) : null}
                   </scrollbox>
                 </>
@@ -816,7 +823,7 @@ function BackButton({ onBack }: { onBack: () => void }) {
   const { hovered, handlers } = useHover();
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onBack} selectable={false} {...handlers}>
-      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{"← back"}</text>
+      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{t("ui.back")}</text>
     </box>
   );
 }
@@ -848,7 +855,7 @@ function ProviderUpdateCard({
   const { hovered, handlers } = useHover();
   const line = providerVersionLine(check, latest);
   const tone = line.tone === "warn" ? COLOR.warn : line.tone === "update" ? COLOR.accent : line.tone === "ok" ? COLOR.added : COLOR.dim;
-  const button = updating ? "[ Updating… ]" : line.button;
+  const button = updating ? t("settings.update.updating") : line.button;
   // Nothing newer to go to: the button says so and steps back, though pressing it still runs the updater.
   const buttonColor = updating || line.settled ? COLOR.dim : hovered ? COLOR.bright : COLOR.accent;
   return (
@@ -867,7 +874,7 @@ function ProviderUpdateCard({
         </box>
       </box>
       <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line.status}</text>
-      <text content={prose(`Runs \`${PROVIDER_UPDATER[provider]}\`. Sessions already running keep the old build until they restart.`, COLOR.dim)} bg={SURFACE.panel} wrapMode="word" selectable={false} />
+      <text content={prose(t("settings.update.note", { command: PROVIDER_UPDATER[provider] }), COLOR.dim)} bg={SURFACE.panel} wrapMode="word" selectable={false} />
     </box>
   );
 }
@@ -888,7 +895,7 @@ function SectionTab({ id, label, prefix, active, width, onSelect }: { id: string
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, marginRight: 1 }} backgroundColor={bg} onMouseDown={onSelect} selectable={false} {...handlers}>
       <text fg={active ? COLOR.accent : COLOR.faint} bg={bg} selectable={false}>{active ? "▌ " : "  "}</text>
       {prefix === "" ? null : <text fg={COLOR.faint} bg={bg} selectable={false}>{prefix}</text>}
-      <text fg={active ? COLOR.bright : hovered ? COLOR.text : COLOR.dim} bg={bg} selectable={false}>{truncate(label, width - 3 - prefix.length)}</text>
+      <text fg={active ? COLOR.bright : hovered ? COLOR.text : COLOR.dim} bg={bg} selectable={false}>{truncate(label, width - 4 - prefix.length)}</text>
     </box>
   );
 }
@@ -897,7 +904,7 @@ function SectionTab({ id, label, prefix, active, width, onSelect }: { id: string
 function valueText(item: SettingItem): string {
   const label = settingValueLabel(item.descriptor, item.value, item.control, item.entries?.length);
   if (item.control.kind === "list") return `${label}  ›`;
-  if (item.control.kind === "toggle") return item.value === true ? "● On" : item.value === undefined && item.control.tristate === true ? `◌ ${label}` : "○ Off";
+  if (item.control.kind === "toggle") return item.value === true ? `● ${t("settings.on")}` : item.value === undefined && item.control.tristate === true ? `◌ ${label}` : `○ ${t("settings.off")}`;
   if (item.control.kind === "pick" || item.control.kind === "handoff" || item.control.kind === "order") return `${label}  ›`;
   return label;
 }
@@ -933,7 +940,7 @@ function SettingCard({
   const fullValue = `${pending ? "· " : ""}${valueText(item)}`;
   const shown = truncate(fullValue, Math.max(12, room - descriptor.label.length - 2));
   // When a change applies sits beside the label if both fit, else on a line of its own, so the label is never cut for it.
-  const tag = descriptor.appliesAt === undefined || descriptor.appliesAt === "now" ? "" : `  ${APPLIES_AT_TEXT[descriptor.appliesAt].tag}`;
+  const tag = descriptor.appliesAt === undefined || descriptor.appliesAt === "now" ? "" : `  ${tx(APPLIES_AT_TEXT[descriptor.appliesAt].tag)}`;
   const inline = tag !== "" && descriptor.label.length + tag.length <= room - shown.length - 2;
   const note = inline ? tag : "";
   const labelWidth = Math.max(8, room - shown.length - note.length - 2);
@@ -971,17 +978,17 @@ function SettingCard({
         <TextField
           id={`settings-edit-${descriptor.key}`}
           initial={secret || value === undefined ? "" : String(value)}
-          placeholder={secret ? "paste the key, then press enter" : descriptor.kind.type === "string" ? (descriptor.kind.placeholder ?? "") : ""}
+          placeholder={secret ? t("le.pasteKey") : descriptor.kind.type === "string" ? (descriptor.kind.placeholder ?? "") : ""}
           multiline={descriptor.kind.type === "string" && descriptor.kind.multiline === true}
           secret={secret}
-          fallback={secret ? "removes the saved key" : descriptor.defaultValue === undefined || descriptor.defaultValue === "" ? "unset" : `the default, ${String(descriptor.defaultValue)}`}
+          fallback={secret ? t("le.removesKey") : descriptor.defaultValue === undefined || descriptor.defaultValue === "" ? t("le.unset") : t("le.theDefaultValue", { value: String(descriptor.defaultValue) })}
           width={width}
           onGrow={onGrow}
           onSubmit={onSubmit}
         />
       ) : null}
       <text content={prose(descriptor.description, item.unavailable !== undefined ? COLOR.faint : COLOR.dim)} bg={bg} wrapMode="word" selectable={false} />
-      {tag !== "" && !inline ? <text fg={COLOR.faint} bg={bg} selectable={false}>{`Applies: ${tag.trim()}`}</text> : null}
+      {tag !== "" && !inline ? <text fg={COLOR.faint} bg={bg} selectable={false}>{t("settings.applies", { when: tag.trim() })}</text> : null}
       {item.inForce !== undefined ? <text fg={COLOR.dim} bg={bg} wrapMode="word" selectable={false}>{item.inForce}</text> : null}
       {item.unavailable !== undefined ? <text fg={COLOR.warn} bg={bg} wrapMode="word" selectable={false}>{item.unavailable}</text> : null}
       {item.unavailable === undefined && (item.control.kind === "pick" || item.control.kind === "order") && item.control.warning !== undefined ? <text fg={COLOR.warn} bg={bg} wrapMode="word" selectable={false}>{item.control.warning}</text> : null}
@@ -1045,12 +1052,12 @@ function OptionRow({
 }
 
 /** The search line over a long list: always drawn, so it is plain that typing narrows it. */
-function SearchField({ query, width }: { query: string; width: number }) {
+function SearchField({ query, width, hint }: { query: string; width: number; hint: string }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, width, paddingLeft: 1, marginBottom: 1 }} backgroundColor={SURFACE.hover} selectable={false}>
       <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{"⌕  "}</text>
       {query === "" ? (
-        <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{"Search by name, id or provider"}</text>
+        <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{hint}</text>
       ) : (
         <text fg={COLOR.bright} bg={SURFACE.hover} selectable={false}>{`${query}▏`}</text>
       )}

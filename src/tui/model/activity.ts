@@ -93,13 +93,51 @@ export interface SkillView {
   running: boolean;
 }
 
-/** One of Moxen's memory tools (`memory_read`, `memory_save`, `memory_delete`): which memory, in which scope. */
+/**
+ * One of Moxen's memory tools (`memory_read`, `memory_save`, `memory_delete`):
+ * which memory, in which scope, and for a save or delete what changed.
+ */
 export interface MemoryView {
   kind: "memory";
-  action: "read" | "save" | "delete";
+  action: "read" | "save" | "edit" | "append" | "delete";
   /** The memory's name; null for a read with none, which is the index. */
   name: string | null;
   scope: string | null;
+  running: boolean;
+  /** A save: a new memory, one it replaced, or one it left as it was; "rejected" for a save or delete the server refused. Null for a read, and while it runs. */
+  outcome: "created" | "updated" | "unchanged" | "rejected" | null;
+  /** Why it was refused (the server's words), for a rejected one. */
+  note: string | null;
+  /** The change as a unified patch (a new memory is all additions, a delete all removals); null when there is none to show. */
+  diff: string | null;
+  added: number | null;
+  removed: number | null;
+  /** A read with no name: how many memories the index listed, null when it did not say. */
+  listed: number | null;
+}
+
+/**
+ * One of Moxen's thread tools (`thread_search`, `thread_read`): what was searched for and which threads
+ * it found, or which thread was read and how much of it.
+ */
+export interface ThreadLookupView {
+  kind: "threads";
+  action: "search" | "read";
+  /** A search: what was searched for. */
+  query: string | null;
+  /** A search: this project's threads, or every project's. */
+  scope: "project" | "all" | null;
+  /** A search: the titles it found (the ones shown, not every match). */
+  titles: string[];
+  /** A search: how many threads matched, the ones shown and the ones left out; null when the answer did not say. */
+  total: number | null;
+  /** A read: the thread asked for, and its title when the answer named it (an outline and turns do, one tool call does not). */
+  threadId: string | null;
+  title: string | null;
+  /** A read: how much of it: `outline`, `turns 2-4` or `tool call 3.1`. */
+  part: string | null;
+  /** Why it failed, in the server's words. */
+  note: string | null;
   running: boolean;
 }
 
@@ -221,6 +259,7 @@ export type ActivityView =
   | QuestionView
   | SkillView
   | MemoryView
+  | ThreadLookupView
   | WebView
   | ImageView
   | ToolView
@@ -588,10 +627,23 @@ function moxenToolName(name: string): string | null {
   return /^(?:mcp__moxen__|moxen[./:_]+)([a-z_]+)$/iu.exec(name.trim())?.[1]?.toLowerCase() ?? null;
 }
 
+/**
+ * A tool result without the wrapper some providers put around an MCP server's
+ * answer (`<untrusted_context source="…">…</untrusted_context>`; a result cut by
+ * the ledger's cap may have lost its closing tag).
+ */
+export function unwrapToolOutput(text: string): string {
+  return text
+    .trim()
+    .replace(/^<untrusted_context\b[^>]*>\s*/u, "")
+    .replace(/\s*<\/untrusted_context>$/u, "")
+    .trim();
+}
+
 /** The tool's JSON result, when it came back as one (moxen's tools answer in JSON). */
 function jsonResult(state: Record<string, unknown>, payload: Record<string, unknown>): Record<string, unknown> | null {
   for (const raw of [state.output, payload.detail]) {
-    const text = asString(raw)?.trim();
+    const text = unwrapToolOutput(asString(raw) ?? "");
     if (!text || !text.startsWith("{")) continue;
     try {
       return asRecord(JSON.parse(text));
@@ -614,14 +666,115 @@ function jsonResult(state: Record<string, unknown>, payload: Record<string, unkn
 export function memoryLabel(view: MemoryView): string {
   const scope = view.scope === null ? "" : ` (${view.scope})`;
   if (view.name !== null) return `${view.name}${scope}`;
-  return view.action === "read" ? "index" : `memory${scope}`;
+  if (view.action !== "read") return `memory${scope}`;
+  return view.listed === null ? "the index" : `${view.listed} ${view.listed === 1 ? "memory" : "memories"}`;
 }
 
-const MEMORY_ACTIONS: Readonly<Record<string, MemoryView["action"]>> = { memory_read: "read", memory_save: "save", memory_delete: "delete" };
+/** A memory row's title, as a sentence: `Saved memory`, `Read the memory index`. */
+export function memoryTitle(view: MemoryView): string {
+  if (view.action === "read") return view.name === null ? "Read the memory index" : "Read memory";
+  if (view.outcome === "rejected") {
+    return view.action === "delete" ? "Memory not deleted" : view.action === "edit" ? "Memory not edited" : view.action === "append" ? "Nothing added to memory" : "Memory not saved";
+  }
+  if (view.action === "delete") return view.running ? "Deleting memory" : "Deleted memory";
+  if (view.action === "edit") return view.running ? "Editing memory" : "Edited memory";
+  if (view.action === "append") return view.running ? "Adding to memory" : "Added to memory";
+  if (view.running) return "Saving memory";
+  return view.outcome === "updated" ? "Updated memory" : view.outcome === "unchanged" ? "Memory unchanged" : "Saved memory";
+}
 
-/** A memory tool call: the memory it names and the scope, from the call, else from what came back. */
-function memoryView(action: MemoryView["action"], input: Record<string, unknown>, result: Record<string, unknown> | null, running: boolean): MemoryView {
-  return { kind: "memory", action, name: asString(input.name) ?? asString(result?.name) ?? null, scope: asString(input.scope) ?? asString(result?.scope) ?? null, running };
+const THREAD_ACTIONS: Readonly<Record<string, ThreadLookupView["action"]>> = { thread_search: "search", thread_read: "read" };
+
+/** A thread tool call: what it asked for, from the call, and what it found, from the answer. */
+function threadLookupView(action: ThreadLookupView["action"], input: Record<string, unknown>, output: string, running: boolean): ThreadLookupView {
+  const base: ThreadLookupView = { kind: "threads", action, query: null, scope: null, titles: [], total: null, threadId: null, title: null, part: null, note: null, running };
+  // A failure answers as `CODE: reason`, with no wrapper.
+  const note = !running && /^[A-Z][A-Z_]+: /u.test(output) ? firstLine(output) : null;
+  if (action === "search") {
+    const titles = [...output.matchAll(/^- "(.+?)" · id /gmu)].map((match) => match[1]!);
+    const more = /\[Moxen\] (\d+) more threads? matched/u.exec(output)?.[1];
+    return {
+      ...base,
+      query: asString(input.query) ?? null,
+      scope: input.scope === "all" ? "all" : "project",
+      titles,
+      total: running || note !== null ? null : titles.length + (more === undefined ? 0 : Number(more)),
+      note,
+    };
+  }
+  const item = asString(input.item);
+  const turns = asString(input.turns);
+  return {
+    ...base,
+    threadId: asString(input.id) ?? null,
+    title: /^Thread "(.+)" \(/mu.exec(output)?.[1] ?? null,
+    part: item !== null ? `tool call ${item}` : turns !== null ? `turns ${turns}` : "outline",
+    note,
+  };
+}
+
+const MEMORY_ACTIONS: Readonly<Record<string, MemoryView["action"]>> = { memory_read: "read", memory_save: "save", memory_edit: "edit", memory_append: "append", memory_delete: "delete" };
+
+/** A memory read as text for diffing: its description, then its body. */
+function memoryText(description: string, body: string): string {
+  return `${description.trim()}\n\n${body.trim()}\n`;
+}
+
+/**
+ * A memory tool call: the memory it names and the scope (from the call, else from what came back),
+ * and the change a save or delete made. The result carries the version it replaced or removed
+ * (`before`), so the diff needs nothing but the call and its answer.
+ */
+function memoryView(
+  action: MemoryView["action"],
+  input: Record<string, unknown>,
+  result: Record<string, unknown> | null,
+  output: string,
+  running: boolean,
+): MemoryView {
+  const name = asString(input.name) ?? asString(result?.name) ?? null;
+  const scope = asString(input.scope) ?? asString(result?.scope) ?? null;
+  const base: MemoryView = { kind: "memory", action, name, scope, running, outcome: null, note: null, diff: null, added: null, removed: null, listed: null };
+  // A save or delete the server refused answers in words, not in JSON.
+  if (action !== "read" && !running && output.length > 0 && !output.startsWith("{")) return { ...base, outcome: "rejected", note: firstLine(output) };
+  if (action === "read") {
+    const lines = name === null && output.length > 0 ? output.split("\n").filter((line) => /^- \[/u.test(line)).length : null;
+    return { ...base, listed: name !== null || output.length === 0 ? null : lines };
+  }
+  const before = asRecord(result?.before);
+  const oldText = before === null ? null : memoryText(asString(before.description) ?? "", asString(before.body) ?? "");
+  const fileName = `${name ?? "memory"}.md`;
+  if (action === "delete") {
+    if (oldText === null) return base;
+    const diff = createPatch(fileName, oldText, "", undefined, undefined, { context: 3 });
+    return { ...base, diff, ...countChangedLines(diff) };
+  }
+  if (action === "edit") {
+    // The change is in the call: the text it replaced and what replaced it.
+    const oldString = asString(input.old_string);
+    // An empty replacement removes the text: it is a value, not a missing one.
+    const newString = typeof input.new_string === "string" ? input.new_string : null;
+    if (oldString === null || newString === null) return base;
+    const diff = createPatch(fileName, withTrailingNewline(oldString), newString === "" ? "" : withTrailingNewline(newString), undefined, undefined, { context: 3 });
+    return { ...base, diff, ...countChangedLines(diff) };
+  }
+  if (action === "append") {
+    const text = asString(input.text)?.trim();
+    if (text === undefined || text === "") return base;
+    const diff = createPatch(fileName, "", withTrailingNewline(text), undefined, undefined, { context: 3 });
+    return { ...base, diff, ...countChangedLines(diff) };
+  }
+  const body = asString(input.body);
+  if (body === null) return base;
+  const newText = memoryText(asString(input.description) ?? "", body);
+  if (oldText === null) {
+    // Whether it replaced something is in the answer: until it comes, a save shows its text as a new memory.
+    const diff = createPatch(fileName, "", newText, undefined, undefined, { context: 3 });
+    return { ...base, outcome: running || result === null ? null : "created", diff, ...countChangedLines(diff) };
+  }
+  if (oldText === newText) return { ...base, outcome: "unchanged" };
+  const diff = createPatch(fileName, oldText, newText, undefined, undefined, { context: 3 });
+  return { ...base, outcome: "updated", diff, ...countChangedLines(diff) };
 }
 
 const DELEGATED_STATUS: Record<string, string> = {
@@ -921,8 +1074,10 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const moxenTool = moxenToolName(display);
     // moxen's checklist (lent to OpenCode, which has none): the tasks panel shows it.
     if (moxenTool === "todos") return { kind: "todos", title, items: decodeTodos(input.todos), running };
+    const threadAction = moxenTool === null ? undefined : THREAD_ACTIONS[moxenTool];
+    if (threadAction !== undefined) return threadLookupView(threadAction, input, unwrapToolOutput(asString(state.output) ?? asString(payload.detail) ?? ""), running);
     const memoryAction = moxenTool === null ? undefined : MEMORY_ACTIONS[moxenTool];
-    if (memoryAction !== undefined) return memoryView(memoryAction, input, jsonResult(state, payload), running);
+    if (memoryAction !== undefined) return memoryView(memoryAction, input, jsonResult(state, payload), unwrapToolOutput(asString(state.output) ?? asString(payload.detail) ?? ""), running);
     if (moxenTool !== null) return moxenToolView(moxenTool, input, jsonResult(state, payload), payload, running);
     // Claude's Agent tool: say which subagent and what for, not its whole
     // prompt (the subagent reads that; the transcript needs the gist).

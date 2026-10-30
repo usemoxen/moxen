@@ -112,6 +112,26 @@ describe("claude driver turns", () => {
     expect(outcome.text).toBe("It exports one function.");
   });
 
+  it("records the thread's running total on each turn, the cost never going down (MXN-170)", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    await sleep(20);
+
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    const firstOutcome = driver.awaitTurn("thread-1", first.turnId);
+    transport.created[0]!.push(assistantText("a", { input_tokens: 10, output_tokens: 5 }));
+    transport.created[0]!.push(successResult("a", 0.02));
+    expect((await firstOutcome).usage).toMatchObject({ input: 10, output: 5, costUsd: 0.02 });
+
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    const secondOutcome = driver.awaitTurn("thread-1", second.turnId);
+    transport.created[0]!.push(assistantText("b", { input_tokens: 20, output_tokens: 7 }));
+    // A result reporting less than was already seen does not lower the total.
+    transport.created[0]!.push(successResult("b", 0.01));
+    expect((await secondOutcome).usage).toMatchObject({ input: 30, output: 12, costUsd: 0.02 });
+  });
+
   it("starts a session and runs a turn to completion", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
@@ -310,7 +330,7 @@ describe("claude driver permissions", () => {
 });
 
 describe("claude driver compaction, limits, rollback", () => {
-  it("observes compaction and resets usage", async () => {
+  it("observes compaction and carries the usage on", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
     const eventsPromise = collectEvents(driver, 6);
@@ -323,7 +343,8 @@ describe("claude driver compaction, limits, rollback", () => {
     query.push(assistantText("b", { input_tokens: 3, output_tokens: 1 }));
     query.push(successResult("b"));
     const outcome = await outcomePromise;
-    expect(outcome.usage).toMatchObject({ input: 3, output: 1 });
+    // 10 + 3 in, 5 + 1 out: compaction does not lower what the thread has spent.
+    expect(outcome.usage).toMatchObject({ input: 13, output: 6 });
     const events = await eventsPromise;
     expect(
       events.find(

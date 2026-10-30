@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import type { EffortDescriptor, ModelSummary } from "../../core/catalog/summary.js";
 import type { ModelSelection, ThreadEnvelope } from "../../core/types.js";
@@ -82,13 +83,13 @@ export function isEffortDescriptor(id: string): boolean {
  * providers name their levels but do not describe them, so these say it in
  * general terms; a level they do not name has no line of its own.
  */
-const EFFORT_HINTS: Readonly<Record<string, string>> = {
-  minimal: "Barely any reasoning, fastest",
-  low: "Fast answers, little reasoning",
-  medium: "Balanced speed and depth",
-  high: "Deeper reasoning for harder tasks",
-  xhigh: "Extended reasoning, slower, more tokens",
-  max: "Deepest reasoning, slowest, most tokens",
+const EFFORT_HINTS: Readonly<Record<string, MessageKey>> = {
+  minimal: "effort.minimal",
+  low: "effort.low",
+  medium: "effort.medium",
+  high: "effort.high",
+  xhigh: "effort.xhigh",
+  max: "effort.max",
 };
 
 /** The line under a reasoning level: what it means, and that it is the model's default when it is. */
@@ -98,9 +99,9 @@ export function defaultEffortId(choices: readonly { readonly id: string; readonl
 }
 
 export function describeEffort(id: string, isDefault: boolean): string | undefined {
-  const hint = EFFORT_HINTS[id.toLowerCase()];
-  if (hint === undefined) return isDefault ? "The default effort for this model" : undefined;
-  return isDefault ? `${hint} · default for this model` : hint;
+  const key = EFFORT_HINTS[id.toLowerCase()];
+  if (key === undefined) return isDefault ? t("effort.defaultOnly") : undefined;
+  return isDefault ? t("effort.defaultHint", { hint: t(key) }) : t(key);
 }
 
 /**
@@ -111,7 +112,7 @@ export function describeEffort(id: string, isDefault: boolean): string | undefin
 export function modelRowDetail(model: Pick<ModelSummary, "isDefault" | "efforts">, isDefault: boolean = model.isDefault === true): { badge?: string; meta?: string } {
   const levels = model.efforts.filter((descriptor) => isEffortDescriptor(descriptor.id)).flatMap((descriptor) => descriptor.choices.map((choice) => choice.label));
   const meta = levels.length === 0 ? undefined : levels.length === 1 ? levels[0] : `${levels[0]}–${levels[levels.length - 1]}`;
-  return { ...(isDefault ? { badge: "default" } : {}), ...(meta === undefined ? {} : { meta }) };
+  return { ...(isDefault ? { badge: t("picker.defaultBadge") } : {}), ...(meta === undefined ? {} : { meta }) };
 }
 
 /**

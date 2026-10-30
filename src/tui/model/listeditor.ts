@@ -1,5 +1,6 @@
 import { numberLabel } from "./numberlabel.js";
 import { sliderLayout } from "./slider.js";
+import { t, tx } from "../i18n/index.js";
 import type { SettingChoice, SettingEnds, ListField, ListFieldView, ListItemView, SettingValue } from "../../core/configschema.js";
 
 /**
@@ -69,12 +70,12 @@ export function fieldControl(field: ListField, value: SettingValue, choices: rea
   const kind = field.kind;
   const current = value === undefined ? "" : String(value);
   const withCurrent = (options: EditorOption[]): readonly EditorOption[] =>
-    current === "" || options.some((entry) => entry.value === current) ? options : [{ value: current, label: current, description: "Set in the config file" }, ...options];
+    current === "" || options.some((entry) => entry.value === current) ? options : [{ value: current, label: current, description: t("settings.setInFile") }, ...options];
   switch (kind.type) {
     case "boolean":
-      return { kind: "pick", options: [{ value: "", label: "Default", description: "Not set here: what the row shows applies." }, { value: "true", label: "On" }, { value: "false", label: "Off" }] };
+      return { kind: "pick", options: [DEFAULT_OPTION(), { value: "true", label: t("settings.on") }, { value: "false", label: t("settings.off") }] };
     case "enum":
-      return { kind: "pick", options: withCurrent([{ value: "", label: "Default", description: "Not set here: what the row shows applies." }, ...kind.choices.map((choice) => ({ value: choice.value, label: choice.label, ...(choice.description ? { description: choice.description } : {}) }))]) };
+      return { kind: "pick", options: withCurrent([DEFAULT_OPTION(), ...kind.choices.map((choice) => ({ value: choice.value, label: tx(choice.label), ...(choice.description ? { description: tx(choice.description) } : {}) }))]) };
     case "integer":
     case "number": {
       if (kind.presets === undefined) return { kind: "text", multiline: false };
@@ -82,9 +83,9 @@ export function fieldControl(field: ListField, value: SettingValue, choices: rea
       return {
         kind: "pick",
         options: withCurrent([
-          { value: "", label: "Default", description: "Not set here: what the row shows applies." },
+          DEFAULT_OPTION(),
           ...kind.presets.map((preset) => ({ value: String(preset), label: `${numberLabel(preset)}${unit}` })),
-          { value: TEXT_OPTION, label: "Another value…" },
+          { value: TEXT_OPTION, label: t("settings.anotherValue") },
         ]),
         ...(kind.ends === undefined ? {} : { ends: kind.ends }),
       };
@@ -99,30 +100,32 @@ export function fieldControl(field: ListField, value: SettingValue, choices: rea
     case "list":
       return { kind: "text", multiline: false };
     case "effort":
-      return { kind: "pick", options: withCurrent([{ value: "", label: "Default", description: "Not set here: what the row shows applies." }, ...choices.map((choice) => ({ value: choice.value, label: choice.label, ...(choice.description ? { description: choice.description } : {}) }))]) };
+      return { kind: "pick", options: withCurrent([DEFAULT_OPTION(), ...choices.map((choice) => ({ value: choice.value, label: tx(choice.label), ...(choice.description ? { description: tx(choice.description) } : {}) }))]) };
   }
 }
+
+const DEFAULT_OPTION = (): EditorOption => ({ value: "", label: t("settings.default"), description: t("settings.notSetHere") });
 
 function shownValue(field: ListField, view: ListFieldView | undefined): { shown: string; origin: string | null } {
   const value = view?.value;
   const effective = view?.effective;
   const kind = field.kind;
   const format = (raw: SettingValue): string => {
-    if (raw === undefined) return kind.type === "secret" ? "No key saved" : "Default";
-    if (kind.type === "secret") return "Saved in the keychain";
+    if (raw === undefined) return kind.type === "secret" ? t("settings.noKey") : t("settings.default");
+    if (kind.type === "secret") return t("settings.keySaved");
     // A map or a list of words is shown on one line, however many it has.
     if (kind.type === "pairs") return String(raw).split("\n").map((line) => line.split("=")[0]).join(", ");
     if (kind.type === "words") return String(raw);
-    if (kind.type === "boolean" || typeof raw === "boolean") return raw ? "On" : "Off";
-    if (kind.type === "enum") return kind.choices.find((choice) => choice.value === String(raw))?.label ?? String(raw);
+    if (kind.type === "boolean" || typeof raw === "boolean") return raw ? t("settings.on") : t("settings.off");
+    if (kind.type === "enum") return kind.choices.find((choice) => choice.value === String(raw))?.label === undefined ? String(raw) : tx(kind.choices.find((choice) => choice.value === String(raw))!.label);
     if (typeof raw === "number") return `${numberLabel(raw)}${kind.type === "integer" ? (kind.unit ?? "") : ""}`;
     return String(raw);
   };
   if (value !== undefined) return { shown: format(value), origin: null };
-  if (effective !== undefined) return { shown: format(effective.value), origin: effective.origin };
+  if (effective !== undefined) return { shown: format(effective.value), origin: tx(effective.origin) };
   // What the schema says applies while it is unset, said on the row rather than in the description.
-  if (field.unset !== undefined) return "value" in field.unset ? { shown: format(field.unset.value), origin: "the default" } : { shown: "Default", origin: field.unset.text };
-  return { shown: field.kind.type === "secret" ? "No key saved" : "Default", origin: null };
+  if (field.unset !== undefined) return "value" in field.unset ? { shown: format(field.unset.value), origin: t("settings.originDefault") } : { shown: t("settings.default"), origin: tx(field.unset.text) };
+  return { shown: field.kind.type === "secret" ? t("settings.noKey") : t("settings.default"), origin: null };
 }
 
 /** The editor's rows for one item: its fields under headings in the schema's order, nested lists as child rows. */
@@ -142,21 +145,21 @@ export function itemRows(fields: readonly ListField[], item: ListItemView): read
     if (field.group !== group) {
       group = field.group;
       const description = fields.find((entry) => entry.group === group && entry.groupDescription !== undefined)?.groupDescription;
-      rows.push({ kind: "heading", label: group, ...(description !== undefined ? { description } : {}) });
+      rows.push({ kind: "heading", label: tx(group), ...(description !== undefined ? { description: tx(description) } : {}) });
     }
     if (field.kind.type === "list") {
       for (const child of view?.items ?? []) {
         rows.push({ kind: "child", id: child.id, path: field.path, title: child.title, summary: child.summary, status: child.status });
       }
-      rows.push({ kind: "addChild", path: field.path, noun: field.kind.noun });
+      rows.push({ kind: "addChild", path: field.path, noun: tx(field.kind.noun) });
       continue;
     }
     const { shown, origin } = shownValue(field, view);
     rows.push({
       kind: "field",
       path: field.path,
-      label: field.label,
-      description: field.description,
+      label: tx(field.label),
+      description: tx(field.description),
       control: fieldControl(field, view?.value, view?.choices),
       value: view?.value,
       shown,
@@ -165,8 +168,8 @@ export function itemRows(fields: readonly ListField[], item: ListItemView): read
     });
   }
   if (item.resolved.length > 0) {
-    rows.push({ kind: "heading", label: "In force" });
-    for (const row of item.resolved) rows.push({ kind: "resolved", label: row.label, value: row.value, origin: row.origin });
+    rows.push({ kind: "heading", label: t("settings.inForce") });
+    for (const row of item.resolved) rows.push({ kind: "resolved", label: tx(row.label), value: tx(row.value), origin: tx(row.origin) });
   }
   return rows;
 }

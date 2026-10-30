@@ -72,6 +72,7 @@ import {
   type OpencodeSessionState,
   type OpencodeSubscribedEvent,
   type OpencodeTransport,
+  isServerUnreachable,
 } from "./transport.js";
 import { registerOpencodeMcpServer, type OpencodeMessage } from "./translate.js";
 
@@ -860,15 +861,29 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       if (existing && !existing.closed) return this.describeSession(existing);
       this.wantedServerConfig.set(input.workingDirectory, serverShape(input.disabledNativeTools, input.moxenPrompt));
       this.reconcileServers();
-      const connection = await this.connectionForSession(input.threadId, input.workingDirectory);
-      await this.registerMcpServers(connection, input.mcpServers ?? [], input.checklist !== false);
-      // OpenCode keeps sessions on disk, so the previous one — from this
-      // process or an earlier one — is reattached with its history rather
-      // than replaced by an empty session.
-      const cursor = existing?.nativeSessionId ?? input.resumeCursor;
-      const resumed = cursor ? await connection.getSession(cursor).catch(() => null) : null;
-      const native: OpencodeSessionState =
-        resumed ?? (await connection.createSession({}));
+      // A server that died unnoticed is dropped and replaced once, rather than failing the first message to it.
+      let connection: OpencodeServerConnection;
+      let resumed: OpencodeSessionState | null;
+      let native: OpencodeSessionState;
+      for (let attempt = 0; ; attempt += 1) {
+        connection = await this.connectionForSession(input.threadId, input.workingDirectory);
+        try {
+          await this.registerMcpServers(connection, input.mcpServers ?? [], input.checklist !== false);
+          // OpenCode keeps sessions on disk, so the previous one — from this
+          // process or an earlier one — is reattached with its history rather
+          // than replaced by an empty session.
+          const cursor = existing?.nativeSessionId ?? input.resumeCursor;
+          resumed = cursor ? await connection.getSession(cursor).catch((cause: unknown) => {
+            if (isServerUnreachable(cause)) throw cause;
+            return null;
+          }) : null;
+          native = resumed ?? (await connection.createSession({}));
+          break;
+        } catch (cause) {
+          if (attempt > 0 || !isServerUnreachable(cause)) throw cause;
+          this.dropConnection(input.workingDirectory, connection, "it stopped answering");
+        }
+      }
       const nativeSessionId = native.sessionID;
       const session: OpenCodeSession = {
         threadId: input.threadId,
@@ -1121,20 +1136,29 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   }
 
   /**
-   * Stop one native subagent without touching its parent: the parent's call
-   * waiting on it comes back with whatever the child had, and carries on.
+   * Stop one background task without touching its parent turn: a native
+   * subagent's call comes back with whatever the child had, and carries on;
+   * a background command is killed and the model is told it ended.
    */
   readonly stopBackgroundTask = (threadId: ThreadId, taskId: string): Effect.Effect<void, CliError> =>
-    this.attempt("OPENCODE_TASK_STOP_FAILED", `Could not stop subagent ${taskId}`, async () => {
+    this.attempt("OPENCODE_TASK_STOP_FAILED", `Could not stop background task ${taskId}`, async () => {
       const session = this.requireSession(threadId);
       const child = this.children.get(taskId);
-      if (!child || child.parent !== session || child.stopped) {
-        throw new CliError("BACKGROUND_TASK_NOT_FOUND", `No subagent ${taskId} is running on thread ${threadId}.`, {
-          exitCode: 3,
-          details: { threadId, taskId },
-        });
+      if (child && child.parent === session && !child.stopped) {
+        await this.stopChild(await this.connectionFor(session), taskId, child);
+        return;
       }
-      await this.stopChild(await this.connectionFor(session), taskId, child);
+      const shell = session.backgroundShells?.get(taskId);
+      if (shell) {
+        await (await this.connectionFor(session)).stopShell(taskId);
+        // The server's own `shell.exited` follows; saying so now keeps the panel from showing a dead command.
+        this.onBackgroundShell(session, { type: "session.shell.ended", properties: { sessionID: session.nativeSessionId, shellID: taskId, command: shell.command, status: "killed" } });
+        return;
+      }
+      throw new CliError("BACKGROUND_TASK_NOT_FOUND", `No background task ${taskId} is running on thread ${threadId}.`, {
+        exitCode: 3,
+        details: { threadId, taskId },
+      });
     });
 
   async awaitTurn(threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<OpenCodeTurnOutcome> {
@@ -1971,7 +1995,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         }
         const settings = await this.contextSettingsFor(session).catch(() => null);
         session.context = opencodeContextOf(messages, settings) ?? session.context;
-        const usage = latestAssistantUsage(messages);
+        const usage = turnAssistantUsage(messages, [turn.userMessageId, ...turn.steerMessageIds]) ?? latestAssistantUsage(messages);
         if (usage) {
           turn.usage = usage;
           this.publish({
@@ -2207,6 +2231,39 @@ export function answersFor(
     });
     return splitMultiselect(answer, labels);
   });
+}
+
+/**
+ * What the turn spent: every assistant step that answers one of its user
+ * messages (the prompt and any steers), tokens and `cost` summed. Null when
+ * none of them reports tokens — the caller then falls back to the latest
+ * reply. Only the newest `IDLE_READ_ITEMS` messages are read, so a turn that
+ * ran longer than that is counted from its recent steps.
+ */
+function turnAssistantUsage(
+  messages: ReadonlyArray<{ info: Record<string, unknown> }>,
+  userMessageIds: ReadonlyArray<string>,
+): TokenUsageDelta | null {
+  const number = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  let total: TokenUsageDelta | null = null;
+  let cost: number | null = null;
+  for (const { info } of messages) {
+    if (info.role !== "assistant" || !userMessageIds.includes(asString(info.parentID) ?? "")) continue;
+    const tokens = asRecord(info.tokens);
+    if (!tokens) continue;
+    const cache = asRecord(tokens.cache);
+    const prior: TokenUsageDelta = total ?? emptyUsage();
+    total = {
+      input: prior.input + number(tokens.input),
+      cacheRead: prior.cacheRead + number(cache?.read),
+      cacheCreate: prior.cacheCreate + number(cache?.write),
+      output: prior.output + number(tokens.output),
+      thinking: prior.thinking + number(tokens.reasoning),
+    };
+    if (typeof info.cost === "number" && Number.isFinite(info.cost)) cost = (cost ?? 0) + info.cost;
+  }
+  // A model the server cannot price reports no cost: absent, never zero.
+  return total === null ? null : cost === null ? total : { ...total, costUsd: cost };
 }
 
 function latestAssistantUsage(

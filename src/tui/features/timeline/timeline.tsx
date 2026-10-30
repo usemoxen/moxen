@@ -1,3 +1,4 @@
+import { type MessageKey, t as tr, tx } from "../../i18n/index.js";
 import { webToolKind } from "../../../core/threads/views.js";
 import type { ReactNode, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -5,11 +6,12 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
 
 import { useHover } from "../../hooks/useHover.js";
+import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "./attachmentrow.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
-import { describeActivity, fileRowCounts, formatMs, memoryLabel, readRangeLabel, webToolSource } from "../../model/activity.js";
+import { describeActivity, fileRowCounts, formatMs, memoryLabel, memoryTitle, readRangeLabel, webToolSource } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
-import { formatBytes, renderMessage } from "../../model/message.js";
+import { renderMessage } from "../../model/message.js";
 import { isCompactPrompt, isUsageContinue, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
@@ -21,6 +23,10 @@ const syntaxStyle = markdownSyntaxStyle;
 /** PowerShell rows use the vendored `powershell` grammar
     (`parsers-config.json`); everything else gets `bash`, which also covers
     zsh/ksh/sh/git-bash and is the closest approximation for `cmd.exe`. */
+const TASK_VERB: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = { finished: "task.finished", failed: "task.failed", stopped: "task.stopped", running: "task.running" };
+const TASK_VERB_IN: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = { finished: "task.finishedIn", failed: "task.failedIn", stopped: "task.stoppedIn", running: "task.runningFor" };
+const TASK_VERB_FOR: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = TASK_VERB_IN;
+
 function commandFiletype(tool: string): string {
   return /powershell|pwsh/i.test(tool) ? "powershell" : "bash";
 }
@@ -44,12 +50,12 @@ const GUTTER = 1;
 /** No scroll-changed event exists on `<scrollbox>`, so "is the pane scrolled
     away from bottom" is polled at this interval instead. */
 const SCROLL_POSITION_POLL_MS = 300;
-const JUMP_TO_BOTTOM_LABEL = "Jump to bottom (↓)";
+const jumpToBottomLabel = (): string => tr("timeline.jumpBottom");
 
 function clampInfo(value: string, maxLines: number): { text: string; truncated: boolean } {
   const rows = value.split("\n");
   if (rows.length <= maxLines) return { text: value, truncated: false };
-  return { text: [...rows.slice(0, maxLines), `… ${rows.length - maxLines} more lines`].join("\n"), truncated: true };
+  return { text: [...rows.slice(0, maxLines), tr("timeline.moreLines", { count: rows.length - maxLines })].join("\n"), truncated: true };
 }
 
 function clamp(value: string, maxLines: number): string {
@@ -121,9 +127,9 @@ function ToolChip({
           attributes={titleBold ? TextAttributes.BOLD : 0}
           selectable={false}
         >
-          {title}
+          {tx(title)}
         </text>
-        <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{[time, ...meta].filter((part) => part.length > 0).map((part) => `  ·  ${part}`).join("")}</text>
+        <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{[time, ...meta].filter((part) => part.length > 0).map((part) => `  ·  ${tx(part)}`).join("")}</text>
         {toggleable ? (
           <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{expanded ? " ▾" : " ▸"}</text>
         ) : null}
@@ -152,7 +158,7 @@ function TodoRows({ items }: { items: { content: string; status: string }[] }) {
         );
       })}
       {items.length > visible.length ? (
-        <text fg={COLOR.faint}>{`… ${items.length - visible.length} more`}</text>
+        <text fg={COLOR.faint}>{tr("timeline.more", { count: items.length - visible.length })}</text>
       ) : null}
     </>
   );
@@ -167,7 +173,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
   if (view.kind === "command") {
     const rail = view.failed ? COLOR.danger : view.running ? COLOR.warn : COLOR.command;
     const meta: string[] = [];
-    if (view.exit !== null) meta.push(`exit ${view.exit}`);
+    if (view.exit !== null) meta.push(tr("timeline.exit", { code: view.exit }));
     if (view.durationMs !== null) meta.push(formatMs(view.durationMs));
     if (view.running) meta.push("running");
     const command = clampInfo(view.command, MAX_COMMAND_LINES);
@@ -214,14 +220,14 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     // match checkpoint-backfilled hunks), else the overlay's own counts.
     const { added, removed } = fileRowCounts(view, entry.editStats, overlay);
     const stats = [
-      added === null || added === 0 ? null : `Added ${added} line${added === 1 ? "" : "s"}`,
-      removed === null || removed === 0 ? null : `removed ${removed} line${removed === 1 ? "" : "s"}`,
+      added === null || added === 0 ? null : tr("timeline.addedLines", { count: added }),
+      removed === null || removed === 0 ? null : tr("timeline.removedLines", { count: removed }),
     ].filter((part): part is string => part !== null);
-    const title = `${view.verb}(${view.path})${view.fileCount === null ? "" : `  +${view.fileCount - 1} more`}`;
+    const title = `${view.verb}(${view.path})${view.fileCount === null ? "" : tr("timeline.plusMore", { count: view.fileCount - 1 })}`;
     return (
       <ToolChip rail={COLOR.agent} glyph="✎" title={title} titleBold time={time} running={view.running}>
         {stats.length === 0 && !view.running ? null : (
-          <text fg={COLOR.faint}>{stats.length > 0 ? `└ ${stats.join(", ")}` : "writing…"}</text>
+          <text fg={COLOR.faint}>{stats.length > 0 ? `└ ${stats.join(", ")}` : tr("timeline.writing")}</text>
         )}
         {patchText === null ? null : (
           <diff
@@ -241,7 +247,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
             removedLineNumberBg={DIFF_BG.removedLineNumber}
           />
         )}
-        {view.diffMore === 0 ? null : <text fg={COLOR.faint}>{`… ${view.diffMore} more lines`}</text>}
+        {view.diffMore === 0 ? null : <text fg={COLOR.faint}>{tr("timeline.moreLines", { count: view.diffMore })}</text>}
       </ToolChip>
     );
   }
@@ -252,6 +258,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
       <ToolChip
         rail={COLOR.agent}
         glyph="▤"
+        // i18n-exempt: a tool call's own name
         title={`Read(${view.path})${range === null ? "" : ` ${range}`}`}
         titleBold
         time={time}
@@ -264,6 +271,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
 
   if (view.kind === "list") {
     return (
+      // i18n-exempt: a tool call's own name
       <ToolChip rail={COLOR.agent} glyph="≡" title={`List(${view.path})`} titleBold time={time} running={view.running}>
         {null}
       </ToolChip>
@@ -311,9 +319,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
         {view.subject.length === 0 ? null : <text fg={COLOR.tool}>{truncate(view.subject, 96)}</text>}
         {view.state === null && view.facts.length === 0 ? null : (
           <box style={{ flexDirection: "row", flexShrink: 0 }}>
-            {view.state === null ? null : <text fg={stateColor}>{view.state}</text>}
+            {view.state === null ? null : <text fg={stateColor}>{tx(view.state)}</text>}
             {view.facts.length === 0 ? null : (
-              <text fg={COLOR.faint}>{`${view.state === null ? "" : "  ·  "}${view.facts.join("  ·  ")}`}</text>
+              <text fg={COLOR.faint}>{`${view.state === null ? "" : "  ·  "}${view.facts.map(tx).join("  ·  ")}`}</text>
             )}
           </box>
         )}
@@ -353,9 +361,60 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
   }
 
   if (view.kind === "memory") {
+    const stats = [
+      view.added === null || view.added === 0 ? null : tr("timeline.addedLinesLower", { count: view.added }),
+      view.removed === null || view.removed === 0 ? null : tr("timeline.removedLines", { count: view.removed }),
+    ].filter((part): part is string => part !== null);
     return (
-      <ToolChip rail={COLOR.diff} glyph="◈" title={`memory ${view.action}`} time={time} running={view.running}>
+      <ToolChip rail={view.outcome === "rejected" ? COLOR.danger : COLOR.diff} glyph="◈" title={memoryTitle(view)} time={time} running={view.running}>
         <text fg={COLOR.tool}>{truncate(memoryLabel(view), 72)}</text>
+        {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+        {stats.length === 0 ? null : <text fg={COLOR.faint}>{`└ ${stats.join(", ")}`}</text>}
+        {view.diff === null ? null : (
+          <diff
+            diff={view.diff}
+            view="unified"
+            fg={COLOR.text}
+            filetype="markdown"
+            syntaxStyle={syntaxStyle()}
+            wrapMode="word"
+            addedBg={DIFF_BG.added}
+            removedBg={DIFF_BG.removed}
+            addedContentBg={DIFF_BG.added}
+            removedContentBg={DIFF_BG.removed}
+            lineNumberFg={COLOR.faint}
+            addedLineNumberBg={DIFF_BG.addedLineNumber}
+            removedLineNumberBg={DIFF_BG.removedLineNumber}
+          />
+        )}
+      </ToolChip>
+    );
+  }
+
+  if (view.kind === "threads") {
+    const failed = view.note !== null;
+    if (view.action === "search") {
+      const where = view.scope === "all" ? tr("timeline.allProjects") : tr("app.this_project_e910");
+      const found = view.total === null ? null : view.total === 0 ? tr("timeline.noThreadFound") : tr("timeline.threadsFound", { count: view.total });
+      const shown = view.titles.slice(0, 4);
+      return (
+        <ToolChip rail={failed ? COLOR.danger : COLOR.agent} glyph="⌕" title={failed ? tr("timeline.searchFailed") : view.running ? tr("timeline.searching") : tr("timeline.searched")} time={time} running={view.running}>
+          <text fg={COLOR.tool}>{truncate(`"${view.query ?? ""}" · ${where}`, 72)}</text>
+          {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+          {found === null ? null : <text fg={COLOR.faint}>{`└ ${found}`}</text>}
+          {shown.map((title, index) => (
+            <text key={index} fg={COLOR.dim}>{`  · ${truncate(title, 68)}`}</text>
+          ))}
+          {view.titles.length > shown.length ? <text fg={COLOR.faint}>{`  ${tr("timeline.more", { count: view.titles.length - shown.length })}`}</text> : null}
+        </ToolChip>
+      );
+    }
+    const named = view.title ?? (view.threadId === null ? tr("notify.aThread").toLowerCase() : tr("timeline.threadId", { id: view.threadId.slice(0, 8) }));
+    return (
+      <ToolChip rail={failed ? COLOR.danger : COLOR.agent} glyph="⌕" title={failed ? tr("timeline.notRead") : view.running ? tr("timeline.reading") : tr("timeline.read")} time={time} running={view.running}>
+        <text fg={COLOR.tool}>{truncate(view.title === null ? named : `"${named}"`, 72)}</text>
+        {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+        {view.part === null ? null : <text fg={COLOR.faint}>{`└ ${view.part}`}</text>}
       </ToolChip>
     );
   }
@@ -365,9 +424,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     const url = /^https?:\/\//i.test(view.query) ? view.query : null;
     const title =
       web === "fetch"
-        ? `Fetched ${url === null ? truncate(view.query, 48) : hostOf(url)}`
+        ? tr("timeline.fetched", { what: url === null ? truncate(view.query, 48) : hostOf(url) })
         : web === "search"
-          ? `Searched for "${truncate(view.query, 48)}"`
+          ? tr("timeline.searchedFor", { query: truncate(view.query, 48) })
           : view.tool;
     const source = web === null ? null : webToolSource(view.tool);
     return (
@@ -395,8 +454,8 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
       ? Number.isNaN(started) ? null : Math.max(0, now - started)
       : view.durationMs;
     const title = view.running
-      ? `Thinking…${elapsed === null || elapsed < 1000 ? "" : ` ${formatDuration(elapsed)}`}`
-      : elapsed === null ? "Thought" : `Thought for ${thoughtDuration(elapsed)}`;
+      ? elapsed === null || elapsed < 1000 ? tr("timeline.thinking") : tr("timeline.thinkingFor", { time: formatDuration(elapsed) })
+      : elapsed === null ? tr("timeline.thought") : tr("timeline.thoughtFor", { time: thoughtDuration(elapsed) });
     const hasText = view.text.length > 0;
     return (
       <ToolChip
@@ -419,16 +478,16 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
   }
 
   if (view.kind === "model-switch") {
-    const flagged = view.from === null ? "The model" : view.from;
+    const flagged = view.from === null ? tr("timeline.theModel") : view.from;
     const why = view.category === null ? "" : ` (${view.category})`;
     const detail =
       view.reason === "auto"
-        ? `${view.from === null ? "The provider" : `${view.from} was unavailable, so the provider`} moved the thread to ${view.to} on its own.`
+        ? view.from === null ? tr("timeline.providerMoved", { to: view.to }) : tr("timeline.unavailableMoved", { from: view.from, to: view.to })
         : view.scope === "local"
-          ? `${flagged} flagged a subagent's request${why}; that reply came from ${view.to}.`
-          : `${flagged} flagged this request${why}, so it re-ran on ${view.to}. The thread stays on ${view.to}.`;
+          ? tr("timeline.flaggedSub", { who: flagged, why, to: view.to })
+          : tr("timeline.flagged", { who: flagged, why, to: view.to });
     return (
-      <ToolChip rail={COLOR.warn} glyph="↻" title={`Switched to ${view.to}`} titleBold time={time} running={false}>
+      <ToolChip rail={COLOR.warn} glyph="↻" title={tr("timeline.switched", { to: view.to })} titleBold time={time} running={false}>
         <text fg={COLOR.dim}>{detail}</text>
       </ToolChip>
     );
@@ -461,19 +520,19 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     const resets = view.resetsAt === null ? null : new Date(view.resetsAt);
     const known = resets !== null && !Number.isNaN(resets.getTime());
     const passed = known && resets.getTime() <= now;
-    const window = view.label === null ? "Plan" : view.label;
+    const window = view.label === null ? tr("timeline.plan") : view.label;
     const tone = view.wrapUp ? COLOR.warn : COLOR.danger;
     return (
       <box style={{ flexDirection: "column", marginLeft: GUTTER, marginTop: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1 }}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
           <text fg={tone}>{"◔ "}</text>
-          <text fg={tone} attributes={TextAttributes.BOLD}>{view.wrapUp ? "Usage limit reached, wrapping up" : "Usage limit reached"}</text>
-          <text fg={COLOR.dim}>{`  ·  ${window} limit`}</text>
+          <text fg={tone} attributes={TextAttributes.BOLD}>{view.wrapUp ? tr("timeline.limitWrap") : tr("app.usage_limit_reached_301b")}</text>
+          <text fg={COLOR.dim}>{tr("timeline.windowLimit", { window })}</text>
           {!known ? (
-            <text fg={COLOR.faint}>{"  ·  resets when the provider allows"}</text>
+            <text fg={COLOR.faint}>{tr("timeline.resetsWhenAllowed")}</text>
           ) : (
             <>
-              <text fg={COLOR.dim}>{passed ? "  ·  reset at " : "  ·  resets "}</text>
+              <text fg={COLOR.dim}>{passed ? tr("timeline.resetAt") : tr("timeline.resetsAt")}</text>
               <text fg={passed ? COLOR.dim : COLOR.warn}>{clockTime(view.resetsAt ?? "", now)}</text>
               {passed ? null : <text fg={COLOR.faint}>{` (${untilLabel(resets, now)})`}</text>}
             </>
@@ -481,7 +540,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
           {time.length === 0 ? null : <text fg={COLOR.faint}>{`  ·  ${time}`}</text>}
         </box>
         {view.wrapUp ? (
-          <text fg={COLOR.dim} wrapMode="word">{"  Finishing the current step on a small allowance from the weekly limit, instead of stopping mid-edit."}</text>
+          <text fg={COLOR.dim} wrapMode="word">{tr("timeline.finishingStep")}</text>
         ) : null}
       </box>
     );
@@ -536,11 +595,13 @@ function MessageBody({
           <box style={{ height: 1, flexShrink: 0 }} backgroundColor={background} />
           <box style={{ flexDirection: "row", flexWrap: "wrap", flexShrink: 0, columnGap: 3, rowGap: 0 }}>
             {rendered.images.map((image) => (
-              <box key={image.contextId} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <text fg={COLOR.diff} bg={background}>
-                  {`▣ ${image.label}${image.sizeBytes === null ? "" : ` (${formatBytes(image.sizeBytes)})`}`}
-                </text>
-              </box>
+              <AttachmentRow
+                key={image.contextId}
+                attachmentId={image.attachmentId}
+                label={image.label}
+                sizeBytes={image.sizeBytes}
+                background={background}
+              />
             ))}
           </box>
         </box>
@@ -601,7 +662,7 @@ function TaskNotificationBlock({
   // border, padding: 5).
   const inner = Math.max(16, width - 12);
   const native = tasks.every((task) => task.source === "native");
-  const header = tasks.length === 1 ? null : `${tasks.length} ${native ? "subagents" : "delegated tasks"} settled`;
+  const header = tasks.length === 1 ? null : tr(native ? "timeline.subagentsSettled" : "timeline.tasksSettled", { count: tasks.length });
   return (
     <box
       border={["left"]}
@@ -618,7 +679,7 @@ function TaskNotificationBlock({
         const glyphColor = task.status === "completed" ? COLOR.added : task.status === "failed" ? COLOR.danger : COLOR.warn;
         const verb = task.status === "completed" ? "finished" : task.status === "failed" ? "failed" : task.status === "interrupted" ? "stopped" : "running";
         // "finished in 1m 32s": the outcome and how long it took read as one fact.
-        const outcome = task.durationMs === null ? verb : `${verb} ${task.status === "running" ? "for" : "in"} ${formatDuration(Math.max(1000, task.durationMs))}`;
+        const outcome = task.durationMs === null ? tr(TASK_VERB[verb]) : tr(task.status === "running" ? TASK_VERB_FOR[verb] : TASK_VERB_IN[verb], { time: formatDuration(Math.max(1000, task.durationMs)) });
         const model = task.model === null ? null : modelLabel(task.model);
         // A native subagent runs on the thread's own model; saying "subagent"
         // is what tells it apart from a delegated thread.
@@ -641,8 +702,8 @@ function TaskNotificationBlock({
           </>
         );
         const footer = [
-          task.filesChanged === null || task.filesChanged === 0 ? null : `+${task.additions ?? 0} −${task.deletions ?? 0} · ${task.filesChanged} file${task.filesChanged === 1 ? "" : "s"}`,
-          task.branch === null ? null : `branch ${task.branch}`,
+          task.filesChanged === null || task.filesChanged === 0 ? null : `+${task.additions ?? 0} −${task.deletions ?? 0} · ${tr("git.files", { count: task.filesChanged })}`,
+          task.branch === null ? null : tr("timeline.branch", { name: task.branch }),
         ].filter((fact): fact is string => fact !== null);
         return (
           <box key={task.taskId} style={{ flexDirection: "column", flexShrink: 0, marginTop: index === 0 && header === null ? 0 : 1 }} backgroundColor={SURFACE.panel}>
@@ -690,9 +751,9 @@ function OpenRequestBlock({ entry, ask, now }: { entry: TimelineEntry; ask: Open
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.diff} bg={SURFACE.panel}>{"⇡ "}</text>
-        <text fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD}>{`Open ${ask.draft ? "a draft" : "a"} ${noun.short}`}</text>
+        <text fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD}>{tr(ask.draft ? "timeline.openDraft" : "timeline.open", { what: noun.short })}</text>
         <text fg={COLOR.faint} bg={SURFACE.panel}>{"  ·  "}</text>
-        <text fg={COLOR.accent} bg={SURFACE.panel}>{ask.branch ?? "current branch"}</text>
+        <text fg={COLOR.accent} bg={SURFACE.panel}>{ask.branch ?? tr("timeline.currentBranch")}</text>
         {ask.base === null ? null : (
           <>
             <text fg={COLOR.faint} bg={SURFACE.panel}>{" → "}</text>
@@ -700,11 +761,11 @@ function OpenRequestBlock({ entry, ask, now }: { entry: TimelineEntry; ask: Open
           </>
         )}
         <text fg={COLOR.faint} bg={SURFACE.panel}>{"  ·  "}</text>
-        <text fg={ask.draft ? COLOR.dim : COLOR.added} bg={SURFACE.panel}>{ask.draft ? "draft" : "ready for review"}</text>
+        <text fg={ask.draft ? COLOR.dim : COLOR.added} bg={SURFACE.panel}>{ask.draft ? tr("timeline.draft") : tr("timeline.ready")}</text>
         <text fg={COLOR.faint} bg={SURFACE.panel}>{`  ·  ${clockTime(entry.at, now)}`}</text>
       </box>
       <text fg={COLOR.dim} bg={SURFACE.panel}>
-        {`  ${ask.cold ? "Read the branch, then commit" : "Commit"} what belongs, push, and open it with ${cli}${into}`}
+        {tr(ask.cold ? "timeline.askCold" : "timeline.askWarm", { cli, into })}
       </text>
     </box>
   );
@@ -719,7 +780,7 @@ function ContinueNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, paddingLeft: 1 }}>
       <text fg={COLOR.warn}>{"↻ "}</text>
-      <text fg={COLOR.dim}>{"Continued after the usage limit reset"}</text>
+      <text fg={COLOR.dim}>{tr("timeline.continued")}</text>
       <text fg={COLOR.faint}>{`  ·  ${clockTime(entry.at, now)}`}</text>
     </box>
   );
@@ -749,7 +810,7 @@ function CompactionLine({
   const [expanded, setExpanded] = useState(false);
   const { hovered, handlers } = useHover();
   const foldable = summary !== null;
-  const toggle = foldable ? (expanded ? "▾ summary" : "▸ summary") : "";
+  const toggle = foldable ? (expanded ? tr("timeline.summaryOpen") : tr("timeline.summaryClosed")) : "";
   const inner = Math.max(8, width - 2);
   // The metadata and then the title give way before the rule does.
   const fits = (parts: string) => parts.length + 2 <= inner - 4;
@@ -824,7 +885,7 @@ function CompactBlock({ group, open, now, width }: { group: TurnGroup; open: boo
       // A row that does not describe itself is not the compaction.
     }
   }
-  const title = open ? "Compacting conversation…" : compacted ? "Conversation compacted" : "Compaction ended without a summary";
+  const title = open ? tr("timeline.compacting") : compacted ? tr("timeline.compacted") : tr("timeline.compactNoSummary");
   const tone = open ? pulseColor(tick, COLOR.dim, COLOR.warn, 1800) : compacted ? COLOR.diff : COLOR.dim;
   const meta = [...(open || group.durationMs <= 0 ? [] : [formatDuration(group.durationMs)]), clockTime(group.startedAt, now)];
   return <CompactionLine title={title} tone={tone} meta={meta} summary={open ? null : summary} width={width} />;
@@ -874,7 +935,7 @@ function PromptBlock({
     >
       <SpeakerHeader
         // A native subagent's prompt came from the agent that spawned it.
-        label={entry.message?.origin === "subagent-prompt" ? "asked by the agent" : "you"}
+        label={entry.message?.origin === "subagent-prompt" ? tr("timeline.askedByAgent") : tr("timeline.you")}
         time={clockTime(entry.at, now)}
         color={hovered ? COLOR.bright : COLOR.user}
         background={SURFACE.user}
@@ -979,10 +1040,10 @@ function WorkFold({
       {...handlers}
     >
       <text fg={foldFg} selectable={false}>
-        {`${expanded ? "▾" : "▸"} ${open ? "Working" : "Worked"} for ${formatDuration(durationMs)}`}
+        {`${expanded ? "▾" : "▸"} ${tr(open ? "timeline.workingFor" : "timeline.workedFor", { time: formatDuration(durationMs) })}`}
       </text>
       <text fg={COLOR.faint} selectable={false}>
-        {`  ·  ${steps} step${steps === 1 ? "" : "s"}  ·  ${clockTime(group.startedAt, now)}`}
+        {`  ·  ${tr("timeline.steps", { count: steps })}  ·  ${clockTime(group.startedAt, now)}`}
       </text>
     </box>
   );
@@ -1017,7 +1078,7 @@ function PlanCard({ entry, now }: { entry: TimelineEntry; now: number }) {
       >
         <text fg={hovered ? COLOR.bright : COLOR.diff} selectable={false}>{`${expanded ? "▾" : "▸"} ◈ `}</text>
         <text fg={implemented ? COLOR.dim : COLOR.diff} selectable={false}>
-          {implemented ? "Plan implemented" : "Plan proposed"}
+          {implemented ? tr("timeline.planImplemented") : tr("timeline.planProposed")}
         </text>
         <text fg={COLOR.faint} selectable={false}>{`  ·  ${clockTime(entry.at, now)}`}</text>
       </box>
@@ -1067,7 +1128,7 @@ function TurnDiffRow({
       {...handlers}
     >
       <text fg={hovered ? COLOR.bright : COLOR.diff} selectable={false}>{`${expanded ? "▾" : "▸"} diff `}</text>
-      <text fg={COLOR.dim} selectable={false}>{`${checkpoint.files.length} file${checkpoint.files.length === 1 ? "" : "s"} `}</text>
+      <text fg={COLOR.dim} selectable={false}>{`${tr("git.files", { count: checkpoint.files.length })} `}</text>
       <text fg={COLOR.added} selectable={false}>{`+${added}`}</text>
       <text fg={COLOR.removed} selectable={false}>{` -${removed}`}</text>
     </box>
@@ -1226,7 +1287,7 @@ function TurnBlock({  group,
           // still live — on a finished turn they are plain past messages.
           // Either way they keep the model's own color: dimming them grey
           // made the last answer read as inactive the moment tools followed.
-          label={open ? `${model} · working` : model}
+          label={open ? tr("timeline.modelWorking", { model }) : model}
           time={clockTime(entry.at, now)}
           color={modelColor ?? COLOR.agent}
           background={SURFACE.base}
@@ -1326,7 +1387,7 @@ function TurnBlock({  group,
           <text fg={COLOR.faint} bg={SURFACE.base}>{`${MARKER} `}</text>
           <box style={{ flexDirection: "column", flexGrow: 1 }}>
             <SpeakerHeader
-              label={`${model} · writing`}
+              label={tr("timeline.modelWriting", { model })}
               time={clockTime(live.at, now)}
               color={modelColor ?? COLOR.agent}
               background={SURFACE.base}
@@ -1412,8 +1473,8 @@ function LiveBadge({
     <box style={{ position: "absolute", bottom: -1, right: 2, height: 1, flexShrink: 0 }}>
       <text fg={waiting ? COLOR.warn : pulseColor(tick, COLOR.dim, COLOR.accent, 2400)} bg={SURFACE.base}>
         {waiting
-          ? ` ◆ waiting for you · ${formatDuration(elapsedMs)} `
-          : ` ${frame} ${busy && !thinking ? "working" : "thinking"}… ${formatDuration(elapsedMs)} `}
+          ? tr("timeline.waitingForYou", { time: formatDuration(elapsedMs) })
+          : tr(busy && !thinking ? "timeline.frameWorking" : "timeline.frameThinking", { frame, time: formatDuration(elapsedMs) })}
       </text>
     </box>
   );
@@ -1438,6 +1499,7 @@ export function Timeline({
   modelForTurn,
   modelLabel,
   homeDir,
+  readAttachment,
   expandedTurn,
   expandedWork,
   scrollRef,
@@ -1463,6 +1525,8 @@ export function Timeline({
   /** Names an `instance/model` reference (a delegated task's model). */
   modelLabel: (model: string) => { name: string; color: string | null };
   homeDir: string | undefined;
+  /** Fetches a sent image's bytes from the server, for the message thumbnails; none, no thumbnails. */
+  readAttachment?: AttachmentReader;
   expandedTurn: number | null;
   expandedWork: ReadonlyMap<string, boolean>;
   scrollRef: RefObject<ScrollBoxRenderable | null>;
@@ -1504,7 +1568,7 @@ export function Timeline({
     }, SCROLL_POSITION_POLL_MS);
     return () => clearInterval(timer);
   }, [scrollRef]);
-  const jumpToBottomWidth = JUMP_TO_BOTTOM_LABEL.length + 4;
+  const jumpToBottomWidth = jumpToBottomLabel().length + 4;
   const jumpToBottomLeft = Math.max(0, Math.floor((width - jumpToBottomWidth) / 2));
   const scrollToBottom = () => {
     const pane = scrollRef.current;
@@ -1513,6 +1577,7 @@ export function Timeline({
   };
 
   return (
+    <AttachmentReaderContext.Provider value={readAttachment ?? null}>
     <box
       style={{ flexDirection: "column", flexGrow: 1, borderStyle: "rounded", backgroundColor: SURFACE.base }}
       borderColor={focused ? SURFACE.borderFocus : SURFACE.border}
@@ -1543,7 +1608,7 @@ export function Timeline({
           onMouseDown={scrollToBottom}
           selectable={false}
         >
-          <text fg={pulseColor(pillTick, COLOR.accent, COLOR.bright, 1600)} bg={SURFACE.raised} selectable={false}>{JUMP_TO_BOTTOM_LABEL}</text>
+          <text fg={pulseColor(pillTick, COLOR.accent, COLOR.bright, 1600)} bg={SURFACE.raised} selectable={false}>{jumpToBottomLabel()}</text>
         </box>
       )}
       <scrollbox
@@ -1609,5 +1674,6 @@ export function Timeline({
         })}
       </scrollbox>
     </box>
+    </AttachmentReaderContext.Provider>
   );
 }

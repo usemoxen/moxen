@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { baseChoices, resolveBase } from "../../model/gitpanel.js";
@@ -207,7 +208,7 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
   const createRequest = useCallback(
     async (input: { title: string; body?: string; draft?: boolean }): Promise<string | null> => {
       if (threadId === null) return null;
-      const result = await write("Opening…", () =>
+      const result = await write(t("git.opening_bea7"), () =>
         client.dispatch({
           type: "forge.request.create",
           threadId,
@@ -226,7 +227,7 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
   const commentOn = useCallback(
     async (number: number, body: string): Promise<void> => {
       if (threadId === null) return;
-      await write("Commenting…", () => client.dispatch({ type: "forge.request.comment", threadId, number, body }));
+      await write(t("git.commenting_4462"), () => client.dispatch({ type: "forge.request.comment", threadId, number, body }));
     },
     [client, threadId, write],
   );
@@ -234,7 +235,7 @@ export function useGitPanel(client: ClientApi, threadId: string | null, active: 
   const merge = useCallback(
     async (number: number, strategy: MergeStrategy, deleteBranch: boolean): Promise<void> => {
       if (threadId === null) return;
-      await write("Merging…", () =>
+      await write(t("git.merging_21fe"), () =>
         client.dispatch({ type: "forge.request.merge", threadId, number, strategy, deleteBranch }),
       );
       read();

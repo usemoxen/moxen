@@ -4,6 +4,7 @@
  * a `parentThreadId`), the open thread's recorded `subagent` rows (a
  * provider's native subagents), and a context breakdown.
  */
+import { t } from "../i18n/index.js";
 import type { ActivityEnvelope, MessageEnvelope, ThreadEnvelope } from "../../core/types.js";
 import type { QueryResult } from "../../server/api.js";
 
@@ -258,16 +259,16 @@ export function estimateContextBreakdown(
   const scale = messageTotal > usage.usedTokens && messageTotal > 0 ? usage.usedTokens / messageTotal : 1;
   const round = (value: number): number => Math.round(value * scale);
   const used = [
-    { name: "User messages", tokens: round(estimated.user) },
-    { name: "Assistant messages", tokens: round(estimated.assistant) },
-    { name: "Reasoning", tokens: round(estimated.reasoning) },
-    { name: "Tool calls", tokens: round(estimated.tools) },
+    { name: t("context.userMessages"), tokens: round(estimated.user) },
+    { name: t("context.assistantMessages"), tokens: round(estimated.assistant) },
+    { name: t("context.reasoning"), tokens: round(estimated.reasoning) },
+    { name: t("context.toolCalls"), tokens: round(estimated.tools) },
   ];
   const accounted = used.reduce((sum, row) => sum + row.tokens, 0);
   const categories: ContextBreakdown["categories"] = [
-    { name: "System prompt & tools", tokens: Math.max(0, usage.usedTokens - accounted), kind: "used" },
+    { name: t("context.systemPrompt"), tokens: Math.max(0, usage.usedTokens - accounted), kind: "used" },
     ...used.filter((row) => row.tokens > 0).map((row) => ({ ...row, kind: "used" as const })),
-    ...(usage.maxTokens !== null ? [{ name: "Free space", tokens: Math.max(0, usage.maxTokens - usage.usedTokens), kind: "free" as const }] : []),
+    ...(usage.maxTokens !== null ? [{ name: t("context.freeSpace"), tokens: Math.max(0, usage.maxTokens - usage.usedTokens), kind: "free" as const }] : []),
   ];
   const tools = [...perTool.entries()]
     .map(([name, toolChars]) => ({ name, tokens: Math.round((toolChars / CHARS_PER_TOKEN) * scale) }))

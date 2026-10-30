@@ -7,6 +7,7 @@ import { defaultEffortId, describeEffort } from "./display.js";
 import { numberLabel } from "./numberlabel.js";
 import { handoffModelsFromText, handoffModelsToText } from "./autohandoff.js";
 import type { QueryResult } from "../../server/api.js";
+import { t, tx } from "../i18n/index.js";
 
 /**
  * What the settings page offers for a setting, as a list to pick from.
@@ -200,6 +201,7 @@ export function webOrderRows(entries: readonly { readonly id: string; readonly l
   const order = [...new Set(String(value ?? "").split(",").map((id) => id.trim()).filter((id) => id !== ""))];
   const ranked = order.map((id, at): WebOrderRow => {
     const entry = entries.find((candidate) => candidate.id === id);
+    // i18n-exempt: English from core, translated where it is drawn (weborder.tsx)
     return { id, label: entry?.label ?? id, summary: entry?.summary ?? "not a tool Moxen knows", locked: entry?.locked ?? (entry ? null : "unknown"), rank: at + 1 };
   });
   return [...ranked, ...entries.filter((entry) => !order.includes(entry.id)).map((entry): WebOrderRow => ({ ...entry, rank: null }))];
@@ -225,24 +227,23 @@ function durationLabel(value: string): string {
   const match = /^(\d+)(ms|s|m|h)$/.exec(value);
   if (match === null) return value;
   const count = Number(match[1]);
-  const unit = { ms: "millisecond", s: "second", m: "minute", h: "hour" }[match[2] as "ms" | "s" | "m" | "h"];
-  return `${count} ${unit}${count === 1 ? "" : "s"}`;
+  return t(`duration.${match[2] as "ms" | "s" | "m" | "h"}`, { count });
 }
 
 /** The Default option of a setting with no default of its own: it names what applies instead, as core worked it out. */
 function defaultOption(effective: SettingEffective | undefined): SettingOption {
-  if (effective === undefined) return option("", "Default", "Nothing is set here.");
-  return option("", "Default", effective.origin === undefined ? effective.label : `${effective.label}, ${effective.origin}`);
+  if (effective === undefined) return option("", t("settings.default"), t("settings.nothingSet"));
+  return option("", t("settings.default"), effective.origin === undefined ? effective.label : `${effective.label}, ${effective.origin}`);
 }
 
 /** The value a page writes for an unset setting: "Default (Full access)". */
 export function defaultLabel(effective: SettingEffective | undefined): string {
-  return effective === undefined ? "Default" : `Default (${effective.label})`;
+  return effective === undefined ? t("settings.default") : t("settings.defaultOf", { value: effective.label });
 }
 
 /** A preset, marked when it is the value a setting has unless told otherwise. */
 const presetOption = (value: string, label: string, defaultValue: SettingValue, short?: string): SettingOption =>
-  String(defaultValue) === value ? option(value, label, "The default", true, short) : option(value, label, undefined, false, short);
+  String(defaultValue) === value ? option(value, label, t("settings.theDefault"), true, short) : option(value, label, undefined, false, short);
 
 /** The value a key holds on the page right now, as `settings.set` would take it. */
 function valueOf(settings: readonly SettingView[], key: string): string | undefined {
@@ -271,7 +272,7 @@ export function configuredDefaultModel(settings: readonly SettingView[], instanc
 function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "opencode" | "harness" | undefined): string {
   const aimed = valueOf(settings, "provider");
   const provider = providers.find((entry) => (providerKind !== undefined ? driverKindOfInstance(entry.instanceId) === providerKind : entry.instanceId === aimed));
-  return provider?.displayName ?? provider?.instanceId ?? "the provider";
+  return provider?.displayName ?? provider?.instanceId ?? t("settings.theProvider");
 }
 
 /** The catalog providers worth offering: enabled ones. */
@@ -317,12 +318,12 @@ function catalogOptions(
         : available.filter((provider) => provider.instanceId === providerId);
   if (source === "provider") {
     return [
-      option("", "First available", effective?.label ?? "Claude Code when it is installed"),
+      option("", t("settings.firstAvailable"), effective?.label ?? t("settings.claudeWhenInstalled")),
       ...available.map((provider) => option(provider.instanceId, provider.displayName ?? provider.instanceId)),
     ];
   }
   if (source === "model") {
-    const out: SettingOption[] = [effective === undefined ? option("", "Provider's default") : defaultOption(effective)];
+    const out: SettingOption[] = [effective === undefined ? option("", t("settings.providerDefault")) : defaultOption(effective)];
     const seen = new Set<string>();
     for (const provider of scoped) {
       // Across providers each one's models sit under its own heading, the provider's default first.
@@ -348,7 +349,7 @@ function catalogOptions(
   // global Provider the setting reaches every provider, so only the levels
   // each provider's model takes are offered: none of them can be handed a
   // level its model lacks.
-  const out: SettingOption[] = [effective === undefined ? option("", "Provider's default") : defaultOption(effective)];
+  const out: SettingOption[] = [effective === undefined ? option("", t("settings.providerDefault")) : defaultOption(effective)];
   const perProvider = scoped.flatMap((provider) => {
     const slug = configuredDefaultModel(settings, provider.instanceId) ?? provider.models.find((model) => model.isDefault === true)?.slug;
     const model = provider.models.find((candidate) => candidate.slug === slug) ?? (slug === undefined ? provider.models[0] : undefined);
@@ -360,8 +361,8 @@ function catalogOptions(
     if (perProvider.every((choices) => choices.some((other) => other.id === choice.id)) && !levels.has(choice.id)) levels.set(choice.id, choice);
   }
   const fallback = defaultEffortId([...levels.values()]);
-  for (const choice of levels.values()) out.push(choice.id === fallback ? option(choice.id, choice.label, describeEffort(choice.id, true), true) : option(choice.id, choice.label, describeEffort(choice.id, false)));
-  if (out.length === 1) out[0] = option("", "Provider's default", "The model in force takes no effort setting, so there is nothing else to pick.");
+  for (const choice of levels.values()) out.push(choice.id === fallback ? option(choice.id, tx(choice.label), describeEffort(choice.id, true), true) : option(choice.id, tx(choice.label), describeEffort(choice.id, false)));
+  if (out.length === 1) out[0] = option("", t("settings.providerDefault"), t("settings.noEffortSetting"));
   return out;
 }
 
@@ -431,7 +432,7 @@ export function settingControl(
       // Shares first (they follow any window), then sizes from small local models up.
       options = [
         ...(descriptor.defaultValue === undefined ? [defaultOption(effective)] : []),
-        ...kind.presets.map((preset) => presetOption(preset, preset.endsWith("%") ? `${preset} of the window` : `${preset} tokens`, applies, preset)),
+        ...kind.presets.map((preset) => presetOption(preset, t(preset.endsWith("%") ? "settings.ofWindow" : "settings.tokensOf", { preset }), applies, preset)),
       ];
       break;
     case "duration":
@@ -443,7 +444,7 @@ export function settingControl(
       if (kind.source === "web-order") {
         const rows = webOrderRows(settings.find((view) => view.descriptor.key === descriptor.key)?.order ?? [], value);
         const blocked = rows.filter((row) => row.rank !== null && row.locked !== null && row.locked !== "unknown");
-        return blocked.length === 0 ? { kind: "order", rows } : { kind: "order", rows, warning: `Ranked but unavailable: ${blocked.map((row) => `${row.label} (${row.locked})`).join("; ")}.` };
+        return blocked.length === 0 ? { kind: "order", rows } : { kind: "order", rows, warning: t("settings.rankedUnavailable", { list: blocked.map((row) => `${row.label} (${tx(row.locked ?? "")})`).join("; ") }) };
       }
       if (kind.source === "native-tools") {
         const tools = (kind.tools ?? []).map((tool): McpAccessEntry => ({ name: tool.name, summary: tool.summary, locked: null }));
@@ -460,15 +461,15 @@ export function settingControl(
   // Only a loaded catalog can say a model or level is not there; while it loads, nothing is claimed.
   const warning = unknown && kind.type === "string" && (kind.source === "model" || kind.source === "effort") && providers !== null && options.length > 1
     ? kind.source === "model"
-      ? `${current} is not a model ${catalogName(settings, providers, kind.providerKind)} lists, so a new thread would ask for one it may not have.`
-      : `The model in force takes no '${current}' level, so its provider may refuse it or use its own.`
+      ? t("settings.notAModel", { current, catalog: catalogName(settings, providers, kind.providerKind) })
+      : t("settings.noLevel", { current })
     : undefined;
-  if (unknown) options = [option(current, current, "Set in the config file"), ...options];
+  if (unknown) options = [option(current, current, t("settings.setInFile")), ...options];
   // A few short values read better side by side; names and long lists get a line each.
   const stops = options.filter((entry) => entry.value !== "");
   const slider =
     (kind.type === "integer" || kind.type === "duration" || (kind.type === "string" && kind.source === "effort")) && stops.length >= 2 && stops.length <= 12 && stops.every((entry) => (entry.short ?? entry.label).length <= 20);
-  const ends: SettingEnds | undefined = kind.type === "string" ? { low: "Faster", high: "Smarter" } : kind.type === "integer" || kind.type === "duration" ? kind.ends : undefined;
+  const ends: SettingEnds | undefined = kind.type === "string" ? { low: t("settings.faster"), high: t("settings.smarter") } : kind.type === "integer" || kind.type === "duration" ? (kind.ends === undefined ? undefined : { low: tx(kind.ends.low), high: tx(kind.ends.high) }) : undefined;
   return { kind: "pick", options, layout: slider ? "slider" : "list", ...(slider && ends !== undefined ? { ends } : {}),
     ...(slider && kind.type === "string" && kind.source === "effort" ? { scale: "effort" as const } : {}), searchable: !slider && (options.length > 8 || (kind.type === "string" && kind.source === "model" && options.length > 6)),
     ...(effective ? { effective } : {}), ...(warning ? { warning } : {}) };
@@ -488,43 +489,43 @@ export function nextToggleValue(control: Extract<SettingControl, { kind: "toggle
 export function settingValueLabel(descriptor: SettingDescriptor, value: SettingValue, control: SettingControl, count?: number): string {
   if (descriptor.kind.type === "list") {
     const noun = descriptor.kind.noun;
-    return count === undefined || count === 0 ? `None yet` : `${count} ${noun}${count === 1 ? "" : "s"}`;
+    return count === undefined || count === 0 ? t("settings.noneYet") : `${count} ${noun}${count === 1 ? "" : "s"}`;
   }
   if (control.kind === "servers") {
     // Only the servers this provider could get count: one limited elsewhere is not the checklist's to say.
     const open = control.servers.filter((server) => server.locked === null);
     const total = open.length;
-    if (control.servers.length === 0) return "No servers yet";
-    if (total === 0) return "None";
+    if (control.servers.length === 0) return t("settings.noServersYet");
+    if (total === 0) return t("settings.noneAny");
     const off = open.filter((server) => control.excluded.includes(server.name)).length;
-    return off === 0 ? (total === 1 ? "The server" : `All ${total} servers`) : off === total ? "None" : `${total - off} of ${total}`;
+    return off === 0 ? (total === 1 ? t("settings.theServer") : t("settings.allServers", { count: total })) : off === total ? t("settings.noneAny") : t("settings.ofTotal", { count: total - off, total });
   }
   if (control.kind === "order") {
     const ranked = control.rows.filter((row) => row.rank !== null);
-    return ranked.length === 0 ? "No preference" : ranked.map((row) => row.label).join(" → ");
+    return ranked.length === 0 ? t("settings.noPreference") : ranked.map((row) => row.label).join(" → ");
   }
   if (control.kind === "tools") {
     const off = control.excluded.length;
-    return off === 0 ? "All on" : `${off} off`;
+    return off === 0 ? t("settings.allOn") : t("settings.countOff", { count: off });
   }
   if (control.kind === "handoff") {
     const set = control.models.filter(hasOverrides).length;
-    return set === 0 ? "None" : `${set} model${set === 1 ? "" : "s"}`;
+    return set === 0 ? t("settings.noneAny") : t("settings.models", { count: set });
   }
   if (descriptor.kind.type === "boolean") {
     if (control.kind === "toggle" && control.tristate === true && value === undefined) return defaultLabel(control.effective);
-    return value === true ? "On" : "Off";
+    return value === true ? t("settings.on") : t("settings.off");
   }
   if (descriptor.kind.type === "secret") {
-    if (value !== undefined && value !== "") return "Saved in the keychain";
-    return control.kind === "secret" && control.effective !== undefined ? defaultLabel(control.effective) : "No key saved";
+    if (value !== undefined && value !== "") return t("settings.keySaved");
+    return control.kind === "secret" && control.effective !== undefined ? defaultLabel(control.effective) : t("settings.noKey");
   }
   if (control.kind === "pick") {
     const current = value === undefined || value === "" ? "" : String(value);
     const match = control.options.find((entry) => entry.value === current);
-    if (match !== undefined) return match.value === "" && match.label === "Default" ? defaultLabel(control.effective) : match.label;
+    if (match !== undefined) return match.value === "" && match.label === t("settings.default") ? defaultLabel(control.effective) : match.label;
   }
-  if (value === undefined || value === "") return control.kind === "text" ? defaultLabel(control.effective) : "Default";
+  if (value === undefined || value === "") return control.kind === "text" ? defaultLabel(control.effective) : t("settings.default");
   if (descriptor.kind.type === "integer") return `${typeof value === "number" ? numberLabel(value, descriptor.kind.binary) : String(value)}${descriptor.kind.unit ?? ""}`;
   return String(value);
 }
@@ -563,25 +564,25 @@ export interface ProviderVersionLine {
  * read; without one the page says it could not tell, never "up to date".
  */
 export function providerVersionLine(check: ProviderCheckView | undefined, latest?: LatestView): ProviderVersionLine {
-  const base = { button: "[ Update ]", settled: false } as const;
-  if (check === undefined) return { ...base, version: null, status: "Checking…", tone: "muted" };
-  if (!check.installed) return { ...base, version: null, status: "Not found on this machine. Check the executable path below.", tone: "warn" };
+  const base = { button: t("settings.update.button"), settled: false } as const;
+  if (check === undefined) return { ...base, version: null, status: t("settings.update.checking"), tone: "muted" };
+  if (!check.installed) return { ...base, version: null, status: t("settings.update.notFound"), tone: "warn" };
   const version = versionNumber(check.version);
-  if (version === null) return { ...base, version: null, status: "Could not read its version.", tone: "warn" };
+  if (version === null) return { ...base, version: null, status: t("settings.update.noVersion"), tone: "warn" };
   if (check.minVersion !== undefined && !check.ok) {
-    return { ...base, version, status: `Older than the ${check.minVersion} Moxen needs: sessions will not start until it is updated.`, tone: "warn" };
+    return { ...base, version, status: t("settings.update.tooOld", { min: check.minVersion }), tone: "warn" };
   }
-  if (latest === undefined) return { ...base, version, status: "Checking for a newer version…", tone: "muted" };
-  if (!latest.enabled) return { ...base, version, status: "Version checks are off (Settings, General).", tone: "muted" };
+  if (latest === undefined) return { ...base, version, status: t("settings.update.checkingLatest"), tone: "muted" };
+  if (!latest.enabled) return { ...base, version, status: t("settings.update.checksOff"), tone: "muted" };
   const state = updateState(version, latest.latest);
-  const channel = latest.channel === null ? "" : ` on the ${latest.channel} channel`;
+  const channel = latest.channel === null ? "" : t("settings.update.channel", { channel: latest.channel });
   if (state === "available") {
-    return { version, status: `${latest.latest} is available${channel}.`, tone: "update", button: `[ Update to ${latest.latest} ]`, settled: false };
+    return { version, status: t("settings.update.available", { latest: latest.latest ?? "", channel }), tone: "update", button: t("settings.update.buttonTo", { version: latest.latest ?? "" }), settled: false };
   }
   if (state === "current") {
-    return { version, status: `Up to date: ${latest.latest} is the newest${channel}.`, tone: "ok", button: "[ Up to date ]", settled: true };
+    return { version, status: t("settings.update.current", { latest: latest.latest ?? "", channel }), tone: "ok", button: t("settings.update.buttonCurrent"), settled: true };
   }
-  return { ...base, version, status: "Could not check for a newer version.", tone: "muted" };
+  return { ...base, version, status: t("settings.update.cannotCheck"), tone: "muted" };
 }
 
 /** The "Per model" row: every model with its four overrides, read from the four settings beside it, and what its Compaction can be. */
@@ -597,7 +598,7 @@ function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValu
   const compaction: ModelCompactionChoices =
     kind === "opencode"
       ? providerMode === "provider"
-        ? { choices: [], unavailable: "OpenCode compacts by itself on this provider, for its whole server; set its Compaction to Moxen's or Off for a model to choose." }
+        ? { choices: [], unavailable: t("settings.openCodeCompacts") }
         : { choices: choices.filter((choice) => choice.value !== "provider"), unavailable: null }
       : { choices, unavailable: null };
   return { kind: "handoff", models: modelOverrideEntries(providers, kind, values), compaction };

@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import type { NativeSubagentEnvelope, ProjectEnvelope, ThreadEnvelope } from "../../core/types.js";
 import { threadSortTime, threadStatus, type ShellState, type ThreadStatus } from "./shell.js";
 
@@ -143,7 +144,7 @@ function toSidebarThread(
   natives: SidebarNative[] = [],
 ): SidebarThread {
   const project = projects.get(thread.projectId);
-  const projectTitle = project?.title ?? "unknown project";
+  const projectTitle = project?.title ?? t("sidebar.unknownProject");
   const branch = typeof thread.branch === "string" && thread.branch.length > 0 ? thread.branch : null;
   const status = threadStatus(thread, now);
   return {
@@ -336,7 +337,7 @@ export function buildSidebarSections(state: ShellState, options: SidebarOptions)
     groups = [...perProject.entries()]
       .sort(([, left], [, right]) => threadSortTime(right[0]!) - threadSortTime(left[0]!))
       .map(([id, rows]) => {
-        const projectTitle = projects.get(id)?.title ?? "unknown project";
+        const projectTitle = projects.get(id)?.title ?? t("sidebar.unknownProject");
         return {
           projectId: id,
           projectTitle,
@@ -365,6 +366,6 @@ export function buildSidebarSections(state: ShellState, options: SidebarOptions)
     mode,
     groups,
     projectId,
-    projectTitle: projectId === null ? null : (projects.get(projectId)?.title ?? "unknown project"),
+    projectTitle: projectId === null ? null : (projects.get(projectId)?.title ?? t("sidebar.unknownProject")),
   };
 }

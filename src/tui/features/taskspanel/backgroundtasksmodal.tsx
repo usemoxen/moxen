@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -22,9 +23,9 @@ const OUTPUT_POLL_MS = 2000;
 const COMMAND_ROWS = 8;
 
 const KIND_ORDER: readonly BackgroundTaskKind[] = ["shell", "monitor", "agent", "task"];
-const KIND_SECTION: Record<BackgroundTaskKind, string> = { shell: "Shells", monitor: "Monitors", agent: "Agents", task: "Tasks" };
-const KIND_TITLE: Record<BackgroundTaskKind, string> = { shell: "Shell", monitor: "Monitor", agent: "Agent", task: "Task" };
-const KIND_SOURCE: Record<BackgroundTaskKind, string> = { shell: "Command", monitor: "Script", agent: "Prompt", task: "Command" };
+const KIND_SECTION = (): Record<BackgroundTaskKind, string> => ({ shell: t("bgm.shells_b835"), monitor: t("bgm.monitors_8c22"), agent: t("tab.agents"), task: t("bgm.tasks_ef61") });
+const KIND_TITLE = (): Record<BackgroundTaskKind, string> => ({ shell: t("bgm.shell_ea89"), monitor: t("bgm.monitor_d298"), agent: t("bgm.agent_7446"), task: t("bgm.task_eaeb") });
+const KIND_SOURCE = (): Record<BackgroundTaskKind, string> => ({ shell: t("bgm.command_ee97"), monitor: t("bgm.script_f907"), agent: t("bgm.prompt_45d7"), task: t("bgm.command_ee97") });
 
 function runtimeOf(task: BackgroundTaskRow | null, now: number): string | null {
   if (task?.startedAt === null || task?.startedAt === undefined) return null;
@@ -160,14 +161,14 @@ export function BackgroundTasksModal({
   if (detailTaskId !== null && detailTask !== null) {
     const kind = backgroundTaskKind(detailTask);
     const title = backgroundTaskTitle(detailTask);
-    const statusLabel = detailFinished ? "✓ finished" : "● running";
+    const statusLabel = detailFinished ? t("bgm.finished_e3e2") : t("bgm.running_7f32");
     const runtime = detailFinished ? null : runtimeOf(detailTask, now);
     const command = detailTask.command?.trim() || null;
     const showCommand = command !== null && command !== title;
     const commandRows = showCommand ? wrapRows(command, inner - 2) : [];
     const outputLines = output && output.taskId === detailTaskId ? output.lines : [];
-    const lineCountLabel = `${outputLines.length} line${outputLines.length === 1 ? "" : "s"}`;
-    const heading = `${KIND_TITLE[kind]} · `;
+    const lineCountLabel = t("bgm.lines", { count: outputLines.length });
+    const heading = `${KIND_TITLE()[kind]} · `;
     return shell(
       <>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
@@ -183,18 +184,18 @@ export function BackgroundTasksModal({
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
           {runtime === null ? null : (
             <>
-              <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{"Runtime "}</text>
+              <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.runtime_cfb5")}</text>
               <text fg={COLOR.text} bg={SURFACE.raised} selectable={false}>{runtime}</text>
               <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"  ·  "}</text>
             </>
           )}
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{"Task "}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.task_069e")}</text>
           <text fg={COLOR.text} bg={SURFACE.raised}>{detailTask.taskId}</text>
         </box>
         {showCommand ? (
           <>
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-              <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{KIND_SOURCE[kind]}</text>
+              <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{KIND_SOURCE()[kind]}</text>
             </box>
             <box
               style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1, height: Math.min(commandRows.length, COMMAND_ROWS) }}
@@ -212,9 +213,9 @@ export function BackgroundTasksModal({
           </>
         ) : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{"Output"}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.output_29c2")}</text>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {output?.available ? (detailFinished ? lineCountLabel : `${lineCountLabel} · live`) : ""}
+            {output?.available ? (detailFinished ? lineCountLabel : t("bgm.live", { lines: lineCountLabel })) : ""}
           </text>
         </box>
         <box
@@ -223,11 +224,11 @@ export function BackgroundTasksModal({
           backgroundColor={SURFACE.raised}
         >
           {output === null || output.taskId !== detailTaskId ? (
-            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"waiting for output…"}</text>
+            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("bgm.waiting_for_output_2faa")}</text>
           ) : !output.available ? (
-            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"no output yet"}</text>
+            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("bgm.no_output_yet_b7d2")}</text>
           ) : outputLines.length === 0 ? (
-            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"(empty)"}</text>
+            <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("bgm.empty_9e65")}</text>
           ) : (
             // Every line scrolls; the view sticks to the newest while it tails.
             <scrollbox style={{ flexGrow: 1 }} stickyScroll stickyStart="bottom">
@@ -239,10 +240,10 @@ export function BackgroundTasksModal({
         </box>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {truncate(detailFinished ? "← back · esc close" : "← back · x stop · esc close", Math.max(0, inner - 8))}
+            {truncate(detailFinished ? t("bgm.back_esc_close_d83a") : t("bgm.back_x_stop_esc_be25"), Math.max(0, inner - 8))}
           </text>
           {detailFinished || liveDetail === null ? null : (
-            <HoverButton label=" ■ stop " fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => onStop(liveDetail)} />
+            <HoverButton label={t("bgm.stop_ec99")} fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => onStop(liveDetail)} />
           )}
         </box>
       </>,
@@ -254,19 +255,19 @@ export function BackgroundTasksModal({
   return shell(
     <>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{"Background work"}</text>
+        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{t("bgm.background_work_7ae0")}</text>
         <HoverButton label="esc" fg={COLOR.faint} hoverFg={COLOR.text} onClick={onClose} />
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
         <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-          {summary === null ? "nothing running" : `${ordered.length} running · ${summary}`}
+          {summary === null ? t("bgm.nothing_running_2489") : t("bgm.runningSummary", { count: ordered.length, summary })}
         </text>
       </box>
       {ordered.length === 0 ? (
         <box style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, justifyContent: "center", alignItems: "center" }}>
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{"Nothing running in the background."}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.nothing_running_in_the_f068")}</text>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {truncate("Shells, monitors and background agents show up here while they run.", inner)}
+            {truncate(t("bgm.shells_monitors_and_background_02e7"), inner)}
           </text>
         </box>
       ) : (
@@ -277,7 +278,7 @@ export function BackgroundTasksModal({
             return (
               <Fragment key={kind}>
                 <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                  <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{`${KIND_SECTION[kind]} (${group.length})`}</text>
+                  <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{`${KIND_SECTION()[kind]} (${group.length})`}</text>
                 </box>
                 {group.map((task) => {
                   const taskIndex = ordered.indexOf(task);
@@ -300,7 +301,7 @@ export function BackgroundTasksModal({
                           <text fg={COLOR.accent} bg={rowBg} selectable={false}>{"● "}</text>
                           <text fg={active ? PICK_FG : COLOR.bright} bg={rowBg} selectable={false}>{truncate(title, titleWidth)}</text>
                         </box>
-                        <text fg={active ? PICK_FG : COLOR.dim} bg={rowBg} selectable={false}>{runtime === null ? "running " : `${runtime} `}</text>
+                        <text fg={active ? PICK_FG : COLOR.dim} bg={rowBg} selectable={false}>{runtime === null ? t("bgm.running_b3be") : `${runtime} `}</text>
                       </box>
                       {command && command !== title ? (
                         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
@@ -317,7 +318,7 @@ export function BackgroundTasksModal({
       )}
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {truncate(ordered.length === 0 ? "esc close" : "↑/↓ select · enter view · x stop · esc close", inner)}
+          {truncate(ordered.length === 0 ? t("bgm.esc_close_dcf7") : t("bgm.select_enter_view_x_2458"), inner)}
         </text>
       </box>
     </>,

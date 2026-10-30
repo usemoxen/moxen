@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import type { ReactNode } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 
@@ -49,21 +50,21 @@ export function MinSizeGate({ children, onQuit }: { children: ReactNode; onQuit:
         onMouseDown={() => {}}
       >
         <text fg={COLOR.warn} selectable={false}>
-          {truncate("Terminal too small", inner)}
+          {truncate(t("ui.terminal_too_small_25f3"), inner)}
         </text>
         <box style={{ height: 1, flexShrink: 0 }} />
         <text fg={COLOR.dim} selectable={false}>
-          {truncate(`This terminal is ${width} × ${height} — moxen needs at least`, inner)}
+          {truncate(t("gate.size", { width, height }), inner)}
         </text>
         <text fg={COLOR.text} selectable={false}>
           {truncate(`${MIN_TERMINAL_WIDTH} × ${MIN_TERMINAL_HEIGHT}.`, inner)}
         </text>
         <box style={{ height: 1, flexShrink: 0 }} />
         <text fg={COLOR.dim} selectable={false}>
-          {truncate("Resize the terminal to continue.", inner)}
+          {truncate(t("ui.resize_the_terminal_to_75ec"), inner)}
         </text>
         <text fg={COLOR.dim} selectable={false}>
-          {truncate("Or press Ctrl+C to quit.", inner)}
+          {truncate(t("ui.or_press_ctrlc_to_12c8"), inner)}
         </text>
       </box>
     </>

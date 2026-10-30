@@ -35,8 +35,12 @@
     "test:watch": "vitest",
     "check": "bun run typecheck && bun run test",
     "check:tui": "bun src/tui/render-check.tsx",
+    "check:tui:shots": "bun src/tui/render-check/shots.tsx",
+    "check:tui:frames": "bun src/tui/render-check/shots.tsx --mode frames",
+    "check:tui:gallery": "bun src/tui/render-check/shots.tsx --mode gallery",
     "tui:mock": "bun src/tui/mock.tsx",
     "test:inventory": "bun ./scripts/test-inventory.ts",
+    "stats:sheet": "bun ./scripts/stats-sheet.ts",
     "update:docs": "bun ./scripts/update-docs.ts",
     "update:tree-sitter-assets": "bun ./scripts/update-tree-sitter-assets.ts --config ./parsers-config.json --assets ./src/core/syntax --output ./src/core/syntax/parsers.ts && bun ./scripts/fetch-tree-sitter-licenses.ts",
     "review:settings": "npm --prefix tools/settings-review run dev"

@@ -17,7 +17,6 @@ import type {
   ForgeConfig,
   GitConfig,
   HarnessProviderConfig,
-  KeyedSearchBackend,
   InteractionMode,
   OpencodeProviderConfig,
   OpenMode,
@@ -244,7 +243,7 @@ export function normalizeConfig(raw: unknown): CliConfig {
   if (web) result.web = web;
   const longThreads = normalizeSection<LongThreadsConfig>(input.longThreads, "longThreads", ["handoff", "handoffAt", "compaction", "compactAt"]);
   if (longThreads) result.longThreads = longThreads;
-  const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "modelScenes", "hideBinaryDiffs", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds", "autoHandoff", "autoHandoffPercent", "autoHandoffTokens"]);
+  const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "theme", "language", "modelScenes", "hideBinaryDiffs", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds", "autoHandoff", "autoHandoffPercent", "autoHandoffTokens"]);
   if (ui) result.ui = ui;
   const git = normalizeSection<GitConfig>(input.git, "git", ["historyLimit", "autoFetch"]);
   if (git) result.git = git;
@@ -273,6 +272,13 @@ function asSection(value: unknown, label: string): Record<string, unknown> {
  * descriptor's own parser. Unknown fields are dropped rather than
  * rejected: a config written by a newer build must stay loadable.
  */
+/** Exa and Brave were once built-in search backends; they are now their MCP servers. A file that names one reads as the default backend (DuckDuckGo), not as an error. */
+function withoutRetiredSearch(section: unknown): unknown {
+  if (section === null || typeof section !== "object" || Array.isArray(section)) return section;
+  const { webSearch, ...rest } = section as Record<string, unknown>;
+  return webSearch === "exa" || webSearch === "brave" ? rest : section;
+}
+
 function normalizeSection<T>(raw: unknown, prefix: string, fields: readonly string[]): T | undefined {
   if (raw === undefined) return undefined;
   const input = asSection(raw, prefix);
@@ -376,12 +382,9 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
   }
   if (input.harness !== undefined) {
     const withProfiles = normalizeHarnessConfig(input.harness);
-    const defaults = normalizeSection<HarnessProviderConfig>(input.harness, "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "webSearchKey", "webSearchKeyEnv", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
+    const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
     const models = handoffModelsOf(input.harness, "providers.harness");
-    const section = asSection(input.harness, "providers.harness");
-    const keys = normalizeSection<Partial<Record<KeyedSearchBackend, string>>>(section.webSearchKeys, "providers.harness.webSearchKeys", ["exa", "brave"]);
-    const keyEnvs = normalizeSection<Partial<Record<KeyedSearchBackend, string>>>(section.webSearchKeyEnvs, "providers.harness.webSearchKeyEnvs", ["exa", "brave"]);
-    if (withProfiles || defaults || models || keys || keyEnvs) result.harness = { ...defaults, ...withProfiles, ...models, ...(keys ? { webSearchKeys: keys } : {}), ...(keyEnvs ? { webSearchKeyEnvs: keyEnvs } : {}) };
+    if (withProfiles || defaults || models) result.harness = { ...defaults, ...withProfiles, ...models };
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

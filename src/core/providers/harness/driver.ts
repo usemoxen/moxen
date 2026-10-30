@@ -266,7 +266,6 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   /** Environment variables that hold keys moxen uses; commands the model runs do not inherit them. */
   private secretEnvNames(): string[] {
     const names = (this.config?.profiles ?? []).map((profile) => profile.apiKeyEnv);
-    names.push(this.config?.webSearchKeyEnv, ...Object.values(this.config?.webSearchKeyEnvs ?? {}));
     return names.filter((name): name is string => typeof name === "string" && name !== "");
   }
 

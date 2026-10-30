@@ -927,6 +927,24 @@ describe("opencode driver", () => {
     expect(outcome.error).toContain("No response from the provider");
   });
 
+  it("replaces a server that died unnoticed, so the first message is not lost to it", async () => {
+    const transport = new FakeOpencodeTransport({ unreachableServers: 1 });
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    const session = await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+    expect(session.threadId).toBe("thread-1");
+    expect(transport.servers).toHaveLength(2);
+    expect(transport.servers[1]!.callsTo("session.create")).toHaveLength(1);
+  });
+
+  it("gives up when the replacement is not there either", async () => {
+    const transport = new FakeOpencodeTransport({ unreachableServers: 2 });
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    await expect(Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }))).rejects.toThrow();
+    expect(transport.servers).toHaveLength(2);
+  });
+
   describe("native subagents (the `subagent` tool's child sessions)", () => {
     const PARENT = "opencode-session-1";
     const CHILD = "ses_child";
@@ -1063,8 +1081,35 @@ describe("opencode driver", () => {
       expect(server.aborted).toEqual([CHILD]);
       expect(subagents()).toMatchObject([{ status: "started" }, { agentId: CHILD, status: "stopped" }]);
       // Once stopped it is no longer there to stop, and an unknown one never was.
-      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", CHILD))).rejects.toThrow(/No subagent/);
-      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", "ses_nope"))).rejects.toThrow(/No subagent/);
+      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", CHILD))).rejects.toThrow(/No background task/);
+      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", "ses_nope"))).rejects.toThrow(/No background task/);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
+    it("lists a command the model sent to the background, and stops it by killing the command", async () => {
+      const SHELL = "sh_bg1";
+      const transport = new FakeOpencodeTransport({});
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      const server = transport.servers[0]!;
+      await server.pushRaw(call("session.tool.input.started", { name: "shell", id: "call_sh" }));
+      await server.pushRaw(call("session.tool.called", { id: "call_sh", input: { command: "sleep 300", background: true } }));
+      await server.pushRaw(call("session.tool.progress", { id: "call_sh", metadata: { shellID: SHELL } }));
+      const lists = () => events.flatMap((event) => (event.type === "background.tasks.changed" ? [event.tasks] : []));
+      expect(lists().at(-1)).toMatchObject([{ taskId: SHELL, taskType: "local_bash", command: "sleep 300" }]);
+
+      await Effect.runPromise(driver.stopBackgroundTask("thread-1", SHELL));
+      expect(server.callsTo("shell.stop").map((entry) => entry.args)).toEqual([{ shellID: SHELL }]);
+      expect(lists().at(-1)).toEqual([]);
+      // The server's own exit after the kill changes nothing more.
+      const before = lists().length;
+      await server.pushRaw({ type: "shell.exited", data: { id: SHELL, status: "killed" } });
+      expect(lists()).toHaveLength(before);
+      await expect(Effect.runPromise(driver.stopBackgroundTask("thread-1", SHELL))).rejects.toThrow(/No background task/);
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 
@@ -1245,6 +1290,37 @@ describe("opencode driver on OpenCode v2", () => {
     );
     return { transport, driver, events, server: transport.servers[0]!, stop: () => Effect.runPromise(Fiber.interrupt(fiber)) };
   }
+
+  it("sums the turn's own assistant steps and their cost, leaving earlier turns out (MXN-170)", async () => {
+    const { driver, server, stop } = await setup({ messages: [] });
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const prompt = server.callsTo("session.prompt")[0]?.args as { messageID: string };
+    const step = (id: string, parentID: string, input: number, cost?: number) => ({
+      info: { id, role: "assistant", parentID, tokens: { input, output: 1, reasoning: 0, cache: { read: 2, write: 0 } }, ...(cost === undefined ? {} : { cost }) },
+      parts: [],
+    });
+    server.messages = [
+      step("old", "msg_earlier", 1000, 5),
+      step("s1", prompt.messageID, 10, 0.01),
+      step("s2", prompt.messageID, 20, 0.02),
+    ];
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    await server.push({ type: "session.idle", properties: { sessionID: REAL_SESSION } });
+    const usage = (await outcomePromise).usage;
+    expect(usage).toMatchObject({ input: 30, output: 2, cacheRead: 4 });
+    expect(usage.costUsd).toBeCloseTo(0.03);
+
+    // A model the server cannot price reports no cost: none is invented.
+    const next = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "again" }));
+    const again = server.callsTo("session.prompt")[1]?.args as { messageID: string };
+    server.messages = [step("s3", again.messageID, 7)];
+    const second = driver.awaitTurn("thread-1", next.turnId);
+    await server.push({ type: "session.idle", properties: { sessionID: REAL_SESSION } });
+    const unpriced = (await second).usage;
+    await stop();
+    expect(unpriced.input).toBe(7);
+    expect(unpriced).not.toHaveProperty("costUsd");
+  });
 
   it("runs a real recorded shell turn: streamed text, tool lifecycle, usage and context", async () => {
     const { driver, events, server, stop } = await setup({

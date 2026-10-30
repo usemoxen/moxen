@@ -1,7 +1,7 @@
 import { FrameBufferRenderable, RGBA, type FrameBufferOptions, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { extend } from "@opentui/react";
 
-import { SURFACE } from "../../theme.js";
+import { SURFACE, sceneBase } from "../../theme.js";
 import { createScene, type SceneId } from "./catalog.js";
 import { createGridScene } from "./grid.js";
 import { journeyBetween, journeyFrames, type Journey } from "./journey.js";
@@ -126,6 +126,8 @@ interface Layer {
 export interface ModelSceneOptions extends FrameBufferOptions {
   scene?: BackdropScene;
   motion?: "animated" | "static";
+  /** The instant a static scene shows, in seconds: 0 unless a caller wants a particular moment of the loop. */
+  at?: number;
   /** Light gain: 1 for the empty creating view. */
   intensity?: number;
   /** The pane's own surface colour — light adds onto it. */
@@ -154,6 +156,7 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
   private readonly fg = RGBA.fromValues(0, 0, 0, 1);
   private readonly bg = RGBA.fromValues(0, 0, 0, 1);
   private t = STATIC_T;
+  private staticAt = STATIC_T;
   private pointer: Pointer | null = null;
   private stale = true;
   private paintedKey = "";
@@ -165,6 +168,7 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
     this.onMouseMove = (event) => {
       if (this.motionMode === "animated") notePointer(event.x, event.y);
     };
+    if (options.at !== undefined) this.staticAt = options.at;
     if (options.motion !== undefined) this.motionMode = options.motion;
     if (options.intensity !== undefined) this.intensity = options.intensity;
     if (options.base !== undefined) this.base = options.base;
@@ -218,6 +222,12 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
     this.syncClock();
   }
 
+  set at(seconds: number) {
+    if (seconds === this.staticAt) return;
+    this.staticAt = seconds;
+    this.syncClock();
+  }
+
   set intensity(value: number) {
     this.gain = value;
     this.stale = true;
@@ -243,7 +253,7 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
       this.t = seconds();
     } else {
       leave(this);
-      this.t = STATIC_T;
+      this.t = this.staticAt;
       this.pointer = null;
     }
     this.stale = true;
@@ -369,9 +379,10 @@ export function SceneBackdrop({
   left = 0,
   top = 0,
   intensity = 1,
-  base = SURFACE.base,
+  base = sceneBase(),
   well = false,
   motion = "animated",
+  at,
 }: {
   scene: BackdropScene;
   width: number;
@@ -382,6 +393,7 @@ export function SceneBackdrop({
   base?: string;
   well?: boolean;
   motion?: "animated" | "static";
+  at?: number;
 }) {
   if (width <= 0 || height <= 0) return null;
   return (
@@ -396,6 +408,7 @@ export function SceneBackdrop({
       base={base}
       well={well}
       motion={motion}
+      {...(at === undefined ? {} : { at })}
     />
   );
 }

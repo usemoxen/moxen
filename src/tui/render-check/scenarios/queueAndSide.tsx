@@ -1,5 +1,5 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { QueuedPanel } from "../../features/queuedpanel/queuedpanel.js";
 import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";

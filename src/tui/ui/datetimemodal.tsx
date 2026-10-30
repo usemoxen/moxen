@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -50,7 +51,7 @@ function FieldColumn({
  * from now can be picked.
  */
 export function DateTimeModal({
-  title = "Schedule message",
+  title = t("app.schedule_message_cbae"),
   screenWidth,
   screenHeight,
   left,
@@ -161,7 +162,7 @@ export function DateTimeModal({
         <text fg={COLOR.accent} bg={SURFACE.raised}>{`${day} · ${when}`}</text>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center" }}>
-        <text fg={COLOR.faint} bg={SURFACE.raised}>{"←→ field · ↑↓ change · digits type · enter · soonest +5 min"}</text>
+        <text fg={COLOR.faint} bg={SURFACE.raised}>{t("ui.field_change_digits_type_97be")}</text>
       </box>
     </ModalShell>
   );

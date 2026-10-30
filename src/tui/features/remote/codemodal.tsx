@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -58,22 +59,23 @@ export function PairingCodeModal({
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
       <box style={{ flexDirection: "column", flexGrow: 1 }}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-          <text fg={COLOR.bright} selectable={false}>{serverName === null ? "Pair a device with this machine" : `Pair a device with ${serverName}`}</text>
+          <text fg={COLOR.bright} selectable={false}>{serverName === null ? t("remote.pair_a_device_with_6aa2") : t("pair.deviceWith", { server: serverName })}</text>
           <box style={{ flexGrow: 1 }} />
           <text fg={COLOR.faint} selectable={false}>{"esc"}</text>
         </box>
         <box style={{ height: 1, flexShrink: 0 }} />
         <text fg={expired ? COLOR.faint : COLOR.accent}>{`  ${pairing.code}`}</text>
         <text fg={COLOR.dim} selectable={false}>
-          {expired ? "  expired — show a new one" : `  single use · valid ${minutes}:${String(seconds).padStart(2, "0")} more`}
+          {expired ? t("remote.expired_show_a_new_04b6") : t("pair.singleUse", { time: `${minutes}:${String(seconds).padStart(2, "0")}` })}
         </text>
         <box style={{ height: 1, flexShrink: 0 }} />
-        <text fg={COLOR.dim} selectable={false}>{"On the other machine, Command palette › Pair with a server, or:"}</text>
+        <text fg={COLOR.dim} selectable={false}>{t("remote.on_the_other_machine_a09e")}</text>
+        {/* i18n-exempt: a command to type on the other machine */}
         <text fg={COLOR.bright}>{`  moxen remote pair ${address} ${pairing.code}`}</text>
         <box style={{ height: 1, flexShrink: 0 }} />
-        <text fg={COLOR.dim} selectable={false}>{pairing.addresses.length > 1 ? "Addresses:" : "Address:"}</text>
+        <text fg={COLOR.dim} selectable={false}>{pairing.addresses.length > 1 ? t("remote.addresses_4587") : t("remote.address_2bf1")}</text>
         <text fg={COLOR.bright}>{`  ${pairing.addresses.join("  ")}`}</text>
-        <text fg={COLOR.dim} selectable={false}>{"Key fingerprint (the other machine shows it after pairing):"}</text>
+        <text fg={COLOR.dim} selectable={false}>{t("remote.key_fingerprint_the_other_4ee5")}</text>
         <text fg={COLOR.faint}>{`  ${pairing.fingerprint}`}</text>
       </box>
     </ModalShell>

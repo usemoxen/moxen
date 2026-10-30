@@ -27,6 +27,8 @@ export interface FakeOpencodeScript {
   /** `model.list`. Unset: the list is unreadable, so the driver skips its model check. */
   readonly models?: ReadonlyArray<OpencodeModelInfo>;
   readonly failMethods?: Record<string, string>;
+  /** The first this many servers started are dead on arrival: nothing answers at their address. */
+  readonly unreachableServers?: number;
   /** Session ids `getSession` reports as gone (pruned, another machine). */
   readonly lostSessions?: readonly string[];
   /** Child session id → the session that started it (a `subagent` child's `parentID`). */
@@ -131,13 +133,22 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     return this.title;
   }
 
+  /** Set on a server that died unnoticed: every call to it fails as the client does with no one listening. */
+  unreachable = false;
+
+  private checkReachable(): void {
+    if (this.unreachable) throw Object.assign(new Error("Transport: Unable to connect. Is the computer able to access the url?"), { reason: "Transport" });
+  }
+
   async createSession(input: { title?: string }): Promise<OpencodeSessionState> {
+    this.checkReachable();
     this.failChecked("session.create");
     this.calls.push({ method: "session.create", args: input });
     return { sessionID: this.script.sessionID ?? "opencode-session-1" };
   }
 
   async getSession(sessionID: string): Promise<OpencodeSessionState | null> {
+    this.checkReachable();
     this.calls.push({ method: "session.get", args: { sessionID } });
     if (this.script.lostSessions?.includes(sessionID)) return null;
     const parentID = this.script.parents?.[sessionID];
@@ -217,6 +228,10 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
   async setInstructions(sessionID: string, key: string, value: string | null): Promise<void> {
     this.calls.push({ method: "session.instructions", args: { sessionID, key, value } });
     this.failChecked("session.instructions");
+  }
+
+  async stopShell(shellID: string): Promise<void> {
+    this.calls.push({ method: "shell.stop", args: { shellID } });
   }
 
   async abortSession(sessionID: string): Promise<void> {
@@ -315,6 +330,7 @@ export class FakeOpencodeTransport implements OpencodeTransport {
     const failure = this.script.failMethods?.["ensureServer"];
     if (failure) throw new Error(failure);
     const server = new FakeOpencodeServerConnection(this.script);
+    server.unreachable = this.servers.length < (this.script.unreachableServers ?? 0);
     this.servers.push(server);
     return server;
   }

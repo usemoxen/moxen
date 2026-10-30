@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { RefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 
@@ -16,7 +17,7 @@ function DiffLoading({ width }: { width: number }) {
   const bar = `${"░".repeat(pos)}▓${"░".repeat(Math.max(0, barWidth - pos - 1))}`;
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <text fg={COLOR.dim}>{` ${frame} loading patch…`}</text>
+      <text fg={COLOR.dim}>{t("diff.loading", { frame })}</text>
       <text fg={COLOR.faint}>{` ${bar}`}</text>
     </box>
   );
@@ -64,7 +65,7 @@ export function FileSection({
         <text fg={COLOR.removed} selectable={false}>{` -${file.deletions}`}</text>
       </box>
       {collapsed ? null : file.binary ? (
-        <text fg={COLOR.dim}>{"   binary file"}</text>
+        <text fg={COLOR.dim}>{t("diff.binary_file_ef89")}</text>
       ) : (
         <diff
           diff={file.patch}
@@ -150,16 +151,16 @@ export function DiffPanel({
         {...headerHandlers}
       >
         <text fg={headerHovered ? COLOR.bright : COLOR.dim} bg={headerHovered ? SURFACE.border : SURFACE.panel} selectable={false}>
-          {turnCount === null ? " Diff" : ` Diff turn ${turnCount}`}
+          {turnCount === null ? " Diff" : t("diff.turn", { n: turnCount })}
         </text>
         <text fg={COLOR.faint} bg={headerHovered ? SURFACE.border : SURFACE.panel} selectable={false}>
-          {`${turnTotal} turn${turnTotal === 1 ? "" : "s"} ▾ `}
+          {`${t("turns", { count: turnTotal })} ▾ `}
         </text>
       </box>
       {loading ? (
         <DiffLoading width={inner} />
       ) : files.length === 0 ? (
-        <text fg={COLOR.dim}>{" no file changes in this turn"}</text>
+        <text fg={COLOR.dim}>{t("diff.no_file_changes_in_4815")}</text>
       ) : (
         <scrollbox
           ref={scrollRef}
@@ -191,7 +192,7 @@ export function DiffPanel({
           <text fg={COLOR.added} bg={SURFACE.panel} selectable={false}>{`+${added}`}</text>
           <text fg={COLOR.removed} bg={SURFACE.panel} selectable={false}>{` -${removed}`}</text>
         </box>
-        <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{"click a file to fold"}</text>
+        <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{t("diff.click_a_file_to_dfe5")}</text>
       </box>
     </box>
   );

@@ -1,10 +1,9 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
-import { App } from "../../app/app.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { LinkState } from "../../../server/transport/remote.js";
-import { client } from "../fixtures.js";
+import { App, client } from "../fixtures.js";
 import { fail } from "../helpers.js";
 
 /** The fixture client, plus the link state a `RemoteConnection` reports, set by hand. */

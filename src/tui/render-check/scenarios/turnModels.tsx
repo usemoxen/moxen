@@ -1,4 +1,4 @@
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import type { MessageEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import type { ClientApi, ShellFrame, ThreadFrame } from "../../../server/api.js";

@@ -85,6 +85,10 @@ export type BackdropMode = "animated" | "static" | "off";
 
 export interface UiConfig {
   backdrop?: BackdropMode;
+  /** The TUI colour theme, by name (`moxen`, `catppuccin-mocha`, `dracula`, …). Unset or unknown: `moxen`. */
+  theme?: string;
+  /** The TUI language: `auto` (the terminal's own, from LC_ALL / LANG), `en` or `es-ES`. Unset: `auto`. */
+  language?: "auto" | "en" | "es-ES";
   /** Each model's own scene behind the new-thread view; off keeps the monitoring field. On by default. */
   modelScenes?: boolean;
   /** Leave binary files out of the Diff tab. On by default. */
@@ -190,16 +194,8 @@ export interface HarnessProviderConfig {
   keepRecentTokens?: number;
   /** How many requests a profile's server takes at once when the profile does not say; unset means no limit. */
   slots?: number;
-  /** Where `web_search` looks: duckduckgo (no account), exa or brave (a key), searxng (your instance). */
+  /** Where `web_search` looks: duckduckgo (no account) or searxng (your instance). Exa and Brave are their MCP servers' (the Exa and Brave Search presets). */
   webSearch?: string;
-  /** Each search service's own key: a `keychain:` reference per backend, so switching services never sends one's key to the other. */
-  webSearchKeys?: Partial<Record<KeyedSearchBackend, string>>;
-  /** Each search service's own key variable: the NAME of an environment variable, never the key. A saved key wins over it. */
-  webSearchKeyEnvs?: Partial<Record<KeyedSearchBackend, string>>;
-  /** Older single slot for "the Exa or Brave key", read only while no per-service key is set (`resolveWebSettings`). Kept for files an older build shares. */
-  webSearchKeyEnv?: string;
-  /** Older single slot, as `webSearchKeyEnv`: a `keychain:` reference. */
-  webSearchKey?: string;
   /** Address of a SearXNG instance. */
   searxngUrl?: string;
   /** Older keys for what is now the shared `web` section; read when it leaves them unset (`webPolicy`). */
@@ -208,9 +204,6 @@ export interface HarnessProviderConfig {
   /** Older key: opened private networks for the Moxen Harness's web tools only. */
   webPrivateNetwork?: boolean;
 }
-
-/** The search services that take a key of their own. */
-export type KeyedSearchBackend = "exa" | "brave";
 
 /** How Moxen's web tools reach the web, for every provider: the Harness's own tools and the `web_fetch` Moxen offers Claude Code and OpenCode. */
 export interface SkillsConfig {

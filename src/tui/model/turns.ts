@@ -1,3 +1,4 @@
+import { currentLanguage, t } from "../i18n/index.js";
 import type { TimelineEntry } from "./thread.js";
 import { describeActivity } from "./activity.js";
 import { workingMs, type TurnWaits, type WaitSpan } from "./waits.js";
@@ -281,8 +282,9 @@ export function formatContextUsage(usage: {
   };
 }
 
-const WEEKDAY_LABEL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTH_LABEL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// 2023-01-01 was a Sunday: a fixed week to ask Intl for the day names, in whatever language is set.
+const weekdayLabel = (day: number): string => new Date(Date.UTC(2023, 0, 1 + day)).toLocaleDateString(currentLanguage(), { weekday: "short", timeZone: "UTC" });
+const monthLabel = (month: number): string => new Date(Date.UTC(2023, month, 1)).toLocaleDateString(currentLanguage(), { month: "short", timeZone: "UTC" });
 
 function startOfDay(ms: number): number {
   const date = new Date(ms);
@@ -303,8 +305,8 @@ export function clockTime(value: string, now: number): string {
   const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const dayDiff = Math.round((startOfDay(now) - startOfDay(parsed)) / 86_400_000);
   if (dayDiff <= 0) return time;
-  if (dayDiff < 7) return `${WEEKDAY_LABEL[date.getDay()]}, ${time}`;
-  return `${String(date.getDate()).padStart(2, "0")} ${MONTH_LABEL[date.getMonth()]}, ${time}`;
+  if (dayDiff < 7) return `${weekdayLabel(date.getDay())}, ${time}`;
+  return `${String(date.getDate()).padStart(2, "0")} ${monthLabel(date.getMonth())}, ${time}`;
 }
 
 /**
@@ -362,6 +364,9 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
       case "memory":
         bump(`memory-${view.action}`);
         break;
+      case "threads":
+        bump(`thread-${view.action}`);
+        break;
       case "tool":
         bump("tool");
         break;
@@ -381,36 +386,43 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
 }
 
 function summarizePart(key: string, count: number): string {
-  const plural = count === 1 ? "" : "s";
-  switch (key) {
+    switch (key) {
     case "command":
-      return `ran ${count} command${plural}`;
+      return t("summary.command", { count });
     case "file-created":
-      return `created ${count} new file${plural}`;
+      return t("summary.file_created", { count });
     case "file-updated":
-      return `updated ${count} file${plural}`;
+      return t("summary.file_updated", { count });
     case "read":
-      return `read ${count} file${plural}`;
+      return t("summary.read", { count });
     case "grep":
-      return `searched code ${count} time${plural}`;
+      return t("summary.grep", { count });
     case "web":
-      return `searched the web ${count} time${plural}`;
+      return t("summary.web", { count });
     case "question":
-      return `asked ${count} question${plural}`;
+      return t("summary.question", { count });
     case "task":
-      return `ran ${count} task${plural}`;
+      return t("summary.task", { count });
     case "skill":
-      return `used ${count} skill${plural}`;
+      return t("summary.skill", { count });
+    case "thread-search":
+      return t("summary.thread_search", { count });
+    case "thread-read":
+      return t("summary.thread_read", { count });
     case "memory-read":
-      return `read ${count} ${count === 1 ? "memory" : "memories"}`;
+      return t("summary.memory_read", { count });
     case "memory-save":
-      return `saved ${count} ${count === 1 ? "memory" : "memories"}`;
+      return t("summary.memory_save", { count });
+    case "memory-edit":
+      return t("summary.memory_edit", { count });
+    case "memory-append":
+      return t("summary.memory_append", { count });
     case "memory-delete":
-      return `deleted ${count} ${count === 1 ? "memory" : "memories"}`;
+      return t("summary.memory_delete", { count });
     case "tool":
-      return `used ${count} tool${plural}`;
+      return t("summary.tool", { count });
     default:
-      return `ran ${count} step${plural}`;
+      return t("summary.step", { count });
   }
 }
 

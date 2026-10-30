@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "../../hooks/useClipboard.js";
@@ -56,7 +57,7 @@ export function useComposer(
     if (draft.trim().length === 0) return;
     void copyPrompt(clipboard, draft, pending).then(({ ok, images }) => {
       if (ok) toasts.push("copy-draft", "info", copiedToast(pending.length, images), COPY_TOAST_MS);
-      else if (clipboard.isRemote()) setError("copy failed — terminal may block OSC 52");
+      else if (clipboard.isRemote()) setError(t("app.copy_failed_terminal_may_6db8"));
     });
   };
 
@@ -155,7 +156,7 @@ export function useComposer(
         temp = await createTempDraftFile(seed);
         const exitCode = await runEditorAttached(command, args, temp.file);
         if (exitCode !== 0) {
-          setError(`editor exited with code ${exitCode}`);
+          setError(t("editor.exited", { code: exitCode }));
           return;
         }
         const edited = await readTempDraftFile(temp.file);
@@ -164,7 +165,7 @@ export function useComposer(
           setComposerResetCounter((count) => count + 1);
         }
       } catch (cause: unknown) {
-        setError(`could not open ${editor}: ${String(cause).slice(0, 80)}`);
+        setError(t("editor.cannotOpen", { editor, why: String(cause).slice(0, 80) }));
       } finally {
         if (temp !== null) await cleanupTempDraftFile(temp.dir);
         setEditingExternally(false);

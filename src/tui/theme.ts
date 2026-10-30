@@ -1,44 +1,50 @@
 import { SyntaxStyle } from "@opentui/core";
+import { DEFAULT_THEME, THEMES, isThemeName, type ThemeName, type ThemeSpec } from "./themes.js";
+
+/*
+ * The palettes below are plain objects that `applyTheme` rewrites in place.
+ * Components read them while rendering, so a theme change shows on the next
+ * draw without anything being re-imported. Never copy a value out at module
+ * load (`const X = COLOR.accent`): it would keep the old theme's colour.
+ */
 
 /**
- * One quiet zinc scale, OpenCode-style: panes separate by a few lightness
- * steps on the same hue, so chrome never bands into stripes. Keep every
- * surface within ~10 lightness of base; colour carries meaning, not chrome.
+ * One quiet scale per theme: panes separate by a few lightness steps on the
+ * same hue, so chrome never bands into stripes. Colour carries meaning, not
+ * chrome.
  */
 export const SURFACE = {
-  base: "#09090b",
-  panel: "#0f0f12",
-  raised: "#17171b",
+  base: "",
+  panel: "",
+  raised: "",
   /** Button hover fill — one step above `raised`, for text buttons that
       signal hover with a background instead of a tone/underline change. */
-  hover: "#202027",
-  user: "#14141a",
-  agent: "#0f0f12",
-  border: "#27272a",
-  borderFocus: "#7dd3fc",
-} as const;
+  hover: "",
+  user: "",
+  agent: "",
+  border: "",
+  borderFocus: "",
+};
 
 /** One palette for every pane so chrome stays quiet and colour carries meaning. */
 export const COLOR = {
-  // Claude Code's body text, deliberately below pure white so long sessions
-  // stay easy on the eyes.
-  text: "#dcdfe4",
-  bright: "#eceef2",
-  dim: "#8b8f98",
-  faint: "#3f3f46",
-  rule: "#27272a",
-  accent: "#7dd3fc",
-  user: "#86efac",
-  agent: "#93c5fd",
-  tool: "#a1a1aa",
-  command: "#c3e88d",
-  warn: "#fbbf24",
-  danger: "#f87171",
-  diff: "#c4b5fd",
-  added: "#4ade80",
-  removed: "#f87171",
-  selectionBg: "#1f2937",
-} as const;
+  text: "",
+  bright: "",
+  dim: "",
+  faint: "",
+  rule: "",
+  accent: "",
+  user: "",
+  agent: "",
+  tool: "",
+  command: "",
+  warn: "",
+  danger: "",
+  diff: "",
+  added: "",
+  removed: "",
+  selectionBg: "",
+};
 
 /**
  * A thread's mode, on the composer's left edge and in its footer. Amber
@@ -47,18 +53,10 @@ export const COLOR = {
  * and Orchestrate's orchid stay distinct; blue remains the app's structural
  * focus colour instead of competing with Build in the composer.
  */
-export const MODE_COLOR = {
-  default: "#72cdbd",
-  research: COLOR.diff,
-  orchestrate: "#e9a8f5",
-} as const;
+export const MODE_COLOR = { default: "", research: "", orchestrate: "" };
 
 /** The other end of each mode's running pulse (`pulseColor` from `MODE_COLOR`). */
-export const MODE_PULSE = {
-  default: "#c9f0e8",
-  research: "#ede9fe",
-  orchestrate: "#f8e0fb",
-} as const;
+export const MODE_PULSE = { default: "", research: "", orchestrate: "" };
 
 /**
  * Tree-sitter highlight-group palette for code grammars (`keyword`,
@@ -70,58 +68,123 @@ export const MODE_PULSE = {
  * `<markdown>` renderable); never passed to a renderable directly, or
  * markdown files render all-white (no `markup.*` groups).
  */
-export const CODE_SYNTAX_TOKENS = {
-  default: { fg: "#e5e7eb" },
-  keyword: { fg: "#c792ea", italic: true },
-  "keyword.import": { fg: "#c792ea" },
-  "keyword.return": { fg: "#c792ea", italic: true },
-  "keyword.function": { fg: "#82aaff" },
-  "keyword.operator": { fg: "#89ddff" },
-  "keyword.type": { fg: "#ffcb6b", bold: true },
-  string: { fg: "#c3e88d" },
-  "string.special": { fg: "#c3e88d" },
-  comment: { fg: "#5f7e97", italic: true },
-  number: { fg: "#f78c6c" },
-  boolean: { fg: "#f78c6c" },
-  constant: { fg: "#f78c6c" },
-  function: { fg: "#82aaff" },
-  "function.call": { fg: "#82aaff" },
-  "function.method": { fg: "#82aaff" },
-  constructor: { fg: "#82aaff" },
-  type: { fg: "#ffcb6b" },
-  class: { fg: "#ffcb6b" },
-  module: { fg: "#ffcb6b" },
-  variable: { fg: "#e5e7eb" },
-  "variable.parameter": { fg: "#f78c6c" },
-  "variable.member": { fg: "#82aaff" },
-  property: { fg: "#80cbc4" },
-  operator: { fg: "#89ddff" },
-  punctuation: { fg: "#89ddff" },
-  "punctuation.bracket": { fg: "#89ddff" },
-  "punctuation.delimiter": { fg: "#89ddff" },
-  bracket: { fg: "#89ddff" },
-  tag: { fg: "#f07178" },
-  "tag.attribute": { fg: "#ffcb6b" },
-  label: { fg: "#c792ea" },
-} as const;
+export type SyntaxToken = { fg: string; italic?: boolean; bold?: boolean };
+export const CODE_SYNTAX_TOKENS: Record<string, SyntaxToken> = {};
 
 /** Row-background palette for `<diff>` renderables — shared by the full-file
     `diffpanel.tsx` view and the inline per-edit diff in `timeline.tsx` so a
     change reads the same color whether it's in the side panel or the chat. */
-export const DIFF_BG = {
-  added: "#0f2a1a",
-  removed: "#2e1516",
-  addedLineNumber: "#16341f",
-  removedLineNumber: "#3a1a1b",
-} as const;
+export const DIFF_BG = { added: "", removed: "", addedLineNumber: "", removedLineNumber: "" };
 
-export const STATUS_COLOR: Record<string, string> = {
-  running: COLOR.accent,
-  blocked: COLOR.danger,
-  active: COLOR.warn,
-  snoozed: "#a78bfa",
-  settled: COLOR.dim,
-};
+export const STATUS_COLOR: Record<string, string> = {};
+
+function codeTokens(t: ThemeSpec): Record<string, SyntaxToken> {
+  return {
+    default: { fg: t.text },
+    keyword: { fg: t.purple, italic: true },
+    "keyword.import": { fg: t.purple },
+    "keyword.return": { fg: t.purple, italic: true },
+    "keyword.function": { fg: t.accent },
+    "keyword.operator": { fg: t.cyan },
+    "keyword.type": { fg: t.yellow, bold: true },
+    string: { fg: t.green },
+    "string.special": { fg: t.green },
+    comment: { fg: t.comment, italic: true },
+    number: { fg: t.orange },
+    boolean: { fg: t.orange },
+    constant: { fg: t.orange },
+    function: { fg: t.accent },
+    "function.call": { fg: t.accent },
+    "function.method": { fg: t.accent },
+    constructor: { fg: t.accent },
+    type: { fg: t.yellow },
+    class: { fg: t.yellow },
+    module: { fg: t.yellow },
+    variable: { fg: t.text },
+    "variable.parameter": { fg: t.orange },
+    "variable.member": { fg: t.accent },
+    property: { fg: t.teal },
+    operator: { fg: t.cyan },
+    punctuation: { fg: t.cyan },
+    "punctuation.bracket": { fg: t.cyan },
+    "punctuation.delimiter": { fg: t.cyan },
+    bracket: { fg: t.cyan },
+    tag: { fg: t.red },
+    "tag.attribute": { fg: t.yellow },
+    label: { fg: t.purple },
+  };
+}
+
+let currentTheme: ThemeName = DEFAULT_THEME;
+
+/** The theme the palettes currently hold. */
+export function activeTheme(): ThemeName {
+  return currentTheme;
+}
+
+/**
+ * Rewrites every palette in place for `name` (an unknown name falls back to
+ * the default) and drops the cached markdown style. Returns whether anything
+ * changed, so a caller can skip a redraw.
+ */
+export function applyTheme(name: string | undefined): boolean {
+  const next: ThemeName = isThemeName(name) ? name : DEFAULT_THEME;
+  if (next === currentTheme && SURFACE.base !== "") return false;
+  currentTheme = next;
+  const t: ThemeSpec = THEMES[next];
+  Object.assign(SURFACE, {
+    base: t.base,
+    panel: t.panel,
+    raised: t.raised,
+    hover: t.hover,
+    user: t.user,
+    agent: t.panel,
+    border: t.border,
+    borderFocus: t.accent,
+  });
+  Object.assign(COLOR, {
+    text: t.text,
+    bright: t.bright,
+    dim: t.dim,
+    faint: t.faint,
+    rule: t.border,
+    accent: t.accent,
+    user: t.green,
+    agent: t.blue,
+    tool: t.tool ?? t.dim,
+    command: t.green,
+    warn: t.yellow,
+    danger: t.red,
+    diff: t.purple,
+    added: t.green,
+    removed: t.red,
+    selectionBg: t.selection,
+  });
+  Object.assign(MODE_COLOR, { default: t.teal, research: t.purple, orchestrate: t.pink });
+  Object.assign(MODE_PULSE, {
+    default: lerpColor(t.teal, t.bright, 0.7),
+    research: lerpColor(t.purple, t.bright, 0.7),
+    orchestrate: lerpColor(t.pink, t.bright, 0.7),
+  });
+  Object.assign(DIFF_BG, {
+    added: lerpColor(t.base, t.green, 0.14),
+    removed: lerpColor(t.base, t.red, 0.14),
+    addedLineNumber: lerpColor(t.base, t.green, 0.2),
+    removedLineNumber: lerpColor(t.base, t.red, 0.2),
+  });
+  for (const key of Object.keys(CODE_SYNTAX_TOKENS)) delete CODE_SYNTAX_TOKENS[key];
+  Object.assign(CODE_SYNTAX_TOKENS, codeTokens(t));
+  for (const key of Object.keys(STATUS_COLOR)) delete STATUS_COLOR[key];
+  Object.assign(STATUS_COLOR, {
+    running: t.accent,
+    blocked: t.red,
+    active: t.yellow,
+    snoozed: t.purple,
+    settled: t.dim,
+  });
+  cachedMarkdownStyle = null;
+  return true;
+}
 
 /**
  * Best-effort brand-color approximations — the provider catalog carries no
@@ -196,6 +259,17 @@ export function lerpColor(from: string, to: string, t: number): string {
 }
 
 /**
+ * The ground the model scenes paint on. Scenes add light onto it, so on a
+ * light theme (where light on light is just white) they keep a night ground
+ * taken from the theme's own text colour instead of its surface.
+ */
+export function sceneBase(): string {
+  const [r, g, b] = hexToRgb(SURFACE.base);
+  const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luma > 0.5 ? lerpColor(COLOR.text, "#000000", 0.72) : SURFACE.base;
+}
+
+/**
  * A slow gray-to-vivid-to-gray pulse so a "working" indicator reads as
  * actively alive rather than a static label. `now`/`startedAt` drive the
  * phase so the color advances on the same tick that already redraws the
@@ -225,43 +299,47 @@ export function pulseColor(elapsedMs: number, from: string, to: string, periodMs
  * this same style so `md`/`mdx` hunks highlight via `markup.*` instead of
  * falling back to all-white default text.
  */
-const MARKDOWN_SYNTAX_TOKENS = {
-  ...CODE_SYNTAX_TOKENS,
-  default: { fg: COLOR.text },
-  conceal: { fg: COLOR.faint },
-  "markup.heading": { fg: COLOR.bright, bold: true },
-  "markup.heading.1": { fg: COLOR.accent, bold: true, underline: true },
-  "markup.heading.2": { fg: COLOR.accent, bold: true },
-  "markup.heading.3": { fg: COLOR.bright, bold: true },
-  "markup.heading.4": { fg: COLOR.text, bold: true },
-  "markup.heading.5": { fg: COLOR.dim, bold: true },
-  "markup.heading.6": { fg: COLOR.dim, italic: true },
-  "markup.strong": { fg: COLOR.bright, bold: true },
-  "markup.italic": { italic: true },
-  "markup.strikethrough": { fg: COLOR.dim, dim: true },
-  "markup.raw": { fg: COLOR.command },
-  "markup.raw.block": { fg: COLOR.command },
-  "markup.link": { fg: COLOR.dim },
-  "markup.link.label": { fg: COLOR.accent, underline: true },
-  "markup.link.url": { fg: COLOR.dim },
-  "markup.list": { fg: COLOR.accent },
-  "markup.list.checked": { fg: COLOR.added },
-  "markup.list.unchecked": { fg: COLOR.dim },
-  "markup.quote": { fg: COLOR.dim, italic: true },
-  // Shared by markdown's own decoration marks (table pipes, `hr`) *and*
-  // code's template-literal interpolation braces (`${...}`) — one group
-  // name, two contexts; `dim` reads fine as de-emphasis in both rather than
-  // vanishing against the panel background like `faint` did for `${}`.
-  "punctuation.special": { fg: COLOR.dim },
-  label: { fg: COLOR.dim },
-  "keyword.directive": { fg: COLOR.warn },
-  "string.escape": { fg: COLOR.dim },
-} as const;
+function markdownSyntaxTokens() {
+  return {
+    ...CODE_SYNTAX_TOKENS,
+    default: { fg: COLOR.text },
+    conceal: { fg: COLOR.faint },
+    "markup.heading": { fg: COLOR.bright, bold: true },
+    "markup.heading.1": { fg: COLOR.accent, bold: true, underline: true },
+    "markup.heading.2": { fg: COLOR.accent, bold: true },
+    "markup.heading.3": { fg: COLOR.bright, bold: true },
+    "markup.heading.4": { fg: COLOR.text, bold: true },
+    "markup.heading.5": { fg: COLOR.dim, bold: true },
+    "markup.heading.6": { fg: COLOR.dim, italic: true },
+    "markup.strong": { fg: COLOR.bright, bold: true },
+    "markup.italic": { italic: true },
+    "markup.strikethrough": { fg: COLOR.dim, dim: true },
+    "markup.raw": { fg: COLOR.command },
+    "markup.raw.block": { fg: COLOR.command },
+    "markup.link": { fg: COLOR.dim },
+    "markup.link.label": { fg: COLOR.accent, underline: true },
+    "markup.link.url": { fg: COLOR.dim },
+    "markup.list": { fg: COLOR.accent },
+    "markup.list.checked": { fg: COLOR.added },
+    "markup.list.unchecked": { fg: COLOR.dim },
+    "markup.quote": { fg: COLOR.dim, italic: true },
+    // Shared by markdown's own decoration marks (table pipes, `hr`) *and*
+    // code's template-literal interpolation braces (`${...}`) — one group
+    // name, two contexts; `dim` reads fine as de-emphasis in both rather than
+    // vanishing against the panel background like `faint` did for `${}`.
+    "punctuation.special": { fg: COLOR.dim },
+    label: { fg: COLOR.dim },
+    "keyword.directive": { fg: COLOR.warn },
+    "string.escape": { fg: COLOR.dim },
+  };
+}
 
 let cachedMarkdownStyle: SyntaxStyle | null = null;
 
 /** The shared style every `<markdown>` renderable takes (messages, plans, question previews). */
 export function markdownSyntaxStyle(): SyntaxStyle {
-  cachedMarkdownStyle ??= SyntaxStyle.fromStyles(MARKDOWN_SYNTAX_TOKENS);
+  cachedMarkdownStyle ??= SyntaxStyle.fromStyles(markdownSyntaxTokens());
   return cachedMarkdownStyle;
 }
+
+applyTheme(DEFAULT_THEME);

@@ -71,6 +71,8 @@ const KERNEL_PREFIXES = [
   "src/core/threads/views",
   // When a long thread hands off or compacts: pure rules over config and a reading, like `threads/views`. The server acts on them; a client only draws the card.
   "src/core/threads/longthreads",
+  // How stats are worded and how the heatmap is laid out: pure rules over a `usage.stats` result, shared with the image card the server draws.
+  "src/core/usage/present",
   "src/core/attachments",
   "src/core/syntax",
   "src/core/infra/",

@@ -12,6 +12,7 @@
  * this one after a restart) recognises the copy too. Only the latest copy
  * is kept; its image files replace the previous copy's.
  */
+import { t } from "../i18n/index.js";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -171,11 +172,11 @@ export async function copyPrompt(
 
 /** What a copy toast says: plain, or how the images went along. */
 export function copiedToast(attached: number, onClipboard: number): string {
-  if (attached === 0) return "Copied to clipboard";
-  const images = `${attached} image${attached === 1 ? "" : "s"}`;
+  if (attached === 0) return t("app.copied_to_clipboard_efc1");
+  const images = t("copy.images", { count: attached });
   return onClipboard > 0
-    ? `Copied with ${images} (in clipboard history too) · paste here to attach them`
-    : `Copied · paste here to attach the ${images}`;
+    ? t("copy.withImages", { images })
+    : t("copy.pasteImages", { images });
 }
 
 /** For tests: forget the in-memory copy (the file stays). */

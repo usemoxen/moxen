@@ -60,11 +60,10 @@ describe("web tool intents", () => {
     expect(sessionAllowKey("web_fetch", fetchTool.intent({ url: "https://other.example/x" }, context), "/w")).not.toBe("web:docs.example.com");
   });
 
-  it("reads the web settings on each call: DuckDuckGo and the browser on automatically unless told otherwise, a key only by variable name", () => {
+  it("reads the web settings on each call: DuckDuckGo and the browser on automatically unless told otherwise", () => {
     expect(resolveWebSettings(undefined, {})).toMatchObject({ search: { backend: "duckduckgo" }, browser: { mode: "auto" }, allowPrivate: false });
-    const configured = resolveWebSettings({ webSearch: "brave", webSearchKeyEnv: "BRAVE_KEY", webBrowser: "off", webPrivateNetwork: true }, { BRAVE_KEY: "x" });
-    expect(configured).toMatchObject({ search: { backend: "brave", keyEnv: "BRAVE_KEY" }, browser: { mode: "off" }, allowPrivate: true });
-    expect(JSON.stringify({ ...configured, env: undefined })).not.toContain('"x"');
+    const configured = resolveWebSettings({ webSearch: "searxng", searxngUrl: "http://localhost:8888", webBrowser: "off", webPrivateNetwork: true }, {});
+    expect(configured).toMatchObject({ search: { backend: "searxng", searxngUrl: "http://localhost:8888" }, browser: { mode: "off" }, allowPrivate: true });
     expect(resolveWebSettings({ webSearch: "bing" }, {}).search.backend).toBe("duckduckgo");
   });
 
@@ -75,16 +74,6 @@ describe("web tool intents", () => {
     expect(webPolicy(undefined, { webBrowser: "off", webPrivateNetwork: true }, false)).toEqual({ browser: { mode: "off", path: undefined }, allowPrivate: false });
     expect(webPolicy(undefined, { webPrivateNetwork: true }, true).allowPrivate).toBe(true);
     expect(webPolicy({ privateNetwork: true }, undefined, false).allowPrivate).toBe(true);
-  });
-
-  it("keeps one key per search service, and reads the older single slot only for a file that has no other", () => {
-    const legacy = { webSearch: "exa", webSearchKey: "keychain:providers.harness.webSearchKey", webSearchKeyEnv: "SEARCH_KEY" };
-    expect(resolveWebSettings(legacy, {}).search).toMatchObject({ backend: "exa", keyRef: "keychain:providers.harness.webSearchKey", keyEnv: "SEARCH_KEY" });
-    const split = { ...legacy, webSearch: "brave", webSearchKeys: { exa: "keychain:providers.harness.webSearchKey" } };
-    expect(resolveWebSettings(split, {}).search).toEqual({ backend: "brave", searxngUrl: undefined });
-    expect(resolveWebSettings({ ...split, webSearch: "exa" }, {}).search).toMatchObject({ keyRef: "keychain:providers.harness.webSearchKey" });
-    expect(resolveWebSettings({ ...split, webSearchKeyEnvs: { brave: "BRAVE_KEY" } }, {}).search).toMatchObject({ backend: "brave", keyEnv: "BRAVE_KEY" });
-    expect(resolveWebSettings({ ...split, webSearchKeyEnvs: { brave: "BRAVE_KEY" } }, {}).search).not.toHaveProperty("keyRef");
   });
 
   it("states in the tool text that results are data and that sign-in is not possible", () => {

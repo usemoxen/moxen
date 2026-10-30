@@ -23,7 +23,7 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { CliError } from "../core/errors.js";
-import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryScope, type MemoryType } from "../core/memory/memory.js";
+import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemoryType } from "../core/memory/memory.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
@@ -60,6 +60,9 @@ import type {
   MergeStrategy,
 } from "../core/forge/forge.js";
 import type { Diagnosis } from "../core/diagnostics/doctor.js";
+import type { StatsRange, UsageStats } from "../core/usage/stats.js";
+import { type CardPalette, isCardPalette } from "../core/usage/card.js";
+import type { UsageCard } from "../core/usage/statsstore.js";
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
@@ -215,6 +218,10 @@ export type CommandBody =
    */
   | ({ readonly type: "memory.save"; readonly name: string; readonly description: string; readonly memoryType: MemoryType; readonly body: string; readonly scope: MemoryScope } & MemoryAddress)
   | ({ readonly type: "memory.delete"; readonly name: string; readonly scope: MemoryScope } & MemoryAddress)
+  /** Replace one piece of a memory's body (`oldText` must be in it exactly once); `description` replaces the description. */
+  | ({ readonly type: "memory.edit"; readonly name: string; readonly scope: MemoryScope; readonly oldText: string; readonly newText: string; readonly description?: string } & MemoryAddress)
+  /** Add text to the end of a memory that exists. */
+  | ({ readonly type: "memory.append"; readonly name: string; readonly scope: MemoryScope; readonly text: string } & MemoryAddress)
   /** Copy Claude Code's auto memory for the project into Moxen's: only ever when the user asks. */
   | ({ readonly type: "memory.import-claude" } & MemoryAddress)
   | {
@@ -343,9 +350,11 @@ export interface CommandResults {
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
-  /** `total`: the memories the scope holds afterwards. */
-  "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number };
-  "memory.delete": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
+  /** `total`: the memories the scope holds afterwards; `before`: what a replace overwrote or a delete removed. */
+  "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number; readonly before?: MemoryBefore };
+  "memory.delete": { readonly name: string; readonly scope: MemoryScope; readonly total: number; readonly before: MemoryBefore };
+  "memory.edit": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
+  "memory.append": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
   "memory.import-claude": ImportResult;
   "settings.set": SettingsSnapshot & Accepted;
   "remote.pairing.start": RemotePairing;
@@ -451,6 +460,10 @@ export type Query =
    * every thread on it. Empty until a session reports.
    */
   | { readonly type: "usage.limits" }
+  /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
+  | { readonly type: "usage.stats"; readonly range?: StatsRange }
+  /** The stats as a shareable PNG card for a range (`all` unless given). Returned, not written: the client saves it where it runs. */
+  | { readonly type: "usage.card"; readonly range?: StatsRange; readonly palette?: CardPalette }
   /** Remote access as the server sees it; `available` false when there is no server (in-process). */
   | { readonly type: "remote.status" }
   /** Paired devices, with how many sockets each has open (0 without a server). */
@@ -546,6 +559,8 @@ export interface QueryResults {
   "memory.read": Memory;
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
   "thread.subagent": SubagentTranscript;
+  "usage.stats": UsageStats;
+  "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "remote.status": RemoteAccessStatus & { readonly available: boolean };
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
@@ -1026,6 +1041,27 @@ export function decodeCommand(value: unknown): Command {
       };
     case "memory.delete":
       return { ...meta, type, ...decodeMemoryAddress(record), name: requireField(record.name, type, "name"), scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES) };
+    case "memory.edit":
+      return {
+        ...meta,
+        type,
+        ...decodeMemoryAddress(record),
+        name: requireField(record.name, type, "name"),
+        scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES),
+        oldText: requireField(record.oldText, type, "oldText"),
+        // An empty replacement deletes the text: it is a value, not a missing field.
+        newText: typeof record.newText === "string" ? record.newText : requireField(record.newText, type, "newText"),
+        ...(typeof record.description === "string" ? { description: record.description } : {}),
+      };
+    case "memory.append":
+      return {
+        ...meta,
+        type,
+        ...decodeMemoryAddress(record),
+        name: requireField(record.name, type, "name"),
+        scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES),
+        text: requireField(record.text, type, "text"),
+      };
     case "memory.import-claude":
       return { ...meta, type, ...decodeMemoryAddress(record) };
     case "model.visibility.set":
@@ -1265,6 +1301,18 @@ export function decodeQuery(value: unknown): Query {
       };
     case "providers.list":
     case "doctor":
+    case "usage.card": {
+      if (record.palette !== undefined && !isCardPalette(record.palette)) {
+        throw new CliError("INVALID_QUERY", "usage.card palette must give background, text, dim, empty and muted as #rrggbb, and four levels.", { exitCode: 2 });
+      }
+      return {
+        type,
+        ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type),
+        ...(record.palette === undefined ? {} : { palette: record.palette }),
+      };
+    }
+    case "usage.stats":
+      return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
     case "remote.status":
     case "remote.devices":

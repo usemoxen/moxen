@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../../i18n/index.js";
 import { createContext, useContext, type ReactNode, type RefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
@@ -20,7 +21,11 @@ export function usePanelWidth(): number {
 
 // Key order is the tab strip's render order (`Object.keys` below): the
 // work-in-the-thread tabs first, then the two roll-up tabs.
-export const TAB_LABEL: Record<SideTab, string> = { diff: "Diff", git: "Git", context: "Context", agents: "Agents", background: "Background" };
+const TAB_KEYS: Record<SideTab, MessageKey> = { diff: "tab.diff", git: "tab.git", context: "tab.context", agents: "tab.agents", background: "tab.background" };
+const TAB_ORDER: readonly SideTab[] = ["diff", "git", "context", "agents", "background"];
+
+/** A tab's name in the current language. */
+export const tabLabel = (tab: SideTab): string => t(TAB_KEYS[tab]);
 
 /**
  * Used when the full labels will not fit. Five tabs plus their badges
@@ -28,12 +33,10 @@ export const TAB_LABEL: Record<SideTab, string> = { diff: "Diff", git: "Git", co
  * the right edge — so the strip sheds badges first, then falls back to
  * these, rather than silently losing the ×.
  */
-const TAB_SHORT_LABEL: Record<SideTab, string> = { diff: "Diff", git: "Git", context: "Ctx", agents: "Agents", background: "Bkgd" };
+const TAB_SHORT_KEYS: Record<SideTab, MessageKey> = { diff: "tab.diff", git: "tab.git", context: "tab.contextShort", agents: "tab.agents", background: "tab.backgroundShort" };
 
 /** Category colours, in order; free space and the compaction buffer keep their own. */
-const SHARE_COLORS = [COLOR.accent, COLOR.diff, COLOR.command, COLOR.warn, COLOR.user, COLOR.agent, "#f0abfc", "#fda4af"];
-const FREE_COLOR = "#3f3f46";
-const BUFFER_COLOR = "#71717a";
+const shareColors = (): string[] => [COLOR.accent, COLOR.diff, COLOR.command, COLOR.warn, COLOR.user, COLOR.agent, "#f0abfc", "#fda4af"];
 
 /** One tab: quiet text until hovered, a raised pill with bright text when open. */
 function TabButton({ label, badge, active, onClick }: { label: string; badge: string | null; active: boolean; onClick: () => void }) {
@@ -86,7 +89,7 @@ export function SideTabBar({
 }) {
   const { hovered, handlers } = useHover();
   const overlay = left !== undefined && width !== undefined;
-  const tabKeys = Object.keys(TAB_LABEL) as SideTab[];
+  const tabKeys = TAB_ORDER;
   const closeWidth = 3;
   // Exact cells the buttons take: pad + label + (" " + badge) + pad. All
   // labels/badges are narrow ASCII, so string length is cell width.
@@ -102,8 +105,8 @@ export function SideTabBar({
   // mostly recognisable from its first letters. Only when the short
   // labels still overflow do the badges go.
   const fits = (labels: Record<SideTab, string>, withBadges: boolean): boolean => measure(labels, withBadges) <= available;
-  const full = agentsLabel === undefined ? TAB_LABEL : { ...TAB_LABEL, agents: agentsLabel };
-  const short = agentsLabel === undefined ? TAB_SHORT_LABEL : { ...TAB_SHORT_LABEL, agents: agentsLabel };
+  const full = Object.fromEntries(TAB_ORDER.map((tab) => [tab, tab === "agents" && agentsLabel !== undefined ? agentsLabel : tabLabel(tab)])) as Record<SideTab, string>;
+  const short = Object.fromEntries(TAB_ORDER.map((tab) => [tab, tab === "agents" && agentsLabel !== undefined ? agentsLabel : t(TAB_SHORT_KEYS[tab])])) as Record<SideTab, string>;
   const [labels, showBadges] = fits(full, true)
     ? ([full, true] as const)
     : fits(short, true)
@@ -253,13 +256,13 @@ export function ActionText({ label, color = COLOR.accent, onClick }: { label: st
 export function DiffEmptyTab({ turns, onPick }: { turns: number; onPick: () => void }) {
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <Heading text="Diff" meta={turns === 0 ? "no changes yet" : `${turns} turn${turns === 1 ? "" : "s"} with changes`} />
+      <Heading text="Diff" meta={turns === 0 ? t("side.no_changes_yet_e141") : t("diff.turnsWithChanges", { count: turns })} />
       {turns === 0 ? (
-        <Empty glyph="±" text="Turns that change files show their diff here." />
+        <Empty glyph="±" text={t("side.turns_that_change_files_aded")} />
       ) : (
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-          <ActionText label="Pick a turn" onClick={onPick} />
-          <text fg={COLOR.faint}>{"  or click a diff row in the chat"}</text>
+          <ActionText label={t("side.pick_a_turn_6a14")} onClick={onPick} />
+          <text fg={COLOR.faint}>{t("side.or_click_a_diff_1c27")}</text>
         </box>
       )}
     </box>
@@ -306,9 +309,9 @@ export function AgentsTab({
   const inner = useContext(PanelWidth);
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <Heading text="Delegated threads" meta={threads.length === 0 ? "none yet" : `${threads.length}`} />
+      <Heading text={t("side.delegated_threads_3be3")} meta={threads.length === 0 ? t("side.noneYet") : `${threads.length}`} />
       {threads.length === 0 ? (
-        <Empty glyph="○" text="Tasks this thread delegates appear here, each a thread you can open." />
+        <Empty glyph="○" text={t("side.tasks_this_thread_delegates_5e72")} />
       ) : (
         threads.map((agent) => {
           const running = agent.status === "running";
@@ -338,13 +341,13 @@ export function AgentsTab({
           );
         })
       )}
-      <Heading text="Subagents in this thread" meta={subagents.length === 0 ? "none yet" : `${subagents.length}`} />
+      <Heading text={t("side.subagents_in_this_thread_7d16")} meta={subagents.length === 0 ? t("side.noneYet") : `${subagents.length}`} />
       {subagents.length === 0 ? (
-        <Empty glyph="○" text="The provider's own subagents (Claude's Agent tool) appear here." />
+        <Empty glyph="○" text={t("side.the_providers_own_subagents_a1b3")} />
       ) : (
         subagents.map((agent) => {
           const took = agent.stoppedAt === null ? null : Math.max(1000, Date.parse(agent.stoppedAt) - Date.parse(agent.at));
-          const state = agent.running ? formatDuration(Math.max(1000, now - Date.parse(agent.at))) : took === null || !Number.isFinite(took) ? "done" : `done in ${formatDuration(took)}`;
+          const state = agent.running ? formatDuration(Math.max(1000, now - Date.parse(agent.at))) : took === null || !Number.isFinite(took) ? t("side.done") : t("side.doneIn", { time: formatDuration(took) });
           const typeWidth = Math.min(agent.agentType.length, Math.max(4, inner - state.length - 6));
           return (
             <Row key={agent.agentId} spaced {...(onOpenSubagent === undefined ? {} : { onClick: () => onOpenSubagent(agent.agentId) })}>
@@ -414,24 +417,24 @@ function Fact({ label, value, color = COLOR.text }: { label: string; value: stri
 export function InfoTab({ info, now, onOpen }: { info: DelegatedInfo; now: number; onOpen: (threadId: string) => void }) {
   const running = info.status === "running";
   const state = running
-    ? info.startedAt === null ? "running" : `running ${formatDuration(Math.max(1000, now - Date.parse(info.startedAt)))}`
+    ? info.startedAt === null ? t("side.running") : t("side.runningFor", { time: formatDuration(Math.max(1000, now - Date.parse(info.startedAt))) })
     : info.outcome === null ? info.status : (OUTCOME_LABEL[info.outcome] ?? info.outcome);
   const stateColor = running ? COLOR.warn : info.outcome === "error" ? COLOR.danger : info.outcome === "completed" ? COLOR.added : COLOR.dim;
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <Heading text="Delegated task" meta={state} />
-      <Fact label="Status" value={state} color={stateColor} />
-      {info.model === null ? null : <Fact label="Model" value={info.model} />}
+      <Heading text={t("side.delegated_task_185b")} meta={state} />
+      <Fact label={t("side.status_ec53")} value={state} color={stateColor} />
+      {info.model === null ? null : <Fact label={t("side.model_a559")} value={info.model} />}
       {info.parent === null ? null : (
         <Row onClick={() => onOpen(info.parent!.threadId)}>
-          <Fact label="Parent" value={`${info.parent.title}  ↗`} color={COLOR.accent} />
+          <Fact label={t("side.parent_3026")} value={`${info.parent.title}  ↗`} color={COLOR.accent} />
         </Row>
       )}
-      {info.branch === null ? null : <Fact label="Branch" value={info.branch} />}
-      {info.worktreePath === null ? null : <Fact label="Worktree" value={info.worktreePath} color={COLOR.dim} />}
-      <Heading text="Task" />
+      {info.branch === null ? null : <Fact label={t("side.branch_dacd")} value={info.branch} />}
+      {info.worktreePath === null ? null : <Fact label={t("side.worktree_6691")} value={info.worktreePath} color={COLOR.dim} />}
+      <Heading text={t("side.task_eaeb")} />
       {info.task === null ? (
-        <Empty glyph="○" text="No message yet." />
+        <Empty glyph="○" text={t("side.no_message_yet_ddcc")} />
       ) : (
         <box style={{ flexDirection: "row", flexShrink: 0, paddingLeft: 1 }}>
           <text fg={COLOR.dim} wrapMode="word">{truncate(info.task, 1200)}</text>
@@ -467,7 +470,7 @@ function BarRow({ width, fraction, filledColor }: { width: number; fraction: num
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
       {/* An empty <text> still takes a cell: a full or empty bar would run one long. */}
       {bar.filled ? <text fg={filledColor}>{bar.filled}</text> : null}
-      {bar.empty ? <text fg={FREE_COLOR}>{bar.empty}</text> : null}
+      {bar.empty ? <text fg={COLOR.faint}>{bar.empty}</text> : null}
     </box>
   );
 }
@@ -497,8 +500,9 @@ export function ContextTab({
   const barWidth = inner;
   // The window as one stacked bar: each category its own colour, in order.
   let colorIndex = 0;
+  const palette = shareColors();
   const segments = shares.map((share) => {
-    const color = share.kind === "free" ? FREE_COLOR : share.kind === "buffer" ? BUFFER_COLOR : SHARE_COLORS[colorIndex++ % SHARE_COLORS.length]!;
+    const color = share.kind === "free" ? COLOR.faint : share.kind === "buffer" ? COLOR.dim : palette[colorIndex++ % palette.length]!;
     return { ...share, color, cells: Math.max(share.tokens > 0 ? 1 : 0, Math.round((share.percent / 100) * barWidth)) };
   });
   // Rounding leaves the bar a few cells short or long: the free space (or
@@ -513,18 +517,18 @@ export function ContextTab({
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <Heading text="Context usage" meta={live ? "live" : "last reading"} />
+      <Heading text={t("side.context_usage_5621")} meta={live ? "live" : t("side.last_reading_d532")} />
       {used === null ? (
-        <Empty glyph="○" text="No reading yet: one arrives with the thread's first turn." />
+        <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
       ) : (
         <>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
             <text fg={COLOR.bright}>{formatTokenCount(used)}</text>
             {max === null ? (
-              <text fg={COLOR.dim}>{" tokens in context"}</text>
+              <text fg={COLOR.dim}>{t("side.tokens_in_context_be58")}</text>
             ) : (
               <>
-                <text fg={COLOR.dim}>{` / ${formatTokenCount(max)} · ${Math.round((used / max) * 100)}%`}</text>
+                <text fg={COLOR.dim}>{t("side.ofMax", { max: formatTokenCount(max), percent: Math.round((used / max) * 100) })}</text>
                 {cost === null ? null : (
                   <>
                     <text fg={COLOR.dim}>{" · "}</text>
@@ -549,22 +553,22 @@ export function ContextTab({
             // Headroom is the useful number: how much more the thread can
             // take before it compacts, not where the line sits in the window.
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-              <text fg={COLOR.dim}>{`${compactsAutomatically === false ? "Compaction due" : "Auto-compacts"} at ${formatTokenCount(threshold)} · `}</text>
+              <text fg={COLOR.dim}>{t(compactsAutomatically === false ? "side.compactionDueAt" : "side.autoCompactsAt", { at: formatTokenCount(threshold) })}</text>
               {used >= threshold ? (
-                <text fg={COLOR.warn}>{"due now"}</text>
+                <text fg={COLOR.warn}>{t("side.due_now_9502")}</text>
               ) : (
-                <text fg={threshold - used < max * 0.1 ? COLOR.warn : COLOR.text}>{`${formatTokenCount(threshold - used)} to go`}</text>
+                <text fg={threshold - used < max * 0.1 ? COLOR.warn : COLOR.text}>{t("side.toGo", { count: formatTokenCount(threshold - used) })}</text>
               )}
             </box>
           )}
           {processed === null ? null : (
-            <text fg={COLOR.dim}>{`${formatTokenCount(processed)} tokens processed`}</text>
+            <text fg={COLOR.dim}>{t("side.processed", { count: formatTokenCount(processed) })}</text>
           )}
           {segments.length === 0 ? (
-            <text fg={COLOR.dim} wrapMode="word">{`${providerName ?? "This provider"} reports the total only, not what fills it.`}</text>
+            <text fg={COLOR.dim} wrapMode="word">{t("side.totalOnly", { name: providerName ?? t("side.thisProvider") })}</text>
           ) : (
             <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
-              <text fg={COLOR.dim}>{breakdown?.estimated === true ? "Estimated usage by category" : "Usage by category"}</text>
+              <text fg={COLOR.dim}>{breakdown?.estimated === true ? t("side.estimated_usage_by_category_11cd") : t("side.usage_by_category_5014")}</text>
               {segments.map((segment) => (
                 <box key={segment.name} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
                   <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
@@ -578,7 +582,7 @@ export function ContextTab({
           )}
           {breakdown?.tools === undefined || breakdown.tools.length === 0 ? null : (
             <>
-              <Heading text="Heaviest tools" />
+              <Heading text={t("side.heaviest_tools_a33c")} />
               {(() => {
                 // One row per tool: name, bar, value, in fixed columns
                 // shared by every row, so the bars start and end together
@@ -597,7 +601,7 @@ export function ContextTab({
                     <box key={tool.key} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                       <text fg={COLOR.text}>{`${truncate(tool.name, nameWidth).padEnd(nameWidth)} `}</text>
                       {bar.filled ? <text fg={COLOR.command}>{bar.filled}</text> : null}
-                      {bar.empty ? <text fg={FREE_COLOR}>{bar.empty}</text> : null}
+                      {bar.empty ? <text fg={COLOR.faint}>{bar.empty}</text> : null}
                       <text fg={COLOR.dim}>{` ${values[index]!.padStart(valueWidth)}`}</text>
                     </box>
                   );
@@ -607,10 +611,10 @@ export function ContextTab({
           )}
         </>
       )}
-      <Heading text="Plan usage" {...(providerName === null ? {} : { meta: providerName })} />
+      <Heading text={t("side.plan_usage_48f7")} {...(providerName === null ? {} : { meta: providerName })} />
       {usageLimits === null || usageLimits.windows.length === 0 ? (
         <text fg={COLOR.dim} wrapMode="word">
-          {usageLimits?.unavailable?.message ?? "No subscription usage reported for this provider."}
+          {usageLimits?.unavailable?.message ?? t("side.no_subscription_usage_reported_fa47")}
         </text>
       ) : (
         (() => {
@@ -647,7 +651,7 @@ export function ContextTab({
 
 // -- Background ---------------------------------------------------------------
 
-const KIND_LABEL: Record<string, string> = { shell: "Shell", monitor: "Monitor", agent: "Agent", task: "Task" };
+const KIND_LABEL = (): Record<string, string> => ({ shell: t("side.shell_ea89"), monitor: t("side.monitor_d298"), agent: t("side.agent_7446"), task: t("side.task_eaeb") });
 
 export function BackgroundTab({
   tasks,
@@ -665,9 +669,9 @@ export function BackgroundTab({
   const inner = Math.max(10, width - 4);
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      <Heading text="Running in the background" meta={tasks.length === 0 ? "none yet" : `${tasks.length}`} />
+      <Heading text={t("side.running_in_the_background_e706")} meta={tasks.length === 0 ? t("side.noneYet") : `${tasks.length}`} />
       {tasks.length === 0 ? (
-        <Empty glyph="○" text="Background commands, Monitor watches and background subagents appear here while they run." />
+        <Empty glyph="○" text={t("side.background_commands_monitor_watches_487b")} />
       ) : (
         tasks.map((task) => {
           const started = task.startedAt === null ? null : formatDuration(Math.max(1000, now - Date.parse(task.startedAt)));
@@ -676,7 +680,7 @@ export function BackgroundTab({
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
                 <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                   <text fg={COLOR.warn}>{"● "}</text>
-                  <text fg={COLOR.dim}>{`${KIND_LABEL[backgroundTaskKind(task)] ?? "Task"} · `}</text>
+                  <text fg={COLOR.dim}>{`${KIND_LABEL()[backgroundTaskKind(task)] ?? t("side.task_eaeb")} · `}</text>
                   <text fg={COLOR.text}>{truncate(backgroundTaskTitle(task), Math.max(4, inner - 22))}</text>
                 </box>
                 {started === null ? null : <text fg={COLOR.faint}>{started}</text>}

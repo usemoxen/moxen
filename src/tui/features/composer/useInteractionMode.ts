@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 
 import { storedInteractionMode } from "../../../core/interactionmode.js";
@@ -18,8 +19,10 @@ export function useInteractionMode(params: {
   selected: ThreadEnvelope | null;
   creating: boolean;
   setError: (message: string) => void;
+  /** Whether a turn is running now (read when a switch is asked for, not when it renders): the mode is fixed until it stops. */
+  isRunning: () => boolean;
 }) {
-  const { client, selected, creating, setError } = params;
+  const { client, selected, creating, setError, isRunning } = params;
   const [creatingMode, setCreatingMode] = useState<InteractionMode>("default");
   const [requested, setRequested] = useState<{ readonly threadId: string; readonly mode: InteractionMode } | null>(null);
   const stored = storedInteractionMode(selected?.interactionMode);
@@ -57,8 +60,20 @@ export function useInteractionMode(params: {
     if (creating) setCreatingMode("default");
   }, [creating]);
 
+  /**
+   * A turn is running: the mode cannot change (not by Shift+Tab, a click on it or `/research`), and a steer
+   * carries none. True, with the reason on screen, when that is so.
+   */
+  const refuseWhileRunning = (): boolean => {
+    // Drafting a new thread is another thread: the open one running does not hold it.
+    if (creating || !isRunning()) return false;
+    setError(t("composer.the_mode_cant_change_e55a"));
+    return true;
+  };
+
   /** Switch the thread's mode to `next`; resolves once the server has it, so a send after it runs in the new mode. */
   const setMode = async (next: InteractionMode): Promise<boolean> => {
+    if (refuseWhileRunning()) return false;
     armOneOff(null);
     if (next === stickyMode) return true;
     if (creating) {
@@ -98,6 +113,7 @@ export function useInteractionMode(params: {
     cycleMode: () => void setMode(nextInteractionMode(stickyMode)),
     takeCommand,
     takeOneOff,
+    refuseWhileRunning,
     isModeCommand: (draft: string) => parseModeCommand(draft) !== null,
   };
 }

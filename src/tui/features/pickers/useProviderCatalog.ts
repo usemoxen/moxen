@@ -1,3 +1,4 @@
+import { t, tx } from "../../i18n/index.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { extractProviders, type ProviderSummary } from "../../../core/catalog/summary.js";
@@ -121,7 +122,7 @@ export function useProviderCatalog(params: {
     // with nothing to dispatch against, so it needs no source thread — a
     // fresh install with zero threads lands here with `selected === null`.
     if (selected === null && !creating) {
-      setError("no open thread to set the model for");
+      setError(t("picker.no_open_thread_to_9af4"));
       return;
     }
     setProvidersError(null);
@@ -133,7 +134,7 @@ export function useProviderCatalog(params: {
 
   const openEffortPicker = () => {
     if (selected === null && !creating) {
-      setError("no open thread to set the effort for");
+      setError(t("picker.no_open_thread_to_2c29"));
       return;
     }
     setProvidersError(null);
@@ -216,7 +217,7 @@ export function useProviderCatalog(params: {
 
   const openPermissionPicker = () => {
     if (selected === null && !creating) {
-      setError("no open thread to set permissions for");
+      setError(t("picker.no_open_thread_to_a1a2"));
       return;
     }
     setPickerFilter("");
@@ -272,8 +273,8 @@ export function useProviderCatalog(params: {
     () => runtimeModeChoicesForProvider({ supportedRuntimeModes: supportedModes }),
     [supportedModes],
   );
-  const permission = displayRuntimeMode(
-    compatibleRuntimeMode(effectiveRuntimeMode ?? "full-access", permissionChoices),
+  const permission = tx(
+    displayRuntimeMode(compatibleRuntimeMode(effectiveRuntimeMode ?? "full-access", permissionChoices)),
   );
   const modelColor = providerColor(currentProvider?.driver, effectiveModelSelection?.instanceId, model);
   /**

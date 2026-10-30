@@ -237,6 +237,40 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
     },
   },
   {
+    name: "memory_edit",
+    description:
+      "Change one piece of a memory that exists, like the file Edit tool: old_string must be in the memory's body exactly once (read it with memory_read first and copy the text), " +
+      "and is replaced by new_string. Prefer this to memory_save for a small change: you send only the change, not the whole memory. Moxen updates the index itself.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The memory's name, as the index lists it." },
+        scope: { type: "string", enum: ["project", "global"] },
+        old_string: { type: "string", description: "The text to replace: exactly as it is in the body, and only once there." },
+        new_string: { type: "string", description: "What replaces it; empty removes the text." },
+        description: { type: "string", description: "Optional: a new one-line description, when the change makes the old one wrong." },
+      },
+      required: ["name", "scope", "old_string", "new_string"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "memory_append",
+    description:
+      "Add text to the end of a memory that exists, without reading it first: for one more fact that belongs with what it already says. " +
+      "A memory that does not exist is a memory_save. Moxen updates the index itself.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The memory's name, as the index lists it." },
+        scope: { type: "string", enum: ["project", "global"] },
+        text: { type: "string", description: "What to add after the body: a line or a short paragraph." },
+      },
+      required: ["name", "scope", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "memory_delete",
     description: "Delete a memory that turned out to be wrong or no longer holds. Moxen updates the index itself.",
     inputSchema: {
@@ -251,7 +285,7 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
   },
 ];
 
-const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_delete"]);
+const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_edit", "memory_append", "memory_delete"]);
 
 export interface MoxenToolOptions {
   readonly checklist?: boolean;
@@ -449,6 +483,20 @@ export async function callMoxenTool(
             scope: argString(args, "scope", true)! as "project",
           }),
         );
+      case "memory_edit":
+        return ok(
+          await api.dispatch({
+            type: "memory.edit",
+            threadId: parentThreadId,
+            name: argString(args, "name", true)!,
+            scope: argString(args, "scope", true)! as "project",
+            oldText: argString(args, "old_string", true)!,
+            newText: typeof args.new_string === "string" ? args.new_string : argString(args, "new_string", true)!,
+            ...(argString(args, "description") === undefined ? {} : { description: argString(args, "description")! }),
+          }),
+        );
+      case "memory_append":
+        return ok(await api.dispatch({ type: "memory.append", threadId: parentThreadId, name: argString(args, "name", true)!, scope: argString(args, "scope", true)! as "project", text: argString(args, "text", true)! }));
       case "memory_delete":
         return ok(await api.dispatch({ type: "memory.delete", threadId: parentThreadId, name: argString(args, "name", true)!, scope: argString(args, "scope", true)! as "project" }));
       case "task_cancel": {

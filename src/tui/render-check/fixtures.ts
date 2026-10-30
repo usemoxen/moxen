@@ -1,4 +1,5 @@
-import { App } from "../app/app.js";
+import { createElement, type ComponentProps } from "react";
+import { App as RealApp } from "../app/app.js";
 import type { ClientApi, ShellFrame, ThreadFrame } from "../../server/api.js";
 import {
   permissionActivityRow,
@@ -7,7 +8,22 @@ import {
   type UserInputRuntimeEvent,
 } from "../../core/threads/requestactivity.js";
 
-export { App };
+/** The theme every `App` the scenarios mount shows; set by the visual harness, unset (the default theme) in a plain render-check. */
+export const harnessTheme: { current: string | undefined } = { current: undefined };
+
+/**
+ * The language every `App` the scenarios mount speaks. The scenarios find what
+ * to click by its English words, and "auto" would follow the machine running
+ * them, so it is English unless `MOXEN_RENDER_LANGUAGE` says otherwise (to look
+ * at a language's frames, not to pass the walkthrough).
+ */
+export const harnessLanguage: { current: "en" | "es-ES" } = { current: process.env.MOXEN_RENDER_LANGUAGE === "es-ES" ? "es-ES" : "en" };
+
+/** The real `App`, taking the harness's theme and language unless a scenario passes its own `ui`. */
+export function App(props: ComponentProps<typeof RealApp>) {
+  const theme = harnessTheme.current;
+  return createElement(RealApp, { ...props, ui: { language: harnessLanguage.current, ...(theme === undefined ? {} : { theme }), ...props.ui } });
+}
 
 const HOUR = 3_600_000;
 const now = Date.now();
@@ -748,6 +764,32 @@ export const client: ClientApi = {
     }
     if (query.type === "thread.background.output") {
       return { available: true, lines: ["watching build.log", "...still going"] };
+    }
+    if (query.type === "usage.stats") {
+      // The last few days, counted from today so the heatmap and chart always have them in view.
+      const day = (back: number) => {
+        const date = new Date(Date.now() - back * 86_400_000);
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      };
+      const usage = { input: 1_000, cacheRead: 90_000, cacheCreate: 4_000, output: 5_000, thinking: 0, turns: 6 };
+      const bucket = (key: string, costUsd: number | null) => ({ key, usage, tokens: 100_000, share: 0.5, sessions: 2, costUsd, unpricedTurns: costUsd === null ? 6 : 0 });
+      return {
+        range: "all",
+        sessions: 4,
+        messages: 12,
+        turns: 12,
+        totals: { ...usage, turns: 12 },
+        totalTokens: 200_000,
+        costUsd: 1.25,
+        unpricedTurns: 6,
+        activeDays: 3,
+        bestStreak: 2,
+        peakHour: 14,
+        favoriteModel: "claude-opus-5",
+        byProvider: [bucket("claudeAgent", 1.25), bucket("opencode", null)],
+        byModel: [bucket("claude-opus-5", 1.25), bucket("opencode/free-model", null)],
+        daily: [2, 1, 0].map((back) => ({ day: day(back), tokens: 60_000, byModel: { "claude-opus-5": 40_000, "opencode/free-model": 20_000 }, byProvider: {} })),
+      };
     }
     throw new Error(`render-check client does not serve ${query.type}`);
   }) as unknown as ClientApi["query"],

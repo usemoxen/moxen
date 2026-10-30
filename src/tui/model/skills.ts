@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../core/catalog/summary.js";
 
 export interface SkillTrigger {
@@ -26,11 +27,11 @@ export function detectSkillTrigger(text: string, cursorOffset: number): SkillTri
 }
 
 /** What Moxen itself runs from the composer, whichever provider the thread is on. */
-const MOXEN_COMMANDS: readonly SkillSummary[] = [
-  plainSkill("compact", "Summarize the conversation to free up context"),
-  plainSkill("btw", "Ask a side question without adding it to the thread", { shortDescription: "<question>  Ask a side question without adding it to the thread" }),
-  plainSkill("research", "Research mode: researcher agents, a critic and one final report (again: back to Build)"),
-  plainSkill("orchestrate", "Orchestrate mode: tasks delegated to the model that fits each (again: back to Build)"),
+const moxenCommands = (): readonly SkillSummary[] => [
+  plainSkill("compact", t("cmd.compact")),
+  plainSkill("btw", t("cmd.btw"), { shortDescription: t("cmd.btwShort") }),
+  plainSkill("research", t("cmd.research")),
+  plainSkill("orchestrate", t("cmd.orchestrate")),
 ];
 
 /**
@@ -46,7 +47,7 @@ export function pickerEntries(inventory: Pick<SkillInventory, "skills" | "comman
     plainSkill(command.name, command.description, command.argumentHint === null ? {} : { shortDescription: `${command.argumentHint}  ${command.description ?? ""}`.trim() }),
   );
   const seen = new Set<string>();
-  return [...MOXEN_COMMANDS, ...commands, ...inventory.skills].filter((entry) => {
+  return [...moxenCommands(), ...commands, ...inventory.skills].filter((entry) => {
     if (seen.has(entry.name)) return false;
     seen.add(entry.name);
     return true;

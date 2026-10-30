@@ -1013,6 +1013,53 @@ export const TOOL_FAILED_EVENTS: ReadonlyArray<Record<string, unknown>> = [
   }
 ];
 
+/** A model-launched background command, as a live v2.2.0 server announced it (`shell` tool with `background: true`, then `shell.exited`). */
+export const BACKGROUND_SHELL_EVENTS: ReadonlyArray<Record<string, unknown>> = [
+  {
+    "type": "session.tool.input.started",
+    "data": {
+      "sessionID": "ses_e7738453cffeO6aU9TwL89NK9J",
+      "assistantMessageID": "msg_188c7bbc4001egSoOdSFNd5N1l",
+      "id": "call_f5b08c8b7daca3e40d1aff2afe2a51e1",
+      "name": "shell"
+    }
+  },
+  {
+    "type": "session.tool.called",
+    "data": {
+      "sessionID": "ses_e7738453cffeO6aU9TwL89NK9J",
+      "assistantMessageID": "msg_188c7bbc4001egSoOdSFNd5N1l",
+      "id": "call_f5b08c8b7daca3e40d1aff2afe2a51e1",
+      "input": { "command": "sleep 6 && echo done", "background": true },
+      "executed": false
+    }
+  },
+  {
+    "type": "shell.created",
+    "data": {
+      "info": {
+        "id": "sh_188c7c4e300101Dzleap7ff20v",
+        "status": "running",
+        "command": "sleep 6 && echo done",
+        "metadata": { "sessionID": "ses_e7738453cffeO6aU9TwL89NK9J" }
+      }
+    }
+  },
+  {
+    "type": "session.tool.progress",
+    "data": {
+      "sessionID": "ses_e7738453cffeO6aU9TwL89NK9J",
+      "assistantMessageID": "msg_188c7bbc4001egSoOdSFNd5N1l",
+      "id": "call_f5b08c8b7daca3e40d1aff2afe2a51e1",
+      "metadata": { "shellID": "sh_188c7c4e300101Dzleap7ff20v" }
+    }
+  },
+  {
+    "type": "shell.exited",
+    "data": { "id": "sh_188c7c4e300101Dzleap7ff20v", "exit": 0, "status": "exited" }
+  }
+];
+
 /** `message.list` for the shell turn: user, two assistant steps, idle. */
 export const TIMELINE_ITEMS: ReadonlyArray<Record<string, unknown>> = [
   {

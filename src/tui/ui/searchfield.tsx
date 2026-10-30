@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { COLOR, SURFACE } from "../theme.js";
 
 /**
@@ -8,7 +9,7 @@ import { COLOR, SURFACE } from "../theme.js";
 export function SearchField({
   query,
   active = true,
-  placeholder = "Search",
+  placeholder = t("ui.search_1334"),
   marginTop = 1,
   onClick,
 }: {

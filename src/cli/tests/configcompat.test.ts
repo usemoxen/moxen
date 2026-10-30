@@ -35,7 +35,7 @@ const OLD = {
   providers: {
     claude: { autoCompact: "auto", autoCompactPercent: 75, agentSkills: false, moxenTools: false },
     opencode: { compactBuffer: 16_384, bundledSkills: false },
-    harness: { webBrowser: "off", webPrivateNetwork: true, webSearch: "exa", autoCompactTokens: 65_536 },
+    harness: { webBrowser: "off", webPrivateNetwork: true, webSearch: "searxng", autoCompactTokens: 65_536 },
   },
 };
 

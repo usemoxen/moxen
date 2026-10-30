@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useMemo, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 
@@ -36,11 +37,11 @@ function statusLine(overview: GitOverview): string {
   const status = overview.status;
   if (!status) return "";
   const parts: string[] = [];
-  if (status.staged > 0) parts.push(`${status.staged} staged`);
-  if (status.unstaged > 0) parts.push(`${status.unstaged} changed`);
-  if (status.untracked > 0) parts.push(`${status.untracked} untracked`);
-  if (status.conflicted > 0) parts.push(`${status.conflicted} conflicted`);
-  return parts.length === 0 ? "clean" : parts.join(" · ");
+  if (status.staged > 0) parts.push(t("git.staged", { count: status.staged }));
+  if (status.unstaged > 0) parts.push(t("git.changed", { count: status.unstaged }));
+  if (status.untracked > 0) parts.push(t("git.untracked", { count: status.untracked }));
+  if (status.conflicted > 0) parts.push(t("git.conflicted", { count: status.conflicted }));
+  return parts.length === 0 ? t("git.clean") : parts.join(" · ");
 }
 
 /**
@@ -50,16 +51,16 @@ function statusLine(overview: GitOverview): string {
  */
 export function GitFooter({ overview, forge, width }: { overview: GitOverview | null; forge: ForgeDetection | null; width: number }) {
   const inner = Math.max(10, width - 5);
-  const where = forge?.slug ?? overview?.root ?? "no remote";
+  const where = forge?.slug ?? overview?.root ?? t("git.no_remote_b921");
   const status = overview === null || !overview.isRepository ? "" : statusLine(overview);
-  const branch = overview === null || !overview.isRepository ? null : (overview.status?.branch ?? overview.branch ?? "(detached)");
+  const branch = overview === null || !overview.isRepository ? null : (overview.status?.branch ?? overview.branch ?? t("git.detached_1594"));
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }} backgroundColor={SURFACE.panel}>
       <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{truncate(where, inner)}</text>
       {branch === null ? null : (
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
           <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>{truncate(branch, Math.max(8, inner - status.length - 3))}</text>
-          <text fg={status === "clean" ? COLOR.faint : COLOR.warn} bg={SURFACE.panel} selectable={false}>{status ? ` · ${status}` : ""}</text>
+          <text fg={status === t("git.clean") ? COLOR.faint : COLOR.warn} bg={SURFACE.panel} selectable={false}>{status ? ` · ${status}` : ""}</text>
         </box>
       )}
     </box>
@@ -70,7 +71,7 @@ function aheadBehind(branch: GitBranch): string {
   if (branch.ahead === null && branch.behind === null) return "";
   const ahead = branch.ahead ?? 0;
   const behind = branch.behind ?? 0;
-  if (ahead === 0 && behind === 0) return "in sync";
+  if (ahead === 0 && behind === 0) return t("git.in_sync_1199");
   return `${ahead > 0 ? `↑${ahead}` : ""}${ahead > 0 && behind > 0 ? " " : ""}${behind > 0 ? `↓${behind}` : ""}`;
 }
 
@@ -112,16 +113,16 @@ function runGlyph(state: ForgeCheckRun["state"]): { glyph: string; color: string
 }
 
 function stateLabel(state: ForgeRequest["state"]): { text: string; color: string } {
-  if (state === "draft") return { text: "Draft", color: COLOR.dim };
-  if (state === "merged") return { text: "Merged", color: COLOR.diff };
-  if (state === "closed") return { text: "Closed", color: COLOR.danger };
-  return { text: "Open", color: COLOR.added };
+  if (state === "draft") return { text: t("git.draft_f03a"), color: COLOR.dim };
+  if (state === "merged") return { text: t("git.merged_6391"), color: COLOR.diff };
+  if (state === "closed") return { text: t("git.closed_03f4"), color: COLOR.danger };
+  return { text: t("git.open_c3bf"), color: COLOR.added };
 }
 
 function reviewLabel(decision: string | null): { text: string; color: string } | null {
-  if (decision === "APPROVED") return { text: "approved", color: COLOR.added };
-  if (decision === "CHANGES_REQUESTED") return { text: "changes requested", color: COLOR.danger };
-  if (decision === "REVIEW_REQUIRED") return { text: "review required", color: COLOR.warn };
+  if (decision === "APPROVED") return { text: t("git.approved_787d"), color: COLOR.added };
+  if (decision === "CHANGES_REQUESTED") return { text: t("git.changes_requested_51ca"), color: COLOR.danger };
+  if (decision === "REVIEW_REQUIRED") return { text: t("git.review_required_d01e"), color: COLOR.warn };
   return null;
 }
 
@@ -144,7 +145,7 @@ function RunList({ runs, width }: { runs: readonly ForgeCheckRun[]; width: numbe
       })}
       {sorted.length > RUNS_SHOWN ? (
         <Row onClick={() => setAll((shownAll) => !shownAll)}>
-          <text fg={COLOR.dim} selectable={false}>{all ? "    Show fewer" : `    +${sorted.length - RUNS_SHOWN} more`}</text>
+          <text fg={COLOR.dim} selectable={false}>{all ? t("git.show_fewer_faab") : t("git.runsMore", { count: sorted.length - RUNS_SHOWN })}</text>
         </Row>
       ) : null}
     </>
@@ -224,14 +225,14 @@ export function GitTab({
   if (overview === null) {
     return (
       <box style={{ flexDirection: "column" }}>
-        <text fg={COLOR.dim} selectable={false}>{loadingGit ? "Reading git…" : (error ?? "No git information.")}</text>
+        <text fg={COLOR.dim} selectable={false}>{loadingGit ? t("git.reading_git_3e06") : (error ?? t("git.no_git_information_c6c1"))}</text>
       </box>
     );
   }
   if (!overview.isRepository) {
     return (
       <box style={{ flexDirection: "column" }}>
-        <text fg={COLOR.dim} selectable={false}>{"This thread's folder is not a git repository."}</text>
+        <text fg={COLOR.dim} selectable={false}>{t("git.this_threads_folder_is_a276")}</text>
       </box>
     );
   }
@@ -260,7 +261,7 @@ export function GitTab({
         />
         <text fg={COLOR.faint} selectable={false}>{" · "}</text>
         <ActionLink
-          label="merge commit"
+          label={t("git.merge_commit_3ec7")}
           tone={COLOR.warn}
           onClick={() => {
             setArmedMerge(null);
@@ -272,7 +273,7 @@ export function GitTab({
         <ActionLink label="cancel" onClick={() => setArmedMerge(null)} disabled={false} />
       </>
     ) : (
-      <ActionLink label="merge…" onClick={() => setArmedMerge(request.number)} disabled={busy !== null || request.state === "draft"} />
+      <ActionLink label={t("git.merge")} onClick={() => setArmedMerge(request.number)} disabled={busy !== null || request.state === "draft"} />
     );
 
   return (
@@ -288,11 +289,11 @@ export function GitTab({
         </Row>
       )}
 
-      <Heading text={forge?.kind === "gitlab" ? "Merge request" : "Pull request"} {...(checkedOut === null ? {} : { meta: truncate(checkedOut, Math.max(4, width - 18)) })} />
+      <Heading text={forge?.kind === "gitlab" ? t("git.merge_request_55bc") : t("git.pull_request_7354")} {...(checkedOut === null ? {} : { meta: truncate(checkedOut, Math.max(4, width - 18)) })} />
       {forge === null || forge.kind === null ? (
         <Row>
           <text fg={COLOR.dim} selectable={false}>
-            {truncate(`  ${loadingForge ? "Checking…" : (forge?.reason ?? "No forge for this remote.")}`, width)}
+            {truncate(`  ${loadingForge ? t("settings.update.checking") : (forge?.reason ?? t("git.no_forge_for_this_92ba"))}`, width)}
           </text>
         </Row>
       ) : status !== null ? (
@@ -303,7 +304,7 @@ export function GitTab({
             <>
               {status.url === null ? null : (
                 <>
-                  <ActionLink label="open ↗" onClick={() => onOpenUrl(status.url!)} disabled={false} />
+                  <ActionLink label={t("git.open_7d26")} onClick={() => onOpenUrl(status.url!)} disabled={false} />
                   <text fg={COLOR.faint} selectable={false}>{" · "}</text>
                 </>
               )}
@@ -319,18 +320,18 @@ export function GitTab({
         />
       ) : loadingForge ? (
         <Row>
-          <text fg={COLOR.dim} selectable={false}>{"  Reading…"}</text>
+          <text fg={COLOR.dim} selectable={false}>{t("git.reading_f65c")}</text>
         </Row>
       ) : (
         <>
           <Row>
-            <text fg={COLOR.dim} selectable={false}>{truncate(`  No ${noun.short} for ${checkedOut ?? "this checkout"} yet.`, width)}</text>
+            <text fg={COLOR.dim} selectable={false}>{truncate(t("git.noRequestFor", { what: noun.short, where: checkedOut ?? t("git.thisCheckout") }), width)}</text>
           </Row>
           {/* Where it merges: asked here, not guessed by the agent. */}
           <Row {...(baseChoices.length > 1 ? { onClick: () => setPickingBase((open) => !open) } : {})}>
-            <text fg={COLOR.dim} selectable={false}>{"  into "}</text>
+            <text fg={COLOR.dim} selectable={false}>{t("git.into_a41c")}</text>
             <text fg={base === null ? COLOR.faint : COLOR.bright} selectable={false}>
-              {truncate(base ?? "the default branch", Math.max(4, width - 10))}
+              {truncate(base ?? t("git.the_default_branch_390e"), Math.max(4, width - 10))}
             </text>
             {baseChoices.length > 1 ? <text fg={COLOR.dim} selectable={false}>{pickingBase ? " ▴" : " ▾"}</text> : null}
           </Row>
@@ -352,26 +353,26 @@ export function GitTab({
             : null}
           {opener.label === null ? (
             <Row>
-              <text fg={COLOR.faint} selectable={false}>{truncate("  No agent has usage left to open one.", width)}</text>
+              <text fg={COLOR.faint} selectable={false}>{truncate(t("git.no_agent_has_usage_e85a"), width)}</text>
             </Row>
           ) : (
             <>
               <Row onClick={busy === null ? () => onAgentOpen(true) : undefined}>
-                <text fg={COLOR.accent} selectable={false}>{truncate(`  ✦ Have ${opener.label} open a draft ${noun.short}`, width)}</text>
+                <text fg={COLOR.accent} selectable={false}>{truncate(t("git.haveOpenDraft", { who: opener.label, what: noun.short }), width)}</text>
               </Row>
               <Row onClick={busy === null ? () => onAgentOpen(false) : undefined}>
-                <text fg={COLOR.text} selectable={false}>{truncate(`  ✦ Have ${opener.label} open it ready for review`, width)}</text>
+                <text fg={COLOR.text} selectable={false}>{truncate(t("git.haveOpenReady", { who: opener.label }), width)}</text>
               </Row>
             </>
           )}
           <Row onClick={busy === null ? () => onCreate(true) : undefined}>
-            <text fg={COLOR.dim} selectable={false}>{truncate(`    or open a draft ${noun.short} yourself…`, width)}</text>
+            <text fg={COLOR.dim} selectable={false}>{truncate(t("git.openDraftYourself", { what: noun.short }), width)}</text>
           </Row>
         </>
       )}
       {forge?.kind == null || others.length === 0 ? null : (
         <>
-          <Heading text={`Other open ${noun.short}s`} meta={String(others.length)} />
+          <Heading text={t("git.otherOpen", { what: noun.short })} meta={String(others.length)} />
           {others.map((request) => {
             const glance = checksGlance(request.checks);
             const tail = glance === null ? "" : ` ${glance.text}`;
@@ -387,7 +388,7 @@ export function GitTab({
         </>
       )}
 
-      <Heading text="Branches" meta={`${localBranches.length} local`} />
+      <Heading text={t("git.branches_dfc7")} meta={t("git.localCount", { count: localBranches.length })} />
       {shown.map((branch) => {
         const track = aheadBehind(branch);
         const nameWidth = Math.max(4, width - (track ? track.length + 1 : 0));
@@ -397,22 +398,22 @@ export function GitTab({
             <text fg={branch.current ? COLOR.bright : branch.remote ? COLOR.dim : COLOR.text} selectable={false}>
               {truncate(`${branch.current ? "* " : "  "}${branch.name}`, nameWidth).padEnd(nameWidth)}
             </text>
-            <text fg={track === "in sync" ? COLOR.faint : COLOR.warn} selectable={false}>{track ? ` ${track}` : ""}</text>
+            <text fg={track === t("git.in_sync_1199") ? COLOR.faint : COLOR.warn} selectable={false}>{track ? ` ${track}` : ""}</text>
           </Row>
         );
       })}
       {hiddenCount > 0 || showAllBranches ? (
         <Row onClick={() => setShowAllBranches((shownAll) => !shownAll)}>
           <text fg={COLOR.dim} selectable={false}>
-            {showAllBranches ? "  Show fewer branches" : `  Show ${hiddenCount} more (remotes included)`}
+            {showAllBranches ? t("git.show_fewer_branches_3aea") : t("git.showMoreBranches", { count: hiddenCount })}
           </text>
         </Row>
       ) : null}
 
-      <Heading text="Commits" meta={truncate(selectedBranch ?? overview.branch ?? "detached", Math.max(4, width - 12))} />
+      <Heading text="Commits" meta={truncate(selectedBranch ?? overview.branch ?? t("git.detachedWord"), Math.max(4, width - 12))} />
       {overview.commits.length === 0 ? (
         <Row>
-          <text fg={COLOR.dim} selectable={false}>{loadingGit ? "  Reading…" : "  No commits."}</text>
+          <text fg={COLOR.dim} selectable={false}>{loadingGit ? t("git.reading_f65c") : t("git.no_commits_1e4d")}</text>
         </Row>
       ) : (
         commits.map((entry: GitCommit) => (
@@ -422,13 +423,13 @@ export function GitTab({
       {hiddenCommits > 0 || (showAllCommits && overview.commits.length > COMMITS_SHOWN) ? (
         <Row onClick={() => setShowAllCommits((shownAll) => !shownAll)}>
           <text fg={COLOR.dim} selectable={false}>
-            {showAllCommits ? "  Show fewer commits" : `  Show ${hiddenCommits} more`}
+            {showAllCommits ? t("git.show_fewer_commits_cf89") : t("git.showMoreCommits", { count: hiddenCommits })}
           </text>
         </Row>
       ) : null}
 
       <Row onClick={onRefresh}>
-        <text fg={COLOR.dim} selectable={false}>{"  Refresh"}</text>
+        <text fg={COLOR.dim} selectable={false}>{t("git.refresh_fc78")}</text>
       </Row>
     </box>
   );
@@ -454,27 +455,27 @@ function RequestCard({ request, width, actions }: { request: ForgeRequestStatus;
             <text fg={review.color} selectable={false}>{review.text}</text>
           </>
         )}
-        {request.mergeable === "conflicting" ? <text fg={COLOR.danger} selectable={false}>{" · conflicts"}</text> : null}
-        {request.targetBranch === null ? null : <text fg={COLOR.faint} selectable={false}>{truncate(` · into ${request.targetBranch}`, Math.max(0, width - 30))}</text>}
+        {request.mergeable === "conflicting" ? <text fg={COLOR.danger} selectable={false}>{t("git.conflicts_4ddb")}</text> : null}
+        {request.targetBranch === null ? null : <text fg={COLOR.faint} selectable={false}>{truncate(t("git.into", { branch: request.targetBranch }), Math.max(0, width - 30))}</text>}
       </Row>
       {hasSize ? (
         <Row>
           {request.additions === null ? null : <text fg={COLOR.added} selectable={false}>{`+${request.additions} `}</text>}
           {request.deletions === null ? null : <text fg={COLOR.removed} selectable={false}>{`−${request.deletions} `}</text>}
           {request.changedFiles === null ? null : (
-            <text fg={COLOR.dim} selectable={false}>{`${request.additions === null && request.deletions === null ? "" : "· "}${request.changedFiles} file${request.changedFiles === 1 ? "" : "s"}`}</text>
+            <text fg={COLOR.dim} selectable={false}>{`${request.additions === null && request.deletions === null ? "" : "· "}${t("git.files", { count: request.changedFiles })}`}</text>
           )}
         </Row>
       ) : null}
       {glance === null ? (
         <Row>
-          <text fg={COLOR.faint} selectable={false}>{"No CI checks"}</text>
+          <text fg={COLOR.faint} selectable={false}>{t("git.no_ci_checks_d1bd")}</text>
         </Row>
       ) : (
         <>
           <Row>
             <text fg={TONE[glance.tone]} selectable={false}>{glance.text}</text>
-            <text fg={COLOR.dim} selectable={false}>{glance.tone === "passed" ? " checks passed" : glance.tone === "failed" ? " checks, some failing" : " checks, some running"}</text>
+            <text fg={COLOR.dim} selectable={false}>{glance.tone === "passed" ? t("git.checks_passed_f617") : glance.tone === "failed" ? t("git.checks_some_failing_590a") : t("git.checks_some_running_35da")}</text>
           </Row>
           <RunList runs={request.runs} width={width} />
         </>
@@ -546,11 +547,11 @@ function CommitView({
   return (
     <box style={{ flexDirection: "column" }}>
       <Row onClick={onBack}>
-        <text fg={COLOR.accent} selectable={false}>{"‹ Commits"}</text>
+        <text fg={COLOR.accent} selectable={false}>{t("git.commits_053b")}</text>
       </Row>
       {detail === null ? (
         <Row>
-          <text fg={COLOR.dim} selectable={false}>{commit.loading ? "  Reading the commit…" : "  Git could not read this commit."}</text>
+          <text fg={COLOR.dim} selectable={false}>{commit.loading ? t("git.reading_the_commit_c819") : t("git.git_could_not_read_7045")}</text>
         </Row>
       ) : (
         <>
@@ -561,35 +562,35 @@ function CommitView({
           <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
             <Row>
               <text fg={COLOR.text} selectable={false}>{detail.author}</text>
-              <text fg={COLOR.dim} selectable={false}>{` authored ${ago(detail.date, now)}`}</text>
+              <text fg={COLOR.dim} selectable={false}>{t("git.authored", { when: ago(detail.date, now) })}</text>
             </Row>
             {detail.committer === detail.author ? null : (
               <Row>
                 <text fg={COLOR.text} selectable={false}>{detail.committer}</text>
-                <text fg={COLOR.dim} selectable={false}>{` committed ${ago(detail.committerDate, now)}`}</text>
+                <text fg={COLOR.dim} selectable={false}>{t("git.committed", { when: ago(detail.committerDate, now) })}</text>
               </Row>
             )}
             <text fg={COLOR.faint}>{detail.sha}</text>
             {detail.parents.length === 0 ? null : (
-              <text fg={COLOR.faint} selectable={false}>{truncate(`${detail.parents.length > 1 ? "parents" : "parent"} ${detail.parents.map((parent) => parent.slice(0, 7)).join(" ")}`, width)}</text>
+              <text fg={COLOR.faint} selectable={false}>{truncate(t("git.parents", { count: detail.parents.length, list: detail.parents.map((parent) => parent.slice(0, 7)).join(" ") }), width)}</text>
             )}
             {detail.refs.length === 0 ? null : <text fg={COLOR.diff} selectable={false}>{truncate(detail.refs.join(", "), width)}</text>}
           </box>
           {commit.runs === null || commit.runs.length === 0 ? null : (
             <>
-              <Heading text="Checks" meta={checksGlance(tally(commit.runs))?.text ?? ""} />
+              <Heading text={t("git.checks_f551")} meta={checksGlance(tally(commit.runs))?.text ?? ""} />
               <RunList runs={commit.runs} width={width} />
               {commit.runs.find((run) => run.state === "failed" && run.url !== null) === undefined ? null : (
                 <Row>
-                  <ActionLink label="  open the failing run ↗" onClick={() => onOpenUrl(commit.runs!.find((run) => run.state === "failed" && run.url !== null)!.url!)} disabled={false} />
+                  <ActionLink label={t("git.open_the_failing_run_733c")} onClick={() => onOpenUrl(commit.runs!.find((run) => run.state === "failed" && run.url !== null)!.url!)} disabled={false} />
                 </Row>
               )}
             </>
           )}
-          <Heading text="Files" meta={`${detail.files.length} · +${added} −${removed}`} />
+          <Heading text={t("git.files_91f3")} meta={`${detail.files.length} · +${added} −${removed}`} />
           {files.length === 0 ? (
             <Row>
-              <text fg={COLOR.dim} selectable={false}>{"  No changes to show."}</text>
+              <text fg={COLOR.dim} selectable={false}>{t("git.no_changes_to_show_a8c4")}</text>
             </Row>
           ) : (
             files.map((file) => (

@@ -1,6 +1,6 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import type { ClientApi } from "../../../server/api.js";
 import { App, client } from "../fixtures.js";

@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { useRef } from "react";
 import type { BoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
@@ -113,7 +114,7 @@ export function SliderDefault({ id, unset, defaultLabel, onReset }: { id: string
     return (
       <box style={{ flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-          {defaultLabel === undefined ? "Nothing chosen here: the default applies." : `Nothing chosen here: the default applies (${defaultLabel}).`}
+          {defaultLabel === undefined ? t("ui.nothing_chosen_here_the_b6c8") : t("ui.nothingChosenDefault", { default: defaultLabel })}
         </text>
       </box>
     );
@@ -121,8 +122,8 @@ export function SliderDefault({ id, unset, defaultLabel, onReset }: { id: string
   const bg = hovered ? SURFACE.hover : SURFACE.raised;
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }} backgroundColor={bg} onMouseDown={onReset} selectable={false} {...handlers}>
-      <text fg={hovered ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{"↺ Clear this choice"}</text>
-      <text fg={COLOR.dim} bg={bg} selectable={false}>{defaultLabel === undefined ? "  d" : `  back to the default (${defaultLabel})  d`}</text>
+      <text fg={hovered ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{t("ui.clear_this_choice_1d45")}</text>
+      <text fg={COLOR.dim} bg={bg} selectable={false}>{defaultLabel === undefined ? "  d" : t("ui.backToDefault", { default: defaultLabel })}</text>
     </box>
   );
 }

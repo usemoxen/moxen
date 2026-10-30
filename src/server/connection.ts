@@ -65,7 +65,7 @@ import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
-import { claudeMemoryDir, deleteMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
+import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
 import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
 import { readAttachment, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
@@ -126,6 +126,7 @@ import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
 import { DeviceRegistry } from "./transport/devices.js";
@@ -811,6 +812,10 @@ export class DirectConnection implements ClientApi {
           body: command.body,
           scope: command.scope,
         });
+      case "memory.edit":
+        return await editMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, oldText: command.oldText, newText: command.newText, description: command.description });
+      case "memory.append":
+        return await appendMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, text: command.text });
       case "memory.delete":
         return await deleteMemory(await this.memoryLocation(command), command.name, command.scope);
       case "memory.import-claude": {
@@ -1320,6 +1325,10 @@ export class DirectConnection implements ClientApi {
       }
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "usage.stats":
+        return await readUsageStats(await this.store(), query.range ?? "all");
+      case "usage.card":
+        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette);
       case "remote.devices":
         return {
           devices: this.remoteAccess

@@ -341,12 +341,12 @@ describe("web_search", () => {
     ]);
   });
 
-  const searchContext = (backend: SearchBackend, extra: Partial<SearchContext> & { keyEnv?: string; searxngUrl?: string } = {}): SearchContext => ({
-    settings: { backend, keyEnv: extra.keyEnv, searxngUrl: extra.searxngUrl },
+  const searchContext = (backend: SearchBackend, extra: Partial<SearchContext> & { searxngUrl?: string } = {}): SearchContext => ({
+    settings: { backend, searxngUrl: extra.searxngUrl },
     env: extra.env ?? {},
     policy,
     signal,
-    endpoints: { duckduckgo: `${base}/ddg`, exa: `${base}/exa`, brave: `${base}/brave` },
+    endpoints: { duckduckgo: `${base}/ddg` },
   });
 
   it("searches DuckDuckGo, and says so plainly when it asks for a human check", async () => {
@@ -363,41 +363,6 @@ describe("web_search", () => {
       res.end("<html><body>Unfortunately, bots use DuckDuckGo too.</body></html>");
     });
     expect(await searchWeb("again", 5, searchContext("duckduckgo"))).toMatchObject({ isError: true, content: expect.stringContaining("human check") });
-  });
-
-  it("calls Exa and Brave with the key from the named variable, in each one's shape, and never repeats the key", async () => {
-    routes.set("/exa", (_req, res) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ results: [{ title: "Exa hit", url: "https://e.example/", highlights: ["best part"] }] }));
-    });
-    routes.set("/brave", (_req, res) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ web: { results: [{ title: "Brave <strong>hit</strong>", url: "https://b.example/", description: "About <strong>it</strong>" }] } }));
-    });
-    const exa = await searchWeb("q", 3, searchContext("exa", { keyEnv: "EXA_KEY", env: { EXA_KEY: "exa-secret" } }));
-    expect(exa.content).toContain("1. Exa hit\n   https://e.example/\n   best part");
-    expect(seen.at(-1)!.headers["x-api-key"]).toBe("exa-secret");
-    expect(JSON.parse(seen.at(-1)!.body)).toMatchObject({ query: "q", numResults: 3 });
-    const brave = await searchWeb("q two", 4, searchContext("brave", { keyEnv: "BRAVE_KEY", env: { BRAVE_KEY: "brave-secret" } }));
-    expect(brave.content).toContain("1. Brave hit\n   https://b.example/\n   About it");
-    expect(seen.at(-1)!.headers["x-subscription-token"]).toBe("brave-secret");
-    expect(seen.at(-1)!.url).toContain("count=4");
-    for (const text of [exa.content, brave.content]) {
-      expect(text).not.toContain("secret");
-    }
-  });
-
-  it("explains what to set when a key is missing or refused, without naming the key", async () => {
-    routes.set("/exa", (_req, res) => {
-      res.writeHead(401, { "content-type": "application/json" });
-      res.end("{}");
-    });
-    expect((await searchWeb("q", 3, searchContext("exa"))).content).toMatch(/its key variable/);
-    expect((await searchWeb("q", 3, searchContext("exa", { keyEnv: "NOT_SET" }))).content).toMatch(/NOT_SET .*not set/);
-    expect((await searchWeb("q", 3, searchContext("exa", { keyEnv: "sk-live-abc123def" }))).content).toMatch(/NAME of an environment variable/);
-    const refused = await searchWeb("q", 3, searchContext("exa", { keyEnv: "EXA_KEY", env: { EXA_KEY: "exa-secret" } }));
-    expect(refused).toMatchObject({ isError: true, content: expect.stringContaining("refused the key (EXA_KEY)") });
-    expect(refused.content).not.toContain("exa-secret");
   });
 
   it("asks a SearXNG instance of the user's own, which may be on this machine or their network", async () => {

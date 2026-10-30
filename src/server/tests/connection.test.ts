@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import type { CommandOf } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
 import { OpenCodeDriver } from "../../core/providers/opencode/driver.js";
@@ -878,7 +879,7 @@ describe("DirectConnection model and session continuity", () => {
       // here the stdio child, bound to this thread and this store (no HTTP
       // endpoint: this connection never became a long-lived owner).
       expect(servers[1]).toMatchObject({ name: "moxen", type: "in-process", alwaysLoad: true });
-      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_delete"]);
+      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       const fallback = servers[1]!.fallback as { type: string; env: Record<string, string>; args: string[] };
       expect(fallback).toMatchObject({ type: "stdio", env: { MOXEN_STORE_ROOT: harness.root } });
       expect(fallback.args.slice(-2)).toEqual(["--thread", "thread-m"]);
@@ -1121,6 +1122,33 @@ describe("DirectConnection capabilities (formerly CLI-only)", () => {
         const turns = await harness.store.readTurns(first.threadId);
         return turns[0]?.status === "completed";
       });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps the thread's mode while a turn runs: a steer, a queued send and the set command cannot change it", async () => {
+    const driver = new GateDriver();
+    const { harness, connection } = await connected({ driver });
+    try {
+      const first = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Long job" });
+      await waitFor("the first run to reach the driver", async () => driver.prompts.length === 1);
+      const send = (extra: Record<string, unknown>) =>
+        connection.dispatch({ type: "thread.turn.start", threadId: first.threadId, message: { text: "More" }, ...extra } as CommandOf<"thread.turn.start">);
+      await expect(send({ delivery: "steer", interactionMode: "research" })).rejects.toMatchObject({ code: "MODE_LOCKED_WHILE_RUNNING" });
+      await expect(send({ delivery: "queue", interactionMode: "orchestrate" })).rejects.toMatchObject({ code: "MODE_LOCKED_WHILE_RUNNING" });
+      await expect(connection.dispatch({ type: "thread.interaction-mode.set", threadId: first.threadId, interactionMode: "research" })).rejects.toMatchObject({
+        code: "MODE_LOCKED_WHILE_RUNNING",
+      });
+      expect((await harness.store.readThreadRecord(first.threadId))?.interactionMode).toBe("default");
+      // Setting the mode it already has is not a change, and a steer with no mode is as before.
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: first.threadId, interactionMode: "default" });
+      expect((await send({ delivery: "steer" })).delivery).toBe("steered");
+      await driver.release();
+      await waitFor("the running turn to complete", async () => (await harness.store.readTurns(first.threadId))[0]?.status === "completed");
+      // Once it stops, the mode changes again.
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: first.threadId, interactionMode: "research" });
+      expect((await harness.store.readThreadRecord(first.threadId))?.interactionMode).toBe("research");
     } finally {
       await connection.close();
     }

@@ -1,8 +1,9 @@
 /**
- * Token usage aggregation over turn ledgers. Drivers report per-turn
- * deltas (recorded on `StoredTurn.usage` at settle); this module sums
- * them for usage panels. Providers that report nothing contribute zeros —
- * graceful degradation, never invention. See docs/threads.md.
+ * Token usage aggregation over turn ledgers. Drivers report usage at settle
+ * (recorded on `StoredTurn.usage`); this module sums turns that each hold
+ * their own spend — `stats.ts` first turns a running total into that.
+ * Providers that report nothing contribute zeros — graceful degradation,
+ * never invention. See docs/threads.md.
  */
 import type { StoredTurn } from "../threads/types.js";
 

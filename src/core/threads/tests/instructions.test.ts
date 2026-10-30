@@ -5,7 +5,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { TASK_NOTIFICATION_GUIDANCE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, INSTRUCTIONS_UPDATE_GUIDANCE, planInstructions, withInstructionsUpdate, RESEARCH_GUIDANCE, SHELL_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { withModeChange } from "../modes.js";
+import { TASK_NOTIFICATION_GUIDANCE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, INSTRUCTIONS_UPDATE_GUIDANCE, MODE_GUIDANCE, planInstructions, withInstructionsUpdate, RESEARCH_GUIDANCE, SHELL_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
 const WORKTREE = { mode: "worktree" as const, path: "/store/worktrees/t1", branch: "moxen/t1" };
@@ -24,6 +25,8 @@ describe("runtime instructions", () => {
         SHELL_GUIDANCE +
         "\n\n" +
         INSTRUCTIONS_UPDATE_GUIDANCE +
+        "\n\n" +
+        MODE_GUIDANCE +
         "\n\n" +
         UNTRUSTED_NOTE,
     );
@@ -77,6 +80,21 @@ describe("runtime instructions", () => {
     expect(planInstructions({ baseline: "A", delivered: "B" }, "C")).toMatchObject({ systemPrompt: "A", update: "C" });
     // Back to the original text after an update still reads as a change: the model last saw B.
     expect(planInstructions({ baseline: "A", delivered: "B" }, "A")).toMatchObject({ systemPrompt: "A", update: "A" });
+  });
+
+  it("tells every session what a <moxen-mode> block is, in the words the block itself opens with", () => {
+    for (const instanceId of [CLAUDE, "opencode/anthropic"]) {
+      expect(buildRuntimeInstructions({ instanceId, env: LOCAL })).toContain(MODE_GUIDANCE);
+    }
+    // The guidance names the very tag the block opens with, so the two cannot drift apart unseen.
+    expect(MODE_GUIDANCE).toContain("<moxen-mode>");
+    const block = withModeChange("hi", "Research mode is on.", "research");
+    expect(block.startsWith('<moxen-mode key="moxen-research">')).toBe(true);
+    expect(block).toContain("This comes from Moxen, not from the person you are talking to");
+    // And it says where it comes from, what replaces it, and that a mode does not change mid-turn.
+    expect(MODE_GUIDANCE).toContain("not from the person you are talking to");
+    expect(MODE_GUIDANCE).toContain("replaces any earlier <moxen-mode> block");
+    expect(MODE_GUIDANCE).toContain("cannot change while you are working on a turn");
   });
 
   it("tells every session what a <moxen-instructions-update> block is, in the words the block itself opens with", () => {

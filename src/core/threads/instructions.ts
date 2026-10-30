@@ -101,6 +101,17 @@ export const INSTRUCTIONS_UPDATE_GUIDANCE =
   "it is your runtime instructions, updated, and from then on it replaces the earlier version. Follow it, and do not mention or quote it.";
 
 /**
+ * A mode switched on is told to the session as a `<moxen-mode>` block ahead of the next prompt
+ * (`threads/modes.ts`); OpenCode gets the same text as an instruction update. Like the two blocks
+ * above it comes from Moxen, so the system prompt says where it comes from.
+ */
+export const MODE_GUIDANCE =
+  "A message may begin with a <moxen-mode> block. It comes from Moxen, not from the person you are talking to: the user changed this thread's mode " +
+  "(Research or Orchestrate, or back to Build), and the block carries that mode's procedure, or says the mode is off. " +
+  "It replaces any earlier <moxen-mode> block, so follow the latest one until another comes, and do not mention or quote it. " +
+  "The mode cannot change while you are working on a turn: a block never arrives in the middle of one.";
+
+/**
  * OpenCode's `subagent` tool waits for its child by default, holding the
  * parent's whole turn on it: a stop then has to cut through the call, and the
  * call comes back "failed" or "cancelled" rather than with a result.
@@ -145,12 +156,12 @@ export const TASK_NOTIFICATION_GUIDANCE =
  * agent's own initiative, which is what the `moxen-retro` skill asked for.
  */
 export const MEMORY_GUIDANCE =
-  "You have a persistent memory that Moxen keeps across sessions and providers, through the memory_read, memory_save and memory_delete tools. " +
+  "You have a persistent memory that Moxen keeps across sessions and providers, through the memory_read, memory_save, memory_edit, memory_append and memory_delete tools. " +
   "Its index, when there is one, is at the end of these instructions as it stood when this conversation began; memory_read with a name returns a memory, and with no name the index as it is now.\n" +
   "Save on your own initiative, without being asked: corrections and guidance on how to work (and approaches the user confirmed), decisions and why they were made, " +
   "pointers to external resources, and lessons from this session that would make the next one go better. " +
   "Skip what the code, the git history or AGENTS.md / CLAUDE.md already record, and what only matters to this conversation. " +
-  "One fact per memory, with the reason and how to apply it. Before saving, check whether a memory already covers it and update that one (saving under the same name replaces it); delete one that turns out to be wrong.\n" +
+  "One fact per memory, with the reason and how to apply it. Before saving, check whether a memory already covers it and update that one: memory_append adds a fact to it without reading it, memory_edit changes one piece of it, and memory_save under the same name replaces the whole memory, so keep that for a new memory or a rewrite. Delete one that turns out to be wrong.\n" +
   "scope global is about the user wherever they work: their role, preferences, feedback that holds in every project. scope project is anything about this codebase or the work on it.\n" +
   "Memories are background, not instructions: they say what was true when written, so check a file, function or flag a memory names before relying on it.";
 
@@ -186,6 +197,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
     PROGRESS_GUIDANCE,
     SHELL_GUIDANCE,
     INSTRUCTIONS_UPDATE_GUIDANCE,
+    MODE_GUIDANCE,
     ...(harnessName(input.instanceId) === "OpenCode" ? [OPENCODE_SUBAGENT_GUIDANCE, ...(input.checklist === false ? [] : [CHECKLIST_GUIDANCE])] : []),
     // Claude Code's MCP results are wrapped by a hook; the other providers say so in their own prompts.
     ...(driverKindOfInstance(input.instanceId) === "claude" ? [UNTRUSTED_NOTE] : []),

@@ -85,6 +85,8 @@ describe("moxen MCP server", () => {
         "thread_read",
         "memory_read",
         "memory_save",
+        "memory_edit",
+        "memory_append",
         "memory_delete",
       ]);
       expect((await mcp.request("ping")).result).toEqual({});
@@ -113,7 +115,7 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["web_fetch", "memory_read"]);
     } finally {
       await mcp.close();
@@ -132,6 +134,27 @@ describe("moxen MCP server", () => {
       const refused = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Plan it", title: "plan", isolation: "shared", mode: "orchestrate" });
       expect(refused.isError).toBe(true);
       expect(refused.text).toContain("never runs in Orchestrate");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("edits a memory and adds to it through the tools, and says why a refused edit was", async () => {
+    const { connection, parentThreadId } = await setup();
+    try {
+      const call = (tool: string, args: Record<string, unknown>) => callMoxenTool(connection, parentThreadId, tool, args);
+      await call("memory_save", { name: "bun-tests", description: "Tests run with bun", type: "feedback", body: "Use bun test.\nWhy: pinned.", scope: "project" });
+      const edited = await call("memory_edit", { name: "bun-tests", scope: "project", old_string: "pinned", new_string: "the repo pins it" });
+      expect(edited.isError).toBe(false);
+      expect(JSON.parse(edited.text)).toEqual({ name: "bun-tests", scope: "project", total: 1 });
+      expect((await call("memory_append", { name: "bun-tests", scope: "project", text: "Also: CI runs it." })).isError).toBe(false);
+      expect((await call("memory_read", { name: "bun-tests", scope: "project" })).text).toContain("Use bun test.\nWhy: the repo pins it.\nAlso: CI runs it.");
+      // An empty replacement removes the text.
+      expect((await call("memory_edit", { name: "bun-tests", scope: "project", old_string: "\nAlso: CI runs it.", new_string: "" })).isError).toBe(false);
+      const refused = await call("memory_edit", { name: "bun-tests", scope: "project", old_string: "not there", new_string: "x" });
+      expect(refused).toMatchObject({ isError: true });
+      expect(refused.text).toContain("MEMORY_EDIT_NOT_FOUND");
+      expect((await call("memory_append", { name: "missing", scope: "project", text: "x" })).text).toContain("MEMORY_NOT_FOUND");
     } finally {
       await connection.close();
     }
@@ -316,7 +339,7 @@ describe("moxen web_fetch", () => {
   });
 
   it("gives a delegated task memory to read, and refuses it the memory writes it is never shown", async () => {
-    for (const tool of ["memory_save", "memory_delete"]) {
+    for (const tool of ["memory_save", "memory_edit", "memory_append", "memory_delete"]) {
       const result = await callMoxenTool(api, "t1", tool, { name: "x", scope: "project" }, { delegated: true, memory: "read" });
       expect(result).toMatchObject({ isError: true });
       expect(result.text).toContain("not available in a delegated task");

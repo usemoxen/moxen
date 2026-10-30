@@ -1,5 +1,5 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { describeSettings } from "./settingsFixture.js";

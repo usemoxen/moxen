@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useRef } from "react";
@@ -15,10 +16,10 @@ const MAX_QUEUED_ROWS = 6;
  * turn settles; the rest name their time.
  */
 export function whenLabel(item: QueuedMessage, now: number): string {
-  if (item.scheduledFor === null) return "after this turn";
+  if (item.scheduledFor === null) return t("queued.after_this_turn_c5ef");
   const at = clockTime(item.scheduledFor, now);
   // ◷, not the ⏲ emoji: terminals draw the emoji two cells wide over the space after it.
-  if (item.reason === "usage-hold") return `◷ ${at}, after the reset`;
+  if (item.reason === "usage-hold") return t("queued.afterReset", { at });
   return `◷ ${at}`;
 }
 
@@ -64,14 +65,14 @@ export function QueuedPanel({
   const held = items.filter((item) => item.reason === "usage-hold").length;
   const rows = items.map((item, index) => {
     const when = whenLabel(item, now);
-    const extra = item.attachments > 0 ? ` +${item.attachments} image${item.attachments === 1 ? "" : "s"}` : "";
+    const extra = item.attachments > 0 ? t("queued.images", { count: item.attachments }) : "";
     // Cancel is 3 cells, the when-label and its gap follow the text.
     const textWidth = Math.max(4, rowWidth - 4 - when.length - 2 - extra.length - 3);
     const firstLine = queuedLabel(item);
     return (
       <box key={item.turnId} style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${index + 1}. `}</text>
-        <text fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel}>{truncate(firstLine || "(image only)", textWidth)}</text>
+        <text fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel}>{truncate(firstLine || t("queued.image_only_d3ad"), textWidth)}</text>
         <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{extra}</text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         <text fg={item.reason === "usage-hold" ? COLOR.warn : COLOR.faint} bg={SURFACE.panel} selectable={false}>
@@ -87,9 +88,9 @@ export function QueuedPanel({
       style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: SURFACE.panel }}
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-        <text fg={COLOR.accent} bg={SURFACE.panel} selectable={false}>{"Queued"}</text>
+        <text fg={COLOR.accent} bg={SURFACE.panel} selectable={false}>{t("queued.queued_7b2f")}</text>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>
-          {` (${queuedSummary(items.length, held)}) · × takes one back`}
+          {t("queued.takeBack", { summary: queuedSummary(items.length, held) })}
         </text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         {pager ?? null}

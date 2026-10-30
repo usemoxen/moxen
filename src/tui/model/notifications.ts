@@ -4,6 +4,7 @@
  * Pure — the caller keeps the previous pulses and decides how loudly to say
  * it (a toast, a terminal notification while the window is unfocused).
  */
+import { t } from "../i18n/index.js";
 import type { ThreadEnvelope } from "../../core/types.js";
 import { threadStatus } from "./shell.js";
 
@@ -48,7 +49,7 @@ export function threadAlerts(
     next.set(thread.id, pulse);
     const before = previous.get(thread.id);
     if (before === undefined) continue;
-    const title = thread.title.trim() || "Thread";
+    const title = thread.title.trim() || t("palette.thread");
     if (pulse.blocked && !before.blocked) {
       alerts.push({ kind: "blocked", threadId: thread.id, title });
       continue;

@@ -47,6 +47,11 @@ export function seasonAt(t: number): Season {
   return "autumn";
 }
 
+/** When the frog of `slot` jumps in, in seconds. */
+export function splashStart(slot: number): number {
+  return slot * SPLASH_SLOT + hash2(slot, 1, SEED + 20) * (SPLASH_SLOT - RIPPLE_LIFE);
+}
+
 /** Bashō's frog: one splash per slot, somewhere on the water. */
 const SPLASH_SLOT = 24;
 const RIPPLE_LIFE = 6;

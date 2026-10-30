@@ -1,5 +1,5 @@
 import { act, useState } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { NoticeBanner, type Notice } from "../../ui/noticebanner.js";
 import { COLOR } from "../../theme.js";

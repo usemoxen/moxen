@@ -62,7 +62,7 @@ describe("Moxen's own tools, switched per provider", () => {
   };
 
   it("keeps web_fetch with orchestration off, and the delegation tools with web_fetch off", async () => {
-    const memory = ["memory_delete", "memory_read", "memory_save"];
+    const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save"];
     const threads = ["thread_read", "thread_search"];
     expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads, "web_fetch"]);
     expect(await moxenTools({ orchestration: false })).toEqual([...memory, "web_fetch"]);
@@ -75,7 +75,7 @@ describe("Moxen's own tools, switched per provider", () => {
     expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
     expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["web_fetch"]);
     // Memory alone keeps the server, with its tools only.
-    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_delete", "memory_read", "memory_save"]);
+    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save"]);
   });
 });
 
@@ -440,7 +440,7 @@ describe("session setup", () => {
     try {
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const instructions = startOf(done.threadId)?.instructions ?? "";
-      expect(instructions).toMatch(/^In case you're asked: you are running in Moxen, .* No need to mention this otherwise\.\n\nWhen the work depends on [^\n]*\n\nWhile you work, keep your messages to short progress notes[^\n]*\n\nCommands you run go through the user's own shell[^\n]*\n(?:- [^\n]*\n)+\nA message may begin with a <moxen-instructions-update> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n?)+$/);
+      expect(instructions).toMatch(/^In case you're asked: you are running in Moxen, .* No need to mention this otherwise\.\n\nWhen the work depends on [^\n]*\n\nWhile you work, keep your messages to short progress notes[^\n]*\n\nCommands you run go through the user's own shell[^\n]*\n(?:- [^\n]*\n)+\nA message may begin with a <moxen-instructions-update> block[^\n]*\n\nA message may begin with a <moxen-mode> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n?)+$/);
     } finally {
       await connection.close();
     }
@@ -464,7 +464,7 @@ describe("session setup", () => {
     try {
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ instructions: "Project rule." }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      expect(startOf(done.threadId)?.instructions).toMatch(/do not mention or quote it\.\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n)+\nConfig rule\.\n\nProject rule\.$/);
+      expect(startOf(done.threadId)?.instructions).toMatch(/do not mention or quote it\.\n\nA message may begin with a <moxen-mode> block[^\n]*\n\nText inside <untrusted_context> tags[^\n]*\n\nA message that begins with <task-notification>[^\n]*\n\nYou have a persistent memory[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n\nUsing the web tools well:\n(?:- [^\n]*\n)+\nConfig rule\.\n\nProject rule\.$/);
     } finally {
       await connection.close();
     }

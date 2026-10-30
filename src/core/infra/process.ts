@@ -131,3 +131,24 @@ export function killProcessTree(
     // Already gone.
   }
 }
+
+/**
+ * End a process we only know by pid, and what it started, as a command a
+ * server ran for the model: on Windows the whole tree, elsewhere its process
+ * group (the command was started as the leader of its own). Quiet when it is
+ * already gone.
+ */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+    return;
+  }
+  for (const target of [-pid, pid]) {
+    try {
+      process.kill(target, signal);
+      return;
+    } catch {
+      // Not a group leader, or gone: try the process itself, then give up.
+    }
+  }
+}

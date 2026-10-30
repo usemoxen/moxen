@@ -24,7 +24,8 @@ import { addPixel, hash2, noise, smoothstep, splat, type Frame, type Pointer, ty
 
 type RGB = readonly [number, number, number];
 
-const LOOP = 36;
+/** Seconds in one voyage: cruise, spool-up, jump, drop-out. */
+export const LOOP = 36;
 const STARS = 280;
 const SEED = 0xa57a;
 const STREAK_S = 0.06;
@@ -77,8 +78,13 @@ const KINDS: readonly Omit<Destination, "dx" | "dy">[] = [
   { colour: [0.6, 0.78, 1.0], size: 0.6, kind: "pulsar" },
 ];
 
+/** Which of `KINDS` a voyage ends at: 0 blue-white star, 1 sun, 2 red giant, 3 binary, 4 pulsar. */
+export function destinationIndex(voyage: number): number {
+  return Math.floor(hash2(voyage, 1, SEED) * KINDS.length);
+}
+
 function destination(voyage: number): Destination {
-  const kind = KINDS[Math.floor(hash2(voyage, 1, SEED) * KINDS.length)]!;
+  const kind = KINDS[destinationIndex(voyage)]!;
   return { ...kind, dx: (hash2(voyage, 2, SEED) - 0.5) * 0.3, dy: (hash2(voyage, 3, SEED) - 0.5) * 0.25 };
 }
 

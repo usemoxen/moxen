@@ -1,5 +1,5 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { AnswerPanel } from "../../features/answerpanel/answerpanel.js";
 import type { PendingUserInputQuestion } from "../../model/thread.js";

@@ -1,5 +1,5 @@
 import type { ThreadEnvelope } from "../../core/types.js";
-import { describeActivity, memoryLabel, readRangeLabel } from "./activity.js";
+import { describeActivity, memoryLabel, memoryTitle, readRangeLabel } from "./activity.js";
 import { formatDuration } from "./turns.js";
 import type {
   ContextUsage,
@@ -115,7 +115,11 @@ export function exportToolLine(entry: TimelineEntry): string | null {
     case "skill":
       return `Skill ${view.name}${view.running ? " · running" : ""}`;
     case "memory":
-      return `Memory ${view.action} ${memoryLabel(view)}${view.running ? " · running" : ""}`;
+      return `${memoryTitle(view)}: ${memoryLabel(view)}${view.note === null ? "" : ` (${view.note})`}${view.running ? " · running" : ""}`;
+    case "threads":
+      return view.action === "search"
+        ? `Searched threads for "${view.query ?? ""}" (${view.scope === "all" ? "all projects" : "this project"}): ${view.note ?? (view.total === null ? "" : `${view.total} found`)}${view.running ? " · running" : ""}`
+        : `Read thread ${view.title ?? view.threadId ?? ""} (${view.part ?? "outline"})${view.note === null ? "" : `: ${view.note}`}${view.running ? " · running" : ""}`;
     case "web": {
       const query = full(view.query);
       const tail = view.running ? " · running" : "";

@@ -1,3 +1,4 @@
+import { t as tr } from "../../i18n/index.js";
 import type { RefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { bold, fg, t, underline } from "@opentui/core";
@@ -83,16 +84,16 @@ export function SkillPicker({
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", marginBottom: 0 }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-          {matches.length === 0 ? "Commands & skills" : `Commands & skills  ${activeIndex + 1}/${matches.length}`}
+          {matches.length === 0 ? tr("composer.commands_skills_ff16") : tr("composer.commandsAt", { at: activeIndex + 1, total: matches.length })}
         </text>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {width >= 56 ? "↑↓ move · ⏎ insert · esc close" : "⏎ insert · esc"}
+          {width >= 56 ? tr("composer.move_insert_esc_close_2746") : tr("composer.insert_esc_ce90")}
         </text>
       </box>
       {matches.length === 0 ? (
         <box style={{ flexDirection: "column", flexShrink: 0 }} backgroundColor={SURFACE.raised}>
           <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-            {hasCatalog ? truncate(`Nothing matches “${query}”`, rowWidth) : "No commands or skills available here"}
+            {hasCatalog ? truncate(tr("composer.nothingMatches", { query }), rowWidth) : tr("composer.no_commands_or_skills_b3e6")}
           </text>
         </box>
       ) : (

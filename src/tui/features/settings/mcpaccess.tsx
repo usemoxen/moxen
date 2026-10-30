@@ -1,3 +1,4 @@
+import { t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
@@ -76,13 +77,13 @@ export function McpAccessEditor({
         <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{description}</text>
       </box>
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
-        {servers.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{noun === "tools" ? "This provider lists no tools to switch off." : "No MCP servers yet. Add one under MCP servers, and it shows up here."}</text> : null}
+        {servers.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{noun === "tools" ? t("ma.noTools") : t("ma.noServers")}</text> : null}
         {servers.map((server, index) => (
           <Row key={server.name} id={`mcp-access-${index}`} server={server} checked={server.locked === null && !off.has(server.name)} active={index === at} width={width} onPress={() => { setCursor(index); toggle(server); }} />
         ))}
       </scrollbox>
       <box style={{ flexDirection: "row", flexShrink: 0, height: 1, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(servers.length === 0 ? "esc back" : `${on} of ${servers.length} on · space toggles · a all on · n all off · esc back · applies from the next session`, width)}</text>
+        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(servers.length === 0 ? t("ho.escBack") : t("ma.footer", { on, total: servers.length }), width)}</text>
       </box>
     </box>
   );
@@ -92,7 +93,7 @@ function Back({ onBack }: { onBack: () => void }) {
   const { hovered, handlers } = useHover();
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onBack} selectable={false} {...handlers}>
-      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{"← back"}</text>
+      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{t("ui.back")}</text>
     </box>
   );
 }
@@ -102,7 +103,7 @@ function Row({ id, server, checked, active, width, onPress }: { id: string; serv
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   const locked = server.locked !== null;
   const left = `${active ? "▌ " : "  "}${checked ? "☑" : "☐"} ${server.name}`;
-  const right = locked ? `· ${server.locked}` : server.summary;
+  const right = locked ? `· ${tx(server.locked ?? "")}` : server.summary;
   const rightWidth = Math.max(0, width - left.length - 4);
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>

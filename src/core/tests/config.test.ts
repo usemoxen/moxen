@@ -51,9 +51,12 @@ describe("config", () => {
   });
 
   it("keeps the harness web settings, and refuses a search backend it does not have", () => {
-    const web = { webSearch: "exa", webSearchKeyEnv: "EXA_API_KEY", searxngUrl: "http://localhost:8888", webBrowser: "off", webBrowserPath: "/usr/bin/chromium", webPrivateNetwork: true };
+    const web = { webSearch: "searxng", searxngUrl: "http://localhost:8888", webBrowser: "off", webBrowserPath: "/usr/bin/chromium", webPrivateNetwork: true };
     expect(normalizeConfig({ providers: { harness: web } }).providers?.harness).toEqual(web);
     expect(() => normalizeConfig({ providers: { harness: { webSearch: "bing" } } })).toThrow(/webSearch must be one of/);
+    // Exa and Brave were built-in backends once; they are their MCP servers now, and a file that names one still loads, as the default.
+    expect(normalizeConfig({ providers: { harness: { webSearch: "exa", webSearchKeyEnv: "EXA_API_KEY", webSearchKeys: { exa: "keychain:x" }, searxngUrl: "http://s" } } }).providers?.harness).toEqual({ searxngUrl: "http://s" });
+    expect(normalizeConfig({ providers: { harness: { webSearch: "brave" } } }).providers?.harness).toBeUndefined();
     expect(() => normalizeConfig({ providers: { harness: { webBrowser: "always" } } })).toThrow(/webBrowser/);
   });
 

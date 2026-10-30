@@ -64,6 +64,12 @@ budget, memory, a model per task and isolation.
   off. On the wire it is `interactionMode` on `thread.turn.start`. There
   are no trigger words: a false trigger would spend usage on delegated
   tasks.
+- **Fixed while a turn runs:** the mode cannot change while a turn is
+  running, by Shift+Tab, `/research`, `/orchestrate` or
+  `thread.interaction-mode.set`, and a steer, an inject or a queued send
+  carries no mode (`MODE_LOCKED_WHILE_RUNNING`). In the TUI a mode command
+  typed during a turn stays in the draft and the composer says why. Once the
+  turn stops, the mode changes again.
 - **Delivery, cache-safe:** never in the system prompt. On Claude and the
   Moxen Harness the procedure goes ahead of the next prompt as a
   `<moxen-mode>` block, once; going back to Build sends a short "mode is
@@ -240,6 +246,32 @@ and the replaced state is pinned under a `revert-*` ref to undo by.
 
 ## Usage accounting
 
-Drivers report per-turn usage deltas, recorded at settle and summed for
-the usage panels. Providers that report nothing contribute zeros:
+Drivers report usage when a turn settles and it is recorded on the turn;
+stats add it up. Providers that report nothing contribute zeros:
 degradation, never invention.
+
+What a turn records depends on the provider. OpenCode and the Harness record
+what that turn spent (OpenCode sums the assistant steps that answer the turn's
+messages). Claude records the thread's running total after the turn: it never
+goes down, the cost keeps its highest value, and a compaction keeps the counts
+and carries on adding to them. Stats read a Claude turn's spend as the gain
+over the thread's previous turn, and the thread's total as its final value, so
+threads stored before this read the same way; a total that drops (a resumed
+process starts counting again) counts as new spend. Where the provider reports a cost
+(`costUsd`: Claude's `total_cost_usd`, OpenCode's per-step `cost`) the turn
+records it too, an estimate and not a bill; without one the field is absent
+and the turn reads as unpriced.
+
+### Stats
+
+`usage.stats` (a server query, range `7d`, `30d` or `all`) turns the turn
+ledgers into the numbers the stats screen shows; `usage.card` returns the
+shareable PNG for a range. Both read every thread that is not deleted, a turn
+counting on the day it started in the machine's local time, and a turn still
+queued counting for nothing. Sessions are the threads with a turn in the
+range, messages are the user's and the assistant's (not notes Moxen wrote),
+and a streak is consecutive days with a turn. Cost adds the costs providers
+reported and stays unset, never zero, where none did; a reported zero (a free
+model) is free. A Claude turn's spend is the gain over the previous turn, as
+above, so the instances stored as running totals are the Claude ones
+(`core/usage/statsstore.ts`).

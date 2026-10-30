@@ -99,8 +99,29 @@ describe("summarizeWork", () => {
       memory("m2", "memory_read", { name: "a-memory" }),
       memory("m3", "memory_save", { name: "a-memory", scope: "project" }),
       memory("m4", "memory_delete", { name: "a-memory", scope: "project" }),
+      memory("m5", "memory_edit", { name: "b-memory", scope: "project", old_string: "a", new_string: "b" }),
+      memory("m6", "memory_append", { name: "b-memory", scope: "project", text: "c" }),
+      memory("m7", "memory_append", { name: "c-memory", scope: "project", text: "d" }),
     ];
-    expect(summarizeWork(entries)).toBe("Read 2 memories, saved 1 memory, deleted 1 memory");
+    expect(summarizeWork(entries)).toBe("Read 2 memories, added to 2 memories, saved 1 memory, deleted 1 memory, edited 1 memory");
+  });
+
+  it("counts the thread tools: searches and reads", () => {
+    const thread = (id: string, tool: string, input: Record<string, unknown>): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: "",
+        data: { toolName: `mcp__moxen__${tool}`, input },
+      });
+    const entries = [
+      thread("t1", "thread_search", { query: "a" }),
+      thread("t2", "thread_read", { id: "x" }),
+      thread("t3", "thread_read", { id: "y", turns: "1" }),
+    ];
+    expect(summarizeWork(entries)).toBe("Read 2 threads, searched threads 1 time");
   });
 
   it("tells created files apart from updated ones", () => {

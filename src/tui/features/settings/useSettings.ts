@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { handoffModelsFromText, type LongThreadConfig } from "../../model/autohandoff.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -203,7 +204,7 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
           const target = resolveFile(file);
           await mkdir(path.dirname(target), { recursive: true });
           await writeFile(target, text, "utf8");
-          setNotice({ text: `Exported ${profileId} to ${target}. It holds no saved key.`, error: false });
+          setNotice({ text: t("settings.exported", { id: profileId, target }), error: false });
         })
         .catch((cause: unknown) => setNotice({ text: cause instanceof Error ? cause.message : String(cause), error: true }));
     },
@@ -216,12 +217,12 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
       const mine = (generation.current += 1);
       void readFile(resolveFile(file), "utf8")
         .catch(() => {
-          throw new Error(`Cannot read ${file}.`);
+          throw new Error(t("settings.cannotRead", { file }));
         })
         .then(async (text) => {
           const result = await client.dispatch({ type: "harness.profile.import", text, onConflict: "rename" });
           if (generation.current === mine) setSnapshot({ path: result.path, exists: result.exists, settings: result.settings });
-          setNotice({ text: `Imported as ${result.id}${result.id === result.fileId ? "" : ` (${result.fileId} was taken)`}. Set its key if the server needs one.`, error: false });
+          setNotice({ text: result.id === result.fileId ? t("settings.imported", { id: result.id }) : t("settings.importedRenamed", { id: result.id, taken: result.fileId }), error: false });
         })
         .catch((cause: unknown) => setNotice({ text: cause instanceof Error ? cause.message : String(cause), error: true }));
     },
@@ -247,6 +248,8 @@ export function uiFromSnapshot(snapshot: SettingsSnapshot | null): UiConfig | nu
   if (snapshot === null) return null;
   const value = (key: string): unknown => snapshot.settings.find((view) => view.descriptor.key === key)?.value;
   const backdrop = value("ui.backdrop");
+  const theme = value("ui.theme");
+  const language = value("ui.language");
   const modelScenes = value("ui.modelScenes");
   const hideBinaryDiffs = value("ui.hideBinaryDiffs");
   const side = value("ui.defaultSidePanel");
@@ -254,6 +257,8 @@ export function uiFromSnapshot(snapshot: SettingsSnapshot | null): UiConfig | nu
   const usage = value("ui.usageRefreshSeconds");
   return {
     ...(backdrop === "animated" || backdrop === "static" || backdrop === "off" ? { backdrop } : {}),
+    ...(typeof theme === "string" ? { theme } : {}),
+    ...(language === "auto" || language === "en" || language === "es-ES" ? { language } : {}),
     ...(typeof modelScenes === "boolean" ? { modelScenes } : {}),
     ...(typeof hideBinaryDiffs === "boolean" ? { hideBinaryDiffs } : {}),
     ...(side === "context" || side === "git" || side === "agents" || side === "background" ? { defaultSidePanel: side } : {}),

@@ -1,3 +1,4 @@
+import { t, tx } from "../../i18n/index.js";
 import { useRef, useState } from "react";
 
 import { describeUpdate, type UpdatableProvider } from "../../../core/catalog/update.js";
@@ -27,15 +28,15 @@ export function useProviderUpdates(
   const update = (provider: UpdatableProvider) => {
     const id = `update:${provider}`;
     if (running.current.has(provider)) {
-      push(id, "info", `${LABELS[provider]} is already updating…`);
+      push(id, "info", t("update.already", { name: LABELS[provider] }));
       return;
     }
     running.current.add(provider);
     setUpdating(new Set(running.current));
-    push(id, "info", `Updating ${LABELS[provider]}…`);
+    push(id, "info", t("update.updating", { name: LABELS[provider] }));
     void client
       .dispatch({ type: "provider.update", provider })
-      .then((result) => push(id, "info", describeUpdate(result), RESULT_TOAST_MS))
+      .then((result) => push(id, "info", tx(describeUpdate(result)), RESULT_TOAST_MS))
       .catch((cause: unknown) => push(id, "danger", dispatchErrorMessage(cause), RESULT_TOAST_MS))
       .finally(() => {
         running.current.delete(provider);

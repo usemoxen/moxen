@@ -158,6 +158,8 @@ export interface TurnUsage {
   readonly cacheCreate: number;
   readonly output: number;
   readonly thinking: number;
+  /** What the turn cost in USD when the provider says (an estimate, not a bill); absent when it reports none. */
+  readonly costUsd?: number;
 }
 
 export type MessageRole = "user" | "assistant" | "system";

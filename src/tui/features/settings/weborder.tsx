@@ -1,3 +1,4 @@
+import { t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
@@ -85,7 +86,7 @@ export function WebOrderEditor({
       </scrollbox>
       <box style={{ flexDirection: "row", flexShrink: 0, height: 1, marginTop: 1 }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {truncate(`${ranked.length === 0 ? "no preference" : `${ranked.length} ranked`} · space ranks or unranks · u up · d down · esc back · applies from the next session`, width)}
+          {truncate(t("wo.footer", { state: ranked.length === 0 ? t("wo.noPreference") : t("wo.ranked", { count: ranked.length }) }), width)}
         </text>
       </box>
     </box>
@@ -96,7 +97,7 @@ function Back({ onBack }: { onBack: () => void }) {
   const { hovered, handlers } = useHover();
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onBack} selectable={false} {...handlers}>
-      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{"← back"}</text>
+      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{t("ui.back")}</text>
     </box>
   );
 }
@@ -106,7 +107,7 @@ function Row({ id, row, active, width, onPress }: { id: string; row: WebOrderRow
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   const locked = row.locked !== null;
   const left = `${active ? "▌ " : "  "}${row.rank === null ? " ·" : `${String(row.rank).padStart(2, " ")}.`} ${row.label}`;
-  const right = locked ? `· ${row.locked}` : row.summary;
+  const right = locked ? `· ${tx(row.locked ?? "")}` : tx(row.summary);
   const rightWidth = Math.max(0, width - left.length - 4);
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>

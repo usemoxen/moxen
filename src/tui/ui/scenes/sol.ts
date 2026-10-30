@@ -168,6 +168,15 @@ function visibleArc(g: Layout, fieldHeight: number): number {
 const ERUPT_SLOT = 55;
 const ERUPT_LIFE = 14;
 
+/** When a prominence of `slot` lets go, in seconds, or null when that slot has no eruption. */
+export function eruptionStart(slot: number): number | null {
+  if (hash2(slot, 0, SEED + 40) >= 0.65) return null;
+  return slot * ERUPT_SLOT + 6 + hash2(slot, 1, SEED + 40) * (ERUPT_SLOT - ERUPT_LIFE - 8);
+}
+
+/** How long an eruption lasts. */
+export const ERUPTION_SECONDS = ERUPT_LIFE;
+
 function paintProminences(frame: Frame, win: SceneWindow, g: Layout, t: number): void {
   const arc = visibleArc(g, win.fieldHeight) * 0.85;
   if (arc <= 0) return;

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useCallback, useRef, useState } from "react";
 
 import type { ClientApi } from "../../../server/api.js";
@@ -53,25 +54,25 @@ export function useRemote(params: {
         if (!enabled && server !== null) {
           // This TUI reaches that server through remote access: off, it is
           // dropped, so go back to this machine's rather than retry forever.
-          push("remote", "info", `Remote access off on ${server.name} — back to this machine`, 6_000);
-          onSwitchServer?.(null).catch((cause: unknown) => push("remote", "danger", `Could not connect: ${errorText(cause)}`, 10_000));
+          push("remote", "info", t("remote.offBack", { server: server.name }), 6_000);
+          onSwitchServer?.(null).catch((cause: unknown) => push("remote", "danger", t("remote.cannotConnect", { why: errorText(cause) }), 10_000));
           return;
         }
         const next = await client.query({ type: "remote.status" });
         setStatus(next);
-        const where = server ? ` on ${server.name}` : "";
+        const where = server ? t("remote.onServer", { server: server.name }) : "";
         push(
           "remote",
           "info",
           !enabled
-            ? `Remote access off${where}`
+            ? t("remote.accessOff", { where })
             : next.available
-              ? `Remote access on${where}: ${next.listening.map((entry) => entry.address).join(", ")}`
-              : "Remote access on: it starts with the moxen server (moxen server start)",
+              ? t("remote.accessOn", { where, addresses: next.listening.map((entry) => entry.address).join(", ") })
+              : t("remote.remote_access_on_it_3674"),
           4_000,
         );
       } catch (cause) {
-        push("remote", "danger", `Remote access: ${errorText(cause)}`, 8_000);
+        push("remote", "danger", t("remote.accessError", { why: errorText(cause) }), 8_000);
       }
     },
     [client, server, push, onSwitchServer],
@@ -83,7 +84,7 @@ export function useRemote(params: {
       setPairing(await client.dispatch({ type: "remote.pairing.start" }));
       return true;
     } catch (cause) {
-      push("remote", "danger", `Pairing: ${errorText(cause)}`, 8_000);
+      push("remote", "danger", t("remote.pairingError", { why: errorText(cause) }), 8_000);
       return false;
     }
   }, [client, push]);
@@ -95,7 +96,7 @@ export function useRemote(params: {
       (result) => setDevices([...result.devices]),
       (cause: unknown) => {
         setDevices([]);
-        push("remote", "danger", `Devices: ${errorText(cause)}`, 8_000);
+        push("remote", "danger", t("remote.devicesError", { why: errorText(cause) }), 8_000);
       },
     );
   }, [client, push]);
@@ -110,10 +111,10 @@ export function useRemote(params: {
       setRevokeArmed(null);
       void client.dispatch({ type: "remote.device.revoke", deviceId: device.id }).then(
         () => {
-          push("remote", "info", `Revoked ${device.name}`, 4_000);
+          push("remote", "info", t("remote.revoked", { name: device.name }), 4_000);
           setDevices((current) => current?.filter((entry) => entry.id !== device.id) ?? null);
         },
-        (cause: unknown) => push("remote", "danger", `Revoke: ${errorText(cause)}`, 8_000),
+        (cause: unknown) => push("remote", "danger", t("remote.revokeError", { why: errorText(cause) }), 8_000),
       );
     },
     [client, push, revokeArmed],
@@ -123,10 +124,10 @@ export function useRemote(params: {
   const switchTo = useCallback(
     (target: string | null) => {
       if (!onSwitchServer) return;
-      setSwitching(target ?? "this machine");
+      setSwitching(target ?? t("paired.thisMachine"));
       onSwitchServer(target).catch((cause: unknown) => {
         setSwitching(null);
-        push("remote", "danger", `Could not connect: ${errorText(cause)}`, 10_000);
+        push("remote", "danger", t("remote.cannotConnect", { why: errorText(cause) }), 10_000);
       });
     },
     [onSwitchServer, push],
@@ -136,13 +137,13 @@ export function useRemote(params: {
   const pair = useCallback(
     (code: string) => {
       const address = pairAddress;
-      push("remote", "info", `Pairing with ${address}…`, 10_000);
+      push("remote", "info", t("remote.pairingWith", { address }), 10_000);
       void store.pair({ address, code }).then(
         (paired) => {
-          push("remote", "info", `Paired with ${paired.name}. Key ${paired.fingerprint.slice(0, 23)}… — connecting`, 6_000);
+          push("remote", "info", t("remote.pairedWith", { name: paired.name, key: paired.fingerprint.slice(0, 23) }), 6_000);
           switchTo(paired.name);
         },
-        (cause: unknown) => push("remote", "danger", `Pairing failed: ${errorText(cause)}`, 10_000),
+        (cause: unknown) => push("remote", "danger", t("remote.pairFailed", { why: errorText(cause) }), 10_000),
       );
     },
     [pairAddress, push, store, switchTo],

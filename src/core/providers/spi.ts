@@ -227,6 +227,8 @@ export interface TokenUsageDelta {
   readonly cacheCreate: number;
   readonly output: number;
   readonly thinking: number;
+  /** The turn's cost in USD when the provider reports one — an estimate, not a bill. */
+  readonly costUsd?: number;
 }
 
 export interface RateLimitWindow {

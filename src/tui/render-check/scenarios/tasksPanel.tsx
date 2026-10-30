@@ -1,5 +1,5 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { TasksPanel } from "../../features/taskspanel/taskspanel.js";
 import { fail } from "../helpers.js";

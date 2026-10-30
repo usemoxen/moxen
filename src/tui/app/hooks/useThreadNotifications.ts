@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useRef } from "react";
 
 import type { ThreadEnvelope } from "../../../core/types.js";
@@ -32,10 +33,10 @@ export function useThreadNotifications(args: {
     for (const alert of alerts) {
       const text =
         alert.kind === "finished"
-          ? `✓ ${alert.title} finished`
+          ? t("notify.finished", { title: alert.title })
           : alert.kind === "failed"
-            ? `✗ ${alert.title} failed`
-            : `◔ ${alert.title} hit a usage limit`;
+            ? t("notify.failed", { title: alert.title })
+            : t("notify.limit", { title: alert.title });
       if (alert.threadId !== openThreadId) {
         pushToast(`thread-alert:${alert.threadId}`, alert.kind === "finished" ? "info" : alert.kind === "failed" ? "danger" : "warn", text, 5000);
       }
@@ -49,6 +50,6 @@ export function useThreadNotifications(args: {
     asked.current = { threadId: openThreadId, count: pendingQuestions };
     // Switching threads is not a new question.
     if (previous.threadId !== openThreadId || pendingQuestions <= previous.count) return;
-    notify("Moxen", `? ${openThreadTitle?.trim() || "A thread"} needs your answer`);
+    notify("Moxen", t("notify.answer", { title: openThreadTitle?.trim() || t("notify.aThread") }));
   }, [openThreadId, openThreadTitle, pendingQuestions, notify]);
 }

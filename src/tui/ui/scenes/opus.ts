@@ -268,6 +268,15 @@ function spikes(frame: Frame, win: SceneWindow, x: number, y: number, len: numbe
 const COMET_SLOT = 40;
 const COMET_LIFE = 16;
 
+/** When the comet of `slot` enters, in seconds, or null when that slot has none. */
+export function cometStart(slot: number): number | null {
+  if (hash2(slot, 0, SEED + 30) > 0.7) return null;
+  return slot * COMET_SLOT + 2 + hash2(slot, 1, SEED + 30) * (COMET_SLOT - COMET_LIFE - 4);
+}
+
+/** How long a comet takes to cross. */
+export const COMET_SECONDS = COMET_LIFE;
+
 function paintComet(frame: Frame, win: SceneWindow, t: number): void {
   const fw = win.fieldWidth;
   const fh = win.fieldHeight * 2;

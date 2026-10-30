@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -8,7 +9,7 @@ import type { ThreadEnvelope } from "../../../core/types.js";
 import type { useToasts } from "../../hooks/useToasts.js";
 import { COPY_TOAST_MS } from "../constants.js";
 
-async function uniquePath(dir: string, filename: string): Promise<string> {
+export async function uniquePath(dir: string, filename: string): Promise<string> {
   const dot = filename.lastIndexOf(".");
   const base = dot === -1 ? filename : filename.slice(0, dot);
   const ext = dot === -1 ? "" : filename.slice(dot);
@@ -67,11 +68,11 @@ export function useThreadExport(params: {
 
   const exportThread = () => {
     if (openThreadId === null || thread === null) {
-      setError("no open thread to export");
+      setError(t("thread.noneToExport"));
       return;
     }
     if (groups.length === 0) {
-      setError("nothing to export yet");
+      setError(t("thread.nothingToExport"));
       return;
     }
     const id = openThreadId;
@@ -89,7 +90,7 @@ export function useThreadExport(params: {
     void uniquePath(dir, filename)
       .then((path) => writeFile(path, markdown, "utf8").then(() => path))
       .then((path) => {
-        toasts.push("thread-exported", "info", `Exported ${groups.length} turn${groups.length === 1 ? "" : "s"} to ${path}`, COPY_TOAST_MS);
+        toasts.push("thread-exported", "info", t("thread.exported", { count: groups.length, path }), COPY_TOAST_MS);
         closePicker(paletteReturnFocus);
         void clipboard.copyText(path).catch(() => false);
       })

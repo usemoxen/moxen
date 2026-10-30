@@ -71,6 +71,17 @@ export function openTurn(turns: StoredTurn[]): StoredTurn | null {
   return turns.find((turn) => turn.status === "running") ?? null;
 }
 
+/**
+ * A thread's mode is fixed while a turn runs: a steer, an inject, a queued send or a one-off mode
+ * on a send cannot change it, nor can the command that sets it. Once the turn stops it can again.
+ */
+function modeLocked(threadId: string): CliError {
+  return new CliError("MODE_LOCKED_WHILE_RUNNING", "The mode cannot change while a turn is running: wait for it to finish, or stop it.", {
+    exitCode: 4,
+    details: { threadId },
+  });
+}
+
 function normalizeIfBusy(raw: SendIfBusy | undefined): SendIfBusy {
   const ifBusy = raw ?? "reject";
   if (ifBusy !== "reject" && ifBusy !== "inject") {
@@ -297,6 +308,8 @@ export async function sendTurn(
 
     const turns = await store.readTurns(threadId);
     const running = openTurn(turns);
+    // A message sent to a running turn does not carry a mode of its own (`/research` is for a prompt that starts one).
+    if (running && input.interactionMode !== undefined) throw modeLocked(threadId);
 
     if (delivery === "auto" && running && ifBusy === "reject") {
       throw new CliError(
@@ -1088,6 +1101,9 @@ export async function updateThreadMeta(
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "be updated");
+    if (input.interactionMode !== undefined && input.interactionMode !== thread.interactionMode && openTurn(await store.readTurns(threadId))) {
+      throw modeLocked(threadId);
+    }
     let title = thread.title;
     let titleSource = thread.titleSource;
     if (input.title !== undefined) {

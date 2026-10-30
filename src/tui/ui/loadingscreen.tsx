@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { useState } from "react";
 
 import { useAnimTick } from "../hooks/useAnimTick.js";
@@ -26,18 +27,18 @@ export function LoadingScreen({ stage }: { stage: BootStage }) {
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} selectable={false}>
         <text fg={pulseColor(tick, COLOR.dim, COLOR.accent, 2400)} bg={SURFACE.base} selectable={false}>
-          {` ${frame} Loading ${stage === "threads" ? "threads" : stage === "providers" ? "providers" : "transcript"}… `}
+          {t(stage === "threads" ? "loading.threads" : stage === "providers" ? "loading.providers" : "loading.transcript", { frame })}
         </text>
       </box>
       <box style={{ height: 1, flexShrink: 0 }} selectable={false}>
         <text fg={COLOR.faint} bg={SURFACE.base} selectable={false}>
-          {"waiting for the Moxen snapshot"}
+          {t("ui.waiting_for_the_moxen_8e31")}
         </text>
       </box>
       {tick - mountedAt < SLOW_MS ? null : (
         <box style={{ height: 1, flexShrink: 0 }} selectable={false}>
           <text fg={COLOR.warn} bg={SURFACE.base} selectable={false}>
-            {"still waiting — is Moxen running?"}
+            {t("ui.still_waiting_is_moxen_83a6")}
           </text>
         </box>
       )}

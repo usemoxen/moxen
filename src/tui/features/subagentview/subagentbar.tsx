@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 
@@ -19,11 +20,11 @@ export function SubagentBar({
   onBack: () => void;
 }) {
   const { hovered, handlers } = useHover();
-  const back = "← back to the thread";
+  const back = t("sub.back_to_the_thread_11bf");
   // Inside: the left border and padding (5), the glyph (2), two cells
   // before the link. The title gives way first, then "read-only" goes.
   const inner = width - 5 - 2 - back.length - 2;
-  const full = `  ·  ${state}  ·  read-only`;
+  const full = t("sub.readOnly", { state });
   const suffix = inner - full.length >= 12 ? full : `  ·  ${state}`;
   const room = Math.max(4, inner - suffix.length);
   return (

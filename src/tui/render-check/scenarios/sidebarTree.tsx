@@ -1,5 +1,5 @@
 import { act, useState } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import type { ThreadEnvelope } from "../../../core/types.js";
 import { Sidebar } from "../../features/sidebar/sidebar.js";

@@ -1,9 +1,8 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
-import { App } from "../../app/app.js";
 import type { ClientApi, ShellFrame, ThreadFrame } from "../../../server/api.js";
-import { client } from "../fixtures.js";
+import { App, client } from "../fixtures.js";
 import { fail } from "../helpers.js";
 
 /**

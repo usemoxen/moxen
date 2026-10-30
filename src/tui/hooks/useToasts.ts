@@ -1,3 +1,4 @@
+import { tx } from "../i18n/index.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type ToastTone = "info" | "warn" | "danger";
@@ -41,7 +42,7 @@ export function useToasts(): {
 
   const push = useCallback(
     (id: string, tone: ToastTone, text: string, ms?: number, action?: ToastAction) => {
-      setToasts((current) => [...current.filter((toast) => toast.id !== id), { id, tone, text, action: action ?? null }]);
+      setToasts((current) => [...current.filter((toast) => toast.id !== id), { id, tone, text: tx(text), action: action ?? null }]);
       const existing = timers.current.get(id);
       if (existing !== undefined) clearTimeout(existing);
       if (ms === undefined) {

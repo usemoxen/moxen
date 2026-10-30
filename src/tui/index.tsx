@@ -9,7 +9,8 @@ import type { LinkState, RemoteConnection } from "../server/transport/remote.js"
 import type { PairedServer } from "../server/transport/servers.js";
 import type { ActiveServer } from "./features/remote/server.js";
 import { registerSyntaxParsers } from "../core/syntax/register.js";
-import { SURFACE } from "./theme.js";
+import { applyLanguage } from "./i18n/index.js";
+import { SURFACE, applyTheme } from "./theme.js";
 import { MinSizeGate } from "./ui/terminalgate.js";
 
 export async function runTui(server?: string): Promise<void> {
@@ -65,6 +66,8 @@ export async function runTui(server?: string): Promise<void> {
           finish(await connect(target));
         };
         const draw = (config: CliConfig): void => {
+          applyLanguage(config.ui?.language);
+          if (applyTheme(config.ui?.theme)) renderer.setBackgroundColor(SURFACE.base);
           root.render(
             <MinSizeGate onQuit={() => finish(null)}>
               <App

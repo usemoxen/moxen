@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -13,13 +14,13 @@ const DETAIL_MAX_ROWS = 6;
 function headline(request: PendingPermissionRequest): string {
   switch (request.classification) {
     case "command-execution":
-      return "Run shell command";
+      return t("perm.run_shell_command_5bd9");
     case "file-change":
-      return "Edit file";
+      return t("perm.edit_file_178f");
     case "file-read":
-      return "Read";
+      return t("perm.read_7a1a");
     default:
-      return `Use ${request.toolName}`;
+      return t("perm.use", { tool: request.toolName });
   }
 }
 
@@ -44,8 +45,8 @@ export function PermissionPanel({
 }) {
   const [highlight, setHighlight] = useState(0);
   const rows: ReadonlyArray<{ key: PermissionDecision; label: string; meta?: string }> = [
-    { key: "accept", label: "1. Yes" },
-    { key: "accept-session", label: `2. Yes, and don't ask again for ${request.toolName}`, meta: "this session" },
+    { key: "accept", label: t("perm.1_yes_d834") },
+    { key: "accept-session", label: t("perm.yesAlways", { tool: request.toolName }), meta: t("perm.this_session_1855") },
     { key: "decline", label: "3. No" },
   ];
 
@@ -116,7 +117,7 @@ export function PermissionPanel({
         )}
         <box style={{ flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
           <text fg={COLOR.bright} bg={SURFACE.raised}>
-            Do you want to proceed?
+            {t("perm.proceed")}
           </text>
         </box>
         <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
@@ -144,7 +145,7 @@ export function PermissionPanel({
         </box>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-        <text fg={COLOR.faint}>{truncate("↑↓ move · 1-3 pick · enter selects · × denies", Math.max(0, width))}</text>
+        <text fg={COLOR.faint}>{truncate(t("perm.move_13_pick_enter_39e3"), Math.max(0, width))}</text>
       </box>
     </box>
   );

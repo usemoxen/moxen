@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, stripAnsiSequences } from "@opentui/core";
@@ -61,13 +62,13 @@ export function TextField({
   }, [height]);
   const rows = multiline ? { minHeight: 4, maxHeight: 10 } : { minHeight: 1, maxHeight: 3 };
   const lines = text.split("\n").length;
-  const size = text.length === 0 ? "" : multiline ? `${text.length} chars · ${lines} line${lines === 1 ? "" : "s"}` : `${text.length} chars`;
+  const size = text.length === 0 ? "" : multiline ? t("tf.charsLines", { chars: text.length, count: lines }) : t("tf.chars", { count: text.length });
   // Each hint is a key and what it does, the key lit and the verb quiet.
   const hints: ReadonlyArray<readonly [string, string]> = [
-    ["enter", "save"],
-    ...(multiline ? ([["shift+enter", "new line"]] as const) : []),
-    ["esc", "cancel"],
-    ["ctrl+u", "clear"],
+    ["enter", t("tf.save")],
+    ...(multiline ? ([["shift+enter", t("tf.newLine")]] as const) : []),
+    ["esc", t("tf.cancel")],
+    ["ctrl+u", t("tf.clear")],
   ];
 
   return (
@@ -124,11 +125,11 @@ export function TextField({
           ))}
         </box>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {hidden ? (text === "" ? "" : `${text.length} chars, hidden`) : size}
+          {hidden ? (text === "" ? "" : t("tf.charsHidden", { count: text.length })) : size}
         </text>
       </box>
       {fallback === undefined ? null : (
-        <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{` Left empty: ${fallback}`}</text>
+        <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("tf.leftEmpty", { what: fallback })}</text>
       )}
     </box>
   );

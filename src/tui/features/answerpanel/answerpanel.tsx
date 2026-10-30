@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -91,13 +92,13 @@ export function AnswerPanel({
       : [
           {
             key: "custom",
-            label: "✎ Custom answer…",
+            label: t("answer.custom_answer_cd39"),
             ...(customValue === undefined ? {} : { meta: truncate(customValue, 32), selected: true }),
             onPick: onCustom,
           },
         ]),
     ...(question.multiSelect
-      ? [{ key: "continue", label: "Continue ✓", meta: `${pickedValues.length} picked`, onPick: onContinue }]
+      ? [{ key: "continue", label: t("answer.continue_a757"), meta: t("answer.picked", { count: pickedValues.length }), onPick: onContinue }]
       : []),
   ];
   const safe = rows.length === 0 ? -1 : Math.min(highlight, rows.length - 1);
@@ -222,7 +223,7 @@ export function AnswerPanel({
             border
             borderStyle="rounded"
             borderColor={SURFACE.border}
-            title=" preview "
+            title={t("answer.preview_aac3")}
             titleColor={COLOR.faint}
             style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1, maxHeight: PREVIEW_MAX_ROWS }}
             backgroundColor={SURFACE.raised}
@@ -232,7 +233,7 @@ export function AnswerPanel({
         )}
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-        <text fg={COLOR.faint}>{truncate(`↑↓ move · 1-9 pick · enter selects${total > 1 ? " · ←→ questions" : ""} · × dismisses`, Math.max(0, width))}</text>
+        <text fg={COLOR.faint}>{truncate(t(total > 1 ? "answer.hintMany" : "answer.hintOne"), Math.max(0, width))}</text>
       </box>
     </box>
   );

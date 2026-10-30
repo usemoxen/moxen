@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import { markModalDismissed } from "../model/modalDismiss.js";
 import { SURFACE } from "../theme.js";
+import { modalOpened } from "./modalopen.js";
 
 /**
  * Shared chrome for every modal (picker, message actions, command palette,
@@ -33,6 +34,8 @@ export function ModalShell({
   children: ReactNode;
 }) {
   const [step, setStep] = useState(0);
+  // Images underneath stop drawing while this is open: the dimming layer would turn them black (see modalopen.ts).
+  useEffect(() => modalOpened(), []);
   useEffect(() => {
     const timer = setInterval(() => {
       setStep((current) => {

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useKeyboard } from "@opentui/react";
 
 import { ModalShell } from "../../ui/modalshell.js";
@@ -49,7 +50,7 @@ export function SideQuestionModal({
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{"Side question"}</text>
+        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{t("btw.side_question_3945")}</text>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"esc"}</text>
       </box>
       <box style={{ flexDirection: "row", flexShrink: 0, marginTop: 1 }}>
@@ -58,9 +59,9 @@ export function SideQuestionModal({
       </box>
       <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
         {asking ? (
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{`${frame} asking on a copy of this thread…`}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("btw.asking", { frame })}</text>
         ) : entry.status === "failed" ? (
-          <text fg={COLOR.danger} bg={SURFACE.raised}>{entry.error ?? "No answer."}</text>
+          <text fg={COLOR.danger} bg={SURFACE.raised}>{entry.error ?? t("btw.no_answer_8836")}</text>
         ) : (
           // `selectable`: `<markdown>` is not by default, and the answer is what gets dragged.
           <markdown content={entry.answer ?? ""} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
@@ -71,13 +72,13 @@ export function SideQuestionModal({
           {truncate(
             // Short enough to survive beside the copy button: the second
             // half of a longer line was the part that got cut.
-            entry.withContext ? "Not added to the thread · no tools run" : "No thread context: nothing to copy yet",
+            entry.withContext ? t("btw.not_added_to_the_ed5d") : t("btw.no_thread_context_nothing_3722"),
             Math.max(10, inner - 24),
           )}
         </text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.raised} />
         {entry.answer === null ? null : (
-          <HoverButton label=" c copy " fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopy(entry.answer!)} />
+          <HoverButton label={t("btw.c_copy_bf8e")} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopy(entry.answer!)} />
         )}
       </box>
     </ModalShell>

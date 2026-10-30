@@ -4,7 +4,6 @@
  * approval like a command does (a page address or a query can carry
  * information out), keyed by host for "allow for this session".
  */
-import { primeSecret } from "../../../secrets.js";
 import { fetchPage } from "../web/fetch.js";
 import { isLoopbackHost } from "../web/netguard.js";
 import { searchHost, searchWeb } from "../web/search.js";
@@ -92,7 +91,6 @@ export function webSearchTool(settings: () => WebSettings): HarnessTool<SearchAr
     },
     async run(args, context) {
       const current = settings();
-      await primeSecret(current.search.keyRef);
       return await searchWeb(args.query, args.count, { settings: current.search, env: current.env, policy: { allowPrivate: current.allowPrivate }, signal: context.signal });
     },
   };

@@ -1,5 +1,5 @@
 import { act, useState } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { Composer } from "../../features/composer/composer.js";
 import { fail } from "../helpers.js";

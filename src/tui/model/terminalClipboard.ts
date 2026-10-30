@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import { isSshSession } from "./clipboard.js";
 import { MAX_IMAGE_BYTES } from "../../core/attachments.js";
 import { readClipboardImage } from "./hostClipboard.js";
@@ -300,7 +301,7 @@ export async function readPastedImage(options?: {
     // Locally the host clipboard is the same one, and may still hold an
     // image in a type the terminal lists but this does not read (TIFF).
     if (outcome.status === "no-image" && remote) {
-      return { bytes: null, mimeType: null, error: "clipboard has no image — copy one first" };
+      return { bytes: null, mimeType: null, error: t("clip.noImage") };
     }
     if (outcome.status === "denied") {
       return {
@@ -308,15 +309,15 @@ export async function readPastedImage(options?: {
         mimeType: null,
         error:
           outcome.code === "EPERM"
-            ? "terminal denied clipboard read — kitty: add read-clipboard to clipboard_control, restart"
-            : `terminal clipboard read failed (${outcome.code})`,
+            ? t("clip.denied")
+            : t("clip.readFailedCode", { code: outcome.code }),
       };
     }
     if (outcome.status === "timed-out") {
-      return { bytes: null, mimeType: null, error: "clipboard read timed out — approve the terminal prompt and retry" };
+      return { bytes: null, mimeType: null, error: t("clip.timeout") };
     }
     if (outcome.status === "limit-exceeded") {
-      return { bytes: null, mimeType: null, error: "image is larger than 10 MB" };
+      return { bytes: null, mimeType: null, error: t("clip.tooBig") };
     }
     // "unsupported", or "no-image" locally: on to the host clipboard below.
   }
@@ -331,6 +332,6 @@ export async function readPastedImage(options?: {
   return {
     bytes: null,
     mimeType: null,
-    error: "over SSH: allow Kitty clipboard reads (clipboard_control), or scp the file and @mention it",
+    error: t("clip.ssh"),
   };
 }

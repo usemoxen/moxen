@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { basename, resolve } from "node:path";
 
 import { buildImageAttachments, extractMentions } from "../../../core/attachments.js";
@@ -94,7 +95,7 @@ export function useThreadCreation(params: {
     // nothing to create under.
     const projectId = creatingProjectId ?? source?.projectId ?? shellProjects[0]?.id ?? null;
     if (projectId === undefined || projectId === null) {
-      setError("pick a project for the new thread first");
+      setError(t("thread.pickProject"));
       return;
     }
     const parsed = extractMentions(trimmed);
@@ -179,17 +180,17 @@ export function useThreadCreation(params: {
   const submitProjectFolder = (rawPath: string) => {
     const trimmed = rawPath.trim();
     if (trimmed.length === 0) {
-      setError("enter a folder path for the new project");
+      setError(t("thread.enterFolder"));
       return;
     }
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
     if (remote && (trimmed === "~" || trimmed.startsWith("~/") || !isAbsoluteAnywhere(trimmed))) {
       // This machine's home and working folder mean nothing on the server.
-      setError("enter the folder's full path on the server");
+      setError(t("thread.enterServerPath"));
       return;
     }
     if ((trimmed === "~" || trimmed.startsWith("~/")) && home.length === 0) {
-      setError("could not resolve ~ — enter a full path");
+      setError(t("thread.noHome"));
       return;
     }
     const workspaceRoot = remote ? trimmed : resolve(trimmed === "~" || trimmed.startsWith("~/") ? home + trimmed.slice(1) : trimmed);

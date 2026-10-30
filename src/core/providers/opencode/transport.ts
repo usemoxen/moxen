@@ -20,7 +20,7 @@ import net from "node:net";
 import { OpenCode } from "@opencode/client";
 
 import { CliError } from "../../errors.js";
-import { killProcessTree } from "../../infra/process.js";
+import { killProcessGroup, killProcessTree } from "../../infra/process.js";
 import {
   buildServerConfigContent,
   compareSemver,
@@ -169,6 +169,13 @@ export interface OpencodeServerConnection {
   /** Set (string) or clear (null) one runtime instruction entry for the session. */
   setInstructions(sessionID: string, key: string, value: string | null): Promise<void>;
   abortSession(sessionID: string): Promise<void>;
+  /**
+   * Stop a running command the model sent to the background. On this machine's own server the process is
+   * killed, so the model is told it ended ("Killed by SIGTERM") with the output it made. Otherwise (a server
+   * elsewhere, or no pid) `shell.remove`: it kills the command too, but also forgets it, and the model is
+   * then told its job failed with `Shell.NotFoundError`.
+   */
+  stopShell(shellID: string): Promise<void>;
   /** `session.fork`: a copy of the session, up to (excluding) `beforeMessageID` when given. */
   forkSession(sessionID: string, beforeMessageID?: string): Promise<OpencodeSessionState>;
   /**
@@ -211,6 +218,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -233,15 +244,58 @@ function isNotFound(cause: unknown): boolean {
   return status === 404;
 }
 
-async function request<T>(label: string, run: () => Promise<T>): Promise<T> {
-  try {
-    return await run();
-  } catch (cause) {
-    if (cause instanceof CliError) throw cause;
-    throw new CliError("OPENCODE_REQUEST_FAILED", `OpenCode ${label} failed: ${errorDetail(cause)}.`, {
-      details: { label },
-      cause,
-    });
+/**
+ * Calls a 503 may be retried for: the ones that set a session up or only read. A 503 is the server saying it
+ * could not take the request yet (a first request just after it started, or while it re-reads its config), so
+ * none of these was handled. A prompt or a reply is left out: a 503 from something in front of the server
+ * could follow work already done.
+ */
+const RETRIED_WHEN_UNAVAILABLE = new Set([
+  "session.create",
+  "session.get",
+  "mcp.add",
+  "model.list",
+  "integration.list",
+  "command.list",
+  "message.list",
+  "session.context",
+]);
+
+/** Waits before each retry of a 503: three more tries, about two seconds in all. */
+export const UNAVAILABLE_RETRY_DELAYS_MS: ReadonlyArray<number> = [250, 750, 1_000];
+
+/**
+ * The server is not there: nothing answered at its address (the client reports `Transport`), as when its
+ * process died without the driver having heard of it yet.
+ */
+export function isServerUnreachable(cause: unknown): boolean {
+  for (let error: unknown = cause, depth = 0; error instanceof Error && depth < 4; error = error.cause, depth += 1) {
+    if ((error as { reason?: unknown }).reason === "Transport") return true;
+  }
+  return false;
+}
+
+function isUnavailable(cause: unknown): boolean {
+  return cause instanceof Error && asRecord((cause as { cause?: unknown }).cause)?.status === 503;
+}
+
+export async function request<T>(label: string, run: () => Promise<T>, retryDelaysMs: ReadonlyArray<number> = UNAVAILABLE_RETRY_DELAYS_MS): Promise<T> {
+  const delays = RETRIED_WHEN_UNAVAILABLE.has(label) ? retryDelaysMs : [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (cause) {
+      const delay = delays[attempt];
+      if (delay !== undefined && isUnavailable(cause)) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      if (cause instanceof CliError) throw cause;
+      throw new CliError("OPENCODE_REQUEST_FAILED", `OpenCode ${label} failed: ${errorDetail(cause)}.`, {
+        details: { label },
+        cause,
+      });
+    }
   }
 }
 
@@ -506,6 +560,20 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
 
   async abortSession(sessionID: string): Promise<void> {
     await this.client.session.interrupt({ sessionID }).catch(() => undefined);
+  }
+
+  async stopShell(shellID: string): Promise<void> {
+    if (!this.external) {
+      const result = asRecord(await request("shell.get", () => this.client.shell.get({ id: shellID, location: this.location })));
+      // The command's own record, whether or not the server wraps it in an envelope.
+      const info = asRecord(result?.data) ?? result;
+      const pid = asNumber(info?.pid);
+      if (info?.status === "running" && pid !== undefined && pid > 0) {
+        killProcessGroup(pid);
+        return;
+      }
+    }
+    await request("shell.remove", () => this.client.shell.remove({ id: shellID, location: this.location }));
   }
 
   async forkSession(sessionID: string, beforeMessageID?: string): Promise<OpencodeSessionState> {

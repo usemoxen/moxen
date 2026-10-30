@@ -1,4 +1,4 @@
-import type { HarnessProviderConfig, KeyedSearchBackend, WebConfig } from "../../../types.js";
+import type { HarnessProviderConfig, WebConfig } from "../../../types.js";
 import type { BrowserSettings } from "./browser.js";
 import { SEARCH_BACKENDS, type SearchBackend, type SearchSettings } from "./search.js";
 
@@ -30,32 +30,10 @@ export function webPolicy(web: WebConfig | undefined, harness: HarnessProviderCo
   };
 }
 
-/** Whether the per-service key slots are in use; while none is, the older single slot stands for the selected service. */
-export function usesPerServiceKeys(harness: HarnessProviderConfig | undefined): boolean {
-  return Object.keys(harness?.webSearchKeys ?? {}).length > 0 || Object.keys(harness?.webSearchKeyEnvs ?? {}).length > 0;
-}
-
-/**
- * The key a search service uses: its own slot, else (in a file from before
- * there was one per service) the single older slot, which only ever stood for
- * the service selected, so no other service is handed it.
- */
-export function searchKeyFor(harness: HarnessProviderConfig | undefined, backend: SearchBackend): { keyRef?: string; keyEnv?: string } {
-  if (backend !== "exa" && backend !== "brave") return {};
-  const keyed = backend satisfies KeyedSearchBackend;
-  if (usesPerServiceKeys(harness)) {
-    const keyRef = harness?.webSearchKeys?.[keyed];
-    const keyEnv = harness?.webSearchKeyEnvs?.[keyed];
-    return { ...(keyRef ? { keyRef } : {}), ...(keyEnv ? { keyEnv } : {}) };
-  }
-  if (harness?.webSearch !== keyed) return {};
-  return { ...(harness?.webSearchKey ? { keyRef: harness.webSearchKey } : {}), ...(harness?.webSearchKeyEnv ? { keyEnv: harness.webSearchKeyEnv } : {}) };
-}
-
 export function resolveWebSettings(config: HarnessProviderConfig | undefined, env: NodeJS.ProcessEnv, web?: WebConfig): WebSettings {
   const backend = SEARCH_BACKENDS.includes(config?.webSearch as SearchBackend) ? (config!.webSearch as SearchBackend) : "duckduckgo";
   return {
-    search: { backend, ...searchKeyFor(config, backend), searxngUrl: config?.searxngUrl },
+    search: { backend, searxngUrl: config?.searxngUrl },
     ...webPolicy(web, config, true),
     env,
   };

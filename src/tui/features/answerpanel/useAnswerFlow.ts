@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { dispatchErrorMessage } from "../../../core/errors.js";
@@ -115,7 +116,7 @@ export function useAnswerFlow(
       }
     }
     if (unanswered(draft.index)) {
-      setError("answer every question before submitting");
+      setError(t("answer.answer_every_question_before_8759"));
       return;
     }
     // Everything is answered. Changing an earlier answer walks on toward the
@@ -128,7 +129,7 @@ export function useAnswerFlow(
     for (const question of request.questions) {
       const resolved = resolveAnswerQuestion(question, draft);
       if (resolved === null) {
-        setError("answer every question before submitting");
+        setError(t("answer.answer_every_question_before_8759"));
         return;
       }
       answers[question.id] = resolved;
@@ -145,7 +146,7 @@ export function useAnswerFlow(
         answers,
       })
       .then(() => {
-        toasts.push("answer-submitted", "info", "Answer submitted", COPY_TOAST_MS);
+        toasts.push("answer-submitted", "info", t("answer.answer_submitted_b1e9"), COPY_TOAST_MS);
         setSettledAnswerRequestIds((settled) =>
           settled.includes(draft.requestId) ? settled : [...settled, draft.requestId],
         );
@@ -162,7 +163,7 @@ export function useAnswerFlow(
             setSettledAnswerRequestIds((settled) => settled.filter((entry) => entry !== draft.requestId));
             setError(dispatchErrorMessage(cause));
           } else {
-            toasts.push("answer-elsewhere", "info", "Already answered elsewhere", COPY_TOAST_MS);
+            toasts.push("answer-elsewhere", "info", t("answer.already_answered_elsewhere_08b4"), COPY_TOAST_MS);
             setSettledAnswerRequestIds((settled) =>
               settled.includes(draft.requestId) ? settled : [...settled, draft.requestId],
             );
@@ -205,7 +206,7 @@ export function useAnswerFlow(
         requestId: draft.requestId,
       })
       .then(() => {
-        toasts.push("answer-dismissed", "info", "Question dismissed", COPY_TOAST_MS);
+        toasts.push("answer-dismissed", "info", t("answer.question_dismissed_d799"), COPY_TOAST_MS);
         setSettledAnswerRequestIds((settled) =>
           settled.includes(draft.requestId) ? settled : [...settled, draft.requestId],
         );

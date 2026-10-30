@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useMemo, useState } from "react";
 
 import { dispatchErrorMessage } from "../../../core/errors.js";
@@ -7,11 +8,11 @@ import { COPY_TOAST_MS } from "../../app/constants.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PermissionDecision } from "../../../server/protocol.js";
 
-const DECIDED: Record<PermissionDecision, string> = {
-  accept: "Allowed",
-  "accept-session": "Allowed for this session",
-  decline: "Denied",
-};
+const DECIDED = (): Record<PermissionDecision, string> => ({
+  accept: t("perm.allowed_bb5f"),
+  "accept-session": t("perm.allowed_for_this_session_413f"),
+  decline: t("perm.denied_58d0"),
+});
 
 /**
  * The tool approval the turn is parked on, oldest first. The panel replaces
@@ -39,7 +40,7 @@ export function usePermissionFlow(
     setSettled((current) => [...current, request.requestId]);
     void client
       .dispatch({ type: "thread.permission.respond", threadId: id, requestId: request.requestId, decision })
-      .then(() => toasts.push("permission-answered", "info", DECIDED[decision], COPY_TOAST_MS))
+      .then(() => toasts.push("permission-answered", "info", DECIDED()[decision], COPY_TOAST_MS))
       .catch((cause: unknown) => {
         // A rejection right after answering in another client means the
         // request is already gone — only an approval still open is an error.
@@ -51,7 +52,7 @@ export function usePermissionFlow(
             setSettled((current) => current.filter((entry) => entry !== request.requestId));
             setError(dispatchErrorMessage(cause));
           } else {
-            toasts.push("permission-elsewhere", "info", "Already answered elsewhere", COPY_TOAST_MS);
+            toasts.push("permission-elsewhere", "info", t("perm.already_answered_elsewhere_08b4"), COPY_TOAST_MS);
           }
         }, 800);
       });

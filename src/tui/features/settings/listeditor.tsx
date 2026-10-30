@@ -6,6 +6,7 @@ import { useKeyboard } from "@opentui/react";
 import { TextField } from "./textfield.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
 import { useHover } from "../../hooks/useHover.js";
+import { t, tx } from "../../i18n/index.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 import { TEXT_OPTION, sliderChoices, itemRows, pairNames, selectable, withPair, type EditorOption, type EditorRow } from "../../model/listeditor.js";
 import type { ListField, ListItemView, SettingDescriptor, SettingEnds } from "../../../core/configschema.js";
@@ -40,7 +41,6 @@ interface MultiEntry {
 
 type Confirm = { readonly action: "remove-profile" | "remove-model" | "probe"; readonly id: string };
 
-const PROBE_WARNING = "Runs about a dozen tiny requests, one at a time. On a one-slot server they replace the cached prompt of your last conversation. Press p again to run, esc to cancel.";
 
 export function ListEditor({
   descriptor,
@@ -177,9 +177,9 @@ export function ListEditor({
     const names = [...new Set([...tools, ...hidden])].sort((a, b) => a.localeCompare(b));
     setOverlay({
       type: "multi",
-      title: "Hidden tools",
-      description: `${tools.length} tool${tools.length === 1 ? "" : "s"} on ${id}. Space ticks the ones to hide from the model; enter saves, even with none ticked. Type to filter.`,
-      entries: names.map((name) => ({ id: name, label: name, detail: tools.includes(name) ? "" : "not offered now" })),
+      title: t("le.hiddenTools"),
+      description: t("le.toolsOn", { count: tools.length, id }),
+      entries: names.map((name) => ({ id: name, label: name, detail: tools.includes(name) ? "" : t("le.notOffered") })),
       checked: hidden,
       filter: "",
       index: 0,
@@ -195,7 +195,7 @@ export function ListEditor({
     if (known !== undefined && known.length > 0) return openToolPicker(id, key, hidden, known);
     // The server has not been asked yet: start it, and open the picker when it answers.
     setToolsPending({ id, key, hidden });
-    setOverlay({ type: "wait", title: "Listing the server's tools…", message: `Starting ${id} to see which tools it offers. esc cancels.` });
+    setOverlay({ type: "wait", title: t("le.listingTools"), message: t("le.startingToSee", { id }) });
     onTest(id);
   };
   useEffect(() => {
@@ -204,7 +204,7 @@ export function ListEditor({
     setToolsPending(null);
     const tools = run.kind === "test" && "result" in run ? run.result.tools : undefined;
     if (tools !== undefined && tools.length > 0) return openToolPicker(id, key, hidden, tools);
-    ask("Hidden tools", `${"error" in run ? run.error : "result" in run && "message" in run.result ? run.result.message : "The server did not answer."}\nType the tool names to hide, separated by commas.`, (text) => onSet(key, text), hidden.join(", "));
+    ask(t("le.hiddenTools"), t("le.typeToolNames", { reason: "error" in run ? run.error : "result" in run && "message" in run.result ? run.result.message : t("le.noAnswer") }), (text) => onSet(key, text), hidden.join(", "));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run, toolsPending]);
 
@@ -214,7 +214,7 @@ export function ListEditor({
     if (row.control.kind === "pairs") {
       const names = pairNames(row.value);
       const secret = row.control.secret;
-      const options: EditorOption[] = [...names.map((name) => ({ value: name, label: name, description: secret ? "change the value, or empty to remove" : "change or remove" })), { value: TEXT_OPTION, label: "+ Add", description: "NAME=value" }];
+      const options: EditorOption[] = [...names.map((name) => ({ value: name, label: name, description: secret ? t("le.changeValue") : t("le.changeOrRemove") })), { value: TEXT_OPTION, label: t("le.add"), description: t("le.nameValue") }];
       setOverlay({
         type: "pick",
         title: row.label,
@@ -224,12 +224,12 @@ export function ListEditor({
         key,
         custom: (option) => {
           if (option.value === TEXT_OPTION) {
-            ask(`${row.label}: NAME=value`, "A new entry. The value is stored, not shown again.", (text) => {
+            ask(`${row.label}: ${t("le.nameValue")}`, t("le.newEntry"), (text) => {
               const at = text.indexOf("=");
               if (at > 0) onSet(key, withPair(row.value, text.slice(0, at).trim(), text.slice(at + 1).trim()));
             });
           } else {
-            ask(`${option.value}: new value`, "Empty removes it.", (text) => onSet(key, withPair(row.value, option.value, text.trim() === "" ? "" : text.trim())));
+            ask(t("le.newValue", { name: option.value }), t("le.emptyRemoves"), (text) => onSet(key, withPair(row.value, option.value, text.trim() === "" ? "" : text.trim())));
           }
         },
       });
@@ -237,7 +237,7 @@ export function ListEditor({
     }
     if (row.control.kind === "secret") {
       // Typed blind (the characters are not drawn) and sent to the keychain; an empty answer removes the saved key.
-      ask(row.label, `${row.description}\n${row.value === undefined ? "No key is saved." : "A key is saved. Type a new one to replace it, or press enter on an empty line to remove it."}`, (text) => onSet(key, text.trim()), "", "paste the key, then press enter", true);
+      ask(row.label, `${row.description}\n${row.value === undefined ? t("le.noKeySaved") : t("le.keySaved")}`, (text) => onSet(key, text.trim()), "", t("le.pasteKey"), true);
       return;
     }
     if (row.control.kind === "text") {
@@ -284,9 +284,9 @@ export function ListEditor({
     const taken = new Set(items.map((item) => item.id));
     setOverlay({
       type: "pick",
-      title: "Add a provider",
-      description: "What kind of server is it? This fills in the usual address and wire format; you can change the address next, and it need not be this machine.",
-      options: PROVIDER_PRESETS.map((preset) => ({ value: preset.id, label: preset.label, description: preset.hint })),
+      title: t("le.addProvider"),
+      description: t("le.addProviderHelp"),
+      options: PROVIDER_PRESETS.map((preset) => ({ value: preset.id, label: tx(preset.label), description: tx(preset.hint) })),
       index: 0,
       key: "",
       custom: (option) => {
@@ -299,17 +299,17 @@ export function ListEditor({
   const askAddress = (preset: ProviderPreset, taken: ReadonlySet<string>) => {
     const local = preset.baseUrl.includes("localhost");
     ask(
-      `${preset.label}: server address`,
+      t("le.serverAddress", { label: tx(preset.label) }),
       local
-        ? "Where it runs. localhost is this machine; if the server is on another one, use that machine's address, such as http://192.168.1.20:" + (preset.baseUrl.split(":").pop() ?? "8080") + "."
-        : "The server's address, with or without /v1.",
+        ? t("le.whereItRuns", { port: preset.baseUrl.split(":").pop() ?? "8080" })
+        : t("le.addressHelp"),
       (url) => {
         const baseUrl = url.trim();
         if (baseUrl === "") return;
         if (preset.keyEnv === null) return findModels(preset, baseUrl, "", taken);
         ask(
-          "Key: environment variable",
-          "The NAME of the variable that holds the API key, not the key itself. Leave it empty if the server needs none. You can save the key on the profile afterwards.",
+          t("le.keyEnv"),
+          t("le.keyEnvHelp"),
           (name) => findModels(preset, baseUrl, name.trim(), taken),
           preset.keyEnv,
           "OPENAI_API_KEY",
@@ -322,14 +322,14 @@ export function ListEditor({
 
   const findModels = (preset: ProviderPreset, baseUrl: string, keyEnv: string, taken: ReadonlySet<string>) => {
     const mine = (flow.current += 1);
-    setOverlay({ type: "wait", title: "Looking for models…", message: `Asking ${baseUrl} which models it serves. esc cancels.` });
+    setOverlay({ type: "wait", title: t("le.lookingForModels"), message: t("le.askingModels", { url: baseUrl }) });
     void onDiscover(baseUrl, preset.apiFormat, keyEnv === "" ? undefined : keyEnv).then((result) => {
       if (flow.current !== mine) return;
       if (result.ok) {
         setOverlay({
           type: "multi",
-          title: `Models on ${result.host}`,
-          description: `${result.models.length} found. Space picks the ones to add; with none picked, enter adds the highlighted one. Type to filter.`,
+          title: t("le.modelsOn", { host: result.host }),
+          description: t("le.modelsFound", { count: result.models.length }),
           entries: result.models.map((model) => ({ id: model.id, label: model.id, detail: model.contextWindow === undefined ? "" : tokensShort(model.contextWindow) })),
           checked: [],
           filter: "",
@@ -337,14 +337,14 @@ export function ListEditor({
           done: (ids) => nameProvider(preset, baseUrl, keyEnv, taken, result.models.filter((model) => ids.includes(model.id))),
         });
       } else {
-        ask("Model name", `${result.message}\nType the model's name as the server expects it, or esc to cancel and fix the address.`, (name) => name.trim() !== "" && nameProvider(preset, baseUrl, keyEnv, taken, [{ id: name.trim() }]));
+        ask(t("le.modelName"), t("le.modelNameHelp", { message: result.message }), (name) => name.trim() !== "" && nameProvider(preset, baseUrl, keyEnv, taken, [{ id: name.trim() }]));
       }
     });
   };
 
   const nameProvider = (preset: ProviderPreset, baseUrl: string, keyEnv: string, taken: ReadonlySet<string>, models: readonly DiscoveredModel[]) => {
     if (models.length === 0) return;
-    ask("Name this provider", "Lowercase letters, digits, '.', '_' or '-'. It becomes harness/<id> in the model picker.", (id) => {
+    ask(t("le.nameProvider"), t("le.nameProviderHelp"), (id) => {
       const clean = id.trim().toLowerCase();
       if (clean === "") return;
       const saved = onSet(`${descriptor.key}[${clean}]`, profileDocument(preset, { baseUrl, keyEnv, models }));
@@ -359,11 +359,11 @@ export function ListEditor({
     const taken = new Set(items.map((item) => item.id));
     setOverlay({
       type: "pick",
-      title: "Add an MCP server",
-      description: "Pick a well-known server to start from, or enter your own. Models see its tools as mcp__<name>__<tool>.",
+      title: t("le.addMcp"),
+      description: t("le.addMcpHelp"),
       options: [
-        ...MCP_PRESETS.map((preset) => ({ value: preset.id, label: preset.label, description: preset.needs === undefined ? preset.hint : `${preset.hint} · needs ${preset.needs}` })),
-        { value: "custom", label: "Custom", description: "a command to start, or an http(s) address" },
+        ...MCP_PRESETS.map((preset) => ({ value: preset.id, label: tx(preset.label), description: preset.needs === undefined ? tx(preset.hint) : t("le.needs", { hint: tx(preset.hint), needs: preset.needs }) })),
+        { value: "custom", label: t("le.custom"), description: t("le.customHelp") },
       ],
       index: 0,
       key: "",
@@ -371,7 +371,7 @@ export function ListEditor({
         const preset = MCP_PRESETS.find((entry) => entry.id === option.value);
         const target = preset === undefined ? "" : mcpTarget(preset, mcpRunner);
         const save = (command: string, secret?: { env?: Record<string, string>; headers?: Record<string, string> }) =>
-          ask("Name this server", "Letters, digits, '-' or '_'.", (name) => {
+          ask(t("le.nameServer"), t("le.nameServerHelp"), (name) => {
             const clean = name.trim();
             if (clean === "") return;
             const saved = onSet(`${descriptor.key}[${clean}]`, mcpDocument(command, secret));
@@ -385,8 +385,8 @@ export function ListEditor({
           const secret = preset.secret;
           if (secret === undefined) return save(target);
           return ask(
-            `${preset.label}: ${secret.label}`,
-            `Kept in the OS keychain, never in the config file. Leave it empty to add the server now and set ${secret.env ?? secret.header} on it later.`,
+            `${tx(preset.label)}: ${tx(secret.label)}`,
+            t("le.keychainHelp", { name: secret.env ?? secret.header ?? "" }),
             (key) => save(target, key.trim() === "" ? undefined : secret.header !== undefined ? { headers: { [secret.header]: key.trim() } } : secret.env !== undefined ? { env: { [secret.env]: key.trim() } } : undefined),
             "",
             "",
@@ -394,8 +394,8 @@ export function ListEditor({
           );
         }
         ask(
-          preset === undefined ? "Command or URL" : `${preset.label}: command`,
-          preset?.needs === undefined ? "A program to start (npx -y some-mcp-server) or an http(s) address. Change it if you need another folder or option." : `A program to start, or an address. Needs ${preset.needs}.`,
+          preset === undefined ? t("le.commandOrUrl") : t("le.commandOf", { label: tx(preset.label) }),
+          preset?.needs === undefined ? t("le.commandHelp") : t("le.commandNeedsHelp", { needs: preset.needs }),
           (text) => text.trim() !== "" && save(text.trim()),
           target,
           "npx -y @modelcontextprotocol/server-filesystem .",
@@ -420,15 +420,15 @@ export function ListEditor({
   };
   const doExport = () => {
     if (!canTransfer || selectedProfileId === null) return;
-    ask("Export to a file", "Writes this profile as JSON. A saved key and probe results are left out, so the file is safe to share. `~/` is your home directory.", (file) => file.trim() !== "" && onExport(selectedProfileId, file), `~/${selectedProfileId}.moxen-profile.json`);
+    ask(t("le.exportTitle"), t("le.exportHelp"), (file) => file.trim() !== "" && onExport(selectedProfileId, file), `~/${selectedProfileId}.moxen-profile.json`);
   };
   const doImport = () => {
     if (!canTransfer) return;
-    ask("Import from a file", "A file made by Export (or `moxen harness profile export`). If its id is taken, it is added under a new one. Set the key afterwards if the server needs one.", (file) => file.trim() !== "" && onImport(file), "", "~/colab.moxen-profile.json");
+    ask(t("le.importTitle"), t("le.importHelp"), (file) => file.trim() !== "" && onImport(file), "", "~/colab.moxen-profile.json");
   };
   const doCopy = () => {
     if (selectedProfileId === null) return;
-    ask("Copy to a new id", "The copy keeps everything except probe results, which describe one server.", (newId) => onDuplicate(selectedProfileId, newId.trim()));
+    ask(t("le.copyTitle"), t("le.copyHelp"), (newId) => onDuplicate(selectedProfileId, newId.trim()));
   };
   const doRemove = () => {
     const id = screen.model ?? selectedProfileId;
@@ -525,7 +525,7 @@ export function ListEditor({
       if (activeRow?.kind === "field") edit(activeRow);
       else if (activeRow?.kind === "child") go({ profile: screen.profile, model: activeRow.id });
       else if (activeRow?.kind === "addChild") {
-        ask("Model name", "The name the server expects.", (name) => {
+        ask(t("le.modelName"), t("le.modelNameShort"), (name) => {
           if (name.trim() !== "") onSet(`${descriptor.key}[${screen.profile}].models[${name.trim()}]`, "{}");
         });
       }
@@ -541,26 +541,26 @@ export function ListEditor({
 
   const title = model !== undefined ? `${profile?.title} › ${model.title}` : profile !== undefined ? profile.title : descriptor.label;
   const hint = overlay?.type === "pick"
-    ? "↑↓ choose · enter picks · esc back"
+    ? t("le.hint.pick")
     : overlay?.type === "multi"
-      ? "↑↓ move · space picks · type to filter · enter adds · esc cancels"
+      ? t("le.hint.multi")
       : overlay?.type === "wait"
-        ? "esc cancels"
+        ? t("le.hint.wait")
     : overlay?.type === "text"
-      ? "enter saves · esc cancels"
+      ? t("le.hint.text")
       : confirm?.action === "probe"
-        ? PROBE_WARNING
+        ? t("le.probeWarning")
         : confirm !== null
-          ? `Press x again to remove ${confirm.id} · esc cancels`
+          ? t("le.hint.confirmRemove", { id: confirm.id })
           : profile === undefined
-            ? `enter opens · a adds ${noun} · d copies${canTest ? " · t tests" : ""}${canProbe ? " · p probes" : ""}${canTransfer ? " · e exports · i imports" : ""} · x removes · esc back`
-            : `enter edits · tab sections${canTest ? " · t test" : ""}${canProbe ? " · p probe" : ""}${canTransfer ? " · e export" : ""} · d copy · x remove · esc back · applies from the next ${kind.type === "list" && kind.add === "mcp-server" ? "session" : "message"}`;
+            ? t("le.hint.list", { noun, test: canTest ? t("le.hint.tTests") : "", probe: canProbe ? t("le.hint.pProbes") : "", transfer: canTransfer ? t("le.hint.transfer") : "" })
+            : t("le.hint.item", { test: canTest ? t("le.hint.tTest") : "", probe: canProbe ? t("le.hint.pProbe") : "", transfer: canTransfer ? t("le.hint.eExport") : "", when: kind.type === "list" && kind.add === "mcp-server" ? t("le.session") : t("le.message") });
 
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-        {canLeave === false && profile === undefined && overlay === null && confirm === null ? <text bg={SURFACE.raised}>{" "}</text> : <Chip label={`← ${model !== undefined ? profile?.title ?? "back" : profile !== undefined ? descriptor.label : "back"}`} onPress={() => back()} accent />}
-        <text fg={saving !== null ? COLOR.faint : COLOR.dim} bg={SURFACE.raised} selectable={false}>{saving !== null ? "saving…" : ""}</text>
+        {canLeave === false && profile === undefined && overlay === null && confirm === null ? <text bg={SURFACE.raised}>{" "}</text> : <Chip label={`← ${model !== undefined ? profile?.title ?? t("le.back") : profile !== undefined ? descriptor.label : t("le.back")}`} onPress={() => back()} accent />}
+        <text fg={saving !== null ? COLOR.faint : COLOR.dim} bg={SURFACE.raised} selectable={false}>{saving !== null ? t("le.saving") : ""}</text>
       </box>
       <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(title, width)}</text>
@@ -569,11 +569,11 @@ export function ListEditor({
         {(model ?? profile)?.status ? <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>{truncate((model ?? profile)?.status ?? "", width)}</text> : null}
         {profile !== undefined ? (
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-            {canTest ? <Chip label="Test" keyHint="t" onPress={doTest} disabled={run?.running === true} /> : null}
-            {canProbe ? <Chip label="Probe" keyHint="p" onPress={doProbe} disabled={run?.running === true} /> : null}
-            {canTransfer ? <Chip label="Export" keyHint="e" onPress={doExport} /> : null}
-            <Chip label="Copy" keyHint="d" onPress={doCopy} />
-            <Chip label={confirm?.action === "remove-profile" || confirm?.action === "remove-model" ? "Remove: click again" : "Remove"} keyHint="x" onPress={doRemove} danger />
+            {canTest ? <Chip label={t("le.chip.test")} keyHint="t" onPress={doTest} disabled={run?.running === true} /> : null}
+            {canProbe ? <Chip label={t("le.chip.probe")} keyHint="p" onPress={doProbe} disabled={run?.running === true} /> : null}
+            {canTransfer ? <Chip label={t("le.chip.export")} keyHint="e" onPress={doExport} /> : null}
+            <Chip label={t("le.chip.copy")} keyHint="d" onPress={doCopy} />
+            <Chip label={confirm?.action === "remove-profile" || confirm?.action === "remove-model" ? t("le.chip.removeAgain") : t("le.chip.remove")} keyHint="x" onPress={doRemove} danger />
           </box>
         ) : null}
       </box>
@@ -614,7 +614,7 @@ export function ListEditor({
               initial={overlay.initial}
               placeholder={overlay.placeholder}
               secret={overlay.secret}
-              {...(overlay.secret ? { fallback: "removes the saved key" } : {})}
+              {...(overlay.secret ? { fallback: t("le.removesKey") } : {})}
               width={width}
               onSubmit={(text) => {
                 setOverlay(null);
@@ -624,7 +624,7 @@ export function ListEditor({
           </>
         ) : profile === undefined ? (
           <>
-            {items.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{kind.type === "list" && kind.add === "mcp-server" ? "No MCP servers yet. Add one to give every thread its tools; each provider's page lets you switch servers off for that provider." : `No ${noun}s yet. Add one to point the Moxen Harness at a server; its models then show up in the model picker as harness/<id>.`}</text> : null}
+            {items.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{kind.type === "list" && kind.add === "mcp-server" ? t("le.noMcp") : t("le.noProfiles", { noun })}</text> : null}
             {items.map((item, index) => (
               <Line key={item.id} id={`list-row-${index}`} left={`${index === at ? "▌ " : "  "}${item.title}`} right={item.status ? `! ${item.status}` : item.summary} rightColor={item.status ? COLOR.warn : COLOR.dim} active={index === at} width={width} onPress={() => go({ profile: item.id, model: null })} />
             ))}
@@ -639,7 +639,7 @@ export function ListEditor({
               setCursor(stops.indexOf(index));
               if (row.kind === "field") edit(row);
               else if (row.kind === "child") go({ profile: screen.profile, model: row.id });
-              else if (row.kind === "addChild") ask("Model name", "The name the server expects.", (name) => name.trim() !== "" && onSet(`${descriptor.key}[${screen.profile}].models[${name.trim()}]`, "{}"));
+              else if (row.kind === "addChild") ask(t("le.modelName"), t("le.modelNameShort"), (name) => name.trim() !== "" && onSet(`${descriptor.key}[${screen.profile}].models[${name.trim()}]`, "{}"));
             }} />
           ))}
           </>
@@ -676,15 +676,15 @@ function MultiPick({ overlay, width, move, toggle }: { overlay: Extract<Overlay,
       <box style={{ flexDirection: "row", height: 1, marginTop: 1, paddingLeft: 1 }} backgroundColor={SURFACE.hover}>
         <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{"⌕  "}</text>
         <text fg={COLOR.bright} bg={SURFACE.hover} selectable={false}>{overlay.filter === "" ? "" : overlay.filter}</text>
-        <text fg={overlay.filter === "" ? COLOR.faint : COLOR.accent} bg={SURFACE.hover} selectable={false}>{overlay.filter === "" ? "Search by name" : "▏"}</text>
+        <text fg={overlay.filter === "" ? COLOR.faint : COLOR.accent} bg={SURFACE.hover} selectable={false}>{overlay.filter === "" ? t("le.searchName") : "▏"}</text>
       </box>
       <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.raised}>
-        {shown.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>No model matches.</text> : null}
+        {shown.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("le.noModel")}</text> : null}
         {shown.map((entry, at) => (
           <Line key={entry.id} id={`list-option-${at}`} left={`${at === index ? "▌ " : "  "}${overlay.checked.includes(entry.id) ? "☑" : "☐"} ${entry.label}`} right={entry.detail} active={at === index} width={width} onPress={() => { move(at); toggle(entry.id); }} />
         ))}
       </box>
-      {overlay.checked.length > 0 ? <text fg={COLOR.accent} bg={SURFACE.raised} selectable={false}>{`${overlay.checked.length} picked · enter adds`}</text> : null}
+      {overlay.checked.length > 0 ? <text fg={COLOR.accent} bg={SURFACE.raised} selectable={false}>{t("le.picked", { count: overlay.checked.length })}</text> : null}
     </>
   );
 }
@@ -783,19 +783,19 @@ const TONE = { pass: COLOR.added, fail: COLOR.danger, inconclusive: COLOR.warn, 
 
 /** The last test or probe, as a card: what ran, how it went in counts, then one row per check. */
 function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
-  const what = run.kind === "test" ? "Test" : "Probe";
+  const what = run.kind === "test" ? t("le.run.test") : t("le.run.probe");
   const card = (children: React.ReactNode) => (
     <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1, width }} backgroundColor={SURFACE.hover}>
       {children}
     </box>
   );
   if (run.running) {
-    return card(<text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{`${what} of ${run.profileId} running…`}</text>);
+    return card(<text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{t("le.run.running", { what, id: run.profileId })}</text>);
   }
   if ("error" in run) {
     return card(
       <>
-        <text fg={COLOR.danger} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{`✗ ${what} of ${run.profileId} failed`}</text>
+        <text fg={COLOR.danger} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{t("le.run.failed", { what, id: run.profileId })}</text>
         <text fg={COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{run.error}</text>
       </>,
     );
@@ -804,7 +804,7 @@ function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
     const result = run.result;
     return card(
       <>
-        <text fg={result.ok ? COLOR.added : COLOR.danger} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{result.ok ? `✓ ${what} of ${run.profileId} passed` : `✗ ${what} of ${run.profileId} failed`}</text>
+        <text fg={result.ok ? COLOR.added : COLOR.danger} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{result.ok ? t("le.run.passed", { what, id: run.profileId }) : t("le.run.failed", { what, id: run.profileId })}</text>
         <text fg={COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{result.message}</text>
       </>,
     );
@@ -815,7 +815,7 @@ function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
   return card(
     <>
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }} backgroundColor={SURFACE.hover}>
-        <text fg={COLOR.bright} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{truncate(`Probe · ${report.model}`, Math.max(10, width - 24))}</text>
+        <text fg={COLOR.bright} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{truncate(t("le.run.probeOf", { model: report.model }), Math.max(10, width - 24))}</text>
         <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.hover}>
           {(["pass", "fail", "inconclusive"] as const).map((outcome) =>
             count(outcome) === 0 ? null : (
@@ -824,22 +824,22 @@ function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
           )}
         </box>
       </box>
-      <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{report.saved ? "What it found was saved to this model." : "Nothing was saved."}</text>
+      <text fg={COLOR.dim} bg={SURFACE.hover} selectable={false}>{report.saved ? t("le.run.saved") : t("le.run.notSaved")}</text>
       <text bg={SURFACE.hover} selectable={false}>{" "}</text>
       {report.checks.map((check) => (
         <box key={check.id} style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.hover}>
           <text fg={TONE[check.outcome]} bg={SURFACE.hover} selectable={false}>{`${ICON[check.outcome]} `}</text>
           <box style={{ width: titleWidth + 2, flexShrink: 0 }} backgroundColor={SURFACE.hover}>
-            <text fg={COLOR.text} bg={SURFACE.hover} selectable={false}>{truncate(check.title, titleWidth)}</text>
+            <text fg={COLOR.text} bg={SURFACE.hover} selectable={false}>{truncate(tx(check.title), titleWidth)}</text>
           </box>
           <box style={{ flexGrow: 1, flexShrink: 1 }} backgroundColor={SURFACE.hover}>
-            <text fg={check.outcome === "fail" ? COLOR.warn : COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{check.finding}</text>
+            <text fg={check.outcome === "fail" ? COLOR.warn : COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{tx(check.finding)}</text>
           </box>
         </box>
       ))}
-      {report.stopped ? <text fg={COLOR.warn} bg={SURFACE.hover} wrapMode="word" selectable={false}>{`\nStopped: ${report.stopped}`}</text> : null}
+      {report.stopped ? <text fg={COLOR.warn} bg={SURFACE.hover} wrapMode="word" selectable={false}>{`\n${t("le.run.stopped", { why: report.stopped })}`}</text> : null}
       {report.notes.map((note, index) => (
-        <text key={index} fg={COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{index === 0 ? `\n${note}` : note}</text>
+        <text key={index} fg={COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{index === 0 ? `\n${tx(note)}` : tx(note)}</text>
       ))}
     </>,
   );

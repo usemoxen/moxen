@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -86,8 +87,8 @@ export function TasksPanel({
       }}
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-        <text fg={COLOR.accent} bg={SURFACE.panel}>{"Tasks"}</text>
-        <text fg={COLOR.dim} bg={SURFACE.panel}>{` (${done} done, ${inProgress} in progress, ${open} open) · ctrl+t to hide`}</text>
+        <text fg={COLOR.accent} bg={SURFACE.panel}>{t("tasks.tasks_ef61")}</text>
+        <text fg={COLOR.dim} bg={SURFACE.panel}>{t("tasks.summary", { done, inProgress, open })}</text>
         {/* Meter only while something is left: at 100% a bare accent block
             reads as a selection artifact, not progress. Brackets make the
             partial state read as a gauge. */}

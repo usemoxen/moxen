@@ -1,11 +1,10 @@
 /**
  * `web_search`: a query in, a short list of results out (title, address, a
  * snippet). The backend is a setting. DuckDuckGo's HTML page needs no account
- * and is the default; Exa and Brave are hosted APIs that take a key; SearXNG
- * is an instance the user runs. A key is only ever the NAME of an environment
- * variable here, read when the request goes out, and no error text includes it.
+ * and is the default; SearXNG is an instance the user runs. Exa and Brave are
+ * not built in: their MCP servers (Moxen's own list) offer them, with their own
+ * keys.
  */
-import { cachedSecret } from "../../../secrets.js";
 import { untrustedContext } from "../mcp.js";
 import type { ToolResult } from "../tools/types.js";
 import { decodeEntities } from "./htmltext.js";
@@ -13,15 +12,11 @@ import { httpRequest, WebError } from "./http.js";
 import { PAGE_HEADERS } from "./fetch.js";
 import type { NetworkPolicy } from "./netguard.js";
 
-export const SEARCH_BACKENDS = ["duckduckgo", "exa", "brave", "searxng"] as const;
+export const SEARCH_BACKENDS = ["duckduckgo", "searxng"] as const;
 export type SearchBackend = (typeof SEARCH_BACKENDS)[number];
 
 export interface SearchSettings {
   readonly backend: SearchBackend;
-  /** The NAME of the environment variable holding the key, for the backends that take one. */
-  readonly keyEnv?: string | undefined;
-  /** A `keychain:` reference to a saved key; wins over `keyEnv`. */
-  readonly keyRef?: string | undefined;
   readonly searxngUrl?: string | undefined;
 }
 
@@ -41,28 +36,14 @@ export interface SearchContext {
   readonly resolve?: Parameters<typeof httpRequest>[1]["resolve"];
 }
 
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const DEFAULT_ENDPOINTS: Readonly<Record<Exclude<SearchBackend, "searxng">, string>> = {
   duckduckgo: "https://html.duckduckgo.com/html/",
-  exa: "https://api.exa.ai/search",
-  brave: "https://api.search.brave.com/res/v1/web/search",
 };
 const MAX_BODY = 2_000_000;
 const TIMEOUT = 20_000;
 
-/** A backend that cannot be used as configured says what to set; it never says what the key is. */
+/** A backend that cannot be used as configured says what to set. */
 class SearchSetupError extends Error {}
-
-function apiKey(context: SearchContext): string {
-  const saved = cachedSecret(context.settings.keyRef);
-  if (saved !== undefined) return saved.trim();
-  const name = context.settings.keyEnv;
-  if (!name) throw new SearchSetupError(`${context.settings.backend} needs an API key. Save one in the Moxen Harness settings (its key, under Web), or name the environment variable that holds it (its key variable).`);
-  if (!ENV_NAME.test(name)) throw new SearchSetupError("The key variable must be the NAME of an environment variable, not the key itself.");
-  const value = context.env[name]?.trim();
-  if (!value) throw new SearchSetupError(`The environment variable ${name} (the key variable) is not set where Moxen's server runs.`);
-  return value;
-}
 
 const text = (value: unknown): string => (typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "");
 const plain = (html: string): string => decodeEntities(html.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
@@ -100,56 +81,10 @@ async function viaDuckDuckGo(query: string, count: number, context: SearchContex
   const html = response.body.toString("utf8");
   const hits = parseDuckDuckGo(html);
   if (hits.length === 0 && (response.status === 202 || response.status === 403 || response.status === 429 || /anomaly|unfortunately, bots|captcha/i.test(html))) {
-    throw new SearchSetupError("DuckDuckGo asked for a human check instead of answering, which it does when it sees many automated searches. Try again later, or set webSearch to exa, brave or searxng.");
+    throw new SearchSetupError("DuckDuckGo asked for a human check instead of answering, which it does when it sees many automated searches. Try again later, set webSearch to searxng, or add the Exa or Brave Search MCP server.");
   }
   if (response.status >= 400) throw new SearchSetupError(`DuckDuckGo answered ${response.status}.`);
   return hits.slice(0, count);
-}
-
-async function viaExa(query: string, count: number, context: SearchContext): Promise<SearchHit[]> {
-  const key = apiKey(context);
-  const endpoint = context.endpoints?.exa ?? DEFAULT_ENDPOINTS.exa;
-  const response = await httpRequest(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json", "x-api-key": key },
-    body: JSON.stringify({ query, numResults: count, contents: { highlights: { maxCharacters: 600 } } }),
-    maxBytes: MAX_BODY,
-    timeoutMs: TIMEOUT,
-    signal: context.signal,
-    policy: context.policy,
-    ...(context.resolve ? { resolve: context.resolve } : {}),
-  });
-  if (response.status === 401 || response.status === 403) throw new SearchSetupError(`Exa refused the key (${context.settings.keyRef ? "the saved one" : context.settings.keyEnv}).`);
-  if (response.status === 402 || response.status === 429) throw new SearchSetupError(`Exa answered ${response.status}: the account is out of credits or over its rate limit.`);
-  if (response.status >= 400) throw new SearchSetupError(`Exa answered ${response.status}.`);
-  const parsed = JSON.parse(response.body.toString("utf8")) as { results?: Array<Record<string, unknown>> };
-  return (parsed.results ?? []).slice(0, count).flatMap((entry) => {
-    const url = text(entry.url);
-    if (!url) return [];
-    const highlights = Array.isArray(entry.highlights) ? entry.highlights.map(text).filter(Boolean).join(" … ") : "";
-    return [{ title: text(entry.title) || url, url, snippet: highlights || text(entry.text).slice(0, 600) || text(entry.summary) }];
-  });
-}
-
-async function viaBrave(query: string, count: number, context: SearchContext): Promise<SearchHit[]> {
-  const key = apiKey(context);
-  const endpoint = context.endpoints?.brave ?? DEFAULT_ENDPOINTS.brave;
-  const response = await httpRequest(`${endpoint}?q=${encodeURIComponent(query)}&count=${count}`, {
-    headers: { accept: "application/json", "x-subscription-token": key },
-    maxBytes: MAX_BODY,
-    timeoutMs: TIMEOUT,
-    signal: context.signal,
-    policy: context.policy,
-    ...(context.resolve ? { resolve: context.resolve } : {}),
-  });
-  if (response.status === 401 || response.status === 403 || response.status === 422) throw new SearchSetupError(`Brave refused the key (${context.settings.keyRef ? "the saved one" : context.settings.keyEnv}).`);
-  if (response.status === 429) throw new SearchSetupError("Brave answered 429: over the plan's rate limit or allowance.");
-  if (response.status >= 400) throw new SearchSetupError(`Brave answered ${response.status}.`);
-  const parsed = JSON.parse(response.body.toString("utf8")) as { web?: { results?: Array<Record<string, unknown>> } };
-  return (parsed.web?.results ?? []).slice(0, count).flatMap((entry) => {
-    const url = text(entry.url);
-    return url ? [{ title: plain(text(entry.title)) || url, url, snippet: plain(text(entry.description)) }] : [];
-  });
 }
 
 async function viaSearxng(query: string, count: number, context: SearchContext): Promise<SearchHit[]> {
@@ -192,7 +127,7 @@ export async function searchWeb(query: string, requested: number | undefined, co
   if (trimmed === "") return { content: "web_search needs a query.", isError: true };
   const count = Math.min(Math.max(requested ?? 8, 1), 20);
   try {
-    const run = { duckduckgo: viaDuckDuckGo, exa: viaExa, brave: viaBrave, searxng: viaSearxng }[context.settings.backend];
+    const run = { duckduckgo: viaDuckDuckGo, searxng: viaSearxng }[context.settings.backend];
     const hits = await run(trimmed, count, context);
     if (hits.length === 0) return { content: `No results for "${trimmed}" from ${context.settings.backend}. Try different words.` };
     const body = hits.map((hit, index) => `${index + 1}. ${hit.title}\n   ${hit.url}${hit.snippet ? `\n   ${hit.snippet}` : ""}`).join("\n\n");

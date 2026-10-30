@@ -208,6 +208,12 @@ export class OpencodeEventTranslator {
   private readonly finished = new Set<string>();
   /** Open forms: form id → the fields a reply must key its answers by. */
   private readonly forms = new Map<string, { sessionID: string; fields: OpencodeFormField[] }>();
+  /**
+   * Commands the model sent to the background (`shell` with `background: true`), by shell id. The server
+   * announces them only through the tool call and a session-less `shell.exited`, never `session.shell.*`
+   * (those are the user's own `!` commands). Kept across resubscribes: the exit may still come.
+   */
+  private readonly backgroundShells = new Map<string, string>();
   /** Per session: user inbox items enqueued and not yet delivered. */
   private readonly pendingInbox = new Map<string, Set<string>>();
 
@@ -299,7 +305,26 @@ export class OpencodeEventTranslator {
         if (!call) return [];
         call.status = call.status === "pending" ? "running" : call.status;
         call.metadata = { ...call.metadata, ...(asRecord(data.metadata) ?? {}) };
-        return [this.toolPart(data, call)];
+        const launched = [this.toolPart(data, call)];
+        // A command the model sent to the background names its shell in its first progress update.
+        const shellID = asString(call.metadata.shellID);
+        if (shellID && call.input.background === true && !this.backgroundShells.has(shellID)) {
+          this.backgroundShells.set(shellID, call.sessionID);
+          launched.push({
+            type: "session.shell.started",
+            properties: { sessionID: call.sessionID, shellID, command: asString(call.input.command) ?? "", status: "running" },
+          });
+        }
+        return launched;
+      }
+      case "shell.exited": {
+        const shellID = asString(data.id);
+        const sessionID = shellID ? this.backgroundShells.get(shellID) : undefined;
+        if (!shellID || !sessionID) return [];
+        this.backgroundShells.delete(shellID);
+        const exit = asNumber(data.exit);
+        const status = asString(data.signal) || asString(data.status) === "killed" ? "killed" : asString(data.status) === "timeout" || (exit !== undefined && exit !== 0) ? "failed" : "exited";
+        return [{ type: "session.shell.ended", properties: { sessionID, shellID, command: "", status } }];
       }
       case "session.tool.success": {
         const call = this.tool(data, created);

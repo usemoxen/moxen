@@ -1,7 +1,8 @@
+import { t as tr, tx } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
-import type { KeyEvent, PasteEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import type { KeyEvent, MouseEvent, PasteEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { useRenderer } from "@opentui/react";
 import { SyntaxStyle, TextAttributes, bg, decodePasteBytes, fg, italic, stripAnsiSequences, t } from "@opentui/core";
 
@@ -18,6 +19,9 @@ import type { SkillSummary } from "../../../core/catalog/summary.js";
 import type { ContextUsageDisplay } from "../../model/turns.js";
 import type { PlanUsageGauge } from "../../model/sidepanel.js";
 import { nextImageLabel, pairImageTokens, relabelImageTokens } from "../../model/imagetokens.js";
+import { imageFromDataUrl, type LoadedImage, type Rect } from "../../model/imagethumb.js";
+import { openImageViewer } from "../timeline/imageviewer.js";
+import { hideImagePreview, showImagePreview, useImagePreviewVisible } from "../timeline/imagepreview.js";
 
 /** Marquee tick for the highlighted row's description, ms per column. */
 const SKILL_MARQUEE_INTERVAL_MS = 350;
@@ -62,7 +66,7 @@ function suggestionPlaceholder(suggestion: string, width: number) {
   const chip = bg(SURFACE.border)(fg(COLOR.bright)(" tab "));
   const MIN_TEXT = 24;
   if (inner - 18 >= Math.min(MIN_TEXT, flat.length)) {
-    return t`${fg(COLOR.dim)(italic(truncate(flat, inner - 18)))}   ${chip}${fg(COLOR.faint)(" to use it")}`;
+    return t`${fg(COLOR.dim)(italic(truncate(flat, inner - 18)))}   ${chip}${fg(COLOR.faint)(tr("composer.to_use_it_e06b"))}`;
   }
   if (inner - 7 >= Math.min(12, flat.length)) return t`${fg(COLOR.dim)(italic(truncate(flat, inner - 7)))}  ${chip}`;
   return t`${fg(COLOR.dim)(italic(truncate(flat, inner)))}`;
@@ -220,6 +224,7 @@ export function Composer({
   onPlanUsageClick,
   onQueue,
   attachments,
+  attachmentDataUrl,
   onAttachmentRemoved,
   onClaimPaste,
   suggestion,
@@ -296,6 +301,8 @@ export function Composer({
    * `[Image #N]` token where it was pasted; deleting the token detaches it.
    */
   attachments?: readonly string[];
+  /** A pending image's bytes as a data URL, by name: what hovering its token shows. */
+  attachmentDataUrl?: (name: string) => string | undefined;
   onAttachmentRemoved?: (name: string) => void;
   /**
    * A paste arriving: when it is moxen's own copy of a prompt with images,
@@ -333,6 +340,78 @@ export function Composer({
     });
     tokens.current.set(name, { id, label });
   };
+  /**
+   * The image token under the pointer, with where it sits on screen. The
+   * text area has no pointer-to-text lookup, so each token's start and end are
+   * found by asking the editor where its cursor would be there (and putting
+   * the cursor back); a token that wraps spans more than one row.
+   */
+  const tokenAt = (node: TextareaRenderable, x: number, y: number): { name: string; anchor: Rect } | null => {
+    const keep = node.cursorOffset;
+    try {
+      const scroll = node.editorView.getViewport().offsetY;
+      for (const [name, token] of tokens.current) {
+        const mark = node.extmarks.get(token.id);
+        if (mark === null) continue;
+        node.cursorOffset = mark.start;
+        const from = { ...node.visualCursor };
+        node.cursorOffset = mark.end;
+        const to = { ...node.visualCursor };
+        for (let row = from.visualRow; row <= to.visualRow; row += 1) {
+          const first = row === from.visualRow ? from.visualCol : 0;
+          const last = row === to.visualRow ? to.visualCol : node.width;
+          const screenRow = node.screenY + row - scroll;
+          if (y === screenRow && x >= node.screenX + first && x < node.screenX + last) {
+            return { name, anchor: { x: node.screenX + first, y: screenRow, width: Math.max(1, last - first), height: 1 } };
+          }
+        }
+      }
+      return null;
+    } finally {
+      node.cursorOffset = keep;
+    }
+  };
+  /** The token whose image is showing, and the images already decoded for hovering. */
+  const previewing = useRef<string | null>(null);
+  const decodedImages = useRef(new Map<string, LoadedImage | null>());
+  const hidePreview = () => {
+    if (previewing.current === null) return;
+    hideImagePreview(`composer:${previewing.current}`);
+    previewing.current = null;
+  };
+  /** The decoded image of a pending attachment, null when it cannot be shown. */
+  const decodedImage = (name: string): LoadedImage | null => {
+    let image = decodedImages.current.get(name);
+    if (image === undefined) {
+      const dataUrl = attachmentDataUrl?.(name);
+      image = dataUrl === undefined ? null : imageFromDataUrl(dataUrl);
+      decodedImages.current.set(name, image);
+    }
+    return image;
+  };
+  /** A click on an image token opens the image full screen. */
+  const openTokenAt = (x: number, y: number) => {
+    const node = areaRef.current;
+    const hit = node === null ? null : tokenAt(node, x, y);
+    const image = hit === null ? null : decodedImage(hit.name);
+    if (hit !== null && image !== null) openImageViewer({ ...image, label: hit.name, sizeBytes: image.bytes.length });
+  };
+  const previewTokenAt = (x: number, y: number) => {
+    const node = areaRef.current;
+    const hit = node === null ? null : tokenAt(node, x, y);
+    if (hit === null) {
+      hidePreview();
+      return;
+    }
+    if (previewing.current === hit.name) return;
+    hidePreview();
+    previewing.current = hit.name;
+    const image = decodedImage(hit.name);
+    if (image !== null) showImagePreview({ id: `composer:${hit.name}`, bytes: image.bytes, size: image.size, anchor: hit.anchor });
+  };
+  useEffect(() => hidePreview, []);
+  // The text cursor would blink over the preview image.
+  const previewVisible = useImagePreviewVisible();
   /** The extmark colouring the draft's leading /command, when it names a known one. */
   const commandMark = useRef<number | null>(null);
   const commandType = useRef<number | null>(null);
@@ -362,22 +441,22 @@ export function Composer({
   // real wrap width and left phantom empty rows behind.
   const fullHint =
     submitVerb === "creates"
-      ? "enter creates · esc cancels"
+      ? tr("composer.enter_creates_esc_cancels_817f")
       : waitingOutLimit === true
-        ? "enter queues after the continue · shift+enter newline · esc unfocus"
+        ? tr("composer.enter_queues_after_the_1a27")
       : running
-        ? "enter steers · tab queues · ctrl+j newline · esc unfocus"
-        : "enter sends · shift+enter newline · esc unfocus";
+        ? tr("composer.enter_steers_tab_queues_300e")
+        : tr("composer.enter_sends_shiftenter_newline_cf80");
   const midHint =
     submitVerb === "creates"
       ? fullHint
       : waitingOutLimit === true
-        ? "enter queues after the continue"
+        ? tr("composer.enter_queues_after_the_ade4")
       : running
-        ? "enter steers · tab queues"
-        : "enter sends · shift+enter newline";
-  const shortHint = submitVerb === "creates" ? "enter creates" : waitingOutLimit === true ? "enter queues" : running ? "enter steers" : "enter sends";
-  const externalHint = "editing in external editor…";
+        ? tr("composer.enter_steers_tab_queues_6b21")
+        : tr("composer.enter_sends_shiftenter_newline_e724");
+  const shortHint = submitVerb === "creates" ? tr("composer.enter_creates_6799") : waitingOutLimit === true ? tr("composer.enter_queues_dae1") : running ? tr("composer.enter_steers_a135") : tr("composer.enter_sends_c341");
+  const externalHint = tr("composer.editing_in_external_editor_05b4");
 
   // The textarea owns its buffer; only an explicit external reset (thread
   // switch, post-send clear — signaled by `resetKey` changing) pushes a value
@@ -574,7 +653,7 @@ export function Composer({
       width: 6,
       drop: 5,
       group: "action",
-      render: (surface) => <HoverText text="⧉ copy" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onCopyClick} surface={surface} />,
+      render: (surface) => <HoverText text={tr("composer.copy_1b18")} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onCopyClick} surface={surface} />,
     });
   }
   if (onExternalEditClick !== undefined) {
@@ -583,7 +662,7 @@ export function Composer({
       width: 10,
       drop: 4,
       group: "action",
-      render: (surface) => <HoverText text="✎ external" color={COLOR.dim} hoverColor={COLOR.bright} onClick={onExternalEditClick} surface={surface} />,
+      render: (surface) => <HoverText text={tr("composer.external_59fc")} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onExternalEditClick} surface={surface} />,
     });
   }
   if (running && onStopClick !== undefined) {
@@ -592,13 +671,13 @@ export function Composer({
       width: 6,
       drop: 0,
       group: "action",
-      render: (surface) => <HoverText text="■ stop" color={COLOR.danger} hoverColor={COLOR.bright} onClick={onStopClick} surface={surface} />,
+      render: (surface) => <HoverText text={tr("composer.stop_6aae")} color={COLOR.danger} hoverColor={COLOR.bright} onClick={onStopClick} surface={surface} />,
     });
   }
   // Card chrome: border 1, left padding 2, the draft column's right padding
   // 1 and the scrollbar strip 1. The model group keeps two columns of air.
   const footerRoom = width - 5;
-  const modeLabel = interactionModeLabel(mode);
+  const modeLabel = tx(interactionModeLabel(mode));
   const usedBy = (segments: readonly Segment[]) => segments.reduce((total, segment, index) => total + segment.width + (index === 0 ? 0 : 5), 0);
   /** What of `list` fits in `room`, shedding the highest drop rank first (a rank of 0 never goes). */
   const fitTo = (list: readonly Segment[], room: number, base = 0) => {
@@ -637,7 +716,7 @@ export function Composer({
           width: MORE_WIDTH - 5,
           drop: 0,
           group: "action",
-          render: (surface) => <HoverText text={menuShown ? "▾ more" : "⋯ more"} color={COLOR.dim} hoverColor={COLOR.bright} onClick={() => setMoreOpen((open) => !open)} surface={surface} />,
+          render: (surface) => <HoverText text={menuShown ? tr("composer.more_379b") : tr("composer.more_6b09")} color={COLOR.dim} hoverColor={COLOR.bright} onClick={() => setMoreOpen((open) => !open)} surface={surface} />,
         },
       ]
     : bottomKept;
@@ -821,7 +900,7 @@ export function Composer({
               attributes={TextAttributes.ITALIC}
               selectable={false}
             >
-              {"Editing in external editor…"}
+              {tr("app.editing_in_external_editor_da08")}
             </text>
           </box>
         ) : (
@@ -846,6 +925,11 @@ export function Composer({
           keyBindings={COMPOSER_KEY_BINDINGS}
           style={{ minHeight: MIN_COMPOSER_LINES - 1, maxHeight: MAX_COMPOSER_LINES, backgroundColor: SURFACE.raised }}
           onContentChange={handleContentChange}
+          onMouseMove={(event: MouseEvent) => previewTokenAt(event.x, event.y)}
+          onMouseDown={(event: MouseEvent) => openTokenAt(event.x, event.y)}
+          onMouseOut={hidePreview}
+          onMouseScroll={hidePreview}
+          showCursor={!previewVisible}
           onPaste={(event: PasteEvent) => {
             const node = areaRef.current;
             if (node === null || onClaimPaste === undefined) return;

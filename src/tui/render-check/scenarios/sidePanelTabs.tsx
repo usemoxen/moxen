@@ -1,6 +1,6 @@
 import { act, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { Composer } from "../../features/composer/composer.js";
 import { DiffPanel } from "../../features/diffpanel/diffpanel.js";

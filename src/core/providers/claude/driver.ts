@@ -1532,7 +1532,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     if (message.subtype === "compact_boundary") {
       session.compacted = true;
       session.turnsSinceCompaction = 0;
-      session.usage = emptyUsage();
+      // The usage is a running total for the thread, recorded on each turn: a
+      // compaction shrinks the context, not what was spent, so the counts
+      // carry on from where they were.
       const metadata = message.compact_metadata as unknown as {
         pre_tokens?: number;
         post_tokens?: number;
@@ -1854,7 +1856,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       return;
     }
     if (message.subtype === "success") {
-      const cost = typeof message.total_cost_usd === "number" ? message.total_cost_usd : 0;
+      // The SDK's total is the session's running spend; the highest figure seen stands.
+      const cost = Math.max(session.usage.costUsd, typeof message.total_cost_usd === "number" ? message.total_cost_usd : 0);
       session.usage = { ...session.usage, costUsd: cost };
       const open = session.transcript.find((turn) => turn.status === "running");
       // A steer that arrived too late to fold into this run is queued as the
@@ -2214,7 +2217,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       // `result`, which only arrives when the turn ends (and never during a
       // long one). A resumed session's restored spend arrives here too.
       if (typeof response?.session?.total_cost_usd === "number") {
-        session.usage = { ...session.usage, costUsd: response.session.total_cost_usd };
+        session.usage = { ...session.usage, costUsd: Math.max(session.usage.costUsd, response.session.total_cost_usd) };
       }
       const mapped = mapUsageProbe(response);
       if (!mapped.available) return;

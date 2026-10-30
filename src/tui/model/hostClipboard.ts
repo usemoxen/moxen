@@ -5,6 +5,7 @@
  * terminal client: it binds `@opentui/core`. The validation rules it feeds
  * live in `core/attachments.ts`, which both clients and the server share.
  */
+import { t } from "../i18n/index.js";
 import { createHostClipboard } from "@opentui/core";
 
 import { MAX_IMAGE_BYTES } from "../../core/attachments.js";
@@ -24,7 +25,7 @@ export async function readClipboardImage(): Promise<
   try {
     host = createHostClipboard({ maxReadBytes: MAX_IMAGE_BYTES, timeoutMs: 10_000 });
   } catch (cause) {
-    return { bytes: null, mimeType: null, error: `clipboard unavailable: ${String(cause).slice(0, 80)}` };
+    return { bytes: null, mimeType: null, error: t("clip.unavailable", { why: String(cause).slice(0, 80) }) };
   }
   try {
     const result = await host.read({
@@ -33,12 +34,12 @@ export async function readClipboardImage(): Promise<
     });
     if (result.status !== "read") {
       const reason =
-        result.status === "empty" ? "clipboard has no image — copy one first" : `clipboard read ${result.status}`;
+        result.status === "empty" ? t("clip.noImage") : t("clip.readStatus", { status: result.status });
       return { bytes: null, mimeType: null, error: reason };
     }
     return { bytes: result.representation.bytes, mimeType: result.representation.mimeType, error: null };
   } catch (cause) {
-    return { bytes: null, mimeType: null, error: `clipboard read failed: ${String(cause).slice(0, 80)}` };
+    return { bytes: null, mimeType: null, error: t("clip.readFailed", { why: String(cause).slice(0, 80) }) };
   } finally {
     await host.dispose().catch(() => undefined);
   }

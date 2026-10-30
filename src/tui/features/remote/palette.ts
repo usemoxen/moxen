@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { PickerBody, PickerSection } from "../pickers/pickermodal.js";
 import type { ActiveServer } from "./server.js";
 import type { RemoteControls } from "./useRemote.js";
@@ -15,33 +16,33 @@ interface Nav {
  * connected to, which is named when it is a paired one.
  */
 export function remotePaletteSection(remote: RemoteControls, server: ActiveServer | null, nav: Nav): PickerSection {
-  const where = server === null ? "this machine" : server.name;
+  const where = server === null ? t("paired.thisMachine") : server.name;
   const status = remote.status;
   const listening = status?.listening ?? [];
   const toggleMeta =
     status === null
       ? where
       : !status.enabled
-        ? `off · ${where}`
+        ? t("remote.metaOff", { where })
         : listening.length > 0
-          ? `on · ${listening.map((entry) => entry.address).join(", ")}`
+          ? t("remote.metaOn", { addresses: listening.map((entry) => entry.address).join(", ") })
           : status.available
-            ? `on, not listening${status.error ? ` · ${status.error}` : ""}`
-            : "on · starts with the moxen server";
+            ? status.error ? t("remote.metaNotListeningWhy", { why: status.error }) : t("remote.metaNotListening")
+            : t("remote.on_starts_with_the_9f18");
   return {
-    header: "Remote",
+    header: t("remote.remote_f850"),
     rows: [
       {
         key: "remote:switch",
-        label: "Switch server…",
-        meta: remote.canSwitch ? `connected to ${where}` : "not available here",
+        label: t("remote.switch_server_d047"),
+        meta: remote.canSwitch ? t("remote.connectedTo", { where }) : t("remote.not_available_here_2758"),
         ...(remote.canSwitch ? {} : { disabled: true }),
         onPick: () => (remote.canSwitch ? nav.open("remote-servers") : undefined),
       },
       {
         key: "remote:pair",
-        label: "Pair with a server…",
-        meta: "address and the code it shows",
+        label: t("remote.pair_with_a_server_e137"),
+        meta: t("remote.address_and_the_code_15c2"),
         ...(remote.canSwitch ? {} : { disabled: true }),
         onPick: () => {
           remote.setPairAddress("");
@@ -50,9 +51,9 @@ export function remotePaletteSection(remote: RemoteControls, server: ActiveServe
       },
       {
         key: "remote:toggle",
-        label: status?.enabled ? "Turn remote access off" : "Turn remote access on",
+        label: status?.enabled ? t("remote.turn_remote_access_off_bbaa") : t("remote.turn_remote_access_on_7134"),
         // Off on the server this TUI reaches through it cuts this TUI off too.
-        meta: status?.enabled && server !== null ? `disconnects this TUI · ${toggleMeta}` : toggleMeta,
+        meta: status?.enabled && server !== null ? t("remote.disconnectsThis", { meta: toggleMeta }) : toggleMeta,
         onPick: () => {
           nav.close();
           void remote.setEnabled(!(status?.enabled ?? false));
@@ -60,20 +61,20 @@ export function remotePaletteSection(remote: RemoteControls, server: ActiveServe
       },
       {
         key: "remote:code",
-        label: "Show pairing code",
+        label: t("remote.show_pairing_code_1dba"),
         ...(listening.length > 0
           ? {
-              meta: `for a new device · ${where}`,
+              meta: t("remote.forNewDevice", { where }),
               onPick: () => {
                 void remote.startPairing().then((ok) => (ok ? nav.open("remote-code") : nav.close()));
               },
             }
-          : { meta: "turn remote access on first", disabled: true, onPick: () => {} }),
+          : { meta: t("remote.turn_remote_access_on_5712"), disabled: true, onPick: () => {} }),
       },
       {
         key: "remote:devices",
-        label: "Paired devices…",
-        meta: `list and revoke · ${where}`,
+        label: t("remote.paired_devices_3d65"),
+        meta: t("remote.listRevoke", { where }),
         onPick: () => {
           remote.loadDevices();
           nav.open("remote-devices");
@@ -95,7 +96,7 @@ export function serversBody(remote: RemoteControls, server: ActiveServer | null,
     sections: [
       {
         rows: [
-          { key: "server:local", label: "This machine", meta: "its own moxen server", selected: current === null, onPick: pick(null) },
+          { key: "server:local", label: t("remote.this_machine_b584"), meta: t("remote.its_own_moxen_server_956f"), selected: current === null, onPick: pick(null) },
           ...remote.servers.map((entry) => ({
             key: `server:${entry.deviceId}`,
             label: entry.name,
@@ -118,11 +119,11 @@ export function devicesBody(remote: RemoteControls): PickerBody {
       {
         rows: remote.devices.map((device) => {
           const armed = remote.revokeArmed === device.id;
-          const seen = device.connections > 0 ? `${device.connections} connected` : device.lastSeenAt ? `seen ${device.lastSeenAt.slice(0, 16).replace("T", " ")}` : `paired ${device.pairedAt.slice(0, 10)}`;
+          const seen = device.connections > 0 ? t("remote.connections", { count: device.connections }) : device.lastSeenAt ? t("remote.seen", { at: device.lastSeenAt.slice(0, 16).replace("T", " ") }) : t("remote.paired", { at: device.pairedAt.slice(0, 10) });
           return {
             key: `device:${device.id}`,
-            label: armed ? `Confirm revoke ${device.name}` : device.name,
-            meta: armed ? "enter again · disconnects it now" : seen,
+            label: armed ? t("remote.confirmRevoke", { name: device.name }) : device.name,
+            meta: armed ? t("remote.enter_again_disconnects_it_c624") : seen,
             onPick: () => remote.revoke(device),
           };
         }),

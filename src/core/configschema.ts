@@ -297,7 +297,7 @@ export type SettingFallback =
   | { readonly text: string }
   | { readonly resolver: FallbackResolver };
 
-export type FallbackResolver = "handoffMode" | "handoffLine" | "compactionMode" | "compactLine" | "providerModel" | "webBrowser" | "privateNetwork" | "searchKey" | "searchKeyEnv" | "moxenTools";
+export type FallbackResolver = "handoffMode" | "handoffLine" | "compactionMode" | "compactLine" | "providerModel" | "webBrowser" | "privateNetwork" | "moxenTools";
 
 /** What is in force for an unset setting, worked out in core so a client only draws it. */
 export interface SettingEffective {
@@ -837,6 +837,38 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
       ],
     },
     defaultValue: "animated",
+  },
+  {
+    key: "ui.theme",
+    label: "Theme",
+    description: "The colours of the interface. Catppuccin, Dracula, Nord, Gruvbox and Tokyo Night follow their published palettes; Moxen is the default.",
+    section: "interface",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("moxen", "Moxen"),
+        choice("catppuccin-latte", "Catppuccin Latte", "A light theme."),
+        choice("catppuccin-frappe", "Catppuccin Frappé"),
+        choice("catppuccin-macchiato", "Catppuccin Macchiato"),
+        choice("catppuccin-mocha", "Catppuccin Mocha"),
+        choice("dracula", "Dracula"),
+        choice("nord", "Nord"),
+        choice("gruvbox", "Gruvbox"),
+        choice("tokyo-night", "Tokyo Night"),
+      ],
+    },
+    defaultValue: "moxen",
+  },
+  {
+    key: "ui.language",
+    label: "Language",
+    description: "The language of the interface. Auto follows the terminal's locale (LC_ALL, LC_MESSAGES, LANG) and falls back to English. Only the TUI is translated; CLI output and --json stay in English.",
+    section: "interface",
+    kind: {
+      type: "enum",
+      choices: [choice("auto", "Auto"), choice("en", "English"), choice("es-ES", "Español (España)")],
+    },
+    defaultValue: "auto",
   },
   {
     key: "ui.modelScenes",
@@ -1433,68 +1465,17 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     key: "providers.harness.webSearch",
     label: "Web search",
     description:
-      "Where the Moxen Harness's web_search looks. DuckDuckGo needs no account but can ask for a human check if it sees many searches. Exa and Brave are hosted APIs that need a key (saved in the keychain; their plans are metered, so check what yours charges past its free allowance). SearXNG is an instance you run.",
+      "Where the Moxen Harness's web_search looks. DuckDuckGo needs no account but can ask for a human check if it sees many searches. SearXNG is an instance you run. For Exa or Brave Search, add their MCP servers (MCP servers → Add); they bring their own tools and key.",
     section: "provider:harness",
     group: "Web search",
     kind: {
       type: "enum",
       choices: [
         choice("duckduckgo", "DuckDuckGo", "No account. Unofficial, best-effort."),
-        choice("exa", "Exa", "Hosted API with a key."),
-        choice("brave", "Brave Search", "Hosted API with a key."),
         choice("searxng", "SearXNG", "Your own instance."),
       ],
     },
     defaultValue: "duckduckgo",
-  },
-  // One key per search service, so switching services never sends one's key to the other.
-  ...(["exa", "brave"] as const).flatMap((backend): SettingDescriptor[] => {
-    const name = backend === "exa" ? "Exa" : "Brave Search";
-    const visibleWhen = { key: "providers.harness.webSearch", in: [backend] };
-    return [
-      {
-        key: `providers.harness.webSearchKeys.${backend}`,
-        label: `${name} key`,
-        description: `The ${name} key, typed once and kept in the OS keychain; it never appears in the config file or on screen.`,
-        section: "provider:harness",
-        group: "Web search",
-        kind: { type: "secret" },
-        defaultValue: undefined,
-        fallback: { resolver: "searchKey" },
-        visibleWhen,
-      },
-      {
-        key: `providers.harness.webSearchKeyEnvs.${backend}`,
-        label: `${name} key variable`,
-        description: "Instead of saving a key: the NAME of an environment variable that holds it, as the Moxen server sees it. A key saved in the keychain wins over this variable; Moxen's own MOXEN_* variables are the other way round and beat the config file.",
-        section: "provider:harness",
-        group: "Web search",
-        kind: { type: "string", placeholder: backend === "exa" ? "EXA_API_KEY" : "BRAVE_API_KEY" },
-        defaultValue: undefined,
-        fallback: { resolver: "searchKeyEnv" },
-        visibleWhen,
-      },
-    ];
-  }),
-  {
-    key: "providers.harness.webSearchKey",
-    label: "Search key (single slot)",
-    description: "Kept so older configs still load: the one slot Exa and Brave shared. It is read only while no service has a key of its own, for the service selected then; switching services on the page first files it under the one it was for.",
-    section: "provider:harness",
-    group: "Web search",
-    hidden: true,
-    kind: { type: "secret" },
-    defaultValue: undefined,
-  },
-  {
-    key: "providers.harness.webSearchKeyEnv",
-    label: "Search key variable (single slot)",
-    description: "Kept so older configs still load: as the single key slot, for the environment variable's name.",
-    section: "provider:harness",
-    group: "Web search",
-    hidden: true,
-    kind: { type: "string", placeholder: "EXA_API_KEY" },
-    defaultValue: undefined,
   },
   {
     key: "providers.harness.searxngUrl",
@@ -1738,7 +1719,6 @@ export function parseSettingValue(descriptor: SettingDescriptor, raw: string): S
  */
 export function writeSetting(config: CliConfig, key: string, value: SettingValue): CliConfig {
   const written = writeSettingValue(config, key, value);
-  if (key === "providers.harness.webSearch") return fileLegacySearchKey(config, written);
   const alias = LONG_THREAD_ALIASES[key];
   return alias === undefined ? written : writeLongThreadAlias(config, written, key, value, alias);
 }
@@ -1777,30 +1757,6 @@ function writeLongThreadAlias(before: CliConfig, written: CliConfig, key: string
   const previous = readSetting(before, key);
   const stillSame = previous !== undefined && previous !== "" && readSetting(written, alias.key) === parseSettingValue(BY_KEY.get(alias.key)!, alias.map(previous));
   return stillSame ? writeSettingValue(written, alias.key, "") : written;
-}
-
-/**
- * Switching search services: a key still in the older single slot is filed
- * under the service it was used for before the switch, so it is never sent to
- * the new one. The slot itself stays (an older build sharing the file reads
- * it), and the secret is not copied: the new slot holds the same keychain
- * reference.
- */
-function fileLegacySearchKey(before: CliConfig, after: CliConfig): CliConfig {
-  const harness = before.providers?.harness;
-  const previous = harness?.webSearch;
-  if (usesPerServiceKeys(before) || (previous !== "exa" && previous !== "brave")) return after;
-  const key = harness?.webSearchKey;
-  const keyEnv = harness?.webSearchKeyEnv;
-  if (!key && !keyEnv) return after;
-  const next = after.providers?.harness ?? {};
-  return {
-    ...after,
-    providers: {
-      ...after.providers,
-      harness: { ...next, ...(key ? { webSearchKeys: { [previous]: key } } : {}), ...(keyEnv ? { webSearchKeyEnvs: { [previous]: keyEnv } } : {}) },
-    },
-  };
 }
 
 function writeSettingValue(config: CliConfig, key: string, value: SettingValue): CliConfig {
@@ -1872,23 +1828,6 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
   return from === undefined || from.key === descriptor.key ? { value, label } : { value, label, origin: settingPlace(descriptor, from) };
 }
 
-/** The search service a per-service key row is for, from its key. */
-const searchBackendOf = (descriptor: SettingDescriptor): "exa" | "brave" | undefined => /\.(exa|brave)$/.exec(descriptor.key)?.[1] as "exa" | "brave" | undefined;
-
-/** Whether a file uses one key slot per search service; until it does, the older single slot stands for the selected service. */
-function usesPerServiceKeys(config: CliConfig): boolean {
-  const harness = config.providers?.harness;
-  return Object.keys(harness?.webSearchKeys ?? {}).length > 0 || Object.keys(harness?.webSearchKeyEnvs ?? {}).length > 0;
-}
-
-/** The older single slot, when it is what a per-service row amounts to: no service has its own yet, and this is the one selected. */
-function legacySearchSlot(config: CliConfig, descriptor: SettingDescriptor, field: "webSearchKey" | "webSearchKeyEnv"): string | undefined {
-  const harness = config.providers?.harness;
-  if (usesPerServiceKeys(config) || harness?.webSearch !== searchBackendOf(descriptor)) return undefined;
-  const value = harness?.[field];
-  return value === undefined || value === "" ? undefined : value;
-}
-
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
@@ -1907,13 +1846,6 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     return config.providers?.harness?.webPrivateNetwork === true
       ? { value: undefined, label: "Moxen Harness only", origin: "from providers.harness.webPrivateNetwork in the config file" }
       : { value: false, label: "Off" };
-  },
-  searchKey(config, descriptor) {
-    return legacySearchSlot(config, descriptor, "webSearchKey") === undefined ? undefined : { value: undefined, label: "Saved in the keychain", origin: "in the single key slot from before each service had its own" };
-  },
-  searchKeyEnv(config, descriptor) {
-    const name = legacySearchSlot(config, descriptor, "webSearchKeyEnv");
-    return name === undefined ? undefined : { value: name, label: name, origin: "in the single key slot from before each service had its own" };
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {

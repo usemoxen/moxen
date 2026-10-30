@@ -183,7 +183,9 @@ function itemTypeForTool(tool: string): string {
   // Namespaced harness tools (`default.bash`) carry the verb last.
   const short = tool.toLowerCase().split(/[^a-z]+/).filter((part) => part.length > 0).pop() ?? "";
   if (SHELL_TOOLS.has(short)) return "command_execution";
-  if (short === "edit" || short === "write" || short === "multiedit" || short === "patch") return "file_change";
+  // Moxen's own tools are never file edits, whatever they end in (`memory_edit` edits a memory, not a file).
+  const moxenTool = /^(?:mcp__moxen__|moxen[./:_])/iu.test(tool.trim());
+  if (!moxenTool && (short === "edit" || short === "write" || short === "multiedit" || short === "patch")) return "file_change";
   if (webToolKind(tool) !== null) return "web_search";
   return "dynamic_tool_call";
 }

@@ -3,13 +3,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
-import { App } from "../../app/app.js";
 import type { ClientApi } from "../../../server/api.js";
 import { PairedServers } from "../../../server/transport/servers.js";
-import { client } from "../fixtures.js";
+import { App, client } from "../fixtures.js";
 import { fail } from "../helpers.js";
 
 const FINGERPRINT = "D8:A1:CA:F7:20:54:F1:61:36:D5:5C:65:12:DA:4D:5C:59:07:C9:20:1B:2D:71:AC:F2:16:BC:20:B9:1B:2A:8D";

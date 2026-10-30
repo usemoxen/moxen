@@ -134,7 +134,7 @@ describe("settings schema", () => {
   });
 });
 
-describe("web tools shared by every provider, and one key per search service", () => {
+describe("web tools shared by every provider", () => {
   const view = (config: unknown, key: string) => describeSettings(normalizeConfig(config)).find((entry) => entry.descriptor.key === key)!;
 
   it("reads the Harness's older keys as what the shared settings amount to while they are unset", () => {
@@ -142,35 +142,14 @@ describe("web tools shared by every provider, and one key per search service", (
     expect(view({}, "web.browser").effective).toEqual({ value: "auto", label: "When needed" });
     expect(view({ providers: { harness: { webPrivateNetwork: true } } }, "web.privateNetwork").effective).toMatchObject({ label: "Moxen Harness only" });
     expect(view({ web: { browser: "auto" }, providers: { harness: { webBrowser: "off" } } }, "web.browser")).toMatchObject({ value: "auto", explicit: true });
-    for (const key of ["providers.harness.webBrowser", "providers.harness.webBrowserPath", "providers.harness.webPrivateNetwork", "providers.harness.webSearchKey", "providers.harness.webSearchKeyEnv"]) {
+    for (const key of ["providers.harness.webBrowser", "providers.harness.webBrowserPath", "providers.harness.webPrivateNetwork"]) {
       expect(settingDescriptor(key)!.hidden).toBe(true);
     }
   });
 
-  it("shows the older single key on the service it was used for, and only there", () => {
-    const legacy = { providers: { harness: { webSearch: "exa", webSearchKey: "keychain:providers.harness.webSearchKey", webSearchKeyEnv: "SEARCH_KEY" } } };
-    expect(view(legacy, "providers.harness.webSearchKeys.exa").effective).toMatchObject({ label: "Saved in the keychain" });
-    expect(view(legacy, "providers.harness.webSearchKeyEnvs.exa").effective).toMatchObject({ value: "SEARCH_KEY" });
-    expect(view(legacy, "providers.harness.webSearchKeys.brave").effective).toBeUndefined();
-  });
-
-  it("files the older key under its service when the service is switched, without copying the secret or dropping the old slot", () => {
-    const legacy = normalizeConfig({ providers: { harness: { webSearch: "exa", webSearchKey: "keychain:providers.harness.webSearchKey", webSearchKeyEnv: "SEARCH_KEY" } } });
-    const switched = setConfigValue(legacy, "providers.harness.webSearch", "brave");
-    expect(switched.providers?.harness).toMatchObject({
-      webSearch: "brave",
-      webSearchKeys: { exa: "keychain:providers.harness.webSearchKey" },
-      webSearchKeyEnvs: { exa: "SEARCH_KEY" },
-      webSearchKey: "keychain:providers.harness.webSearchKey",
-    });
-    expect(switched.providers?.harness?.webSearchKeys).not.toHaveProperty("brave");
-    // Once a service has its own slot, switching again leaves the slots alone.
-    expect(setConfigValue(switched, "providers.harness.webSearch", "exa").providers?.harness?.webSearchKeys).toEqual({ exa: "keychain:providers.harness.webSearchKey" });
-  });
-
-  it("keeps a key out of the file: a per-service key slot takes only a keychain reference", () => {
-    expect(() => setConfigValue(DEFAULT_CONFIG, "providers.harness.webSearchKeys.brave", "BSA-plain-text-key")).toThrow(/keychain/);
-    expect(setConfigValue(DEFAULT_CONFIG, "providers.harness.webSearchKeys.brave", "keychain:providers.harness.webSearchKeys.brave").providers?.harness?.webSearchKeys).toEqual({ brave: "keychain:providers.harness.webSearchKeys.brave" });
+  it("offers only the search backends that are built in, and no key rows for Exa or Brave (their MCP servers hold those)", () => {
+    expect(settingDescriptor("providers.harness.webSearch")!.kind).toMatchObject({ type: "enum", choices: [{ value: "duckduckgo" }, { value: "searxng" }] });
+    expect(SETTINGS.filter((descriptor) => descriptor.key.startsWith("providers.harness.webSearchKey"))).toEqual([]);
   });
 });
 

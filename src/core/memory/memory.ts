@@ -163,8 +163,20 @@ export interface SaveMemoryInput {
   readonly scope: unknown;
 }
 
-/** Save (or replace) one memory and rewrite its scope's index. */
-export async function saveMemory(location: MemoryLocation, input: SaveMemoryInput): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number }> {
+/** What a memory said before a save replaced it or a delete removed it: what a client diffs against. */
+export interface MemoryBefore {
+  readonly description: string;
+  readonly type: MemoryType;
+  readonly body: string;
+}
+
+const beforeOf = (memory: Memory): MemoryBefore => ({ description: memory.description, type: memory.type, body: memory.body });
+
+/** Save (or replace) one memory and rewrite its scope's index. `before` is the version it replaced. */
+export async function saveMemory(
+  location: MemoryLocation,
+  input: SaveMemoryInput,
+): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number; readonly before?: MemoryBefore }> {
   const name = memoryName(input.name);
   const scope = memoryScope(input.scope);
   const type = memoryType(input.type);
@@ -178,13 +190,68 @@ export async function saveMemory(location: MemoryLocation, input: SaveMemoryInpu
   }
   const dir = memoryDir(location.storeRoot, scope, location.projectId);
   const existing = await readAll(dir, scope);
-  const replaced = existing.some((memory) => memory.name === name);
+  const previous = existing.find((memory) => memory.name === name);
+  const replaced = previous !== undefined;
   if (!replaced && existing.length >= MAX_MEMORIES) {
     throw new CliError("MEMORY_FULL", `The ${scope} memory holds ${MAX_MEMORIES} memories already. Update or delete one that is stale instead.`, { exitCode: 4 });
   }
   await writeAtomic(path.join(dir, `${name}.md`), render({ name, description, type, body }));
   await writeIndex(dir, scope);
-  return { name, scope, replaced, total: existing.length + (replaced ? 0 : 1) };
+  return { name, scope, replaced, total: existing.length + (replaced ? 0 : 1), ...(previous === undefined ? {} : { before: beforeOf(previous) }) };
+}
+
+/** Where a memory is in its scope, for an edit or an append: it must exist (a new one is a save). */
+async function existingMemory(location: MemoryLocation, rawName: unknown, rawScope: unknown): Promise<Memory> {
+  const memory = await readMemory(location, rawName, memoryScope(rawScope));
+  return memory;
+}
+
+/**
+ * Replace one piece of a memory's body with another, like the file Edit tool: `oldText` must be in the body
+ * exactly once. `description`, when given, replaces the description too. Returns what the scope holds
+ * afterwards; the client has the old and new text from the call itself.
+ */
+export async function editMemory(
+  location: MemoryLocation,
+  input: { readonly name: unknown; readonly scope: unknown; readonly oldText: unknown; readonly newText: unknown; readonly description?: unknown },
+): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly total: number }> {
+  const memory = await existingMemory(location, input.name, input.scope);
+  const oldText = typeof input.oldText === "string" ? input.oldText : "";
+  const newText = typeof input.newText === "string" ? input.newText : "";
+  if (oldText === "") throw new CliError("INVALID_MEMORY", "old_string is the text to replace, and it cannot be empty: to add text to a memory use memory_append.", { exitCode: 2 });
+  const at = memory.body.indexOf(oldText);
+  if (at === -1) {
+    throw new CliError("MEMORY_EDIT_NOT_FOUND", `old_string is not in the memory ${memory.name}. Read it with memory_read and copy the text exactly.`, { exitCode: 4, details: { name: memory.name } });
+  }
+  if (memory.body.indexOf(oldText, at + 1) !== -1) {
+    throw new CliError("MEMORY_EDIT_NOT_UNIQUE", `old_string is in the memory ${memory.name} more than once: include more of the text around it.`, { exitCode: 4, details: { name: memory.name } });
+  }
+  const saved = await saveMemory(location, {
+    name: memory.name,
+    scope: memory.scope,
+    type: memory.type,
+    description: input.description === undefined ? memory.description : input.description,
+    body: `${memory.body.slice(0, at)}${newText}${memory.body.slice(at + oldText.length)}`,
+  });
+  return { name: saved.name, scope: saved.scope, total: saved.total };
+}
+
+/** Add text to the end of a memory that exists, with no read first. Returns what the scope holds afterwards. */
+export async function appendMemory(
+  location: MemoryLocation,
+  input: { readonly name: unknown; readonly scope: unknown; readonly text: unknown },
+): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly total: number }> {
+  const memory = await existingMemory(location, input.name, input.scope);
+  const text = typeof input.text === "string" ? input.text.trim() : "";
+  if (text === "") throw new CliError("INVALID_MEMORY", "text is what to add, and it cannot be empty.", { exitCode: 2 });
+  const saved = await saveMemory(location, {
+    name: memory.name,
+    scope: memory.scope,
+    type: memory.type,
+    description: memory.description,
+    body: `${memory.body.trimEnd()}\n${text}`,
+  });
+  return { name: saved.name, scope: saved.scope, total: saved.total };
 }
 
 /** One memory, looked for in `scope` or, without one, the project's first and then the global. */
@@ -200,16 +267,22 @@ export async function readMemory(location: MemoryLocation, rawName: unknown, raw
   throw new CliError("MEMORY_NOT_FOUND", `No memory named ${name}${scopes.length === 1 ? ` in the ${scopes[0]} scope` : ""}.`, { exitCode: 4, details: { name } });
 }
 
-export async function deleteMemory(location: MemoryLocation, rawName: unknown, rawScope: unknown): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly total: number }> {
+export async function deleteMemory(location: MemoryLocation, rawName: unknown, rawScope: unknown): Promise<{ readonly name: string; readonly scope: MemoryScope; readonly total: number; readonly before: MemoryBefore }> {
   const name = memoryName(rawName);
   const scope = memoryScope(rawScope);
   const dir = memoryDir(location.storeRoot, scope, location.projectId);
   const file = path.join(dir, `${name}.md`);
-  const there = await readFile(file, "utf8").then(() => true, () => false);
-  if (!there) throw new CliError("MEMORY_NOT_FOUND", `No memory named ${name} in the ${scope} scope.`, { exitCode: 4, details: { name, scope } });
+  const text = await readFile(file, "utf8").catch(() => null);
+  const removed = text === null ? null : parseMemoryFile(text, name);
+  if (text === null) throw new CliError("MEMORY_NOT_FOUND", `No memory named ${name} in the ${scope} scope.`, { exitCode: 4, details: { name, scope } });
   await rm(file, { force: true });
   await writeIndex(dir, scope);
-  return { name, scope, total: (await readAll(dir, scope)).length };
+  return {
+    name,
+    scope,
+    total: (await readAll(dir, scope)).length,
+    before: removed === null ? { description: "", type: "reference", body: text.trim() } : { description: removed.description, type: removed.type, body: removed.body },
+  };
 }
 
 /** Every memory a thread can see: the global ones, then its project's. */

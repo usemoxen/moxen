@@ -1,5 +1,7 @@
+import { sessionStatusLabel } from "../i18n/status.js";
+import { applyLanguage, currentLanguage, t, tx } from "../i18n/index.js";
 import os from "node:os";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CliRenderer, ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
@@ -14,6 +16,7 @@ import { pickerEntries } from "../model/skills.js";
 import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
 import { SettingsModal } from "../features/settings/settingsmodal.js";
+import { StatsModal } from "../features/stats/statsmodal.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import type { ActiveServer } from "../features/remote/server.js";
 import { useRemote } from "../features/remote/useRemote.js";
@@ -68,7 +71,8 @@ import { autoHandoffState, compactsFirst, lineInput, longThreadPolicy, type Long
 import { handOffTarget, openRequestPrompt, requestNoun } from "../model/gitpanel.js";
 import { renderMessage } from "../model/message.js";
 import { copiedAttachments, copiedToast, copyPrompt, matchCopy, uniqueName } from "../model/copystash.js";
-import { COLOR, MARKER, pulseColor, SPINNER, SURFACE, truncate } from "../theme.js";
+
+import { applyTheme, COLOR, MARKER, pulseColor, SPINNER, SURFACE, truncate } from "../theme.js";
 import { useToasts, type ToastTone } from "../hooks/useToasts.js";
 import { useClipboard } from "../hooks/useClipboard.js";
 import { useTerminalNotify } from "../hooks/useTerminalNotify.js";
@@ -116,13 +120,17 @@ import { useThreadNotifications } from "./hooks/useThreadNotifications.js";
 import { useAnswerFlow } from "../features/answerpanel/useAnswerFlow.js";
 import { useSidebar } from "../features/sidebar/useSidebar.js";
 import { useDiffPanel } from "../features/diffpanel/useDiffPanel.js";
-import { ActionText, AgentsTab, BackgroundTab, InfoTab, type DelegatedInfo, ContextTab, DiffEmptyTab, SidePanelFrame, SideTabBar, TAB_LABEL as SIDE_TAB_LABEL } from "../features/sidepanel/sidepanel.js";
+import { ActionText, AgentsTab, BackgroundTab, InfoTab, type DelegatedInfo, ContextTab, DiffEmptyTab, SidePanelFrame, SideTabBar, tabLabel } from "../features/sidepanel/sidepanel.js";
+import { ImagePreviewLayer } from "../features/timeline/imagepreview.js";
+import { closeImageViewer, ImageViewer, ImageViewerDim, useImageViewer } from "../features/timeline/imageviewer.js";
+import { openImageExternally } from "../model/imageopen.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
 import { useProviderCatalog } from "../features/pickers/useProviderCatalog.js";
 import { NO_PROJECT, useThreadCreation } from "./hooks/useThreadCreation.js";
 import { useThreadExport } from "./hooks/useThreadExport.js";
+import { useStatsCard } from "./hooks/useStatsCard.js";
 import { useThreadOps, type RevertKind } from "./hooks/useThreadOps.js";
 import type { PickerName } from "../features/pickers/pickerTypes.js";
 import type { ClientApi } from "../../server/api.js";
@@ -193,7 +201,7 @@ export function App({
   const toasts = useToasts();
   /** Kept as the one call every existing error path already used; now routes
       through `toasts` instead of its own state + timeout effect. */
-  const setError = (message: string) => toasts.push("error", "danger", `error: ${message}`, ERROR_DISPLAY_MS);
+  const setError = (message: string) => toasts.push("error", "danger", t("toast.error", { message }), ERROR_DISPLAY_MS);
   /** The palette's Remote section: this server's remote access, and switching between servers. */
   // Whether the server is answering, and how many times it has come back:
   // what was fetched once is fetched again then (the server may be a new one).
@@ -263,6 +271,9 @@ export function App({
   const providerVersions = useProviderVersions(client, picker === "settings");
   const providerUpdates = useProviderUpdates(client, toasts.push, providerVersions.reload);
   const ui = uiFromSnapshot(settings.snapshot) ?? launchUi;
+  // Rewrites the shared palettes before any child draws; a no-op while the theme is unchanged.
+  applyTheme(ui?.theme);
+  applyLanguage(ui?.language);
   // The provider catalog is read again when the page closes after an edit (a Harness profile, a hidden model).
   const [settingsChanges, setSettingsChanges] = useState(0);
   const snapshotAtOpen = useRef<typeof settings.snapshot>(null);
@@ -337,6 +348,10 @@ export function App({
   const sessionRunningRef = useRef(false);
   const clipboard = useClipboard();
   const renderer = useRenderer() as CliRenderer | null;
+  const themeName = ui?.theme;
+  useEffect(() => {
+    renderer?.setBackgroundColor(SURFACE.base);
+  }, [renderer, themeName]);
   const {
     drafts,
     pendings,
@@ -368,7 +383,7 @@ export function App({
     if (text === lastCopiedRef.current) return;
     lastCopiedRef.current = text;
     void clipboard.copyText(text).then((ok) => {
-      if (ok) toasts.push("copy-selection", "info", "Copied to clipboard", COPY_TOAST_MS);
+      if (ok) toasts.push("copy-selection", "info", t("app.copied_to_clipboard_efc1"), COPY_TOAST_MS);
     });
   });
 
@@ -455,6 +470,7 @@ export function App({
     selected,
     creating,
     setError,
+    isRunning: () => sessionRunningRef.current,
   });
   const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
   const pickerSkills = useMemo(() => pickerEntries(skillInventory), [skillInventory]);
@@ -466,8 +482,8 @@ export function App({
       return;
     }
     void clipboard.copyText(text).then((ok) => {
-      if (ok) toasts.push("palette-copy", "info", "Copied to clipboard", COPY_TOAST_MS);
-      else if (clipboard.isRemote()) setError("copy failed — terminal may block OSC 52");
+      if (ok) toasts.push("palette-copy", "info", t("app.copied_to_clipboard_efc1"), COPY_TOAST_MS);
+      else if (clipboard.isRemote()) setError(t("app.copy_failed_terminal_may_6db8"));
     });
   };
   /**
@@ -475,10 +491,12 @@ export function App({
    * last (after each image, for clipboard histories), and pasting it back
    * into moxen attaches the images again onto its `[Image #N]` tokens.
    */
+  /** A sent image's bytes by id, for the transcript thumbnails: the server holds them, which may be a paired machine. */
+  const readAttachment = useCallback((attachmentId: string) => client.query({ type: "attachment.read", attachmentId }), [client]);
   const copyMessage = (entry: TimelineEntry) => {
     const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
     if (rendered.text.trim().length === 0) {
-      setError("nothing to copy");
+      setError(t("app.nothing_to_copy_91c1"));
       return;
     }
     // The images are the server's: it hands over their bytes by id. One it no longer has is left out.
@@ -493,7 +511,7 @@ export function App({
         const sources = found.flat();
         const { ok, images } = await copyPrompt(clipboard, rendered.text, sources);
         if (ok) toasts.push("palette-copy", "info", copiedToast(sources.length, images), COPY_TOAST_MS);
-        else if (clipboard.isRemote()) setError("copy failed — terminal may block OSC 52");
+        else if (clipboard.isRemote()) setError(t("app.copy_failed_terminal_may_6db8"));
       });
   };
   /**
@@ -505,7 +523,7 @@ export function App({
     const copied = matchCopy(text);
     if (copied === null || copied.images.length === 0) return null;
     if (pending.length + copied.images.length > MAX_PENDING_ATTACHMENTS) {
-      toasts.push("attach-limit", "warn", `A message can carry ${MAX_PENDING_ATTACHMENTS} images — the pasted text came without its ${copied.images.length}`, COPY_TOAST_MS);
+      toasts.push("attach-limit", "warn", t("attach.limitPasted", { max: MAX_PENDING_ATTACHMENTS, count: copied.images.length }), COPY_TOAST_MS);
       return null;
     }
     const taken = new Set(pending.map((attachment) => attachment.name));
@@ -514,6 +532,21 @@ export function App({
     if (uploads.length === 0) return null;
     setPending((current) => [...current, ...uploads]);
     return uploads.map((upload) => upload.name);
+  };
+  const viewedImage = useImageViewer();
+  // The viewed image belongs to the thread it was sent in.
+  useEffect(() => {
+    closeImageViewer();
+  }, [selected?.id]);
+  // Opening an image leaves the composer focused, so a reply can be typed while looking at it.
+  useEffect(() => {
+    if (viewedImage !== null) setFocus("composer");
+  }, [viewedImage === null]);
+  const openViewedImage = () => {
+    if (viewedImage === null) return;
+    void openImageExternally(viewedImage.label, viewedImage.mimeType, viewedImage.bytes).catch((cause: unknown) =>
+      toasts.push("open-image", "danger", t("imageViewer.openFailed", { message: dispatchErrorMessage(cause) }), COPY_TOAST_MS),
+    );
   };
   /** Latest assistant reply text, for the palette's copy action. */
   const lastAssistantMessage = [...threadState.messages].reverse().find(
@@ -538,7 +571,7 @@ export function App({
     if (draft === null || question === undefined) return;
     const trimmed = text.trim();
     if (trimmed.length === 0) {
-      setError("answer is empty");
+      setError(t("app.answer_is_empty_4033"));
       return;
     }
     answerCurrentQuestion(question.id, { custom: trimmed });
@@ -667,6 +700,7 @@ export function App({
     closePicker,
     setError,
   });
+  const copyStatsCard = useStatsCard({ client, dir: cwd, clipboard, toasts });
 
   useEffect(() => {
     if (openThreadId === null) return;
@@ -714,7 +748,8 @@ export function App({
    */
   const dispatchTurn = (prompt: string, attachments: ImageAttachmentUpload[], busyDelivery: "steer" | "queue", scheduledFor?: Date) => {
     if (selected === null) return;
-    const oneOff = interaction.takeOneOff();
+    // A message sent while a turn runs is a steer or a queued send: it carries no mode, and an armed one waits for the next prompt.
+    const oneOff = sessionRunningRef.current ? undefined : interaction.takeOneOff();
     void client
       .dispatch({
         type: "thread.turn.start",
@@ -732,12 +767,12 @@ export function App({
       .then((result) => {
         const continueAt = usageBanner.banner?.continueAt ?? null;
         if (scheduledFor === undefined && result.status === "queued" && !sessionRunningRef.current && continueAt !== null) {
-          toasts.push("queued", "info", `Queued: goes out after the continue at ${clock(continueAt)} (see Queued, above)`, COPY_TOAST_MS);
+          toasts.push("queued", "info", t("send.queuedAfterContinue", { at: clock(continueAt) }), COPY_TOAST_MS);
         } else if (scheduledFor !== undefined) {
           const when = describeScheduled(scheduledFor, new Date());
-          toasts.push("scheduled", "info", when === "now" ? "Scheduled: goes out now (see Queued, above)" : `Scheduled for ${when} (see Queued, above)`, COPY_TOAST_MS);
+          toasts.push("scheduled", "info", when === "now" ? t("app.scheduled_goes_out_now_58dc") : t("send.scheduledFor", { when }), COPY_TOAST_MS);
         } else if (sessionRunningRef.current && busyDelivery === "queue") {
-          toasts.push("queued", "info", "Queued: sent once this turn fully finishes (see Queued, above)", COPY_TOAST_MS);
+          toasts.push("queued", "info", t("app.queued_sent_once_this_2b24"), COPY_TOAST_MS);
         }
       })
       .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
@@ -756,11 +791,11 @@ export function App({
     const side = parseSideQuestion(trimmed);
     if (side !== null) {
       if (side.length === 0) {
-        if (!sideQuestion.reopen()) toasts.push("btw", "info", "Usage: /btw <question> — asks without adding to the thread", COPY_TOAST_MS);
+        if (!sideQuestion.reopen()) toasts.push("btw", "info", t("app.usage_btw_question_asks_e6b2"), COPY_TOAST_MS);
       } else if (sideQuestion.ask(side)) {
         resetDraft(selected.id);
       } else {
-        toasts.push("btw", "warn", "A side question is still being answered", COPY_TOAST_MS);
+        toasts.push("btw", "warn", t("app.a_side_question_is_70ee"), COPY_TOAST_MS);
       }
       return;
     }
@@ -772,7 +807,7 @@ export function App({
       void client
         .dispatch({ type: "thread.unsettle", threadId: id, reason: "user" as const })
         .then(() => {
-          toasts.push("thread-unsettled", "info", "Thread unsettled", COPY_TOAST_MS);
+          toasts.push("thread-unsettled", "info", t("ops.unsettled"), COPY_TOAST_MS);
           send(text, busyDelivery, scheduledFor);
         })
         .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
@@ -794,7 +829,7 @@ export function App({
       // here the draft is kept and nothing is sent.
       const imageError = imageSetError([...pending, ...built.attachments]);
       if (imageError !== null) {
-        setError(`Cannot send: ${imageError}`.slice(0, 160));
+        setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
         return;
       }
       resetDraft(sourceId);
@@ -819,7 +854,7 @@ export function App({
     // Full: say so, and keep what is attached. Dropping the oldest to make
     // room left its image token in the draft with nothing behind it.
     if (pending.length >= MAX_PENDING_ATTACHMENTS) {
-      toasts.push("attach-limit", "warn", `A message can carry ${MAX_PENDING_ATTACHMENTS} images — delete an [Image #N] to attach another`, COPY_TOAST_MS);
+      toasts.push("attach-limit", "warn", t("attach.limit", { max: MAX_PENDING_ATTACHMENTS }), COPY_TOAST_MS);
       return;
     }
     const withRenderer = renderer as unknown as {
@@ -851,7 +886,7 @@ export function App({
       // now, at the paste, instead of when the message is sent.
       const imageError = imageSetError([...pending, built.attachment]);
       if (imageError !== null) {
-        toasts.push("attach-limit", "warn", `Not attached: ${imageError}`, COPY_TOAST_MS);
+        toasts.push("attach-limit", "warn", t("send.notAttached", { why: tx(imageError) }), COPY_TOAST_MS);
         return;
       }
       // Re-checked here: another paste may have landed while this one read the clipboard.
@@ -887,6 +922,8 @@ export function App({
     });
 
   useKeyboard((key) => {
+    // Esc closes the full-screen image from any pane (the composer's own Esc goes through `escapeComposer`).
+    if (key.name === "escape" && focus !== "composer" && !quitConfirmOpen && picker === null && closeImageViewer()) return;
     // The full-size quit confirm owns its keys exactly like a modal does:
     // Enter / Ctrl+C again quits, Esc cancels back to the chat pane.
     if (quitConfirmOpen) {
@@ -963,7 +1000,7 @@ export function App({
         toasts.dismiss("ctrl-c");
         openQuitConfirm();
       } else {
-        toasts.push("ctrl-c", "info", "ctrl-c again if you want to quit", 2_000);
+        toasts.push("ctrl-c", "info", t("toast.ctrlCAgain"), 2_000);
       }
       return;
     }
@@ -1079,7 +1116,7 @@ export function App({
     const started = anchor === null ? Number.NaN : Date.parse(anchor);
     const elapsedMs = Number.isNaN(started) ? 0 : Math.max(0, now - started);
     const frame = SPINNER[Math.floor(elapsedMs / 1000) % SPINNER.length] ?? "◐";
-    setTerminalTitle(`${frame} ${threadTitleText} — working ${formatDuration(elapsedMs)}`);
+    setTerminalTitle(t("title.working", { frame, title: threadTitleText, time: formatDuration(elapsedMs) }));
   }, [setTerminalTitle, selected?.title, selected?.latestTurn, sessionRunning, now]);
 
   /**
@@ -1109,7 +1146,7 @@ export function App({
     if (!threadId) return;
     void client
       .dispatch({ type: "thread.background.stop", threadId, taskId: task.taskId })
-      .then(() => toasts.push("background-stop", "info", `Stopped: ${backgroundTaskTitle(task)}`, COPY_TOAST_MS))
+      .then(() => toasts.push("background-stop", "info", t("bg.stopped", { title: backgroundTaskTitle(task) }), COPY_TOAST_MS))
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
 
@@ -1119,7 +1156,7 @@ export function App({
     if (openThreadId === null) return;
     void client
       .dispatch({ type: "thread.background.stop", threadId: openThreadId, taskId: agentId })
-      .then(() => toasts.push("subagent-stop", "info", "Subagent stopped", COPY_TOAST_MS))
+      .then(() => toasts.push("subagent-stop", "info", t("app.subagent_stopped_a328"), COPY_TOAST_MS))
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
 
@@ -1332,8 +1369,8 @@ export function App({
     shell.projects.some((project) => project.id === effectiveProjectId && project.scratch === true);
   const projectTitle =
     effectiveProjectId === NO_PROJECT
-      ? "no project"
-      : (shell.projects.find((project) => project.id === effectiveProjectId)?.title ?? "this project");
+      ? t("app.no_project_f0f6")
+      : (shell.projects.find((project) => project.id === effectiveProjectId)?.title ?? t("app.this_project_e910"));
 
   /** "Resume with less context" — same trigger as the desktop banner: a
       Claude snapshot holding >= 100k tokens that hasn't refreshed in >= 70
@@ -1423,41 +1460,41 @@ export function App({
       key: "usage",
       glyph: "◔",
       glyphColor: banner.wrapUp ? COLOR.warn : COLOR.danger,
-      title: "Usage limit reached",
+      title: t("app.usage_limit_reached_301b"),
       tags: [
-        ...(banner.wrapUp ? [{ text: "wrapping up", color: COLOR.warn }] : []),
-        ...(banner.windowLabel === null ? [] : [{ text: `${banner.windowLabel} limit`, color: COLOR.dim }]),
+        ...(banner.wrapUp ? [{ text: t("app.wrapping_up_8d20"), color: COLOR.warn }] : []),
+        ...(banner.windowLabel === null ? [] : [{ text: t("usage.windowLimit", { window: banner.windowLabel }), color: COLOR.dim }]),
       ],
       detail:
         banner.continueAt !== null ? (
           <>
-            <text fg={COLOR.dim} selectable={false}>{"  Continues at "}</text>
+            <text fg={COLOR.dim} selectable={false}>{t("app.continues_at_65a6")}</text>
             <text fg={COLOR.warn} selectable={false}>{clock(banner.continueAt)}</text>
             <text fg={COLOR.faint} selectable={false}>{` (${untilLabel(new Date(banner.continueAt), now)})`}</text>
-            <text fg={COLOR.dim} selectable={false}>{", once the limit has reset"}</text>
+            <text fg={COLOR.dim} selectable={false}>{t("app.once_the_limit_has_e1dc")}</text>
           </>
         ) : banner.resetsAt === null ? (
-          <text fg={COLOR.dim} selectable={false}>{"  Resets when the provider allows"}</text>
+          <text fg={COLOR.dim} selectable={false}>{t("app.resets_when_the_provider_8348")}</text>
         ) : (
           <>
-            <text fg={COLOR.dim} selectable={false}>{"  Resets at "}</text>
+            <text fg={COLOR.dim} selectable={false}>{t("app.resets_at_6538")}</text>
             <text fg={COLOR.warn} selectable={false}>{clock(banner.resetsAt.toISOString())}</text>
             <text fg={COLOR.faint} selectable={false}>{` (${untilLabel(banner.resetsAt, now)})`}</text>
           </>
         ),
       actions:
         banner.continueAt !== null
-          ? [{ label: "Cancel continue", fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.cancelContinue }]
+          ? [{ label: t("app.cancel_continue_07e6"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.cancelContinue }]
           : [
               // Short labels on purpose: the three actions share one row with
               // the title, and a longer pair pushed Dismiss off the edge.
               // Read together: continue [at reset | in a new thread].
-              ...(banner.resetsAt === null ? [] : [{ label: "Continue at reset", fg: COLOR.accent, onClick: usageBanner.scheduleContinue }]),
+              ...(banner.resetsAt === null ? [] : [{ label: t("app.continue_at_reset_681f"), fg: COLOR.accent, onClick: usageBanner.scheduleContinue }]),
               // A fresh context instead of resuming a long one: the handoff
               // carries the work, and waits for the reset if it has not come.
               // Only once the assistant has said something to hand over.
-              ...(lastAssistantMessage === null ? [] : [{ label: "In a new thread", fg: COLOR.accent, onClick: usageBanner.continueInNewThread }]),
-              { label: "Dismiss", fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.dismiss },
+              ...(lastAssistantMessage === null ? [] : [{ label: t("app.in_a_new_thread_b710"), fg: COLOR.accent, onClick: usageBanner.continueInNewThread }]),
+              { label: t("action.dismiss"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.dismiss },
             ],
     });
   }
@@ -1466,11 +1503,11 @@ export function App({
       key: "resume",
       glyph: "◈",
       glyphColor: COLOR.warn,
-      title: "Resume with less context",
-      detail: <text fg={COLOR.dim} selectable={false}>{`  ${formatTokenCount(resumeBanner.usedTokens)} tokens from earlier`}</text>,
+      title: t("app.resume_with_less_context_2d5c"),
+      detail: <text fg={COLOR.dim} selectable={false}>{t("resume.tokensEarlier", { count: formatTokenCount(resumeBanner.usedTokens) })}</text>,
       actions: [
-        { label: "Compact", fg: COLOR.accent, onClick: () => compactSession(() => setDismissedResumeKey(resumeBanner.key)) },
-        { label: "Keep full history", fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedResumeKey(resumeBanner.key) },
+        { label: t("action.compact"), fg: COLOR.accent, onClick: () => compactSession(() => setDismissedResumeKey(resumeBanner.key)) },
+        { label: t("app.keep_full_history_79fc"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedResumeKey(resumeBanner.key) },
       ],
     });
   }
@@ -1479,17 +1516,17 @@ export function App({
       key: handoffKey,
       glyph: "◈",
       glyphColor: COLOR.warn,
-      title: `Context at ${handoffState.usedTokens.toLocaleString("en-US")} tokens${handoffState.usedPercent === null ? "" : ` (${handoffState.usedPercent}% full)`}`,
+      title: handoffState.usedPercent === null ? t("ctx.at", { tokens: handoffState.usedTokens.toLocaleString(currentLanguage()) }) : t("ctx.atPercent", { tokens: handoffState.usedTokens.toLocaleString(currentLanguage()), percent: handoffState.usedPercent }),
       detail: (
         <text fg={COLOR.dim} selectable={false}>
           {handoffState.blockers.length === 0
-            ? "  Tool calls get less reliable as it fills: continue in a fresh thread"
-            : `  ${longThread.handoff.mode === "auto" ? "Handing off once" : "Waiting for"}: ${handoffState.blockers.join(", ")}`}
+            ? t("app.tool_calls_get_less_ab60")
+            : t(longThread.handoff.mode === "auto" ? "ctx.handingOffOnce" : "ctx.waitingFor", { blockers: handoffState.blockers.map(tx).join(", ") })}
         </text>
       ),
       actions: [
-        { label: "Hand off", fg: COLOR.accent, onClick: usageBanner.continueInNewThread },
-        { label: "Not now", fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedHandoffKey(handoffKey) },
+        { label: t("action.handOff"), fg: COLOR.accent, onClick: usageBanner.continueInNewThread },
+        { label: t("action.notNow"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedHandoffKey(handoffKey) },
       ],
     });
   }
@@ -1498,15 +1535,15 @@ export function App({
       key: compactKey,
       glyph: "◈",
       glyphColor: COLOR.warn,
-      title: `Context at ${compactState.usedTokens.toLocaleString("en-US")} tokens${compactState.usedPercent === null ? "" : ` (${compactState.usedPercent}% full)`}`,
+      title: compactState.usedPercent === null ? t("ctx.at", { tokens: compactState.usedTokens.toLocaleString(currentLanguage()) }) : t("ctx.atPercent", { tokens: compactState.usedTokens.toLocaleString(currentLanguage()), percent: compactState.usedPercent }),
       detail: (
         <text fg={COLOR.dim} selectable={false}>
-          {compactState.blockers.length === 0 ? "  Compact it to make room, keeping the thread" : `  ${compact?.mode === "auto" ? "Compacting once" : "Waiting for"}: ${compactState.blockers.join(", ")}`}
+          {compactState.blockers.length === 0 ? t("app.compact_it_to_make_023e") : t(compact?.mode === "auto" ? "ctx.compactingOnce" : "ctx.waitingFor", { blockers: compactState.blockers.map(tx).join(", ") })}
         </text>
       ),
       actions: [
-        { label: "Compact", fg: COLOR.accent, onClick: () => compactSession(() => setDismissedCompactKey(compactKey)) },
-        { label: "Not now", fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedCompactKey(compactKey) },
+        { label: t("action.compact"), fg: COLOR.accent, onClick: () => compactSession(() => setDismissedCompactKey(compactKey)) },
+        { label: t("action.notNow"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedCompactKey(compactKey) },
       ],
     });
   }
@@ -1534,8 +1571,8 @@ export function App({
       if (threadSearch.kind === "error") return { kind: "error", message: threadSearch.message };
       const rowOf = (entry: (typeof threadSearch.found.threads)[number]) => {
         const hit = entry.hits[0];
-        const where = hit === undefined || hit.kind === "title" ? "title" : hit.kind === "tool" ? (hit.source ?? "tool") : hit.kind === "message" ? (hit.source ?? "message") : hit.kind;
-        const more = entry.hitCount > 1 ? ` (+${entry.hitCount - 1})` : "";
+        const where = hit === undefined || hit.kind === "title" ? t("search.where.title") : hit.kind === "tool" ? (hit.source ?? t("search.where.tool")) : hit.kind === "message" ? (hit.source ?? t("search.where.message")) : hit.kind;
+        const more = entry.hitCount > 1 ? t("search.more", { count: entry.hitCount - 1 }) : "";
         return {
           key: `search:${entry.threadId}`,
           label: entry.title,
@@ -1553,8 +1590,8 @@ export function App({
       return {
         kind: "list",
         sections: [
-          ...(active.length > 0 ? [{ header: "Active", rows: active }] : []),
-          ...(settled.length > 0 ? [{ header: "Settled", headerColor: COLOR.faint, rows: settled }] : []),
+          ...(active.length > 0 ? [{ header: t("search.active"), rows: active }] : []),
+          ...(settled.length > 0 ? [{ header: t("search.settled"), headerColor: COLOR.faint, rows: settled }] : []),
         ],
       };
     }
@@ -1570,7 +1607,7 @@ export function App({
       // "not created yet" — say so instead of the cryptic stock reason.
       const isLatestTurn =
         entry.turnId !== null && groups.length > 0 && groups[groups.length - 1]?.turnId === entry.turnId;
-      const revertMissingMeta = sessionRunning && isLatestTurn ? "turn still running" : "no checkpoint for this turn";
+      const revertMissingMeta = sessionRunning && isLatestTurn ? t("app.turn_still_running_9163") : t("app.no_checkpoint_for_this_2cc0");
       return {
         kind: "list",
         sections: [
@@ -1578,8 +1615,8 @@ export function App({
             rows: [
               {
                 key: "message:copy",
-                label: "Copy",
-                meta: `${entry.text.length} chars`,
+                label: t("action.copy"),
+                meta: t("chars", { count: entry.text.length }),
                 onPick: () => {
                   closePicker("chat");
                   copyMessage(entry);
@@ -1590,13 +1627,13 @@ export function App({
                 ? [
                     {
                       key: "message:cancel",
-                      label: entry.queued.scheduledFor === null ? "Cancel queued message" : "Cancel scheduled message",
+                      label: entry.queued.scheduledFor === null ? t("app.cancel_queued_message_cd3f") : t("app.cancel_scheduled_message_b5ee"),
                       onPick: () => {
                         closePicker("chat");
                         const turnId = entry.turnId!;
                         void client
                           .dispatch({ type: "thread.turn.interrupt", threadId: openThreadId, turnId })
-                          .then(() => toasts.push("queued-cancel", "info", "Message cancelled", 2500))
+                          .then(() => toasts.push("queued-cancel", "info", t("app.message_cancelled_c940"), 2500))
                           .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
                       },
                     },
@@ -1609,33 +1646,33 @@ export function App({
               revertTarget === null
                 ? {
                     key: "message:revert",
-                    label: "Revert to before this turn",
+                    label: t("app.revert_to_before_this_212f"),
                     meta: revertMissingMeta,
                     disabled: true,
                     onPick: () => {},
                   }
                 : {
                     key: "message:revert",
-                    label: revertArmed === "conversation" ? "Confirm revert" : "Revert to before this turn",
-                    meta: revertArmed === "conversation" ? "enter again to confirm · keeps files" : "conversation only",
+                    label: revertArmed === "conversation" ? t("app.confirm_revert_777b") : t("app.revert_to_before_this_212f"),
+                    meta: revertArmed === "conversation" ? t("app.enter_again_to_confirm_7cde") : t("app.conversation_only_9d33"),
                     onPick: () => revertMessageTurn(entry, revertTarget, "conversation"),
                   },
               // The files too, from the snapshot taken before this turn ran.
               revertTarget === null || checkpoint?.status !== "available"
                 ? {
                     key: "message:revert-files",
-                    label: "Revert conversation and files",
-                    meta: revertTarget === null ? revertMissingMeta : "no file snapshot for this turn",
+                    label: t("app.revert_conversation_and_files_1442"),
+                    meta: revertTarget === null ? revertMissingMeta : t("app.no_file_snapshot_for_1fd3"),
                     disabled: true,
                     onPick: () => {},
                   }
                 : {
                     key: "message:revert-files",
-                    label: revertArmed === "files" ? "Confirm revert with files" : "Revert conversation and files",
+                    label: revertArmed === "files" ? t("app.confirm_revert_with_files_87bc") : t("app.revert_conversation_and_files_1442"),
                     meta:
                       revertArmed === "files"
-                        ? "enter again to confirm · files go back to before this turn"
-                        : "files back to before this turn, new ones removed",
+                        ? t("app.enter_again_to_confirm_4ce2")
+                        : t("app.files_back_to_before_d13a"),
                     onPick: () => revertMessageTurn(entry, revertTarget, "files"),
                   },
                   ]),
@@ -1661,12 +1698,12 @@ export function App({
         kind: "list",
         sections: [
           {
-            header: "New thread",
+            header: t("palette.newThread"),
             rows: [
               {
                 key: "thread:search",
-                label: "Search threads",
-                meta: "titles, messages, tool calls · settled included",
+                label: t("app.search_threads_c202"),
+                meta: t("app.titles_messages_tool_calls_1fcc"),
                 onPick: () => {
                   setPickerFilter("");
                   setPicker("search");
@@ -1674,7 +1711,7 @@ export function App({
               },
               {
                 key: "thread:new-project",
-                label: "Choose project…",
+                label: t("app.choose_project_d8da"),
                 onPick: () => {
                   setPickerFilter("");
                   setPicker("project");
@@ -1692,7 +1729,7 @@ export function App({
       const jumpRows = groups.flatMap((group, index) => {
         const first = group.prompts[0];
         if (first === undefined) return [];
-        const line = first.text.trim().split(/\r?\n/u)[0]?.replace(/\s+/gu, " ").trim() || "(empty prompt)";
+        const line = first.text.trim().split(/\r?\n/u)[0]?.replace(/\s+/gu, " ").trim() || t("app.empty_prompt_558f");
         return [
           {
             key: `jump:${group.id}`,
@@ -1709,40 +1746,40 @@ export function App({
         kind: "list",
         sections: [
           {
-            header: "Copy",
+            header: t("action.copy"),
             rows: [
               {
                 key: "copy:path",
-                label: "Copy project path",
-                onPick: () => copyPaletteText(projectPath, "no project path for this thread"),
+                label: t("app.copy_project_path_a959"),
+                onPick: () => copyPaletteText(projectPath, t("app.no_project_path_for_81f2")),
               },
               {
                 key: "copy:branch",
-                label: "Copy branch",
+                label: t("app.copy_branch_6806"),
                 ...(branchName === null ? {} : { meta: branchName }),
-                onPick: () => copyPaletteText(branchName, "this thread has no branch"),
+                onPick: () => copyPaletteText(branchName, t("app.this_thread_has_no_b556")),
               },
               {
                 key: "copy:thread",
-                label: "Copy thread ID",
+                label: t("app.copy_thread_id_ed70"),
                 ...(openThreadId === null ? {} : { meta: `${openThreadId.slice(0, 8)}…` }),
-                onPick: () => copyPaletteText(openThreadId, "no open thread"),
+                onPick: () => copyPaletteText(openThreadId, t("app.no_open_thread_b43f")),
               },
               {
                 key: "copy:last",
-                label: "Copy last assistant message",
-                ...(lastAssistantMessage === null ? {} : { meta: `${lastAssistantMessage.length} chars` }),
-                onPick: () => copyPaletteText(lastAssistantMessage, "no assistant message yet"),
+                label: t("app.copy_last_assistant_message_7b49"),
+                ...(lastAssistantMessage === null ? {} : { meta: t("chars", { count: lastAssistantMessage.length }) }),
+                onPick: () => copyPaletteText(lastAssistantMessage, t("app.no_assistant_message_yet_de11")),
               },
             ],
           },
           {
-            header: "Thread",
+            header: t("palette.thread"),
             rows: [
               {
                 key: "thread:search",
-                label: "Search threads",
-                meta: "titles, messages, tool calls · settled included",
+                label: t("app.search_threads_c202"),
+                meta: t("app.titles_messages_tool_calls_1fcc"),
                 onPick: () => {
                   setPickerFilter("");
                   setPicker("search");
@@ -1750,7 +1787,7 @@ export function App({
               },
               {
                 key: "thread:new",
-                label: "New thread",
+                label: t("palette.newThread"),
                 ...(selected === null ? {} : { meta: projectTitle }),
                 onPick: () => {
                   startNewThread();
@@ -1759,7 +1796,7 @@ export function App({
               },
               {
                 key: "thread:new-project",
-                label: "New thread in project…",
+                label: t("app.new_thread_in_project_d0c3"),
                 onPick: () => {
                   if (!creating) {
                     setCreatingModelSelection(null);
@@ -1781,8 +1818,8 @@ export function App({
                     return running && canStopSubagent
                       ? {
                           key: "thread:settle",
-                          label: "Settle subagent",
-                          meta: "stops it",
+                          label: t("app.settle_subagent_f72d"),
+                          meta: t("app.stops_it_36c8"),
                           onPick: () => {
                             stopSubagent(agentId);
                             subagentView.close();
@@ -1792,8 +1829,8 @@ export function App({
                       : {
                           key: "thread:settle",
                           // A running one this provider cannot stop alone only has its view closed.
-                          label: running ? "Close subagent" : "Settle subagent",
-                          meta: running ? "keeps running" : "closes it",
+                          label: running ? t("app.close_subagent_1f6d") : t("app.settle_subagent_f72d"),
+                          meta: running ? t("app.keeps_running_afe9") : t("app.closes_it_1286"),
                           onPick: () => {
                             subagentView.close();
                             closePicker("chat");
@@ -1802,17 +1839,17 @@ export function App({
                   })()
                 : {
                     key: "thread:settle",
-                    label: selected !== null && threadStatus(selected, Date.now()) === "settled" ? "Unsettle thread" : "Settle thread",
+                    label: selected !== null && threadStatus(selected, Date.now()) === "settled" ? t("app.unsettle_thread_8bf3") : t("app.settle_thread_7401"),
                     onPick: toggleSettleThread,
                   },
               {
                 key: "thread:regenerate-title",
-                label: "Regenerate title",
+                label: t("app.regenerate_title_ac4c"),
                 onPick: regenerateThreadTitle,
               },
               {
                 key: "thread:rename",
-                label: "Rename thread",
+                label: t("app.rename_thread_979d"),
                 onPick: () => {
                   setPickerFilter("");
                   setPicker("rename");
@@ -1820,15 +1857,15 @@ export function App({
               },
               {
                 key: "thread:archive",
-                label: "Archive thread",
+                label: t("app.archive_thread_1c8a"),
                 onPick: archiveThread,
               },
               {
                 key: "message:schedule",
-                label: "Schedule message",
+                label: t("app.schedule_message_cbae"),
                 // What is in the composer goes, at a time asked for next.
                 ...(draft.trim().length === 0
-                  ? { meta: "write it in the composer first", disabled: true, onPick: () => {} }
+                  ? { meta: t("app.write_it_in_the_589e"), disabled: true, onPick: () => {} }
                   : {
                       meta: truncate(draft.trim().replace(/\s+/gu, " "), 32),
                       onPick: () => {
@@ -1839,9 +1876,9 @@ export function App({
               },
               {
                 key: "thread:compact",
-                label: "Compact session",
+                label: t("app.compact_session_4ad9"),
                 ...(entries.length === 0
-                  ? { meta: "no turns yet", disabled: true, onPick: () => {} }
+                  ? { meta: t("app.no_turns_yet_c9d5"), disabled: true, onPick: () => {} }
                   : { onPick: compactSession }),
               },
               ...(background.length === 0
@@ -1849,15 +1886,15 @@ export function App({
                 : [
                     {
                       key: "background:browse",
-                      label: "View background tasks",
-                      meta: `${background.length} running`,
+                      label: t("app.view_background_tasks_ca11"),
+                      meta: t("bg.runningCount", { count: background.length }),
                       onPick: () => setPicker("background-tasks"),
                     },
                   ]),
               // One row per background task running in the session.
               ...background.map((task) => ({
                 key: `background:stop:${task.taskId}`,
-                label: `Stop background: ${backgroundTaskTitle(task)}`,
+                label: t("bg.stop", { title: backgroundTaskTitle(task) }),
                 meta: task.taskType === "local_agent" ? "agent" : "shell",
                 onPick: () => {
                   closePicker("chat");
@@ -1867,24 +1904,24 @@ export function App({
               deleteSupported
                 ? {
                     key: "thread:delete",
-                    label: deleteArmed ? "Confirm delete thread" : "Delete thread",
-                    meta: deleteArmed ? "enter again to confirm" : "irreversible",
+                    label: deleteArmed ? t("app.confirm_delete_thread_abe2") : t("app.delete_thread_6bd4"),
+                    meta: deleteArmed ? t("app.enter_again_to_confirm_8742") : "irreversible",
                     onPick: deleteThread,
                   }
                 : {
                     key: "thread:delete",
-                    label: "Delete thread",
-                    meta: "not supported by server",
+                    label: t("app.delete_thread_6bd4"),
+                    meta: t("app.not_supported_by_server_91b2"),
                     disabled: true,
                     onPick: () => {},
                   },
             ],
           },
           {
-            header: "Panels",
+            header: t("palette.panels"),
             rows: (["diff", "git", "context", "agents", "background"] as const).map((tab) => ({
               key: `panel:${tab}`,
-              label: `${sidePanelOpen && sidePanel.tab === tab ? "Hide" : "Show"} ${tab === "agents" && delegatedInfo !== null ? "Info" : SIDE_TAB_LABEL[tab]} panel`,
+              label: t(sidePanelOpen && sidePanel.tab === tab ? "panel.hide" : "panel.show", { name: tab === "agents" && delegatedInfo !== null ? t("tab.info") : tabLabel(tab) }),
               ...(sideBadges[tab] == null ? {} : { meta: sideBadges[tab]! }),
               onPick: () => {
                 closePicker("chat");
@@ -1893,27 +1930,27 @@ export function App({
             })),
           },
           {
-            header: "Export",
+            header: t("palette.export"),
             rows: [
               {
                 key: "thread:export",
-                label: "Export thread to markdown",
+                label: t("app.export_thread_to_markdown_34f7"),
                 // A prompt alone (sent, then stopped by a limit) is not a
                 // thread worth exporting: the assistant has to have said something.
                 ...(lastAssistantMessage === null
-                  ? { meta: entries.length === 0 ? "no turns yet" : "no reply yet", disabled: true, onPick: () => {} }
-                  : { meta: `${groups.length} turn${groups.length === 1 ? "" : "s"}`, onPick: exportThread }),
+                  ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
+                  : { meta: t("turns", { count: groups.length }), onPick: exportThread }),
               },
               {
                 key: "thread:continue",
-                label: "Continue in a new thread",
+                label: t("app.continue_in_a_new_6599"),
                 // Same project, model and checkout; a handoff written from
                 // this thread. Held for the reset while a usage limit stands.
                 // Nothing to hand over until the assistant has replied.
                 ...(lastAssistantMessage === null
-                  ? { meta: entries.length === 0 ? "no turns yet" : "no reply yet", disabled: true, onPick: () => {} }
+                  ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
                   : {
-                      meta: usageBanner.banner?.resetsAt ? "after the reset" : "fresh context",
+                      meta: usageBanner.banner?.resetsAt ? t("app.after_the_reset_2abf") : t("app.fresh_context_a387"),
                       onPick: () => {
                         closePicker("chat");
                         usageBanner.continueInNewThread();
@@ -1923,16 +1960,16 @@ export function App({
             ],
           },
           {
-            header: "Memory",
+            header: t("palette.memory"),
             rows: [
               {
                 key: "memory:import-claude",
-                label: "Import Claude Code memory",
+                label: t("app.import_claude_code_memory_1bf9"),
                 // Only ever on request: Moxen keeps its own memory, and Claude's stays where it is.
                 ...(selected === null
-                  ? { meta: "open a thread first", disabled: true, onPick: () => {} }
+                  ? { meta: t("app.open_a_thread_first_cf50"), disabled: true, onPick: () => {} }
                   : {
-                      meta: "into this project",
+                      meta: t("app.into_this_project_147f"),
                       onPick: () => {
                         closePicker("chat");
                         void client
@@ -1941,7 +1978,7 @@ export function App({
                             toasts.push(
                               "memory-import",
                               "info",
-                              result.imported.length === 0 ? "No Claude Code memories to import" : `Imported ${result.imported.length} Claude Code memor${result.imported.length === 1 ? "y" : "ies"}`,
+                              result.imported.length === 0 ? t("app.no_claude_code_memories_ff18") : t("memory.imported", { count: result.imported.length }),
                               COPY_TOAST_MS,
                             ),
                           )
@@ -1952,11 +1989,11 @@ export function App({
             ],
           },
           {
-            header: "Providers",
+            header: t("palette.providers"),
             rows: [
               {
                 key: "update:claude",
-                label: "Update Claude Code",
+                label: t("app.update_claude_code_fc8f"),
                 meta: "claude update",
                 onPick: () => {
                   closePicker("chat");
@@ -1965,7 +2002,7 @@ export function App({
               },
               {
                 key: "update:opencode",
-                label: "Update OpenCode",
+                label: t("app.update_opencode_7246"),
                 meta: "opencode upgrade",
                 onPick: () => {
                   closePicker("chat");
@@ -1975,7 +2012,7 @@ export function App({
             ],
           },
           remoteSection(),
-          ...(jumpRows.length === 0 ? [] : [{ header: "Jump to message", rows: jumpRows }]),
+          ...(jumpRows.length === 0 ? [] : [{ header: t("app.jump_to_message_b628"), rows: jumpRows }]),
         ],
       };
     }
@@ -1997,8 +2034,8 @@ export function App({
               const removed = row.files.reduce((total, file) => total + file.deletions, 0);
               return {
                 key: `turn:${row.checkpointTurnCount}`,
-                label: `Turn ${row.checkpointTurnCount}`,
-                meta: `${row.files.length} file${row.files.length === 1 ? "" : "s"} +${added} -${removed}`,
+                label: t("turn.n", { n: row.checkpointTurnCount }),
+                meta: t("diff.filesChanged", { count: row.files.length, added, removed }),
                 selected: row.checkpointTurnCount === diffPanel.expandedTurn,
                 onPick: () => pickDiffTurn(row.checkpointTurnCount),
               };
@@ -2018,7 +2055,7 @@ export function App({
             rows: [
               {
                 key: "project:new",
-                label: "+ New project from local folder",
+                label: t("app.new_project_from_local_c36e"),
                 onPick: () => {
                   setPickerFilter("");
                   setPicker("project-new");
@@ -2026,8 +2063,8 @@ export function App({
               },
               {
                 key: "project:none",
-                label: "No project",
-                meta: "scratch folder",
+                label: t("app.no_project_3556"),
+                meta: t("app.scratch_folder_f83f"),
                 selected:
                   effectiveProjectId === NO_PROJECT ||
                   shell.projects.some((project) => project.id === effectiveProjectId && project.scratch === true),
@@ -2060,8 +2097,8 @@ export function App({
           {
             rows: permissionChoices.map((choice) => ({
               key: `permission:${choice.mode}`,
-              label: choice.label,
-              meta: choice.description,
+              label: tx(choice.label),
+              meta: tx(choice.description),
               selected: shown === choice.mode,
               onPick: () => setThreadRuntimeMode(choice.mode),
             })),
@@ -2087,16 +2124,16 @@ export function App({
           const fallbackId = isEffortDescriptor(descriptor.id) ? defaultEffortId(descriptor.choices) : descriptor.choices.find((choice) => choice.isDefault === true)?.id;
           const slider: PickerSlider = {
             key: descriptor.id,
-            header: descriptor.label,
+            header: tx(descriptor.label),
             stops: descriptor.choices.map((choice) => ({
               key: choice.id,
-              label: choice.label,
+              label: tx(choice.label),
               isDefault: choice.id === fallbackId,
               ...(isEffortDescriptor(descriptor.id) ? { description: describeEffort(choice.id, choice.id === fallbackId) } : {}),
             })),
             current: typeof picked === "string" ? picked : null,
             // Reasoning levels run from quick to thorough; any other knob is just a row of choices.
-            ...(isEffortDescriptor(descriptor.id) ? { ends: { low: "Faster", high: "Smarter" }, effort: true, defaultCaption: `The default ${descriptor.label.toLowerCase()} for this model` } : {}),
+            ...(isEffortDescriptor(descriptor.id) ? { ends: { low: t("settings.faster"), high: t("settings.smarter") }, effort: true, defaultCaption: t("effort.defaultCaption", { what: tx(descriptor.label).toLowerCase() }) } : {}),
             onPick: (choiceId: string) => pickEffort(descriptor.id, choiceId),
           };
           return slider;
@@ -2181,7 +2218,7 @@ export function App({
    */
   const threadLimited = usageBanner.banner !== null;
   const handOff = threadLimited ? handOffTarget(providers, currentProvider?.instanceId ?? null, planUsage) : null;
-  const requestOpener = { label: !threadLimited ? "the agent" : (handOff?.label ?? null) };
+  const requestOpener = { label: !threadLimited ? t("app.the_agent_4988") : (handOff?.label ?? null) };
   const agentOpenRequest = (draft: boolean) => {
     if (selected === null) return;
     const kind = gitPanel.forge?.kind ?? null;
@@ -2190,7 +2227,7 @@ export function App({
     const base = gitPanel.base;
     if (!threadLimited) {
       send(openRequestPrompt({ kind, draft, branch, base, cold: false }), "queue");
-      toasts.push("forge-agent", "info", `Asked the agent to open a ${draft ? "draft " : ""}${noun.short}`, COPY_TOAST_MS);
+      toasts.push("forge-agent", "info", t(draft ? "forge.askedDraft" : "forge.asked", { what: noun.short }), COPY_TOAST_MS);
       return;
     }
     if (handOff === null) return;
@@ -2199,13 +2236,14 @@ export function App({
         type: "thread.delegate",
         parentThreadId: selected.id,
         task: openRequestPrompt({ kind, draft, branch, base, cold: true }),
+        // i18n-exempt: a thread title stored on the server, as the agent is told it
         title: `Open a ${draft ? "draft " : ""}${noun.short}${base === null ? "" : ` into ${base}`}`,
         provider: handOff.instanceId,
         model: handOff.model,
         wait: false,
         isolation: "shared",
       })
-      .then(() => toasts.push("forge-agent", "info", `${handOff.label} is opening the ${noun.short} (see Agents); it reports back here`, COPY_TOAST_MS))
+      .then(() => toasts.push("forge-agent", "info", t("forge.opening", { who: handOff.label, what: noun.short }), COPY_TOAST_MS))
       .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
   };
   const backgroundGeometry = useMemo(() => {
@@ -2222,7 +2260,7 @@ export function App({
   const effortGeometry = useMemo(() => {
     const panelWidth = Math.min(72, Math.max(40, width - 6));
     const sliders = pickerBody.kind === "sliders" ? Math.max(1, pickerBody.sliders.length) : 1;
-    const panelHeight = Math.min(Math.max(10, height - 6), 5 + 10 * sliders);
+    const panelHeight = Math.min(Math.max(10, height - 6), 6 + 11 * sliders);
     return {
       width: panelWidth,
       height: panelHeight,
@@ -2287,6 +2325,8 @@ export function App({
     if (editingExternallyRef.current) return;
     // `/research`, `/orchestrate`: this prompt runs in that mode and the thread keeps its own; alone, the mode is held for the next prompt.
     if (interaction.isModeCommand(draft)) {
+      // While a turn runs the mode is fixed, and the draft stays as it was rather than go out as text.
+      if (interaction.refuseWhileRunning()) return;
       // The composer's draft key (`useComposer`): the open thread's, or the one a first thread is drafted under.
       resetDraft(openThreadId ?? "__creating__");
       const rest = interaction.takeCommand(draft);
@@ -2299,6 +2339,8 @@ export function App({
     else send(draft);
   };
   const escapeComposer = () => {
+    // The full-screen image is the top layer: Esc closes it before anything else.
+    if (closeImageViewer()) return;
     if (creating) {
       // Zero-thread workspace: there is no transcript to cancel back to,
       // so esc stays in the creating view instead of stranding the UI.
@@ -2318,10 +2360,10 @@ export function App({
     setFocus("chat");
   };
   const composerPlaceholder = editingExternally
-    ? "Editing in external editor…"
+    ? t("app.editing_in_external_editor_da08")
     : creating
-      ? "Ask for changes, send follow-ups, or attach images"
-      : "Message the agent (@img.png or alt+v to attach)";
+      ? t("app.ask_for_changes_send_9b33")
+      : t("app.message_the_agent_imgpng_edc1");
   /**
    * The composer holds keyboard focus only when no modal is open: an open
    * picker owns all keystrokes (type to filter), so a still-focused textarea
@@ -2375,7 +2417,7 @@ export function App({
         onContinue={() => {
           const resolved = resolveAnswerQuestion(question, draft);
           if (resolved === null) {
-            setError("pick at least one option");
+            setError(t("app.pick_at_least_one_611e"));
             return;
           }
           answerCurrentQuestion(question.id, {});
@@ -2440,6 +2482,10 @@ export function App({
             setPickerFilter("");
             setPicker("settings");
           }}
+          onOpenStats={() => {
+            setPickerFilter("");
+            setPicker("stats");
+          }}
         />
         {creating ? (
           <box
@@ -2483,10 +2529,10 @@ export function App({
             >
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center" }}>
                 {draftingWithoutProject ? (
-                  <text fg={COLOR.bright} selectable={false} onMouseDown={openProjectPicker}>{"What should we build?"}</text>
+                  <text fg={COLOR.bright} selectable={false} onMouseDown={openProjectPicker}>{t("app.what_should_we_build_7785")}</text>
                 ) : (
                   <>
-                    <text fg={COLOR.bright} selectable={false} onMouseDown={openProjectPicker}>{`What should we build in `}</text>
+                    <text fg={COLOR.bright} selectable={false} onMouseDown={openProjectPicker}>{t("home.buildIn")}</text>
                     <text
                       fg={COLOR.bright}
                       attributes={TextAttributes.BOLD | TextAttributes.UNDERLINE}
@@ -2527,9 +2573,10 @@ export function App({
                 placeholder={composerPlaceholder}
                 model={model}
                 modelColor={modelColor}
-                effort={effort}
+                effort={effort === null || effort === undefined ? effort : tx(effort)}
                 permission={permission}
                 attachments={pending.map((attachment) => attachment.name)}
+                attachmentDataUrl={(name) => pending.find((attachment) => attachment.name === name)?.dataUrl}
                 onAttachmentRemoved={detachImage}
                 onClaimPaste={claimPaste}
                 submitVerb="creates"
@@ -2569,8 +2616,8 @@ export function App({
               )}
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "center", marginTop: 1 }}>
                 <text fg={COLOR.dim} selectable={false}>{draftingWithoutProject
-                  ? "enter creates · click title to pick a project · esc cancels"
-                  : "enter creates · click project to change or go without · esc cancels"}</text>
+                  ? t("app.enter_creates_click_title_f018")
+                  : t("app.enter_creates_click_project_ce6d")}</text>
               </box>
             </box>
           </box>
@@ -2582,17 +2629,19 @@ export function App({
           {/* Post-boot thread switches (and resyncs) reset `threadState`
               before the new snapshot lands — hold a loading row instead of
               flashing an empty transcript that reads as "no messages". */}
-          {threadState.synchronized ? (
+          {viewedImage !== null ? (
+            <ImageViewer image={viewedImage} onClose={closeImageViewer} onOpenExternally={openViewedImage} />
+          ) : threadState.synchronized ? (
           <Timeline
             groups={subagentView.target === null ? groups : subagentView.groups}
             title={
               subagentView.target !== null
                 ? `◇ ${subagentTitle(subagentView.transcript, subagentRows.find((row) => row.agentId === subagentView.target?.agentId)?.agentType ?? null)}`
                 : selected === null
-                  ? "no thread"
+                  ? t("app.no_thread_888a")
                   : String(selected.title ?? selected.id)
             }
-            subtitle={subagentView.target !== null ? "subagent" : `${session?.status ?? "idle"}`}
+            subtitle={subagentView.target !== null ? t("subagent.word") : sessionStatusLabel(session?.status ?? "idle")}
             modelForTurn={(turnId) =>
               labelFor(
                 turnModelSelection(
@@ -2606,6 +2655,7 @@ export function App({
             }
             modelLabel={modelLabelOf}
             homeDir={homeDir}
+            readAttachment={readAttachment}
             expandedTurn={diffPanel.expandedTurn}
             expandedWork={diffPanel.expandedWork}
             onToggleWork={diffPanel.toggleWork}
@@ -2630,7 +2680,7 @@ export function App({
           />
           ) : (
             <box style={{ flexDirection: "column", flexGrow: 1, alignItems: "center", justifyContent: "center" }}>
-              <text fg={COLOR.dim} selectable={false}>{"loading transcript…"}</text>
+              <text fg={COLOR.dim} selectable={false}>{t("app.loading_transcript_4aac")}</text>
             </box>
           )}
           {/* One blank row between the timeline frame and the tasks header;
@@ -2679,9 +2729,10 @@ export function App({
             suggestion={suggestedPrompt}
             model={model}
             modelColor={modelColor}
-            effort={effort}
+            effort={effort === null || effort === undefined ? effort : tx(effort)}
             permission={permission}
             attachments={pending.map((attachment) => attachment.name)}
+                attachmentDataUrl={(name) => pending.find((attachment) => attachment.name === name)?.dataUrl}
             onAttachmentRemoved={detachImage}
                 onClaimPaste={claimPaste}
             submitVerb="sends"
@@ -2726,7 +2777,7 @@ export function App({
               onTab={showSideTab}
               onClose={closeSidePanel}
               focused={focus === "diff"}
-              {...(delegatedInfo === null ? {} : { agentsLabel: "Info" })}
+              {...(delegatedInfo === null ? {} : { agentsLabel: t("tab.info") })}
               left={2}
               width={Math.max(10, diffPanel.diffWidth - 4)}
             />
@@ -2759,19 +2810,19 @@ export function App({
                   sidePanel.tab === "git" ? (
                     <GitFooter overview={gitPanel.overview} forge={gitPanel.forge} width={diffPanel.diffWidth} />
                   ) : sidePanel.tab === "agents" && delegatedInfo !== null ? null : sidePanel.tab === "agents" ? (
-                    <text fg={COLOR.dim} selectable={false}>{`${agentRows.length} delegated · ${subagentRows.length} subagents`}</text>
+                    <text fg={COLOR.dim} selectable={false}>{t("agents.summary", { delegated: agentRows.length, subagents: subagentRows.length })}</text>
                   ) : sidePanel.tab === "context" && effectiveBreakdown !== null ? (
                     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-                      <ActionText label="Compact now" onClick={() => compactSession(() => undefined)} />
-                      <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{"  frees the window"}</text>
+                      <ActionText label={t("app.compact_now_08f8")} onClick={() => compactSession(() => undefined)} />
+                      <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{t("app.frees_the_window_3f92")}</text>
                     </box>
                   ) : sidePanel.tab === "background" ? (
                     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-                      <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${background.length} running  `}</text>
-                      <ActionText label="View all" onClick={() => setPicker("background-tasks")} />
+                      <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("bg.running", { count: background.length })}</text>
+                      <ActionText label={t("app.view_all_0b4d")} onClick={() => setPicker("background-tasks")} />
                     </box>
                   ) : sidePanel.tab === "diff" && diffTurns.length > 0 ? (
-                    <text fg={COLOR.dim} selectable={false}>{`${diffTurns.length} turn${diffTurns.length === 1 ? "" : "s"} with changes`}</text>
+                    <text fg={COLOR.dim} selectable={false}>{t("diff.turnsWithChanges", { count: diffTurns.length })}</text>
                   ) : null
                 }
               >
@@ -2806,7 +2857,7 @@ export function App({
                     onMerge={(request, strategy) => {
                       void gitPanel
                         .merge(request.number, strategy, false)
-                        .then(() => toasts.push("forge-merge", "info", `Merged #${request.number}.`))
+                        .then(() => toasts.push("forge-merge", "info", t("forge.merged", { n: request.number })))
                         .catch(() => undefined);
                     }}
                   />
@@ -2920,14 +2971,14 @@ export function App({
           initialTitle=""
           title={
             forgePrompt.kind === "create"
-              ? `Open a ${forgePrompt.draft ? "draft " : ""}${requestNoun(gitPanel.forge?.kind ?? null).long}`
-              : `Comment on #${forgePrompt.number}`
+              ? t(forgePrompt.draft ? "forge.openDraft" : "forge.open", { what: requestNoun(gitPanel.forge?.kind ?? null).long })
+              : t("forge.commentOn", { n: forgePrompt.number })
           }
-          placeholder={forgePrompt.kind === "create" ? "Title" : "Comment"}
+          placeholder={forgePrompt.kind === "create" ? t("forge.titleField") : t("forge.commentField")}
           hint={
             forgePrompt.kind === "create"
-              ? "enter opens it on the forge · esc cancels"
-              : "enter posts the comment · esc cancels"
+              ? t("app.enter_opens_it_on_198d")
+              : t("app.enter_posts_the_comment_a64c")
           }
           maxLength={forgePrompt.kind === "create" ? 120 : 2000}
           screenWidth={width}
@@ -2944,13 +2995,13 @@ export function App({
             if (prompt.kind === "create") {
               void gitPanel
                 .createRequest({ title: text, draft: prompt.draft })
-                .then((url) => toasts.push("forge-create", "info", url ?? "Request opened."))
+                .then((url) => toasts.push("forge-create", "info", url ?? t("app.request_opened_3e0b")))
                 .catch(() => undefined);
               return;
             }
             void gitPanel
               .commentOn(prompt.number, text)
-              .then(() => toasts.push("forge-comment", "info", `Commented on #${prompt.number}.`))
+              .then(() => toasts.push("forge-comment", "info", t("forge.commented", { n: prompt.number })))
               .catch(() => undefined);
           }}
           onClose={() => setForgePrompt(null)}
@@ -2960,7 +3011,7 @@ export function App({
         <SideQuestionModal
           entry={sideQuestion.current}
           onCopy={(text) => {
-            void clipboard.copyText(text).then((ok) => toasts.push("btw-copy", "info", ok ? "Answer copied" : "Could not copy", COPY_TOAST_MS));
+            void clipboard.copyText(text).then((ok) => toasts.push("btw-copy", "info", ok ? t("app.answer_copied_5124") : t("app.could_not_copy_fa4b"), COPY_TOAST_MS));
           }}
           screenWidth={width}
           screenHeight={height}
@@ -2986,9 +3037,9 @@ export function App({
       ) : picker === "answer-custom" ? (
         <RenameModal
           initialTitle=""
-          title="Custom answer"
-          placeholder="Type an answer…"
-          hint="enter submits · esc back to options"
+          title={t("app.custom_answer_4461")}
+          placeholder={t("app.type_an_answer_7f9c")}
+          hint={t("app.enter_submits_esc_back_a9c6")}
           maxLength={500}
           screenWidth={width}
           screenHeight={height}
@@ -3002,9 +3053,9 @@ export function App({
       ) : picker === "project-new" ? (
         <RenameModal
           initialTitle={remote ? "" : process.cwd()}
-          title={remote ? `New project from a folder on ${server.name}` : "New project from local folder"}
-          placeholder={remote ? "Folder path on the server" : "Folder path"}
-          hint="enter creates · esc back to projects"
+          title={remote ? t("project.newOnServer", { server: server.name }) : t("app.new_project_from_local_658f")}
+          placeholder={remote ? t("app.folder_path_on_the_9c48") : t("app.folder_path_fdde")}
+          hint={t("app.enter_creates_esc_back_1830")}
           maxLength={500}
           screenWidth={width}
           screenHeight={height}
@@ -3021,9 +3072,9 @@ export function App({
       ) : picker === "remote-pair-address" ? (
         <RenameModal
           initialTitle={remoteAccess.pairAddress}
-          title="Pair with a server — 1/2"
-          placeholder="Its address, e.g. 192.168.1.20:47317"
-          hint="enter next · esc cancels"
+          title={t("app.pair_with_a_server_b674")}
+          placeholder={t("app.its_address_eg_19216812047317_d9d2")}
+          hint={t("app.enter_next_esc_cancels_b9b2")}
           maxLength={200}
           screenWidth={width}
           screenHeight={height}
@@ -3041,9 +3092,9 @@ export function App({
       ) : picker === "remote-pair-code" ? (
         <RenameModal
           initialTitle=""
-          title={`Pair with ${remoteAccess.pairAddress} — 2/2`}
-          placeholder="The code it shows, e.g. ABCD-EFGH"
-          hint="enter pairs and connects · esc cancels"
+          title={t("pair.step2", { address: remoteAccess.pairAddress })}
+          placeholder={t("app.the_code_it_shows_d137")}
+          hint={t("app.enter_pairs_and_connects_e584")}
           maxLength={20}
           screenWidth={width}
           screenHeight={height}
@@ -3116,6 +3167,19 @@ export function App({
           height={backgroundGeometry.height}
           onClose={() => setPicker(null)}
         />
+      ) : picker === "stats" ? (
+        <StatsModal
+          client={client}
+          providers={providers}
+          screenWidth={width}
+          screenHeight={height}
+          left={backgroundGeometry.left}
+          top={backgroundGeometry.top}
+          width={backgroundGeometry.width}
+          height={backgroundGeometry.height}
+          onClose={() => setPicker(null)}
+          onCopyCard={copyStatsCard}
+        />
       ) : picker === "background-tasks" && selected !== null ? (
         <BackgroundTasksModal
           tasks={background}
@@ -3136,28 +3200,28 @@ export function App({
           title={
             picker === "model"
               ? creating
-                ? "Select model"
-                : `Select model — ${
+                ? t("app.select_model_8631")
+                : t("picker.selectModelOf", { provider: 
                     providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId)
-                      ?.displayName ?? "current provider"
-                  }`
+                      ?.displayName ?? t("app.current_provider_8fb0")
+                  })
               : picker === "effort"
-                ? "Select effort"
+                ? t("app.select_effort_bd9e")
                 : picker === "permission"
-                  ? "Select permission"
+                  ? t("app.select_permission_a040")
                   : picker === "diff-turn"
-                  ? "Select diff turn"
+                  ? t("app.select_diff_turn_4e9d")
                   : picker === "command"
-                    ? "Command palette"
+                    ? t("app.command_palette_f8f1")
                     : picker === "search"
-                      ? "Search threads"
+                      ? t("app.search_threads_c202")
                     : picker === "project"
-                      ? "Select project"
+                      ? t("app.select_project_74f5")
                       : picker === "remote-servers"
-                        ? "Switch server"
+                        ? t("app.switch_server_5f7e")
                         : picker === "remote-devices"
-                          ? `Paired devices — ${server?.name ?? "this machine"}`
-                          : "Message actions"
+                          ? t("paired.title", { server: server?.name ?? t("paired.thisMachine") })
+                          : t("app.message_actions_c02b")
           }
           body={pickerBody}
           filter={pickerFilter}
@@ -3167,25 +3231,25 @@ export function App({
           emptyLabel={
             picker === "model"
               ? pickerFilter.trim().length > 0
-                ? "No matching models."
-                : "No models reported by the server."
+                ? t("app.no_matching_models_74d5")
+                : t("app.no_models_reported_by_5ee3")
               : picker === "effort"
-                ? "No effort options for this model."
+                ? t("app.no_effort_options_for_3666")
                 : picker === "permission"
-                  ? "No permission levels for this provider."
+                  ? t("app.no_permission_levels_for_3b4a")
                   : picker === "diff-turn"
-                  ? "No turns with changes."
+                  ? t("app.no_turns_with_changes_8d93")
                   : picker === "command"
-                    ? "No matching commands."
+                    ? t("app.no_matching_commands_fad4")
                     : picker === "search"
                       ? pickerFilter.trim().length === 0
-                        ? "Type to search titles, messages and tool calls."
-                        : "No threads match."
+                        ? t("app.type_to_search_titles_d943")
+                        : t("app.no_threads_match_75a6")
                     : picker === "project"
-                      ? "No projects reported by the server."
+                      ? t("app.no_projects_reported_by_55f1")
                       : picker === "remote-devices"
-                        ? "No paired devices."
-                        : "No actions."
+                        ? t("app.no_paired_devices_be24")
+                        : t("app.no_actions_b08d")
           }
           screenWidth={width}
           screenHeight={height}
@@ -3211,14 +3275,14 @@ export function App({
           onClose={closeQuitConfirm}
         >
           <box style={{ flexDirection: "column", flexGrow: 1 }}>
-            <text fg={COLOR.bright} selectable={false}>{"Quit moxen?"}</text>
+            <text fg={COLOR.bright} selectable={false}>{t("quit.title")}</text>
             <box style={{ height: 1, flexShrink: 0 }} />
             <text fg={COLOR.dim} selectable={false}>
               {selected === null
-                ? "No thread open."
-                : `Open thread: ${truncate(String(selected.title ?? selected.id), Math.max(10, quitGeometry.width - 4))}`}
+                ? t("quit.noThread")
+                : t("quit.openThread", { title: truncate(String(selected.title ?? selected.id), Math.max(10, quitGeometry.width - 4)) })}
             </text>
-            <text fg={COLOR.dim} selectable={false}>{"Ctrl+C cleared the prompt — quitting never sends it."}</text>
+            <text fg={COLOR.dim} selectable={false}>{t("quit.promptCleared")}</text>
             <box style={{ flexGrow: 1 }} />
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
               <text
@@ -3228,7 +3292,7 @@ export function App({
                 onMouseDown={closeQuitConfirm}
                 {...quitCancelHover.handlers}
               >
-                {" Cancel (esc) "}
+                {t("quit.cancel")}
               </text>
               <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{"  "}</text>
               <text
@@ -3238,7 +3302,7 @@ export function App({
                 onMouseDown={onQuit}
                 {...quitConfirmHover.handlers}
               >
-                {" Quit (enter / ctrl+c again) "}
+                {t("quit.confirm")}
               </text>
             </box>
           </box>
@@ -3265,6 +3329,8 @@ export function App({
           onMouseDown={() => {}}
         />
       ) : null}
+      <ImageViewerDim screenWidth={width} screenHeight={height} />
+      <ImagePreviewLayer screenWidth={width} screenHeight={height} />
     </box>
   );
 }

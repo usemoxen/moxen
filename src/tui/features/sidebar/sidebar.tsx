@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../../i18n/index.js";
 import { useHover } from "../../hooks/useHover.js";
 import { MonitoringBackdrop } from "../../ui/backdrop.js";
 import { SearchField } from "../../ui/searchfield.js";
@@ -28,10 +29,10 @@ function waitingColor(waiting: boolean, now: number): string {
   return Math.floor(now / 700) % 2 === 0 ? COLOR.warn : COLOR.faint;
 }
 
-const MODE_LABEL: Record<SidebarMode, string> = {
-  flat: "all",
-  grouped: "by project",
-  project: "one project",
+const MODE_KEY: Record<SidebarMode, MessageKey> = {
+  flat: "sidebar.mode_all",
+  grouped: "sidebar.by_project_e062",
+  project: "sidebar.one_project_a563",
 };
 
 /** Draft/attachment dot: a plain bullet stays inside its cell on every font. */
@@ -429,7 +430,7 @@ function SearchResults({ search, width, openThreadId, onOpenThread }: { search: 
   const empty = search.titles.length === 0 && search.messages.length === 0;
   return (
     <>
-      {search.titles.length === 0 ? null : <SearchLabel text=" Titles" width={width} />}
+      {search.titles.length === 0 ? null : <SearchLabel text={t("sidebar.titles_53a7")} width={width} />}
       {search.titles.map((thread) => (
         <SearchTitleRow
           key={`title:${thread.id}`}
@@ -440,7 +441,7 @@ function SearchResults({ search, width, openThreadId, onOpenThread }: { search: 
           onOpen={() => onOpenThread(thread.id)}
         />
       ))}
-      {search.messages.length === 0 ? null : <SearchLabel text=" In messages" width={width} marginTop={search.titles.length === 0 ? 0 : 1} />}
+      {search.messages.length === 0 ? null : <SearchLabel text={t("sidebar.in_messages_b894")} width={width} marginTop={search.titles.length === 0 ? 0 : 1} />}
       {search.messages.map((hit) => (
         <SearchMessageRow
           key={`message:${hit.threadId}`}
@@ -452,9 +453,9 @@ function SearchResults({ search, width, openThreadId, onOpenThread }: { search: 
         />
       ))}
       {search.searching ? (
-        <SearchLabel text=" searching messages…" width={width} marginTop={empty ? 0 : 1} />
+        <SearchLabel text={t("sidebar.searching_messages_16f2")} width={width} marginTop={empty ? 0 : 1} />
       ) : empty ? (
-        <SearchLabel text=" no matches" width={width} />
+        <SearchLabel text={t("sidebar.no_matches_bf5b")} width={width} />
       ) : null}
     </>
   );
@@ -482,6 +483,7 @@ export function Sidebar({
   panelsOpen,
   onTogglePanels,
   onOpenSettings,
+  onOpenStats,
   serverName,
   search,
   searchFocused = false,
@@ -525,6 +527,7 @@ export function Sidebar({
   panelsOpen?: boolean;
   onTogglePanels?: () => void;
   onOpenSettings?: () => void;
+  onOpenStats?: () => void;
   /** A paired server on another machine: named in the title, so it is always clear whose threads these are. */
   serverName?: string;
   /** The search field under the view switcher; a typed query lists its matches in place of the threads. */
@@ -561,7 +564,7 @@ export function Sidebar({
     <box
       style={{ width, flexDirection: "column", borderStyle: "rounded", backgroundColor: SURFACE.panel }}
       borderColor={SURFACE.border}
-      title={serverName === undefined ? " Threads " : ` Threads · ${serverName} `}
+      title={serverName === undefined ? t("sidebar.threads_1b3a") : t("sidebar.threadsOn", { server: serverName })}
       titleColor={COLOR.dim}
     >
       {/* One continuous field with the creating view: same lattice (offsets
@@ -594,10 +597,10 @@ export function Sidebar({
       >
         <box style={{ width: NEW_THREAD_BUTTON_WIDTH, flexShrink: 0 }} backgroundColor={SURFACE.panel} />
         <box style={{ flexDirection: "row", flexGrow: 1, justifyContent: "center" }} backgroundColor={SURFACE.panel}>
-          {(Object.keys(MODE_LABEL) as SidebarMode[]).map((mode, index, all) => (
+          {(Object.keys(MODE_KEY) as SidebarMode[]).map((mode, index, all) => (
             <ModePillButton
               key={mode}
-              label={MODE_LABEL[mode]}
+              label={t(MODE_KEY[mode])}
               selected={mode === sections.mode}
               spaced={index < all.length - 1}
               onSelect={() => onSelectMode(mode)}
@@ -614,7 +617,7 @@ export function Sidebar({
           <SearchField
             query={search.query}
             active={searchFocused}
-            placeholder={searchFocused ? "Search threads" : "Search threads  /"}
+            placeholder={searchFocused ? t("app.search_threads_c202") : t("sidebar.search_threads_b4f1")}
             marginTop={0}
             {...(onFocusSearch === undefined ? {} : { onClick: onFocusSearch })}
           />
@@ -647,7 +650,7 @@ export function Sidebar({
             {...nextProjectHover.handlers}
           >
             <text fg={COLOR.accent} selectable={false}>
-              {truncate(sections.projectTitle ?? "unknown project", width - 10)}
+              {truncate(sections.projectTitle ?? t("sidebar.unknown_project_c320"), width - 10)}
             </text>
           </box>
           <box
@@ -687,7 +690,7 @@ export function Sidebar({
             })
           : sections.active.map((row) => activeCard(row, sections.mode === "project"))}
         {!searching && sections.mode === "project" && sections.active.length === 0 ? (
-          <text fg={COLOR.faint}>{" no threads in this project"}</text>
+          <text fg={COLOR.faint}>{t("sidebar.no_threads_in_this_f99a")}</text>
         ) : null}
       </scrollbox>
 
@@ -696,10 +699,10 @@ export function Sidebar({
           deliberate break instead of a stray blank void. */}
       <box style={{ flexDirection: "column", flexShrink: 0, backgroundColor: SURFACE.panel, zIndex: 1 }}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-          <text fg={COLOR.dim} selectable={false}>{` ${sections.active.filter((row) => row.status !== "settled").length} active · `}</text>
-          <text fg={runningCount > 0 ? COLOR.accent : COLOR.faint} selectable={false}>{`${runningCount} running`}</text>
+          <text fg={COLOR.dim} selectable={false}>{t("sidebar.active", { count: sections.active.filter((row) => row.status !== "settled").length })}</text>
+          <text fg={runningCount > 0 ? COLOR.accent : COLOR.faint} selectable={false}>{t("sidebar.running", { count: runningCount })}</text>
           {blockedCount > 0 ? (
-            <text fg={COLOR.danger} selectable={false}>{` · ${blockedCount} blocked`}</text>
+            <text fg={COLOR.danger} selectable={false}>{t("sidebar.blocked", { count: blockedCount })}</text>
           ) : null}
         </box>
         <box style={{ height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
@@ -712,7 +715,7 @@ export function Sidebar({
           selectable={false}
           {...settledToggleHover.handlers}
         >
-          <text fg={COLOR.dim} selectable={false}>{` Settled ${sections.settledTotal}`.padEnd(width - 4)}</text>
+          <text fg={COLOR.dim} selectable={false}>{t("sidebar.settled", { count: sections.settledTotal }).padEnd(width - 4)}</text>
           <text fg={COLOR.faint} selectable={false}>{settledExpanded ? " v " : " ^ "}</text>
         </box>
         {settledExpanded ? (
@@ -740,22 +743,23 @@ export function Sidebar({
                 onMouseDown={onShowMore}
                 {...showMoreHover.handlers}
               >
-                {` + ${remaining} more`}
+                {t("sidebar.more", { count: remaining })}
               </text>
             ) : null}
           </scrollbox>
         ) : null}
       </box>
-      {onTogglePanels === undefined && onOpenSettings === undefined ? null : (
+      {onTogglePanels === undefined && onOpenSettings === undefined && onOpenStats === undefined ? null : (
         <box style={{ flexDirection: "column", flexShrink: 0, backgroundColor: SURFACE.panel, zIndex: 1 }}>
           <box style={{ height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
             <text fg={COLOR.rule} bg={SURFACE.panel}>{` ${rule(Math.max(0, width - 4))}`}</text>
           </box>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-            {onOpenSettings === undefined ? null : <FooterButton label="⚙ settings" active={false} onClick={onOpenSettings} />}
+            {onOpenSettings === undefined ? null : <FooterButton label={t("sidebar.settings_5628")} active={false} onClick={onOpenSettings} />}
+            {onOpenStats === undefined ? null : <FooterButton label={t("sidebar.stats")} active={false} onClick={onOpenStats} />}
             <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
             {onTogglePanels === undefined ? null : (
-              <FooterButton label={panelsOpen === true ? "◧ hide panels" : "◫ panels"} active={panelsOpen === true} onClick={onTogglePanels} />
+              <FooterButton label={panelsOpen === true ? t("sidebar.hide_panels_c6f1") : t("sidebar.panels_8967")} active={panelsOpen === true} onClick={onTogglePanels} />
             )}
           </box>
         </box>

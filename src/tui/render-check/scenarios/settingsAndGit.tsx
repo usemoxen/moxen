@@ -1,6 +1,6 @@
 import { act, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import { GitFooter, GitTab, type RequestOpener } from "../../features/gitpanel/gitpanel.js";
 import type { OpenCommit } from "../../features/gitpanel/useGitPanel.js";

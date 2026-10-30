@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.js";
 import type { ProviderSummary, ProviderUsageLimits } from "../../core/catalog/summary.js";
 import type { ForgeCheckRun, ForgeChecks, ForgeKind, GitOverview } from "../../server/api.js";
 
@@ -143,14 +144,16 @@ export function checksGlance(checks: ForgeChecks | null | undefined): { text: st
   return { text: `✓ ${checks.passed}/${total}`, tone: "passed" };
 }
 
+const AGO = { minute: "ago.minute", hour: "ago.hour", day: "ago.day", week: "ago.week", month: "ago.month", year: "ago.year" } as const;
+
 /** "3 minutes ago", "yesterday", "2 months ago": how GitHub words a commit's age. */
 export function ago(iso: string | null, now: number): string {
   if (iso === null) return "";
   const at = Date.parse(iso);
   if (!Number.isFinite(at)) return "";
   const seconds = Math.max(0, Math.floor((now - at) / 1000));
-  const unit = (count: number, name: string) => `${count} ${name}${count === 1 ? "" : "s"} ago`;
-  if (seconds < 60) return "just now";
+  const unit = (count: number, name: "minute" | "hour" | "day" | "week" | "month" | "year") => t(AGO[name], { count });
+  if (seconds < 60) return t("ago.now");
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return unit(minutes, "minute");
   const hours = Math.floor(minutes / 60);

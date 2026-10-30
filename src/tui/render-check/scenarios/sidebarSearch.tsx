@@ -1,5 +1,5 @@
 import { act } from "react";
-import { testRender } from "@opentui/react/test-utils";
+import { testRender } from "../testrender.js";
 
 import type { QueryResult } from "../../../server/protocol.js";
 import type { ThreadEnvelope } from "../../../core/types.js";

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useEffect, useMemo, useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -104,7 +105,7 @@ export function PickerModal({
 }) {
   const [index, setIndex] = useState(0);
   const [marqueeTick, setMarqueeTick] = useState(0);
-  const sliderWidth = Math.max(10, width - 5);
+  const sliderWidth = Math.max(10, width - 6);
   /** Sliders need room for every label; narrower than that they are a list like any other picker. */
   const sliding = body.kind === "sliders" && body.sliders.every((slider) => sliderLayout(slider.stops.map((stop) => stop.label), sliderWidth).fits);
   const listBody = useMemo<Exclude<PickerBody, { kind: "sliders" }>>(() => {
@@ -115,7 +116,7 @@ export function PickerModal({
         header: slider.header,
         rows: slider.stops.map((stop) => ({
           key: `${slider.key}:${stop.key}`,
-          label: `${stop.label}${stop.isDefault === true ? " (default)" : ""}`,
+          label: stop.isDefault === true ? t("picker.withDefault", { label: stop.label }) : stop.label,
           selected: slider.current === stop.key,
           onPick: () => slider.onPick(stop.key),
         })),
@@ -226,11 +227,11 @@ export function PickerModal({
   const rowWidth = Math.max(10, inner - 2);
   const hint = sliding
     ? body.kind === "sliders" && body.sliders.length > 1
-      ? "←→ move · ↑↓ next setting · enter selects · esc closes"
-      : "←→ move · enter selects · esc closes"
+      ? t("picker.move_next_setting_enter_7297")
+      : t("picker.move_enter_selects_esc_dee3")
     : filterable
-      ? "↑↓ move · enter selects · esc closes · type to filter"
-      : "↑↓ move · enter selects · esc closes";
+      ? t("picker.move_enter_selects_esc_2756")
+      : t("picker.move_enter_selects_esc_f825");
 
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
@@ -239,7 +240,7 @@ export function PickerModal({
         <text fg={COLOR.faint} bg={SURFACE.raised}>{"esc"}</text>
       </box>
       {filterable ? <SearchField query={filter} active={filter.length > 0} /> : null}
-      <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" contentOptions={{ paddingRight: 1 }}>
+      <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" contentOptions={{ paddingRight: 1 }} verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
         {sliding && body.kind === "sliders" ? (
           body.sliders.map((slider, at) => {
             const stopIndex = stopOf(slider);
@@ -257,7 +258,7 @@ export function PickerModal({
                   width={sliderWidth}
                   {...(slider.ends === undefined ? {} : { ends: slider.ends })}
                   {...(slider.effort === true ? { tones: effortTones(slider.stops.map((stop) => stop.key)) } : {})}
-                  caption={highlighted?.description ?? (highlighted?.isDefault === true ? slider.defaultCaption ?? "The default" : undefined)}
+                  caption={highlighted?.description ?? (highlighted?.isDefault === true ? slider.defaultCaption ?? t("settings.theDefault") : undefined)}
                   onMove={(next) => {
                     setFocusSlider(at);
                     setStopAt((current) => ({ ...current, [slider.key]: next }));
@@ -271,7 +272,7 @@ export function PickerModal({
             );
           })
         ) : listBody.kind === "loading" || body.kind === "loading" ? (
-          <text fg={COLOR.dim} bg={SURFACE.raised}>{" loading…"}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised}>{t("picker.loading_3da3")}</text>
         ) : listBody.kind === "error" ? (
           <text fg={COLOR.danger} bg={SURFACE.raised}>{` ${listBody.message}`}</text>
         ) : sliding ? null : visibleSections.length === 0 ? (

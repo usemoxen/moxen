@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { useRef } from "react";
 import type { CliRenderer } from "@opentui/core";
 
@@ -101,11 +102,11 @@ export function useThreadOps(params: {
    */
   const deleteThread = () => {
     if (openThreadId === null || selected === null) {
-      setError("no open thread to delete");
+      setError(t("ops.noneDelete"));
       return;
     }
     if (creating) {
-      setError("finish or cancel the new thread before deleting");
+      setError(t("ops.finishDelete"));
       return;
     }
     if (!deleteArmed) {
@@ -117,7 +118,7 @@ export function useThreadOps(params: {
     void client
       .dispatch({ type: "thread.delete", threadId: id })
       .then(() => {
-        toasts.push("thread-deleted", "info", "Thread deleted", COPY_TOAST_MS);
+        toasts.push("thread-deleted", "info", t("ops.deleted"), COPY_TOAST_MS);
         closePicker("chat");
         if (fallback === null) {
           setCreatingModelSelection(null);
@@ -151,13 +152,13 @@ export function useThreadOps(params: {
    */
   const toggleSettleThread = () => {
     if (openThreadId === null || selected === null) {
-      setError("no open thread to settle");
+      setError(t("ops.noneSettle"));
       return;
     }
     // A subagent's transcript is read-only and belongs to its thread: settling
     // from there would settle the parent and everything it runs.
     if (subagentOpen) {
-      setError("close the subagent to settle its thread");
+      setError(t("ops.closeSubagent"));
       return;
     }
     const id = openThreadId;
@@ -185,7 +186,7 @@ export function useThreadOps(params: {
         toasts.push(
           "thread-settle-armed",
           "info",
-          `Settle again to stop ${running === 1 ? "1 running thread" : `${running} running threads`} and settle`,
+          t("ops.settleAgain", { count: running }),
           4_000,
         );
         return;
@@ -199,7 +200,7 @@ export function useThreadOps(params: {
     void client
       .dispatch(command)
       .then(() => {
-        toasts.push("thread-settled", "info", settled ? "Thread unsettled" : "Thread settled — new thread", COPY_TOAST_MS);
+        toasts.push("thread-settled", "info", settled ? t("ops.unsettled") : t("ops.settled"), COPY_TOAST_MS);
         closePicker(paletteReturnFocus);
         if (!settled) {
           setCreatingModelSelection(null);
@@ -220,14 +221,14 @@ export function useThreadOps(params: {
    */
   const regenerateThreadTitle = () => {
     if (openThreadId === null || selected === null) {
-      setError("no open thread to retitle");
+      setError(t("ops.noneRetitle"));
       return;
     }
     const id = openThreadId;
     void client
       .dispatch({ type: "thread.meta.update", threadId: id, regenerateTitle: true })
       .then(() => {
-        toasts.push("thread-regenerate-title", "info", "Regenerating title", COPY_TOAST_MS);
+        toasts.push("thread-regenerate-title", "info", t("ops.retitling"), COPY_TOAST_MS);
         closePicker(paletteReturnFocus);
       })
       .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
@@ -241,11 +242,11 @@ export function useThreadOps(params: {
    */
   const archiveThread = () => {
     if (openThreadId === null || selected === null) {
-      setError("no open thread to archive");
+      setError(t("ops.noneArchive"));
       return;
     }
     if (creating) {
-      setError("finish or cancel the new thread before archiving");
+      setError(t("ops.finishArchive"));
       return;
     }
     const id = openThreadId;
@@ -253,7 +254,7 @@ export function useThreadOps(params: {
     void client
       .dispatch({ type: "thread.archive", threadId: id })
       .then(() => {
-        toasts.push("thread-archived", "info", "Thread archived", COPY_TOAST_MS);
+        toasts.push("thread-archived", "info", t("ops.archived"), COPY_TOAST_MS);
         closePicker("chat");
         if (fallback === null) {
           setCreatingModelSelection(null);
@@ -278,7 +279,7 @@ export function useThreadOps(params: {
    */
   const compactSession = (onDispatched: () => void = () => closePicker("chat")) => {
     if (openThreadId === null || selected === null) {
-      setError("no open thread to compact");
+      setError(t("ops.noneCompact"));
       return;
     }
     const thread = selected;
@@ -293,7 +294,7 @@ export function useThreadOps(params: {
         ...(busy ? { delivery: "queue" as const } : {}),
       })
       .then(() => {
-        if (busy) toasts.push("compact-queued", "info", "Compaction queued: it runs once this turn ends", 3000);
+        if (busy) toasts.push("compact-queued", "info", t("ops.compactQueued"), 3000);
         onDispatched();
       })
       .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
@@ -336,12 +337,12 @@ export function useThreadOps(params: {
       return;
     }
     if (openThreadId === null) {
-      setError("no open thread to revert");
+      setError(t("ops.noneRevert"));
       return;
     }
     if (sessionRunningRef.current) {
       setRevertArmed(false);
-      setError("wait for the turn to finish before reverting");
+      setError(t("ops.waitRevert"));
       return;
     }
     const id = openThreadId;
@@ -357,7 +358,7 @@ export function useThreadOps(params: {
         toasts.push(
           "message-reverted",
           "info",
-          restored ? `Turn reverted, ${restored.files} file${restored.files === 1 ? "" : "s"} restored` : "Turn reverted",
+          restored ? t("ops.reverted", { count: restored.files }) : t("ops.revertedBare"),
           COPY_TOAST_MS,
         );
         closePicker("chat");

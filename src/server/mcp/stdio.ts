@@ -29,7 +29,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
 export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
-export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_save and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
+export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
 export const MOXEN_MEMORY_READ_MCP_INSTRUCTIONS = "memory_read reads Moxen's persistent memory.";
 
 /** The server's instructions for the tools a session has: the delegation tools, `web_fetch`, memory, any of them, or none. */

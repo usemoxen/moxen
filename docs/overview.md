@@ -167,3 +167,29 @@ belong to the account, not the thread. The process owning the sessions
 merges what drivers report into one record per provider, persisted next to
 the thread store, so a fresh process shows the last reading before its
 first turn.
+
+### Stats
+
+`▤ stats` in the Threads sidebar's footer, between Settings and Panels, opens
+what every thread on every provider has spent, over all time, the last 30 days
+or the last 7 (click a range, or `r`). The **Overview** tab has the counts
+(sessions, messages, tokens, active days, peak hour, favorite model, best
+streak, cost, turns) and a heatmap of the last year. Narrowing the range keeps
+every active day on the heatmap: days before it turn grey, days in it stay
+lit. The **Models** tab charts tokens per day by model (the biggest seven in
+their own colour, the rest in one grey row; a long history shares a column
+across days) and lists each model and provider with its tokens, cost and share.
+
+Tokens are those the providers report, so a provider that reports none adds
+activity but no tokens. **Cost** is what the provider says the turn cost: an
+estimate, not a bill, and never a price Moxen made up. `unpriced` means no turn
+reported one, and a trailing `+` means some did not. Deleted threads are not
+counted.
+
+`s` (or `s copy card`) copies a **stats card** for the range on screen to the
+clipboard as an image, ready to paste: a PNG in the current theme's colours
+with the token total, the heatmap, best streak, active days and sessions. Where the machine has no image
+clipboard (a bare SSH session, no `xclip` or `wl-copy`) it saves the card as
+`moxen-stats-<date>.png` in the folder Moxen was started in (numbered if the
+name is taken) and copies that path, and says so. A client makes its own card
+copy, so one from a paired server lands on the machine you are using.

@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { describeActivity, memoryLabel } from "../activity.js";
+import { describeActivity, memoryLabel, memoryTitle, type MemoryView, type ThreadLookupView } from "../activity.js";
 import type { ActivityEnvelope } from "../../../core/types.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../core/threads/toolactivity.js";
 
@@ -211,17 +211,114 @@ describe("toolActivityRow", () => {
       expect(completed("execute", { code: "await tools.moxen.todos({todos: []}); search({query: 'x'})" }, "{}")).toMatchObject({ kind: "tool" });
     });
 
-    it("shows Moxen's memory tools as the memory they touch", () => {
-      expect(completed("moxen_memory_save", { name: "prefers-bun", scope: "global", body: "x" }, '{"name":"prefers-bun","scope":"global","replaced":false,"total":3}')).toEqual({
-        kind: "memory",
-        action: "save",
-        name: "prefers-bun",
-        scope: "global",
-        running: false,
-      });
-      expect(completed("moxen_memory_read", {}, "- [a](a.md): about a")).toEqual({ kind: "memory", action: "read", name: null, scope: null, running: false });
-      expect(memoryLabel({ kind: "memory", action: "read", name: null, scope: null, running: false })).toBe("index");
-      expect(memoryLabel({ kind: "memory", action: "delete", name: "old", scope: "project", running: false })).toBe("old (project)");
+    it("shows Moxen's memory tools as sentences, with what changed", () => {
+      const memory = (tool: string, input: Record<string, unknown>, output: string) => completed(`moxen_${tool}`, input, output) as MemoryView;
+      // A new memory: its text, all additions.
+      const created = memory(
+        "memory_save",
+        { name: "prefers-bun", scope: "global", description: "Uses bun", body: "Run bun, not npm." },
+        '{"name":"prefers-bun","scope":"global","replaced":false,"total":3}',
+      );
+      expect(created).toMatchObject({ kind: "memory", action: "save", name: "prefers-bun", scope: "global", outcome: "created", removed: 0 });
+      expect(created.diff).toContain("+Run bun, not npm.");
+      expect(memoryTitle(created)).toBe("Saved memory");
+      expect(memoryLabel(created)).toBe("prefers-bun (global)");
+
+      // A replaced one: a diff against what it said before.
+      const updated = memory(
+        "memory_save",
+        { name: "prefers-bun", scope: "global", description: "Uses bun", body: "Run bun, not npm.\nTests: bun test." },
+        '{"name":"prefers-bun","scope":"global","replaced":true,"total":3,"before":{"description":"Uses bun","type":"user","body":"Run bun, not npm."}}',
+      );
+      expect(updated).toMatchObject({ outcome: "updated", added: 1, removed: 0 });
+      expect(updated.diff).toContain("+Tests: bun test.");
+      expect(updated.diff).not.toContain("-Run bun");
+      expect(memoryTitle(updated)).toBe("Updated memory");
+
+      // Saved again as it was.
+      const same = memory(
+        "memory_save",
+        { name: "a", scope: "project", description: "About a", body: "Text." },
+        '{"name":"a","scope":"project","replaced":true,"total":1,"before":{"description":"About a","type":"project","body":"Text."}}',
+      );
+      expect(same).toMatchObject({ outcome: "unchanged", diff: null });
+      expect(memoryTitle(same)).toBe("Memory unchanged");
+
+      // An edit shows the text it replaced and what replaced it; an append, the text it added.
+      const edited = memory("memory_edit", { name: "a", scope: "project", old_string: "Why: pinned.", new_string: "Why: the repo pins it." }, '{"name":"a","scope":"project","total":2}');
+      expect(edited).toMatchObject({ action: "edit", outcome: null, added: 1, removed: 1 });
+      expect(edited.diff).toContain("-Why: pinned.");
+      expect(edited.diff).toContain("+Why: the repo pins it.");
+      expect(memoryTitle(edited)).toBe("Edited memory");
+      const trimmed = memory("memory_edit", { name: "a", scope: "project", old_string: "Extra.", new_string: "" }, '{"name":"a","scope":"project","total":2}');
+      expect(trimmed).toMatchObject({ added: 0, removed: 1 });
+      const appended = memory("memory_append", { name: "a", scope: "project", text: "Also: CI runs it." }, '{"name":"a","scope":"project","total":2}');
+      expect(appended).toMatchObject({ action: "append", added: 1, removed: 0 });
+      expect(appended.diff).toContain("+Also: CI runs it.");
+      expect(memoryTitle(appended)).toBe("Added to memory");
+      const refusedEdit = memory("memory_edit", { name: "a", scope: "project", old_string: "x", new_string: "y" }, "MEMORY_EDIT_NOT_FOUND: old_string is not in the memory a.");
+      expect(refusedEdit).toMatchObject({ outcome: "rejected", diff: null });
+      expect(memoryTitle(refusedEdit)).toBe("Memory not edited");
+
+      // A delete shows what was removed.
+      const deleted = memory("memory_delete", { name: "old", scope: "project" }, '{"name":"old","scope":"project","total":2,"before":{"description":"Old","type":"reference","body":"Gone soon."}}');
+      expect(deleted).toMatchObject({ outcome: null, removed: 3 });
+      expect(deleted.diff).toContain("-Gone soon.");
+      expect(memoryTitle(deleted)).toBe("Deleted memory");
+
+      // Claude's harness wraps an MCP server's answer: the row is the same through it, and an answer without JSON is not a refusal.
+      const wrap = (text: string) => `<untrusted_context source="mcp:moxen/memory_save">\n${text}\n</untrusted_context>`;
+      const wrapped = memory(
+        "memory_save",
+        { name: "prefers-bun", scope: "global", description: "Uses bun", body: "Run bun, not npm.\nTests: bun test." },
+        wrap('{"name":"prefers-bun","scope":"global","replaced":true,"total":3,"before":{"description":"Uses bun","type":"user","body":"Run bun, not npm."}}'),
+      );
+      expect(wrapped).toMatchObject({ outcome: "updated", note: null, added: 1 });
+      expect(memory("memory_read", {}, wrap("- [a](a.md) — about a\n- [b](b.md) — about b"))).toMatchObject({ listed: 2 });
+      // Cut off by the ledger's cap, the closing tag is gone but the short fields are not.
+      expect(memory("memory_delete", { name: "old", scope: "project" }, `<untrusted_context source="mcp:moxen/memory_delete">\n{"name":"old","scope":"project","total":2`)).toMatchObject({ outcome: null });
+
+      // A refused save or delete answers in words.
+      const refused = memory("memory_save", { name: "x", scope: "project", description: "d", body: "b" }, "MEMORY_FULL: The project memory holds 200 memories already.");
+      expect(refused).toMatchObject({ outcome: "rejected", note: "MEMORY_FULL: The project memory holds 200 memories already.", diff: null });
+      expect(memoryTitle(refused)).toBe("Memory not saved");
+
+      // Reads: the index says how many memories it listed.
+      const index = memory("memory_read", {}, "- [a](a.md) — about a\n- [b](b.md) — about b");
+      expect(index).toMatchObject({ action: "read", name: null, listed: 2 });
+      expect(memoryTitle(index)).toBe("Read the memory index");
+      expect(memoryLabel(index)).toBe("2 memories");
+      const one = memory("memory_read", { name: "a", scope: "project" }, "a (project, user): About a\n\nText.");
+      expect(memoryTitle(one)).toBe("Read memory");
+      expect(memoryLabel(one)).toBe("a (project)");
+    });
+
+    it("shows the thread tools as what was searched for and which thread was read", () => {
+      const lookup = (tool: string, input: Record<string, unknown>, output: string) => completed(`moxen_${tool}`, input, output) as ThreadLookupView;
+      const wrap = (source: string, text: string) => `<untrusted_context source="${source}">\n${text}\n</untrusted_context>`;
+      const found = lookup(
+        "thread_search",
+        { query: "composer layout", limit: 3 },
+        [
+          wrap(
+            "moxen:thread_search",
+            '- "Linear issue MXN-115 and sub-issues" · id 71de · project f267 · settled · last activity 2026-10-28 · 1 match\n    tool (Bash): $ sed -n 1,2p x\n- "Improve thread view message styling" · id 3640 · project f267 · settled · last activity 2026-10-28 · 3 matches',
+          ),
+          "",
+          "[Moxen] 20 more threads matched: narrow the query, or raise limit (at most 25).",
+          "[Moxen] Read one with thread_read(id): the outline first, then the turns you need.",
+        ].join("\n"),
+      );
+      expect(found).toMatchObject({ kind: "threads", action: "search", query: "composer layout", scope: "project", total: 22, note: null });
+      expect(found.titles).toEqual(["Linear issue MXN-115 and sub-issues", "Improve thread view message styling"]);
+      expect(lookup("thread_search", { query: "zzz", scope: "all" }, 'No thread matches "zzz".')).toMatchObject({ scope: "all", total: 0, titles: [] });
+      expect(lookup("thread_search", { query: "x" }, "INVALID_TOOL_INPUT: query is required.")).toMatchObject({ total: null, note: "INVALID_TOOL_INPUT: query is required." });
+
+      const outline = lookup("thread_read", { id: "36406f5e-86c1-493e-be5e-558e4e2faf19" }, wrap("thread:36406f5e", 'Thread "Improve thread view message styling" (36406f5e-86c1-493e-be5e-558e4e2faf19), 1 turn, newest first:\n1. ...'));
+      expect(outline).toMatchObject({ action: "read", threadId: "36406f5e-86c1-493e-be5e-558e4e2faf19", title: "Improve thread view message styling", part: "outline" });
+      expect(lookup("thread_read", { id: "36406f5e", turns: "1-2" }, wrap("thread:36406f5e", 'Thread "T" (36406f5e), 3 turns.'))).toMatchObject({ title: "T", part: "turns 1-2" });
+      expect(lookup("thread_read", { id: "36406f5e", item: "1.51" }, wrap("thread:36406f5e", "Tool call 1.51 in turn 1: edit, completed"))).toMatchObject({ title: null, part: "tool call 1.51" });
+      expect(lookup("thread_read", { id: "nope" }, "THREAD_NOT_FOUND: No thread nope.")).toMatchObject({ note: "THREAD_NOT_FOUND: No thread nope." });
     });
 
     it("shows a `subagent` call as the native subagent it started", () => {

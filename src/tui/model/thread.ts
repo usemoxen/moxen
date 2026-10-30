@@ -1,3 +1,4 @@
+import { t, t as tr, tx } from "../i18n/index.js";
 import type { MessageEnvelope, SessionEnvelope, ThreadEnvelope, ActivityEnvelope } from "../../core/types.js";
 import { describeActivity } from "./activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
@@ -1148,9 +1149,9 @@ export interface QueuedMessage {
 export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks">): string {
   const tasks = item.tasks;
   if (tasks !== undefined && tasks.length > 0) {
-    if (tasks.length > 1) return `${tasks.length} delegated tasks settled`;
+    if (tasks.length > 1) return tr("timeline.tasksSettled", { count: tasks.length });
     const task = tasks[0]!;
-    return `${task.title} ${task.status === "completed" ? "finished" : task.status}`;
+    return `${task.title} ${tx(task.status === "completed" ? "finished" : task.status)}`;
   }
   return item.text.split("\n")[0]?.trim() ?? "";
 }
@@ -1192,9 +1193,9 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
  * not more of them: "1 not sent yet, 1 held" read as two messages.
  */
 export function queuedSummary(total: number, held: number): string {
-  if (held === 0) return `${total} not sent yet`;
-  if (held >= total) return `${total} held for the reset`;
-  return `${total} not sent yet, ${held} of them held for the reset`;
+  if (held === 0) return t("queue.notSent", { total });
+  if (held >= total) return t("queue.held", { total });
+  return t("queue.notSentHeld", { total, held });
 }
 
 /** A running thought's rows carry no text yet: give them what has streamed so far. */
@@ -1444,12 +1445,12 @@ export function promptSuggestion(state: ThreadState): string | null {
 /** "in 1h 12m" / "in 4m" / "now" until an instant. */
 export function untilLabel(target: Date, now: number = Date.now()): string {
   const minutes = Math.ceil((target.getTime() - now) / 60_000);
-  if (minutes <= 0) return "now";
+  if (minutes <= 0) return t("time.now");
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
-  if (days > 0) return `in ${days}d ${hours % 24}h`;
-  if (hours > 0) return `in ${hours}h ${minutes % 60}m`;
-  return `in ${minutes}m`;
+  if (days > 0) return t("time.inDaysHours", { d: days, h: hours % 24 });
+  if (hours > 0) return t("time.inHoursMinutes", { h: hours, m: minutes % 60 });
+  return t("time.inMinutes", { m: minutes });
 }
 
 /**
@@ -1545,6 +1546,7 @@ export function taskNotifications(message: MessageEnvelope | null): TaskNotifica
       {
         taskId,
         source: task.source === "native" ? ("native" as const) : ("moxen" as const),
+        // i18n-exempt: the default title of a delegated task, stored with it
         title: text(task.title) ?? "Delegated task",
         status: text(task.status) ?? "completed",
         durationMs: count(task.durationMs),

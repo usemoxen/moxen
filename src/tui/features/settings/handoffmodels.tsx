@@ -1,3 +1,4 @@
+import { type MessageKey, currentLanguage, t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
@@ -16,14 +17,13 @@ import {
 import { sliderLayout } from "../../model/slider.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
 
-const FOLLOW = "Follows the provider";
 
 /** The four fields of a model's page, top to bottom. */
-const FIELDS: readonly { readonly field: ModelOverrideField; readonly label: string; readonly size: boolean }[] = [
-  { field: "handoff", label: "Hand off", size: false },
-  { field: "handoffAt", label: "Hand off at", size: true },
-  { field: "compaction", label: "Compaction", size: false },
-  { field: "compactAt", label: "Compact at", size: true },
+const FIELDS: readonly { readonly field: ModelOverrideField; readonly label: MessageKey; readonly size: boolean }[] = [
+  { field: "handoff", label: "ho.field.handoff", size: false },
+  { field: "handoffAt", label: "ho.field.handoffAt", size: true },
+  { field: "compaction", label: "ho.field.compaction", size: false },
+  { field: "compactAt", label: "ho.field.compactAt", size: true },
 ];
 
 /**
@@ -70,7 +70,7 @@ export function HandoffModelsEditor({
   const labels = stops.map(handoffTokensLabel);
   const track = sliderLayout(labels, width - 2).fits;
   // The choice list: following the provider first, then the choices.
-  const options = spec !== undefined && !spec.size ? [{ value: null as string | null, label: FOLLOW }, ...modeChoices(spec.field).map((choice) => ({ value: choice.value as string | null, label: choice.label }))] : [];
+  const options = spec !== undefined && !spec.size ? [{ value: null as string | null, label: t("ho.follow") }, ...modeChoices(spec.field).map((choice) => ({ value: choice.value as string | null, label: tx(choice.label) }))] : [];
 
   const fieldOpenable = (field: ModelOverrideField) => field !== "compaction" || compaction.unavailable === null;
   const openField = (model: ModelOverrideEntry, index: number) => {
@@ -160,14 +160,14 @@ export function HandoffModelsEditor({
   // A field being chosen: a size slider, or the choice list.
   if (choosing !== null && open !== undefined && spec !== undefined) {
     const held = open[spec.field];
-    const verb = spec.field === "handoffAt" ? "handed off" : "compacted";
+    const verb = spec.field === "handoffAt" ? t("ho.handedOff") : t("ho.compacted");
     return (
       <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
         <Back onBack={() => setChoosing(null)} />
         <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(`${spec.label}: ${open.name}`, width)}</text>
+          <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(`${t(spec.label)}: ${open.name}`, width)}</text>
           <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-            {spec.size ? `Tokens of context at which a thread on ${open.slug} is ${verb}. Nothing chosen: it follows this provider's setting.` : `What ${spec.label} is for a thread on ${open.slug}. Following the provider: its own row decides.`}
+            {spec.size ? t("ho.sizeHelp", { slug: open.slug, verb }) : t("ho.modeHelp", { label: t(spec.label), slug: open.slug })}
           </text>
         </box>
         {spec.size && track ? (
@@ -177,8 +177,8 @@ export function HandoffModelsEditor({
             active={choosing.index}
             chosen={held === null ? -1 : stops.indexOf(held as number)}
             width={width - 2}
-            ends={{ low: "Earlier", high: "Later" }}
-            caption={`${stops[choosing.index]!.toLocaleString("en-US")} tokens`}
+            ends={{ low: t("ho.earlier"), high: t("ho.later") }}
+            caption={t("ho.tokens", { count: stops[choosing.index]!.toLocaleString(currentLanguage()) })}
             onMove={(index) => setChoosing({ ...choosing, index })}
             onPick={pick}
           />
@@ -198,7 +198,7 @@ export function HandoffModelsEditor({
           </scrollbox>
         )}
         {spec.size ? <SliderDefault id="handoff-stop-reset" unset={held === null} defaultLabel="the provider setting" onReset={() => clearField(open, spec.field)} /> : null}
-        {footer(`${spec.size && track ? "←→ move" : "↑↓ move"} · enter picks · d clears it · esc back`)}
+        {footer(t("ho.footerChoose", { move: spec.size && track ? t("ho.moveLR") : t("ho.moveUD") }))}
       </box>
     );
   }
@@ -210,18 +210,18 @@ export function HandoffModelsEditor({
         <Back onBack={() => setPage(null)} />
         <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
           <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(`${title}: ${open.name}`, width)}</text>
-          <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{`What a thread on ${open.slug} does differently. Anything left to follow the provider takes its row on the provider's page.`}</text>
+          <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("ho.modelPage", { slug: open.slug })}</text>
         </box>
         <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
           {FIELDS.map((entry, index) => {
             const held = open[entry.field];
             const locked = !fieldOpenable(entry.field);
-            const shown = locked ? "Not offered" : held === null ? FOLLOW : entry.size ? handoffTokensLabel(held as number) : (modeChoices(entry.field).find((choice) => choice.value === held)?.label ?? String(held));
+            const shown = locked ? t("ho.notOffered") : held === null ? t("ho.follow") : entry.size ? handoffTokensLabel(held as number) : (modeChoices(entry.field).find((choice) => choice.value === held)?.label === undefined ? String(held) : tx(modeChoices(entry.field).find((choice) => choice.value === held)!.label));
             return (
               <Row
                 key={entry.field}
                 id={`handoff-model-field-${index}`}
-                label={entry.label}
+                label={t(entry.label)}
                 right={shown}
                 set={held !== null && !locked}
                 active={index === page.field}
@@ -237,7 +237,7 @@ export function HandoffModelsEditor({
             <text fg={COLOR.faint} bg={SURFACE.raised} wrapMode="word" selectable={false} style={{ marginTop: 1 }}>{compaction.unavailable}</text>
           )}
         </scrollbox>
-        {footer("enter changes · d follows the provider again · esc back · applies from the next message")}
+        {footer(t("ho.footerModel"))}
       </box>
     );
   }
@@ -251,7 +251,7 @@ export function HandoffModelsEditor({
         <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{description}</text>
       </box>
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
-        {models.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{catalogReady ? "This provider lists no models yet." : "Loading the provider catalog…"}</text> : null}
+        {models.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{catalogReady ? t("ho.noModels") : t("settings.loadingCatalog")}</text> : null}
         {models.map((model, index) => (
           <Row
             key={model.slug}
@@ -268,7 +268,7 @@ export function HandoffModelsEditor({
           />
         ))}
       </scrollbox>
-      {footer(models.length === 0 ? "esc back" : `${set} of ${models.length} with their own · enter opens · d clears a model · esc back`)}
+      {footer(models.length === 0 ? t("ho.escBack") : t("ho.footerList", { set, total: models.length }))}
     </box>
   );
 }
@@ -277,19 +277,19 @@ export function HandoffModelsEditor({
 function summary(model: ModelOverrideEntry, compaction: ModelCompactionChoices): string {
   const parts: string[] = [];
   const handoff = HANDOFF_MODE_CHOICES.find((choice) => choice.value === model.handoff)?.label;
-  if (handoff !== undefined) parts.push(`hand off ${handoff.toLowerCase()}`);
-  if (model.handoffAt !== null) parts.push(`hand off at ${handoffTokensLabel(model.handoffAt)}`);
+  if (handoff !== undefined) parts.push(t("ho.handOff", { mode: tx(handoff).toLowerCase() }));
+  if (model.handoffAt !== null) parts.push(t("ho.handOffAt", { size: handoffTokensLabel(model.handoffAt) }));
   const compact = compaction.choices.find((choice) => choice.value === model.compaction)?.label;
-  if (compact !== undefined) parts.push(`compaction: ${compact}`);
-  if (model.compactAt !== null) parts.push(`compact at ${handoffTokensLabel(model.compactAt)}`);
-  return parts.length === 0 ? "uses provider setting" : parts.join(" · ");
+  if (compact !== undefined) parts.push(t("ho.compaction", { mode: compact }));
+  if (model.compactAt !== null) parts.push(t("ho.compactAt", { size: handoffTokensLabel(model.compactAt) }));
+  return parts.length === 0 ? t("ho.usesProvider") : parts.join(" · ");
 }
 
 function Back({ onBack }: { onBack: () => void }) {
   const { hovered, handlers } = useHover();
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised} onMouseDown={onBack} selectable={false} {...handlers}>
-      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{"← back"}</text>
+      <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.raised} selectable={false}>{t("ui.back")}</text>
     </box>
   );
 }

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { LinkState } from "../../../server/transport/remote.js";
 import type { ActiveServer } from "./server.js";
 
@@ -21,30 +22,30 @@ const RESTART_GRACE_MS = 20_000;
 export function linkNoticeText(link: Exclude<LinkState, { status: "connected" }>, server: ActiveServer | null, now: number = Date.now()): LinkNoticeText {
   const name = server?.name ?? null;
   if (link.status === "failed") {
-    const title = name === null ? "Disconnected from the moxen server" : `Disconnected from ${name}`;
+    const title = name === null ? t("link.disconnected_from_the_moxen_8207") : t("link.disconnectedFrom", { name });
     switch (link.code) {
       case "REMOTE_DEVICE_REFUSED":
       case "REMOTE_NOT_PAIRED":
-        return { title, tone: "danger", detail: "This device is no longer paired there. Pair it again to reconnect." };
+        return { title, tone: "danger", detail: t("link.this_device_is_no_1170") };
       case "REMOTE_KEY_MISMATCH":
-        return { title, tone: "danger", detail: "Its key changed since pairing. Pair again only if you know why." };
+        return { title, tone: "danger", detail: t("link.its_key_changed_since_3aae") };
       case "PROTOCOL_MISMATCH":
-        return { title, tone: "danger", detail: "It runs another moxen version. Restart it so both match." };
+        return { title, tone: "danger", detail: t("link.it_runs_another_moxen_9b67") };
       default:
-        return { title, tone: "danger", detail: "It refused this connection." };
+        return { title, tone: "danger", detail: t("link.it_refused_this_connection_35f8") };
     }
   }
-  const title = name === null ? "Can't reach the moxen server" : `Can't reach ${name}`;
+  const title = name === null ? t("link.cant_reach_the_moxen_4770") : t("link.cantReach", { name });
   const reason = link.reason;
-  const next = "Reconnecting as soon as it's back.";
+  const next = t("link.reconnecting_as_soon_as_df02");
   if (/no reply|did not answer|stopped answering/i.test(reason)) {
-    return { title, tone: "warn", detail: `It is running but not answering. ${next}` };
+    return { title, tone: "warn", detail: t("link.notAnswering", { next }) };
   }
   if (name !== null) {
-    return { title, tone: "warn", detail: `No answer from ${server?.host}:${server?.port}. ${next}` };
+    return { title, tone: "warn", detail: t("link.noAnswerFrom", { address: `${server?.host}:${server?.port}`, next }) };
   }
   if (now - link.since > RESTART_GRACE_MS) {
-    return { title, tone: "warn", detail: "It isn't running. Start it (moxen server start) to reconnect." };
+    return { title, tone: "warn", detail: t("link.it_isnt_running_start_3abe") };
   }
-  return { title, tone: "warn", detail: `It stopped or is restarting. ${next}` };
+  return { title, tone: "warn", detail: t("link.stopped", { next }) };
 }
