@@ -10,6 +10,7 @@ import type { PairedServer } from "../server/transport/servers.js";
 import type { ActiveServer } from "./features/remote/server.js";
 import { registerSyntaxParsers } from "../core/syntax/register.js";
 import { applyLanguage } from "./i18n/index.js";
+import { watchTerminalVisibility } from "./model/terminalVisibility.js";
 import { SURFACE, applyTheme } from "./theme.js";
 import { MinSizeGate } from "./ui/terminalgate.js";
 
@@ -42,6 +43,8 @@ export async function runTui(server?: string): Promise<void> {
   let connection = await connect(server ?? null);
   const renderer = await createCliRenderer({ exitOnCtrlC: false, backgroundColor: SURFACE.base });
   const root = createRoot(renderer);
+  // Stops painting while the terminal says it is hidden (a background tab); a terminal that cannot say is never hidden.
+  const unwatchVisibility = process.stdout.isTTY === true ? watchTerminalVisibility(renderer, (data) => process.stdout.write(data)) : () => {};
 
   try {
     for (let generation = 0; ; generation += 1) {
@@ -93,6 +96,7 @@ export async function runTui(server?: string): Promise<void> {
       if (previous !== kept.local && previous !== next) await previous.close().catch(() => undefined);
     }
   } finally {
+    unwatchVisibility();
     root.unmount();
     renderer.destroy();
     if (connection !== kept.local) await connection.close();

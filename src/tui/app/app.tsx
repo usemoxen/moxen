@@ -126,6 +126,7 @@ import { ImagePreviewLayer } from "../features/timeline/imagepreview.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, useImageViewer } from "../features/timeline/imageviewer.js";
 import { openImageExternally } from "../model/imageopen.js";
 import { shrinkImage } from "../model/imageshrink.js";
+import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
@@ -1228,11 +1229,14 @@ export function App({
 
   // A 1s tick while a turn is in flight drives the thinking/working elapsed
   // counter; the 30s tick above is enough for sidebar ages when idle.
+  // Not while the terminal is hidden: nothing is painted, and `now` is current again the moment it is not.
+  const terminalVisible = useTerminalVisible();
   useEffect(() => {
-    if (!sessionRunning) return;
+    if (!sessionRunning || !terminalVisible) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [sessionRunning]);
+  }, [sessionRunning, terminalVisible]);
   const contextUsageDisplay = threadState.contextUsage === null ? null : formatContextUsage(threadState.contextUsage);
 
   // -- side panel (Diff / Agents / Context / Background) --------------------

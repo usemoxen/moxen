@@ -28,6 +28,7 @@ import { runScheduleModal } from "./scenarios/scheduleModal.js";
 import { runSidePanelTabs } from "./scenarios/sidePanelTabs.js";
 import { runNoticeBanner } from "./scenarios/noticeBanner.js";
 import { runImageThumbs } from "./scenarios/imageThumbs.js";
+import { runTerminalVisibility } from "./scenarios/terminalVisibility.js";
 import { runImageTokens } from "./scenarios/imageTokens.js";
 import { runComposerSlots } from "./scenarios/composerSlots.js";
 import { runInteractionModes } from "./scenarios/interactionModes.js";
@@ -112,6 +113,7 @@ export async function runWalkthrough(): Promise<void> {
   await runNoticeBanner();
   await runImageTokens();
   await runImageThumbs();
+  await runTerminalVisibility();
   await runInteractionModes();
   await runComposerSlots();
   await runSidebarTree();
