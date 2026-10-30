@@ -24,8 +24,8 @@ describe("paths in the prompt", () => {
         { path: "/z/b c.txt", kind: "file" },
       ],
     );
-    expect(items.map((item) => item.label)).toEqual(["📄 b c.txt", "📁 src", "📄 b c.txt (2)"]);
-    expect(promptWithPaths("Compare 📄 b c.txt (2) with 📄 b c.txt in 📁 src", items)).toBe('Compare "/z/b c.txt" with "/a/b c.txt" in /a/src');
+    expect(items.map((item) => item.label)).toEqual([" 📄 b c.txt ", " 📁 src ", " 📄 b c.txt (2) "]);
+    expect(promptWithPaths("Compare  📄 b c.txt (2)  with  📄 b c.txt  in  📁 src ", items)).toBe('Compare "/z/b c.txt" with "/a/b c.txt" in /a/src');
   });
 
   it("does not attach a path twice", () => {

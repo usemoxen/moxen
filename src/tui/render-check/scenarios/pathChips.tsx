@@ -74,8 +74,8 @@ export async function runPathChips(): Promise<void> {
   await settle();
   console.log("--- composer: an attached file is a chip in the draft ---");
   console.log(setup.captureCharFrame());
-  if (!latest.startsWith("Look at this file: 📄 normalize.py")) fail(`the chip did not land at the cursor: ${JSON.stringify(latest)}`);
-  if (promptWithPaths(latest, [{ path: "/Users/me/My Docs/normalize.py", kind: "file", label: "📄 normalize.py" }]).trim() !== 'Look at this file: "/Users/me/My Docs/normalize.py"') {
+  if (!latest.startsWith("Look at this file:  📄 normalize.py ")) fail(`the chip did not land at the cursor: ${JSON.stringify(latest)}`);
+  if (promptWithPaths(latest, [{ path: "/Users/me/My Docs/normalize.py", kind: "file", label: " 📄 normalize.py " }]).trim() !== 'Look at this file: "/Users/me/My Docs/normalize.py"') {
     fail("the message does not carry the path in the chip's place");
   }
 

@@ -11,7 +11,10 @@ export interface PathAttachment {
   /** Absolute. */
   path: string;
   kind: PathKind;
-  /** What the draft shows for it, `📄 name`: unique among the draft's attachments, since the message is put together by it. */
+  /**
+   * What the draft shows for it, ` 📄 name ` with a space of padding each side so the chip's fill has
+   * gutters: unique among the draft's attachments, since the message is put together by it.
+   */
   label: string;
 }
 
@@ -26,7 +29,7 @@ export function quotePath(value: string): string {
  */
 export function promptWithPaths(prompt: string, items: readonly PathAttachment[]): string {
   let out = prompt;
-  // Longest label first: `📄 a.py` is the start of `📄 a.py (2)`.
+  // Longest label first: ` 📄 a.py ` is the start of ` 📄 a.py (2) `.
   for (const item of [...items].sort((a, b) => b.label.length - a.label.length)) {
     out = out.replace(item.label, () => quotePath(item.path));
   }
@@ -51,8 +54,8 @@ export function addPaths(current: readonly PathAttachment[], incoming: readonly 
   for (const item of incoming) {
     if (out.some((existing) => existing.path === item.path)) continue;
     const base = `${pathIcon(item.kind)} ${pathLabel(item)}`;
-    let label = base;
-    for (let counter = 2; out.some((existing) => existing.label === label); counter += 1) label = `${base} (${counter})`;
+    let label = ` ${base} `;
+    for (let counter = 2; out.some((existing) => existing.label === label); counter += 1) label = ` ${base} (${counter}) `;
     out.push({ ...item, label });
   }
   return out;
