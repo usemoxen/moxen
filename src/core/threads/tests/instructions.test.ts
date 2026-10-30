@@ -3,10 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, parseUiBlock, splitUiBlocks } from "../uiblock.js";
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { IMAGE_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -32,6 +33,9 @@ describe("runtime instructions", () => {
         "# Showing images\n\n" +
         IMAGE_GUIDANCE +
         "\n\n" +
+        "# Layouts, charts and states\n\n" +
+        UI_BLOCK_GUIDANCE +
+        "\n\n" +
         "# Shell\n\n" +
         SHELL_TEXT +
         "\n\n" +
@@ -53,10 +57,31 @@ describe("runtime instructions", () => {
   it("groups the instructions under headings, in the order a reader meets them", () => {
     const text = buildRuntimeInstructions({ instanceId: "opencode", env: LOCAL, shell: LINUX, memory: "write", checklist: true });
     const headings = [...text.matchAll(/^# (.+)$/gm)].map((match) => match[1]);
-    expect(headings).toEqual(["Environment", "Look it up", "Progress notes", "Showing images", "Checklist", "Subagents", "Shell", "Messages from Moxen", "Memory"]);
+    expect(headings).toEqual(["Environment", "Look it up", "Progress notes", "Showing images", "Layouts, charts and states", "Checklist", "Subagents", "Shell", "Messages from Moxen", "Memory"]);
     // Claude Code has its own checklist, so its sections are fewer.
     const claude = [...buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX }).matchAll(/^# (.+)$/gm)].map((match) => match[1]);
-    expect(claude).toEqual(["Environment", "Look it up", "Progress notes", "Showing images", "Shell", "Messages from Moxen"]);
+    expect(claude).toEqual(["Environment", "Look it up", "Progress notes", "Showing images", "Layouts, charts and states", "Shell", "Messages from Moxen"]);
+  });
+
+  it("describes every node type and image operation a moxen-ui block can have, with an example that is a valid block", () => {
+    for (const type of UI_NODE_TYPES) expect(UI_BLOCK_GUIDANCE, `the node type ${type}`).toContain(`"type":"${type}"`);
+    for (const op of UI_OP_NAMES) expect(UI_BLOCK_GUIDANCE, `the operation ${op}`).toContain(`"op":"${op}"`);
+    for (const state of UI_STATES) expect(UI_BLOCK_GUIDANCE).toContain(state);
+    for (const color of UI_COLORS) expect(UI_BLOCK_GUIDANCE).toContain(color);
+    // The limits it states are the parser's own, so it cannot promise what the parser refuses.
+    expect(UI_BLOCK_GUIDANCE).toContain(`${UI_BLOCK_LIMITS.images} images`);
+    expect(UI_BLOCK_GUIDANCE).toContain(`${UI_BLOCK_LIMITS.bars} bars`);
+    // What it shows is what a reply would hold: the fence, the language and JSON the parser reads.
+    expect(parseUiBlock(UI_BLOCK_EXAMPLE)).not.toBeNull();
+    expect(splitUiBlocks(`Here:\n\`\`\`moxen-ui\n${UI_BLOCK_EXAMPLE}\n\`\`\``).map((segment) => segment.kind)).toEqual(["markdown", "ui"]);
+    expect(UI_BLOCK_GUIDANCE).toContain(`\`\`\`moxen-ui\n${UI_BLOCK_EXAMPLE}\n\`\`\``);
+  });
+
+  it("leaves the layouts to a session that talks to a person: a subagent's report goes to another agent", () => {
+    const delegation = { parentTitle: "P", baseBranch: null };
+    const text = buildRuntimeInstructions({ instanceId: CLAUDE, shell: LINUX, env: LOCAL, delegation });
+    expect(text).toContain("# Showing images");
+    expect(text).not.toContain("# Layouts, charts and states");
   });
 
   it("keeps the memory rules as a lead line and one bullet per subject", () => {

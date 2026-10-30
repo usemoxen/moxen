@@ -17,6 +17,10 @@
 export const UI_BLOCK_LANGUAGE = "moxen-ui";
 export const UI_BLOCK_VERSION = 1;
 
+/** The node types and image operations a block may use, for what describes them to a model. */
+export const UI_NODE_TYPES = ["row", "column", "grid", "image", "blend", "text", "caption", "chart", "progress", "keyvalue", "status"] as const;
+export const UI_OP_NAMES = ["crop", "pad", "annotate"] as const;
+
 /** What a block may hold, so a reply cannot ask the client to draw without limit. */
 export const UI_BLOCK_LIMITS = {
   /** Characters of JSON. */

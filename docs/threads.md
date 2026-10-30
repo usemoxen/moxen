@@ -30,13 +30,28 @@ the reset: `autoContinueAtUsageLimit`, or `providers.<kind>.autoContinueAtUsageL
 for one provider, at most `usageLimitContinues` (default 2) in a row.
 
 Runtime instructions are headed sections — Environment, Look it up, Progress
-notes (OpenCode adds Checklist and Subagents), Shell, Messages from Moxen,
-Memory, Web, and for a delegated task Your task — followed by the user's own
+notes, Showing images, Layouts, charts and states (not for a delegated task,
+whose report another agent reads; OpenCode adds Checklist and Subagents),
+Shell, Messages from Moxen, Memory, Web, and for a delegated task Your task —
+followed by the user's own
 instructions, in this order: the global `instructions`, the provider's
 `providers.<kind>.instructions`, the project's `moxen.json` `instructions`,
 then (on the Moxen Harness) the profile's. The Environment section names the
 app, Moxen; which harness it is comes from the provider's own base prompt, so
 no section says it twice.
+
+A reply can show images and data as a layout. A fenced block tagged
+`moxen-ui` holds JSON (`core/threads/uiblock.ts` is the schema, and the
+Layouts, charts and states section is what the model is told): rows, columns
+and grids of images, text, bar charts, progress rows, key-value lists and
+status grids. An image can be cropped (which is also the zoom), padded to a
+shape and annotated with boxes, arrows and highlights, and two images can be
+laid over each other or differenced. The TUI draws it from the theme's colours
+and stacks it in a narrow pane; under a modal the images are text cells. A
+block that is not valid, over a limit (8 images, 4 levels, 12 bars, 20 rows) or
+still streaming stays the code the model wrote, and the desktop app, which has
+no renderer for it yet, and the CLI show it the same way. Images are files on
+the machine the session runs on, read by path.
 
 The Shell section is built from the machine (`core/threads/shells.ts`): its
 platform, the login shell and the shells found on `PATH`, and whether the

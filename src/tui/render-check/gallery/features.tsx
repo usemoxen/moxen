@@ -30,6 +30,7 @@ import { TasksPanel } from "../../features/taskspanel/taskspanel.js";
 import type { InteractionMode } from "../../../core/types.js";
 import type { QueuedMessage } from "../../model/thread.js";
 import { Pager } from "../../ui/noticebanner.js";
+import { ModalShell } from "../../ui/modalshell.js";
 import { act } from "react";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
@@ -126,6 +127,16 @@ const UI_FACTS = uiBlock({
     { type: "status", title: "Checks", rows: [{ label: "typecheck", state: "done", note: "2.1s" }, { label: "tests", state: "live", note: "1,420 of 2,107" }, { label: "render-check", state: "held", note: "waiting on the tests" }, { label: "deploy", state: "next" }, { label: "gallery", state: "broken", note: "a component was not drawn" }] },
   ],
 });
+const UI_NESTED = uiBlock({
+  type: "column",
+  children: [
+    { type: "text", text: "A row, a grid inside it and a caption:" },
+    { type: "row", children: [image("one", "Left, twice the weight", { weight: 2 }), { type: "grid", columns: 2, children: [image("two", "A"), image("three", "B"), image("four", "C"), image("five", "D")] }] },
+    { type: "caption", text: "Same screens, four states." },
+  ],
+});
+const UI_MISSING = uiBlock({ type: "row", children: [image("here", "Present"), image("gone", "This one is not on disk")] });
+const UI_INVALID_REPLY = "Here is the comparison:\n```moxen-ui\n{\"v\":1,\"root\":{\"type\":\"carousel\"}}\n```\nIt did not draw, so the reply shows what the model wrote.";
 const SCROLL = { current: null };
 const skill = (name: string, description: string | null, overrides: Partial<SkillSummary> = {}): SkillSummary => ({
   name,
@@ -814,6 +825,75 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         <StatusView rows={[{ label: "live", state: "live", note: "running now" }, { label: "held", state: "held", note: "waiting on you" }, { label: "broken", state: "broken", note: "failed after 3 tries" }, { label: "next", state: "next" }, { label: "done", state: "done", note: "38s" }]} columns={50} />
       </Stage>
     ),
+  },
+  {
+    id: "ui-block-nested",
+    group: "timeline",
+    title: "UiBlockView, a row holding a grid, between text and a caption",
+    width: 90,
+    height: 24,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={PICTURE_READER}>
+        <Stage width={90} height={24}>
+          <UiBlockView block={UI_NESTED} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    },
+  },
+  {
+    id: "ui-block-missing",
+    group: "timeline",
+    title: "UiBlockView, one image of a pair is not on disk",
+    width: 76,
+    height: 14,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={async (path) => (path.includes("gone") ? Promise.reject(new Error("IMAGE_NOT_FOUND")) : PICTURE_READER(path))}>
+        <Stage width={76} height={14}>
+          <UiBlockView block={UI_MISSING} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    },
+  },
+  {
+    id: "ui-block-invalid",
+    group: "timeline",
+    title: "MessageBody, a moxen-ui block that is not valid stays the code the model wrote",
+    width: 76,
+    height: 9,
+    element: () => (
+      <Stage width={76} height={9}>
+        <MessageBody entry={{ id: "gallery", text: UI_INVALID_REPLY, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+      </Stage>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 500)));
+    },
+  },
+  {
+    id: "ui-block-modal",
+    group: "timeline",
+    title: "UiBlockView under a modal: every image is text cells, the dimming layer cannot turn it black",
+    width: 76,
+    height: 16,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={PICTURE_READER}>
+        <Stage width={76} height={16}>
+          <UiBlockView block={UI_PAIR} />
+          <ModalShell screenWidth={76} screenHeight={16} left={20} top={9} width={36} height={5} onClose={() => {}}>
+            <text>{"a modal is open"}</text>
+          </ModalShell>
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 500)));
+    },
   },
   {
     id: "ui-block-narrow",

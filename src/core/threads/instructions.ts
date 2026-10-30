@@ -29,6 +29,7 @@ import { APP_DISPLAY_NAME, APP_NAME } from "../config.js";
 import type { ThreadEnv } from "./types.js";
 import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.js";
 import { buildWebGuidance, type WebGuidanceInput } from "./webguidance.js";
+import { UI_BLOCK_LANGUAGE, UI_BLOCK_LIMITS, UI_BLOCK_VERSION, UI_COLORS, UI_STATES } from "./uiblock.js";
 
 export interface RuntimeInstructionsInput {
   /** The model selection's instance id (`claudeAgent`, `opencode/…`): names the harness. */
@@ -80,6 +81,53 @@ export const IMAGE_GUIDANCE =
   "You can show the user an image in your reply: put a markdown image on a line of its own, with the absolute path of an image file " +
   "on this machine (png, jpg, gif or webp), like ![what it shows](/absolute/path/chart.png). Moxen draws it in the conversation. " +
   "Use it when seeing the picture helps (a screenshot you took, a chart you made, a design), not to decorate.";
+
+/** The block the guidance shows: it parses, which `instructions.test.ts` pins. */
+export const UI_BLOCK_EXAMPLE = JSON.stringify({
+  v: UI_BLOCK_VERSION,
+  root: {
+    type: "column",
+    children: [
+      {
+        type: "row",
+        children: [
+          { type: "image", src: "/tmp/before.png", caption: "Before" },
+          { type: "image", src: "/tmp/after.png", caption: "After", ops: [{ op: "annotate", shapes: [{ shape: "box", x: 0.1, y: 0.2, w: 0.3, h: 0.2 }] }] },
+        ],
+      },
+      { type: "progress", label: "Checks", value: 0.75, text: "3 of 4" },
+    ],
+  },
+});
+
+/**
+ * The `moxen-ui` block, for the model: what it is for, the whole schema in a
+ * few lines, and one example. Limits, colours and states are the parser's own
+ * constants, so this cannot say something the parser refuses. Static text, in
+ * every session, like the image guidance it follows.
+ */
+export const UI_BLOCK_GUIDANCE =
+  `When a reply is better as a layout than as markdown, put a fenced block tagged ${UI_BLOCK_LANGUAGE} in it, holding JSON; Moxen draws it in the theme's colours. ` +
+  "Use it only for what markdown cannot say: images side by side or compared, a part of a picture picked out, a chart, progress, a list of states. " +
+  "A single picture, a table and plain facts stay markdown. Keep the JSON exact: if it is not valid, or breaks a limit, the user sees it as code.\n\n" +
+  `{"v":${UI_BLOCK_VERSION},"root":NODE}. NODE is one of the following. In a row or column a node may carry "weight" (its share of the width), in a grid "span" (its columns).\n` +
+  `- {"type":"row"|"column","gap":0-4,"children":[NODE,...]}: a row shares the width and stacks when the pane is narrow.\n` +
+  `- {"type":"grid","columns":1-${UI_BLOCK_LIMITS.columns},"children":[NODE,...]}\n` +
+  '- {"type":"image","src":"/absolute/path.png","caption":"...","ops":[OP,...]}\n' +
+  '- {"type":"blend","mode":"overlay"|"difference","opacity":0-1,"a":IMAGE,"b":IMAGE,"caption":"..."}: b over a, or what differs between them.\n' +
+  '- {"type":"text","text":"..."} and {"type":"caption","text":"..."}\n' +
+  '- {"type":"chart","kind":"bar","title":"...","unit":"k","max":100,"bars":[{"label":"...","value":12,"color":"blue"},...]}\n' +
+  '- {"type":"progress","label":"Tests","value":0.42,"text":"38 of 90","color":"green"}: value is 0 to 1.\n' +
+  '- {"type":"keyvalue","title":"...","rows":[{"key":"branch","value":"main"},...]}\n' +
+  `- {"type":"status","title":"...","rows":[{"label":"build","state":"${UI_STATES.join("|")}","note":"..."},...]}\n\n` +
+  "OP, in the order they apply, each reading the image as the one before left it, positions as fractions (0 to 1) of that image:\n" +
+  '- {"op":"crop","x":0.5,"y":0,"w":0.5,"h":0.5}: also how you zoom in.\n' +
+  '- {"op":"pad","aspect":1.5}: pads to a width over height, so pictures of different shapes line up.\n' +
+  '- {"op":"annotate","shapes":[{"shape":"box"|"highlight","x":0,"y":0,"w":0.3,"h":0.2,"color":"red"},{"shape":"arrow","x1":0.9,"y1":0.9,"x2":0.6,"y2":0.6}]}\n' +
+  `Colours: ${UI_COLORS.join(", ")} (red when left out).\n\n` +
+  `Limits: ${UI_BLOCK_LIMITS.images} images, ${UI_BLOCK_LIMITS.depth} levels of nesting, ${UI_BLOCK_LIMITS.children} children in a container, ${UI_BLOCK_LIMITS.bars} bars, ${UI_BLOCK_LIMITS.rows} rows, ${UI_BLOCK_LIMITS.shapes} shapes, ${UI_BLOCK_LIMITS.ops} operations per image. ` +
+  "Images are files on this machine (png, jpg, gif or webp), written before you name them; no URLs. There is no text inside a picture: use captions. Example:\n" +
+  `\`\`\`${UI_BLOCK_LANGUAGE}\n${UI_BLOCK_EXAMPLE}\n\`\`\``;
 
 /**
  * What a long task reads like from outside: a line per step, the full
@@ -223,6 +271,8 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   add("Look it up", LOOKUP_GUIDANCE);
   add("Progress notes", PROGRESS_GUIDANCE);
   add("Showing images", IMAGE_GUIDANCE);
+  // A subagent's final message is a report another agent reads; a layout is for a person.
+  if (!delegation) add("Layouts, charts and states", UI_BLOCK_GUIDANCE);
   if (harness === "OpenCode") {
     if (input.checklist !== false) add("Checklist", CHECKLIST_GUIDANCE);
     add("Subagents", OPENCODE_SUBAGENT_GUIDANCE);
