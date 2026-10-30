@@ -23,15 +23,22 @@ export function quotePath(value: string): string {
   return /[\s"'`]/u.test(value) ? `"${value.replace(/"/gu, '\\"')}"` : value;
 }
 
+/** A link destination: angle-bracketed when the path has a space or a parenthesis, which would end it. */
+function linkDestination(value: string): string {
+  return /[\s()<>]/u.test(value) ? `<${value}>` : value;
+}
+
 /**
  * The draft as the agent gets it: each attachment's chip replaced, where it
- * stands, by its absolute path. "Look at 📄 a.py" reads "Look at /home/me/a.py".
+ * stands, by a link whose text is the chip and whose target is the absolute
+ * path: "Look at 📄 a.py" reads "Look at [📄 a.py](/home/me/a.py)". The agent
+ * reads the path; the transcript draws the chip (`model/messagechips.ts`).
  */
 export function promptWithPaths(prompt: string, items: readonly PathAttachment[]): string {
   let out = prompt;
   // Longest label first: ` 📄 a.py ` is the start of ` 📄 a.py (2) `.
   for (const item of [...items].sort((a, b) => b.label.length - a.label.length)) {
-    out = out.replace(item.label, () => quotePath(item.path));
+    out = out.replace(item.label, () => `[${item.label.trim()}](${linkDestination(item.path)})`);
   }
   return out;
 }

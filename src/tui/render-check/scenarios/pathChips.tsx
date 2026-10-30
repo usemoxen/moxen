@@ -1,6 +1,8 @@
 import { act, useState } from "react";
 
 import { Composer } from "../../features/composer/composer.js";
+import { MessageBody } from "../../features/timeline/timeline.js";
+import { SURFACE } from "../../theme.js";
 import { addPaths, promptWithPaths, type PathAttachment } from "../../model/pathattachments.js";
 import { fail } from "../helpers.js";
 import { testRender } from "../testrender.js";
@@ -75,7 +77,7 @@ export async function runPathChips(): Promise<void> {
   console.log("--- composer: an attached file is a chip in the draft ---");
   console.log(setup.captureCharFrame());
   if (!latest.startsWith("Look at this file:  📄 normalize.py ")) fail(`the chip did not land at the cursor: ${JSON.stringify(latest)}`);
-  if (promptWithPaths(latest, [{ path: "/Users/me/My Docs/normalize.py", kind: "file", label: " 📄 normalize.py " }]).trim() !== 'Look at this file: "/Users/me/My Docs/normalize.py"') {
+  if (promptWithPaths(latest, [{ path: "/Users/me/My Docs/normalize.py", kind: "file", label: " 📄 normalize.py " }]).trim() !== 'Look at this file: [📄 normalize.py](</Users/me/My Docs/normalize.py>)') {
     fail("the message does not carry the path in the chip's place");
   }
 
@@ -85,4 +87,26 @@ export async function runPathChips(): Promise<void> {
   await settle();
   if (latest.includes("normalize.py")) fail(`backspace left part of the chip: ${JSON.stringify(latest)}`);
   if (removed.join() !== "/Users/me/My Docs/normalize.py") fail("deleting the chip did not detach the attachment");
+
+  // Sent, the chips stay chips: no raw path, no markdown link.
+  const sent = await testRender(
+    <box style={{ width: 70, height: 6 }} backgroundColor={SURFACE.user}>
+      <MessageBody
+        entry={{ text: "check [Image #1] and this: [📄 normalize.py](</Users/me/My Docs/normalize.py>) ok", streaming: false, message: null } as never}
+        homeDir={undefined}
+        background={SURFACE.user}
+        chips
+      />
+    </box>,
+    { width: 70, height: 6, exitOnCtrlC: false },
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await sent.flush();
+  });
+  console.log("--- sent message: chips stay chips ---");
+  console.log(sent.captureCharFrame());
+  const frame = sent.captureCharFrame();
+  if (frame.includes("/Users/me") || frame.includes("](")) fail("a sent message shows the raw path or link, not its chip");
+  if (!frame.includes("[Image #1]") || !frame.includes("📄 normalize.py")) fail("a sent message lost its chips");
 }

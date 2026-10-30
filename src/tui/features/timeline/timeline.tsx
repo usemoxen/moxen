@@ -4,6 +4,8 @@ import type { ReactNode, RefObject } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
+import { chipSegments, splitChipBlocks } from "../../model/messagechips.js";
+import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "./attachmentrow.js";
@@ -564,13 +566,16 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
   );
 }
 
-function MessageBody({
+export function MessageBody({
   entry,
   homeDir,
   background,
+  chips = false,
 }: {
   entry: TimelineEntry;
   homeDir: string | undefined;
+  /** A person's message: its attachment chips are drawn filled, as in the composer. */
+  chips?: boolean;
   /** The card background behind this body — must match the caller's own
       background so the blank separator and image row never seam against it. */
   background: string;
@@ -579,17 +584,34 @@ function MessageBody({
 
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }}>
-      {rendered.text.length === 0 ? null : (
-        <markdown
-          content={rendered.text}
-          fg={COLOR.text}
-          syntaxStyle={syntaxStyle()}
-          streaming={entry.streaming}
-          // `<markdown>` defaults to non-selectable like every Renderable —
-          // message bodies are exactly the content a user drags to copy.
-          selectable
-        />
-      )}
+      {rendered.text.length === 0
+        ? null
+        : (chips ? splitChipBlocks(rendered.text) : [{ kind: "markdown" as const, text: rendered.text }]).map((block, index) =>
+            block.kind === "chips" ? (
+              <text key={index} fg={COLOR.text} wrapMode="word" selectable>
+                {chipSegments(block.text).map((segment, at) =>
+                  segment.chip ? (
+                    <span key={at} fg={PICK_FG} bg={PICK_BG} attributes={TextAttributes.BOLD}>
+                      {segment.text}
+                    </span>
+                  ) : (
+                    segment.text
+                  ),
+                )}
+              </text>
+            ) : (
+              <markdown
+                key={index}
+                content={block.text}
+                fg={COLOR.text}
+                syntaxStyle={syntaxStyle()}
+                streaming={entry.streaming}
+                // `<markdown>` defaults to non-selectable like every Renderable —
+                // message bodies are exactly the content a user drags to copy.
+                selectable
+              />
+            ),
+          )}
       {rendered.images.length === 0 ? null : (
         <box style={{ flexDirection: "column", flexShrink: 0 }}>
           <box style={{ height: 1, flexShrink: 0 }} backgroundColor={background} />
@@ -941,7 +963,7 @@ function PromptBlock({
         background={SURFACE.user}
       />
       <box style={{ height: 1, flexShrink: 0 }} backgroundColor={SURFACE.user} />
-      <MessageBody entry={entry} homeDir={homeDir} background={SURFACE.user} />
+      <MessageBody entry={entry} homeDir={homeDir} background={SURFACE.user} chips />
     </box>
   );
 }
