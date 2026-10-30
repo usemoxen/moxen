@@ -5,6 +5,8 @@
  * Pure, so the splitting is tested without a terminal.
  */
 
+import { isLocalPath } from "../../core/threads/uiblock.js";
+
 const CHIP = /\[Image #?\d+\]|⟦Image#\d+⟧|\[(?:📄|📁) [^\]\n]+\]\((?:<[^>\n]*>|[^)\s]*)\)/gu;
 const PATH_CHIP = /^\[((?:📄|📁) [^\]\n]+)\]\(.*\)$/u;
 
@@ -77,11 +79,6 @@ export function splitChipBlocks(text: string): Block[] {
 const REPLY_IMAGE_LINE = /^\s*!\[([^\]\n]*)\]\(([^)\s]+)\)\s*$/u;
 
 export type ReplyBlock = { kind: "markdown"; text: string } | { kind: "image"; alt: string; path: string };
-
-/** True for a path on this machine: not a URL (`https:`, `data:`, `moxen-context:`) whose bytes are not the server's to read. */
-function isLocalPath(target: string): boolean {
-  return !/^[a-z][a-z0-9+.-]*:\/\//iu.test(target) && !/^(?:data|moxen-context|mailto):/iu.test(target);
-}
 
 /**
  * A reply cut at the lines that show an image, each its own block, outside

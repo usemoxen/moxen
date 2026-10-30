@@ -1,0 +1,125 @@
+import { describe, expect, it } from "vitest";
+
+import { UI_BLOCK_LIMITS, parseUiBlock, splitUiBlocks } from "../uiblock.js";
+
+const image = (src = "/tmp/a.png", extra: Record<string, unknown> = {}) => ({ type: "image", src, ...extra });
+const block = (root: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({ v: 1, root, ...extra });
+const fenced = (json: string, fence = "```") => `${fence}moxen-ui\n${json}\n${fence}`;
+
+describe("parseUiBlock", () => {
+  it("reads a row of two images with weights, captions and defaults filled in", () => {
+    expect(
+      parseUiBlock(block({ type: "row", children: [image("/a.png", { caption: "Before", weight: 2 }), image("/b.png", { alt: "after" })] })),
+    ).toEqual({
+      v: 1,
+      root: {
+        type: "row",
+        gap: 1,
+        children: [
+          { type: "image", src: "/a.png", alt: "", caption: "Before", ops: [], weight: 2 },
+          { type: "image", src: "/b.png", alt: "after", ops: [] },
+        ],
+      },
+    });
+  });
+
+  it("nests a grid in a column and keeps a span", () => {
+    const parsed = parseUiBlock(
+      block({ type: "column", children: [{ type: "text", text: "Four shots" }, { type: "grid", columns: 2, children: [image("/a.png", { span: 2 }), image("/b.png")] }] }),
+    );
+    expect(parsed?.root).toMatchObject({ type: "column", children: [{ type: "text" }, { type: "grid", columns: 2, children: [{ span: 2 }, {}] }] });
+  });
+
+  it("ignores fields it does not know, so a later version can add one", () => {
+    expect(parseUiBlock(block(image("/a.png", { future: true }), { note: "x" }))?.root).toMatchObject({ type: "image", src: "/a.png" });
+  });
+
+  it.each([
+    ["not JSON", "{ nope"],
+    ["a newer version", block(image(), { v: 2 })],
+    ["no version", JSON.stringify({ root: image() })],
+    ["an unknown node type", block({ type: "carousel", children: [image()] })],
+    ["a container with no children", block({ type: "row", children: [] })],
+    ["a grid child wider than the grid", block({ type: "grid", columns: 2, children: [image("/a.png", { span: 3 })] })],
+    ["a weight of zero", block({ type: "row", children: [image("/a.png", { weight: 0 })] })],
+    ["an image from a URL", block(image("https://example.com/a.png"))],
+    ["an image from a data URL", block(image("data:image/png;base64,AAAA"))],
+    ["an image with no path", block(image("  "))],
+    ["an operation with no name", block(image("/a.png", { ops: [{ x: 1 }] }))],
+  ])("is not a block for %s", (_name, json) => {
+    expect(parseUiBlock(json)).toBeNull();
+  });
+
+  describe("caps", () => {
+    const row = (children: unknown[]) => ({ type: "row", children });
+    const nested = (depth: number): unknown => (depth <= 1 ? image() : row([nested(depth - 1)]));
+
+    it("allows the deepest nesting and refuses one level more", () => {
+      expect(parseUiBlock(block(nested(UI_BLOCK_LIMITS.depth)))).not.toBeNull();
+      expect(parseUiBlock(block(nested(UI_BLOCK_LIMITS.depth + 1)))).toBeNull();
+    });
+
+    it("refuses more images than the cap, and more nodes than the cap", () => {
+      const images = (count: number) => Array.from({ length: count }, (_, at) => image(`/${at}.png`));
+      const many = (count: number) => block({ type: "column", children: [row(images(count)), row(images(count))] });
+      expect(parseUiBlock(block(row(images(UI_BLOCK_LIMITS.images))))).not.toBeNull();
+      expect(parseUiBlock(block(row(images(UI_BLOCK_LIMITS.images + 1))))).toBeNull();
+      // Two rows of eight images pass the node cap but not the image cap; a tall tree of texts is the node cap.
+      expect(parseUiBlock(many(UI_BLOCK_LIMITS.images))).toBeNull();
+      const texts = Array.from({ length: UI_BLOCK_LIMITS.nodes }, () => ({ type: "text", text: "x" }));
+      const chunks = [0, 1, 2, 3].map((at) => row(texts.slice(at * 10, at * 10 + 10)));
+      expect(parseUiBlock(block({ type: "column", children: chunks }))).toBeNull();
+    });
+
+    it("refuses more children than one container may hold", () => {
+      const texts = Array.from({ length: UI_BLOCK_LIMITS.children + 1 }, () => ({ type: "text", text: "x" }));
+      expect(parseUiBlock(block(row(texts)))).toBeNull();
+    });
+
+    it("refuses a block over the size cap, and a text over the text cap", () => {
+      expect(parseUiBlock(block(image("/a.png", { caption: "x".repeat(UI_BLOCK_LIMITS.bytes) })))).toBeNull();
+      expect(parseUiBlock(block({ type: "text", text: "x".repeat(UI_BLOCK_LIMITS.text + 1) }))).toBeNull();
+    });
+  });
+});
+
+describe("splitUiBlocks", () => {
+  const pair = block({ type: "row", children: [image("/a.png"), image("/b.png")] });
+
+  it("returns text with no block as one markdown segment, untouched", () => {
+    expect(splitUiBlocks("Just prose.\n\n```ts\nconst a = 1;\n```")).toEqual([{ kind: "markdown", text: "Just prose.\n\n```ts\nconst a = 1;\n```" }]);
+  });
+
+  it("cuts a block out of the text around it, keeping every other line", () => {
+    const segments = splitUiBlocks(`Before.\n\n${fenced(pair)}\n\nAfter.`);
+    expect(segments.map((segment) => segment.kind)).toEqual(["markdown", "ui", "markdown"]);
+    expect(segments[0]).toEqual({ kind: "markdown", text: "Before.\n" });
+    expect(segments[2]).toEqual({ kind: "markdown", text: "\nAfter." });
+  });
+
+  it("reads two blocks in one reply, and a longer fence or a ~~~ fence", () => {
+    const segments = splitUiBlocks(`${fenced(pair, "````")}\nbetween\n${fenced(pair, "~~~")}`);
+    expect(segments.map((segment) => segment.kind)).toEqual(["ui", "markdown", "ui"]);
+  });
+
+  it("leaves a block that is not valid as the code it is, closing fence included", () => {
+    const bad = fenced("{ nope");
+    const text = `Look:\n${bad}\nStill here.`;
+    expect(splitUiBlocks(text)).toEqual([{ kind: "markdown", text }]);
+  });
+
+  it("leaves a block that is still streaming as code, and keeps the text after it out of a block", () => {
+    const open = `Look:\n\`\`\`moxen-ui\n{"v":1,"root":`;
+    expect(splitUiBlocks(open)).toEqual([{ kind: "markdown", text: open }]);
+  });
+
+  it("does not take a moxen-ui fence shown inside another code fence for a block", () => {
+    const example = `\`\`\`\`markdown\n${fenced(pair)}\n\`\`\`\`\nDone.`;
+    expect(splitUiBlocks(example)).toEqual([{ kind: "markdown", text: example }]);
+  });
+
+  it("does not take a moxen-ui block whose fence closes with a shorter one for closed", () => {
+    const text = `\`\`\`\`moxen-ui\n${pair}\n\`\`\`\nmore`;
+    expect(splitUiBlocks(text)).toEqual([{ kind: "markdown", text }]);
+  });
+});
