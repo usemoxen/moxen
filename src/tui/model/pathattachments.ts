@@ -38,7 +38,9 @@ export function promptWithPaths(prompt: string, items: readonly PathAttachment[]
   let out = prompt;
   // Longest label first: ` 📄 a.py ` is the start of ` 📄 a.py (2) `.
   for (const item of [...items].sort((a, b) => b.label.length - a.label.length)) {
-    out = out.replace(item.label, () => `[${item.label.trim()}](${linkDestination(item.path)})`);
+    const link = () => `[${item.label.trim()}](${linkDestination(item.path)})`;
+    // The padding is the chip's own, but a draft is trimmed before it is sent: a chip first or last in it has lost its outer space.
+    out = out.includes(item.label) ? out.replace(item.label, link) : out.replace(item.label.trim(), link);
   }
   return out;
 }

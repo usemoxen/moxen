@@ -28,6 +28,12 @@ describe("paths in the prompt", () => {
     expect(promptWithPaths("Compare  📄 b c.txt (2)  with  📄 b c.txt  in  📁 src ", items)).toBe("Compare [📄 b c.txt (2)](</z/b c.txt>) with [📄 b c.txt](</a/b c.txt>) in [📁 src](/a/src)");
   });
 
+  it("still finds a chip at the very start or end of a trimmed draft, where its padding is gone", () => {
+    const items = addPaths([], [{ path: "/a/binaural.py", kind: "file" }, { path: "/a/out2", kind: "folder" }]);
+    expect(promptWithPaths("📄 binaural.py  - just testing", items)).toBe("[📄 binaural.py](/a/binaural.py)  - just testing");
+    expect(promptWithPaths("look at  📁 out2", items)).toBe("look at  [📁 out2](/a/out2)");
+  });
+
   it("does not attach a path twice", () => {
     const first = addPaths([], [{ path: "/a", kind: "folder" }]);
     expect(addPaths(first, [{ path: "/a", kind: "folder" }, { path: "/b", kind: "file" }, { path: "/b", kind: "file" }]).map((item) => item.path)).toEqual(["/a", "/b"]);
