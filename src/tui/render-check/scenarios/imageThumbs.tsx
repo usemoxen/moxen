@@ -124,6 +124,7 @@ export async function runImageThumbs(): Promise<void> {
   await runReplyImage(png);
   await runUiBlock(png);
   await runImageOps();
+  await runUiData();
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -538,4 +539,49 @@ async function runImageOps(): Promise<void> {
   console.log(frame);
   for (const caption of ["Cropped", "Marked", "What changed"]) if (!frame.includes(caption)) fail(`the block's "${caption}" picture is not drawn`);
   if (frame.includes("could not be drawn") || frame.includes("not found")) fail("a picture of the block failed to draw");
+}
+
+/** A bar chart and a progress row in a block: bars scaled to the largest, values on the right, and the label above the bar in a pane too narrow to share. */
+async function runUiData(): Promise<void> {
+  resetModalOpen();
+  const block = JSON.stringify({
+    v: 1,
+    root: {
+      type: "column",
+      children: [
+        { type: "chart", kind: "bar", title: "Tokens", unit: "k", bars: [{ label: "input", value: 120 }, { label: "output", value: 30 }, { label: "cache", value: 0 }] },
+        { type: "progress", label: "Tests", value: 0.5, text: "45 of 90" },
+        { type: "progress", label: "Integration suites across every provider", value: 1 },
+      ],
+    },
+  });
+  const draw = async (width: number) => {
+    const setup = await testRender(
+      <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+        <MessageBody entry={{ text: `\`\`\`moxen-ui\n${block}\n\`\`\``, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+      </box>,
+      { width, height: 12, exitOnCtrlC: false },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await setup.flush();
+    });
+    return setup.captureCharFrame().split("\n");
+  };
+  const wide = await draw(60);
+  console.log("--- moxen-ui block: a chart and progress rows ---");
+  console.log(wide.join("\n"));
+  const row = (lines: string[], needle: string) => lines.find((line) => line.includes(needle)) ?? fail(`no row with "${needle}"`);
+  if (!row(wide, "input").includes("120k") || !row(wide, "output").includes("30k")) fail("a chart row does not show its value on the right");
+  const barOf = (line: string) => [...line].filter((char) => "█▏▎▍▌▋▊▉".includes(char)).length;
+  if (barOf(row(wide, "input")) <= barOf(row(wide, "output")) * 3) fail("a bar four times as large is not about four times as long");
+  if (barOf(row(wide, "cache")) !== 0) fail("a zero value draws a bar");
+  if (!row(wide, "Tests").includes("50%") || !row(wide, "Tests").includes("45 of 90")) fail("a progress row does not show its percentage and its words");
+  if (!wide.some((line) => line.trim() === "Integration suites across every provider")) fail("a long progress label should sit above its bar, whole");
+  if (!row(wide, "100%").includes("█")) fail("a full progress bar is not full");
+
+  const narrow = await draw(16);
+  console.log("--- moxen-ui block: a chart in a narrow pane ---");
+  console.log(narrow.join("\n"));
+  if (row(narrow, "input").includes("120k")) fail("a chart too narrow for its values should drop them before the bars");
 }

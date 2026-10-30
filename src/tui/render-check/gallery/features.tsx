@@ -5,6 +5,7 @@ import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
+import { ChartView, ProgressView } from "../../features/timeline/uidataview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
 import { encodeRgbaPng } from "../../model/imageshrink.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
@@ -86,6 +87,15 @@ const UI_OPS = uiBlock({
         image("before", "Padded to a square", { ops: [{ op: "pad", aspect: 1 }] }),
       ],
     },
+  ],
+});
+const UI_DATA = uiBlock({
+  type: "column",
+  children: [
+    { type: "chart", kind: "bar", title: "Tokens this week", unit: "k", bars: [{ label: "input", value: 120, color: "blue" }, { label: "output", value: 34.5, color: "green" }, { label: "cache reads", value: 310 }, { label: "thinking", value: 8, color: "yellow" }, { label: "errors", value: 0, color: "red" }] },
+    { type: "progress", label: "Tests", value: 0.42, text: "38 of 90" },
+    { type: "progress", label: "Type check", value: 1, color: "green" },
+    { type: "progress", label: "Integration suites across every provider", value: 0.7, color: "yellow" },
   ],
 });
 const SCROLL = { current: null };
@@ -678,6 +688,56 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     drive: async () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 600)));
     },
+  },
+  {
+    id: "ui-block-data",
+    group: "timeline",
+    title: "UiBlockView, a bar chart and progress rows",
+    width: 76,
+    height: 14,
+    element: () => (
+      <Stage width={76} height={14}>
+        <UiBlockView block={UI_DATA} />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-block-data-narrow",
+    group: "timeline",
+    title: "UiBlockView, a bar chart and progress rows in a narrow pane",
+    width: 30,
+    height: 16,
+    element: () => (
+      <Stage width={30} height={16}>
+        <UiBlockView block={UI_DATA} />
+      </Stage>
+    ),
+  },
+  {
+    id: "chart-view",
+    group: "timeline",
+    title: "ChartView, bars with their values (a value past max, one at zero, no title)",
+    width: 60,
+    height: 6,
+    element: () => (
+      <Stage width={60} height={6}>
+        <ChartView max={100} bars={[{ label: "past max", value: 140, color: "red" }, { label: "half", value: 50, color: "green" }, { label: "sliver", value: 0.4 }, { label: "zero", value: 0 }]} columns={60} />
+      </Stage>
+    ),
+  },
+  {
+    id: "progress-view",
+    group: "timeline",
+    title: "ProgressView, empty, part way and full, with words and without",
+    width: 60,
+    height: 7,
+    element: () => (
+      <Stage width={60} height={7}>
+        <ProgressView label="Queued" value={0} columns={60} />
+        <ProgressView label="Part way" value={0.37} text="37 of 100" color="yellow" columns={60} />
+        <ProgressView label="Done" value={1} color="green" columns={60} />
+      </Stage>
+    ),
   },
   {
     id: "ui-block-narrow",

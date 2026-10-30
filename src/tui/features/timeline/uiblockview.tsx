@@ -5,6 +5,7 @@ import { useMeasuredWidth } from "../../hooks/useMeasuredWidth.js";
 import { gridCellWidth, gridColumnsThatFit, splitColumns } from "../../model/uilayout.js";
 import { COLOR } from "../../theme.js";
 import { BlendedImage, ReplyImage } from "./replyimage.js";
+import { ChartView, ProgressView } from "./uidataview.js";
 
 /** The widest a block is drawn, pane permitting, and what a first frame assumes the pane and its gutter take from the screen. */
 const MAX_BLOCK_COLUMNS = 100;
@@ -33,6 +34,10 @@ function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
       return <ReplyImage path={node.src} alt={node.alt} caption={node.caption} maxColumns={columns} ops={node.ops} fill />;
     case "blend":
       return <BlendedImage a={node.a} b={node.b} mode={node.mode} opacity={node.opacity} caption={node.caption} maxColumns={columns} fill />;
+    case "chart":
+      return <ChartView title={node.title} unit={node.unit} max={node.max} bars={node.bars} columns={columns} />;
+    case "progress":
+      return <ProgressView label={node.label} value={node.value} text={node.text} color={node.color} columns={columns} />;
     case "text":
       return (
         <text fg={COLOR.text} wrapMode="word" selectable>
