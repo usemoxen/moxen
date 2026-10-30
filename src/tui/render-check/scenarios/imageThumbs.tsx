@@ -125,6 +125,7 @@ export async function runImageThumbs(): Promise<void> {
   await runUiBlock(png);
   await runImageOps();
   await runUiData();
+  await runUiFacts();
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -584,4 +585,50 @@ async function runUiData(): Promise<void> {
   console.log("--- moxen-ui block: a chart in a narrow pane ---");
   console.log(narrow.join("\n"));
   if (row(narrow, "input").includes("120k")) fail("a chart too narrow for its values should drop them before the bars");
+}
+
+/** A key-value list and a status grid in a block: keys aligned, values wrapping, each state's own mark, and stacked in a pane too narrow to share. */
+async function runUiFacts(): Promise<void> {
+  resetModalOpen();
+  const block = JSON.stringify({
+    v: 1,
+    root: {
+      type: "column",
+      children: [
+        { type: "keyvalue", title: "Branch", rows: [{ key: "name", value: "main" }, { key: "last commit", value: "a long subject line that has to wrap inside its own column" }] },
+        { type: "status", title: "Checks", rows: [{ label: "typecheck", state: "done", note: "2.1s" }, { label: "tests", state: "live", note: "running" }, { label: "deploy", state: "held" }, { label: "gallery", state: "broken", note: "a component" }, { label: "docs", state: "next" }] },
+      ],
+    },
+  });
+  const draw = async (width: number) => {
+    const setup = await testRender(
+      <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+        <MessageBody entry={{ text: `\`\`\`moxen-ui\n${block}\n\`\`\``, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+      </box>,
+      { width, height: 18, exitOnCtrlC: false },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await setup.flush();
+    });
+    return setup.captureCharFrame().split("\n");
+  };
+  const row = (lines: string[], needle: string) => lines.find((line) => line.includes(needle)) ?? fail(`no row with "${needle}"`);
+  const wide = await draw(50);
+  console.log("--- moxen-ui block: a key-value list and a status grid ---");
+  console.log(wide.join("\n"));
+  if (row(wide, "name").indexOf("main") !== row(wide, "last commit").indexOf("a long subject")) fail("the values of a key-value list do not line up");
+  if (wide.filter((line) => line.includes("subject line") || line.includes("inside its own column")).length < 2) fail("a long value did not wrap inside its column");
+  for (const [label, glyph] of [["typecheck", "✓"], ["tests", "●"], ["deploy", "○"], ["gallery", "!"], ["docs", "☐"]] as const) {
+    if (!row(wide, label).includes(`${glyph} ${label}`)) fail(`"${label}" does not carry its state's mark ${glyph}`);
+  }
+  if (!row(wide, "typecheck").includes("2.1s")) fail("a status note is not on its label's row");
+
+  const narrow = await draw(16);
+  console.log("--- moxen-ui block: stacked in a narrow pane ---");
+  console.log(narrow.join("\n"));
+  const at = narrow.findIndex((line) => line.trim() === "last commit");
+  if (at === -1 || !narrow[at + 1]!.includes("a long")) fail("a key should stand above its value in a pane too narrow to share");
+  const gallery = narrow.findIndex((line) => line.includes("! gallery"));
+  if (gallery === -1 || !narrow[gallery + 1]!.includes("a component")) fail("a note should go under its label in a pane too narrow for it beside");
 }

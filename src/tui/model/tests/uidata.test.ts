@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { barCells, chartLayout, fit, formatValue, progressLayout } from "../uidata.js";
+import { barCells, chartLayout, fit, formatValue, keyValueLayout, progressLayout, STATE_GLYPH, statusLayout } from "../uidata.js";
 
 describe("barCells", () => {
   it.each([
@@ -98,5 +98,37 @@ describe("progressLayout", () => {
   it("clamps what is out of range", () => {
     expect(progressLayout("x", 0, undefined, 40).right).toBe("0%");
     expect(progressLayout("x", 0, undefined, 40).bar).toBe("");
+  });
+});
+
+describe("keyValueLayout", () => {
+  it("aligns the keys on the longest and gives the values the rest", () => {
+    expect(keyValueLayout(["branch", "last commit"], 60)).toEqual({ keyWidth: 11, valueWidth: 47, stacked: false });
+  });
+
+  it("keeps the key column to 40% of the width, so the values keep their room", () => {
+    expect(keyValueLayout(["a key that is far too long to be a column"], 50)).toEqual({ keyWidth: 20, valueWidth: 28, stacked: false });
+  });
+
+  it("stacks every key above its value when the values would get under 12 cells", () => {
+    expect(keyValueLayout(["branch"], 19)).toEqual({ keyWidth: 19, valueWidth: 19, stacked: true });
+    expect(keyValueLayout(["branch"], 20).stacked).toBe(false);
+  });
+});
+
+describe("statusLayout", () => {
+  it("gives the label column the longest label and the note the rest of the row", () => {
+    expect(statusLayout(["build", "deploy to staging"], 60)).toEqual({ labelWidth: 17, noteWidth: 60 - 2 - 17 - 2 });
+  });
+
+  it("moves notes below their labels when they would get under 8 cells", () => {
+    expect(statusLayout(["build", "deploy"], 16)).toEqual({ labelWidth: 6, noteWidth: 0 });
+    expect(statusLayout(["build", "deploy"], 18).noteWidth).toBe(8);
+    expect(statusLayout(["a label long enough to take half the row and more"], 40).labelWidth).toBe(19);
+  });
+
+  it("marks each of the five states with one cell, the marks the sidebar and the tasks panel use", () => {
+    expect(Object.values(STATE_GLYPH).map((glyph) => [...glyph].length)).toEqual([1, 1, 1, 1, 1]);
+    expect(STATE_GLYPH).toEqual({ live: "●", held: "○", broken: "!", next: "☐", done: "✓" });
   });
 });

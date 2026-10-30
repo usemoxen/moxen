@@ -112,3 +112,36 @@ export function progressLayout(label: string, value: number, text: string | unde
   const alone = Math.max(1, columns - shown.length - 1);
   return { stackedLabel: fit(label, columns), label: "", labelWidth: 0, bar: barCells(value, alone), barWidth: alone, right: shown };
 }
+
+/** The fewest cells a value is given beside its key before the key moves above it. */
+export const MIN_VALUE_COLUMNS = 12;
+
+export interface KeyValueLayout {
+  keyWidth: number;
+  valueWidth: number;
+  /** The key on a line of its own above its value, when the row is too narrow to share. */
+  stacked: boolean;
+}
+
+/** A key-value list in `columns` cells: keys in an aligned column (the longest, up to 40%), values beside them, wrapping; stacked when the values would be too narrow. */
+export function keyValueLayout(keys: readonly string[], columns: number): KeyValueLayout {
+  const keyWidth = Math.min(Math.max(...keys.map((key) => key.length)), Math.floor(columns * 0.4));
+  const valueWidth = columns - keyWidth - 2;
+  return valueWidth >= MIN_VALUE_COLUMNS ? { keyWidth, valueWidth, stacked: false } : { keyWidth: columns, valueWidth: columns, stacked: true };
+}
+
+/** The mark for each of the five states, the ones the sidebar and the tasks panel already use: running, waiting, failed, open, done. */
+export const STATE_GLYPH = { live: "●", held: "○", broken: "!", next: "☐", done: "✓" } as const;
+
+export interface StatusLayout {
+  labelWidth: number;
+  /** The width left for a note beside its label; 0 when notes go on a line of their own below. */
+  noteWidth: number;
+}
+
+/** A status grid in `columns` cells: `✓ label  note`, the label column the longest label (up to half the width); a note that would get under 8 cells goes below its label. */
+export function statusLayout(labels: readonly string[], columns: number): StatusLayout {
+  const labelWidth = Math.min(Math.max(...labels.map((label) => label.length)), Math.floor((columns - 2) / 2));
+  const noteWidth = columns - 2 - labelWidth - 2;
+  return { labelWidth, noteWidth: noteWidth >= 8 ? noteWidth : 0 };
+}

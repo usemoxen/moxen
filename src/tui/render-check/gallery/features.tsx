@@ -5,7 +5,7 @@ import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
-import { ChartView, ProgressView } from "../../features/timeline/uidataview.js";
+import { ChartView, KeyValueView, ProgressView, StatusView } from "../../features/timeline/uidataview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
 import { encodeRgbaPng } from "../../model/imageshrink.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
@@ -96,6 +96,14 @@ const UI_DATA = uiBlock({
     { type: "progress", label: "Tests", value: 0.42, text: "38 of 90" },
     { type: "progress", label: "Type check", value: 1, color: "green" },
     { type: "progress", label: "Integration suites across every provider", value: 0.7, color: "yellow" },
+  ],
+});
+const UI_FACTS = uiBlock({
+  type: "row",
+  gap: 3,
+  children: [
+    { type: "keyvalue", title: "Branch", rows: [{ key: "name", value: "arrrnmp/mxn-187" }, { key: "last commit", value: "Draw key-value lists and status grids in moxen-ui blocks, with the five states' own marks" }, { key: "changed", value: "9 files, +310 −4" }] },
+    { type: "status", title: "Checks", rows: [{ label: "typecheck", state: "done", note: "2.1s" }, { label: "tests", state: "live", note: "1,420 of 2,107" }, { label: "render-check", state: "held", note: "waiting on the tests" }, { label: "deploy", state: "next" }, { label: "gallery", state: "broken", note: "a component was not drawn" }] },
   ],
 });
 const SCROLL = { current: null };
@@ -736,6 +744,54 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         <ProgressView label="Queued" value={0} columns={60} />
         <ProgressView label="Part way" value={0.37} text="37 of 100" color="yellow" columns={60} />
         <ProgressView label="Done" value={1} color="green" columns={60} />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-block-facts",
+    group: "timeline",
+    title: "UiBlockView, a key-value list beside a status grid",
+    width: 90,
+    height: 9,
+    element: () => (
+      <Stage width={90} height={9}>
+        <UiBlockView block={UI_FACTS} />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-block-facts-narrow",
+    group: "timeline",
+    title: "UiBlockView, a key-value list and a status grid in a narrow pane (stacked)",
+    width: 30,
+    height: 20,
+    element: () => (
+      <Stage width={30} height={20}>
+        <UiBlockView block={uiBlock({ type: "column", children: UI_FACTS.root.type === "row" ? UI_FACTS.root.children : [] })} />
+      </Stage>
+    ),
+  },
+  {
+    id: "key-value-view",
+    group: "timeline",
+    title: "KeyValueView, keys aligned with values that wrap",
+    width: 50,
+    height: 6,
+    element: () => (
+      <Stage width={50} height={6}>
+        <KeyValueView rows={[{ key: "model", value: "Claude Opus 5" }, { key: "effort", value: "high" }, { key: "worktree", value: "/Users/aaron/Documents/t3code-cli/.moxen/worktrees/mxn-187" }]} columns={50} />
+      </Stage>
+    ),
+  },
+  {
+    id: "status-view",
+    group: "timeline",
+    title: "StatusView, each of the five states, with and without a note",
+    width: 50,
+    height: 6,
+    element: () => (
+      <Stage width={50} height={6}>
+        <StatusView rows={[{ label: "live", state: "live", note: "running now" }, { label: "held", state: "held", note: "waiting on you" }, { label: "broken", state: "broken", note: "failed after 3 tries" }, { label: "next", state: "next" }, { label: "done", state: "done", note: "38s" }]} columns={50} />
       </Stage>
     ),
   },
