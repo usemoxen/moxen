@@ -209,6 +209,8 @@ export function Composer({
   onCopyClick,
   onExternalEditClick,
   onAttachClick,
+  pathAttachments,
+  onPathRemoved,
   editingExternally,
   submitVerb,
   running,
@@ -272,6 +274,13 @@ export function Composer({
   onExternalEditClick?: () => void;
   /** Opens the OS dialog to attach files and folders: their paths go in the prompt. First control of the bottom row. */
   onAttachClick?: () => void;
+  /**
+   * The files and folders attached to the draft. Each shows in the draft as a
+   * chip (its label) where it was attached, like an image's token, and goes out
+   * as its path in that place; deleting the chip detaches it.
+   */
+  pathAttachments?: readonly { id: string; label: string }[];
+  onPathRemoved?: (id: string) => void;
   /** The draft is open in the external editor — textarea unfocuses and hints pause. */
   editingExternally?: boolean;
   submitVerb: "creates" | "sends";
@@ -331,6 +340,20 @@ export function Composer({
   /** Each pending image's token in the draft: its extmark and label, by attachment name. */
   const tokens = useRef(new Map<string, { id: number; label: string }>());
   const tokenType = useRef<number | null>(null);
+  /** The same for each attached file or folder, by its id (the path). */
+  const pathTokens = useRef(new Map<string, { id: number; label: string }>());
+  const markPathToken = (node: TextareaRenderable, id: string, label: string, start: number) => {
+    tokenType.current ??= node.extmarks.registerType("image-token");
+    const styleId = imageTokenStyle().getStyleId("extmark.image");
+    const mark = node.extmarks.create({
+      start,
+      end: start + label.length,
+      virtual: true,
+      typeId: tokenType.current,
+      ...(styleId === null ? {} : { styleId }),
+    });
+    pathTokens.current.set(id, { id: mark, label });
+  };
   const markToken = (node: TextareaRenderable, name: string, label: string, start: number) => {
     tokenType.current ??= node.extmarks.registerType("image-token");
     const styleId = imageTokenStyle().getStyleId("extmark.image");
@@ -473,8 +496,15 @@ export function Composer({
     // image its token back (the rest are placed at the next attach pass).
     node.extmarks.clear();
     tokens.current.clear();
+    pathTokens.current.clear();
     commandMark.current = null;
     for (const span of pairImageTokens(draft, attachments ?? []).paired) markToken(node, span.name, span.label, span.start);
+    // A restored draft reads a path chip as plain text too; one whose chip is no longer in it (the draft was cleared) is detached.
+    for (const attached of pathAttachments ?? []) {
+      const at = draft.indexOf(attached.label);
+      if (at === -1) onPathRemoved?.(attached.id);
+      else markPathToken(node, attached.id, attached.label, at);
+    }
     markCommand(node);
     // `draft` is read at the moment `resetKey` changes, not tracked as its
     // own dependency — see the `resetKey` doc comment above. `external` is a
@@ -504,6 +534,26 @@ export function Composer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachmentKey]);
+
+  // A newly attached file or folder gets its chip at the cursor; one no longer attached lets go of it.
+  const pathKey = (pathAttachments ?? []).map((attached) => attached.id).join("\n");
+  useEffect(() => {
+    const node = areaRef.current;
+    if (node === null) return;
+    const wanted = pathAttachments ?? [];
+    for (const [id, token] of [...pathTokens.current]) {
+      if (wanted.some((attached) => attached.id === id)) continue;
+      node.extmarks.delete(token.id);
+      pathTokens.current.delete(id);
+    }
+    for (const attached of wanted) {
+      if (pathTokens.current.has(attached.id)) continue;
+      const start = node.cursorOffset;
+      node.insertText(`${attached.label} `);
+      markPathToken(node, attached.id, attached.label, start);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathKey]);
 
   const [skillTrigger, setSkillTrigger] = useState<SkillTrigger | null>(null);
   const [skillIndex, setSkillIndex] = useState(0);
@@ -604,6 +654,11 @@ export function Composer({
         if (node.extmarks.get(token.id) !== null) continue;
         tokens.current.delete(name);
         onAttachmentRemoved?.(name);
+      }
+      for (const [id, token] of [...pathTokens.current]) {
+        if (node.extmarks.get(token.id) !== null) continue;
+        pathTokens.current.delete(id);
+        onPathRemoved?.(id);
       }
     }
     if (skills === undefined) return;

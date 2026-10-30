@@ -9,7 +9,7 @@ const TOAST_MS = 4_000;
 
 /**
  * Files and folders chosen with the OS dialog, kept per thread (as pending
- * images are) until the message goes out with their paths in its prompt.
+ * images are). Each is a chip in the draft; the message goes out with its path in the chip's place.
  */
 export function useFileAttachments(threadId: string | null, toasts: ReturnType<typeof useToasts>, enabled: boolean) {
   const [byThread, setByThread] = useState<Record<string, PathAttachment[]>>({});

@@ -14,27 +14,28 @@ describe("paths in the prompt", () => {
     expect(quotePath("C:\\Users\\me\\My Docs")).toBe('"C:\\Users\\me\\My Docs"');
   });
 
-  it("lists the attached paths after the prompt, kind first, and changes nothing without any", () => {
+  it("puts each path where its chip stands in the draft, the longer label first", () => {
     expect(promptWithPaths("look", [])).toBe("look");
-    expect(
-      promptWithPaths("look", [
+    const items = addPaths(
+      [],
+      [
         { path: "/a/b c.txt", kind: "file" },
         { path: "/a/src", kind: "folder" },
-      ]),
-    ).toBe('look\n\nAttached paths:\n- file: "/a/b c.txt"\n- folder: /a/src');
+        { path: "/z/b c.txt", kind: "file" },
+      ],
+    );
+    expect(items.map((item) => item.label)).toEqual(["📄 b c.txt", "📁 src", "📄 b c.txt (2)"]);
+    expect(promptWithPaths("Compare 📄 b c.txt (2) with 📄 b c.txt in 📁 src", items)).toBe('Compare "/z/b c.txt" with "/a/b c.txt" in /a/src');
   });
 
   it("does not attach a path twice", () => {
-    const first = [{ path: "/a", kind: "folder" as const }];
-    expect(addPaths(first, [{ path: "/a", kind: "folder" }, { path: "/b", kind: "file" }, { path: "/b", kind: "file" }])).toEqual([
-      { path: "/a", kind: "folder" },
-      { path: "/b", kind: "file" },
-    ]);
+    const first = addPaths([], [{ path: "/a", kind: "folder" }]);
+    expect(addPaths(first, [{ path: "/a", kind: "folder" }, { path: "/b", kind: "file" }, { path: "/b", kind: "file" }]).map((item) => item.path)).toEqual(["/a", "/b"]);
   });
 
   it("names a chip by the last segment, and a root by itself", () => {
-    expect(pathLabel({ path: path.join("x", "y", "report.pdf"), kind: "file" })).toBe("report.pdf");
-    expect(pathLabel({ path: path.parse(process.cwd()).root, kind: "folder" })).toBe(path.parse(process.cwd()).root);
+    expect(pathLabel({ path: path.join("x", "y", "report.pdf") })).toBe("report.pdf");
+    expect(pathLabel({ path: path.parse(process.cwd()).root })).toBe(path.parse(process.cwd()).root);
   });
 });
 

@@ -1,22 +1,55 @@
 import { act, useState } from "react";
 
 import { Composer } from "../../features/composer/composer.js";
-import { PathChips } from "../../features/composer/pathchips.js";
-import type { PathAttachment } from "../../model/pathattachments.js";
+import { addPaths, promptWithPaths, type PathAttachment } from "../../model/pathattachments.js";
 import { fail } from "../helpers.js";
 import { testRender } from "../testrender.js";
 
-/** Attached files and folders show as chips with an icon and a name; the ✕ takes one off in one press. */
+/**
+ * An attached file or folder is a chip in the draft, at the cursor, like an
+ * image's token: the message carries its path in that place, backspace takes
+ * it whole, and "+ attach" leads the bottom row.
+ */
 export async function runPathChips(): Promise<void> {
-  const width = 60;
+  const width = 100;
+  const height = 14;
+  let attach: (items: Array<{ path: string; kind: "file" | "folder" }>) => void = () => {};
+  let latest = "";
+  let removed: string[] = [];
+  let attachClicks = 0;
   function Harness() {
-    const [items, setItems] = useState<PathAttachment[]>([
-      { path: "/Users/me/My Docs/report.pdf", kind: "file" },
-      { path: "/Users/me/projects/moxen", kind: "folder" },
-    ]);
-    return <PathChips items={items} onRemove={(target) => setItems((current) => current.filter((item) => item.path !== target))} width={width} />;
+    const [draft, setDraft] = useState("");
+    const [items, setItems] = useState<PathAttachment[]>([]);
+    attach = (picked) => setItems((current) => addPaths(current, picked));
+    latest = draft;
+    return (
+      <box style={{ flexDirection: "column", width, height, justifyContent: "flex-end" }}>
+        <Composer
+          draft={draft}
+          resetKey="k"
+          onInput={setDraft}
+          onSubmit={() => {}}
+          onEscape={() => {}}
+          onFocus={() => {}}
+          focused
+          placeholder="Message the agent"
+          model="Claude Opus 5"
+          submitVerb="sends"
+          running={false}
+          width={width}
+          permission="Full access"
+          onAttachClick={() => (attachClicks += 1)}
+          pathAttachments={items.map((item) => ({ id: item.path, label: item.label }))}
+          onPathRemoved={(id) => {
+            removed.push(id);
+            setItems((current) => current.filter((item) => item.path !== id));
+          }}
+        />
+        <text>{items.map((item) => item.path).join(",")}</text>
+      </box>
+    );
   }
-  const setup = await testRender(<Harness />, { width, height: 3, exitOnCtrlC: false });
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
   const settle = () =>
     act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -24,54 +57,32 @@ export async function runPathChips(): Promise<void> {
     });
   const rows = () => setup.captureCharFrame().split("\n");
   await settle();
-  console.log("--- path chips ---");
-  console.log(setup.captureCharFrame());
-  const row = rows().findIndex((line) => line.includes("report.pdf"));
-  if (row === -1 || !rows()[row]!.includes("moxen")) fail("the chips did not show both names on a row");
-  if (!rows()[row]!.includes("📄") || !rows()[row]!.includes("📁")) fail("a chip lacks its file or folder icon");
 
-  // The ✕ of the first chip.
-  await act(async () => setup.mockMouse.click(rows()[row]!.indexOf("✕"), row));
+  // "+ attach" leads the bottom row, before the permission, flush with the draft.
+  const bottom = rows().findIndex((line) => line.includes("+ attach"));
+  if (bottom === -1) fail("the composer has no attach button");
+  const draftColumn = rows().find((line) => line.includes("Message the agent"))!.indexOf("Message the agent");
+  if (rows()[bottom]!.indexOf("+ attach") !== draftColumn) fail("the attach button is not left-aligned with the draft");
+  if (rows()[bottom]!.indexOf("+ attach") > rows()[bottom]!.indexOf("Full access")) fail("the attach button is not first in the bottom row");
+  await act(async () => setup.mockMouse.click(draftColumn + 2, bottom));
+  if (attachClicks !== 1) fail("the attach button did not open the dialog");
+
+  // Typed text, then an attachment: its chip lands at the cursor, in the sentence.
+  await act(async () => setup.mockInput.typeText("Look at this file: "));
   await settle();
-  if (rows().some((line) => line.includes("report.pdf"))) fail("pressing ✕ did not take the chip off");
-  if (!rows().some((line) => line.includes("moxen"))) fail("pressing ✕ took off a chip it was not on");
+  await act(async () => attach([{ path: "/Users/me/My Docs/normalize.py", kind: "file" }]));
+  await settle();
+  console.log("--- composer: an attached file is a chip in the draft ---");
+  console.log(setup.captureCharFrame());
+  if (!latest.startsWith("Look at this file: 📄 normalize.py")) fail(`the chip did not land at the cursor: ${JSON.stringify(latest)}`);
+  if (promptWithPaths(latest, [{ path: "/Users/me/My Docs/normalize.py", kind: "file", label: "📄 normalize.py" }]).trim() !== 'Look at this file: "/Users/me/My Docs/normalize.py"') {
+    fail("the message does not carry the path in the chip's place");
+  }
 
-  // The composer's own footer buttons open the dialogs.
-  const clicked: string[] = [];
-  const composerWidth = 100;
-  const footer = await testRender(
-    <box style={{ flexDirection: "column", width: composerWidth, height: 14, justifyContent: "flex-end" }}>
-      <Composer
-        draft=""
-        resetKey="k"
-        onInput={() => {}}
-        onSubmit={() => {}}
-        onEscape={() => {}}
-        onFocus={() => {}}
-        focused
-        placeholder="Message the agent"
-        model="Claude Opus 5"
-        submitVerb="sends"
-        running={false}
-        width={composerWidth}
-        onAttachClick={() => clicked.push("attach")}
-        permission="Full access"
-      />
-    </box>,
-    { width: composerWidth, height: 14, exitOnCtrlC: false },
-  );
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await footer.flush();
-  });
-  console.log("--- composer: attach buttons ---");
-  console.log(footer.captureCharFrame());
-  const lines = footer.captureCharFrame().split("\n");
-  const at = lines.findIndex((line) => line.includes("+ attach"));
-  if (at === -1) fail("the composer has no attach button");
-  // It leads the bottom row, before the permission, flush with the card's text column.
-  if (lines[at]!.indexOf("+ attach") > lines[at]!.indexOf("Full access")) fail("the attach button is not first in the bottom row");
-  if (lines[at]!.indexOf("+ attach") !== lines.find((line) => line.includes("Message the agent"))!.indexOf("Message the agent")) fail("the attach button is not left-aligned with the draft");
-  await act(async () => footer.mockMouse.click(lines[at]!.indexOf("+ attach") + 2, at));
-  if (clicked.length !== 1) fail("the attach button did not open the dialog");
+  // Backspace takes the chip whole and detaches it (the first one is for the space after it).
+  await act(async () => setup.mockInput.pressBackspace());
+  await act(async () => setup.mockInput.pressBackspace());
+  await settle();
+  if (latest.includes("normalize.py")) fail(`backspace left part of the chip: ${JSON.stringify(latest)}`);
+  if (removed.join() !== "/Users/me/My Docs/normalize.py") fail("deleting the chip did not detach the attachment");
 }

@@ -128,7 +128,6 @@ import { openImageExternally } from "../model/imageopen.js";
 import { shrinkImage } from "../model/imageshrink.js";
 import { promptWithPaths } from "../model/pathattachments.js";
 import { useFileAttachments } from "../features/composer/useFileAttachments.js";
-import { PathChips } from "../features/composer/pathchips.js";
 import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
@@ -2758,8 +2757,6 @@ export function App({
           ) : requestPanelVisible ? (
             renderRequestPanel(chatWidth)
           ) : (
-          <>
-          <PathChips items={filePaths.items} onRemove={filePaths.remove} width={chatWidth} />
           <Composer
             draft={draft}
             resetKey={composerResetKey}
@@ -2790,6 +2787,8 @@ export function App({
               if (!editingExternallyRef.current) send(draft, "queue");
             }}
             onAttachClick={attachPaths}
+            pathAttachments={filePaths.items.map((item) => ({ id: item.path, label: item.label }))}
+            onPathRemoved={filePaths.remove}
             onCopyClick={copyDraft}
             onExternalEditClick={editDraftExternally}
             editingExternally={editingExternally}
@@ -2804,7 +2803,6 @@ export function App({
             mode={interaction.mode}
             onCycleMode={interaction.cycleMode}
           />
-          </>
           )}
         </box>
         )}

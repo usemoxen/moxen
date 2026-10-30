@@ -10,6 +10,9 @@ import path from "node:path";
 import { runProcess } from "../../core/infra/process.js";
 import type { PathAttachment } from "./pathattachments.js";
 
+/** What the dialog picked, before it is labelled for the draft. */
+export type PickedPath = Omit<PathAttachment, "label">;
+
 export interface PickerCommand {
   command: string;
   args: string[];
@@ -83,8 +86,8 @@ export function parsePickerOutput(output: string): string[] {
  * path made absolute, its kind read from the disk (a picked file that is
  * gone is dropped, not attached).
  */
-export async function attachmentsFromPaths(paths: readonly string[]): Promise<PathAttachment[]> {
-  const found: PathAttachment[] = [];
+export async function attachmentsFromPaths(paths: readonly string[]): Promise<PickedPath[]> {
+  const found: PickedPath[] = [];
   for (const picked of paths) {
     // Open on the placeholder name picked the folder it was in.
     const absolute = path.basename(picked) === WINDOWS_FOLDER_PLACEHOLDER ? path.resolve(path.dirname(picked)) : path.resolve(picked);
@@ -95,7 +98,7 @@ export async function attachmentsFromPaths(paths: readonly string[]): Promise<Pa
   return found;
 }
 
-export type PickResult = { status: "picked"; items: PathAttachment[] } | { status: "cancelled" } | { status: "unavailable"; reason: string };
+export type PickResult = { status: "picked"; items: PickedPath[] } | { status: "cancelled" } | { status: "unavailable"; reason: string };
 
 /** Opens the dialog and waits for it. Closing it without a pick is `cancelled`, not an error. */
 export async function pickPaths(prompt: string, platform: NodeJS.Platform = process.platform): Promise<PickResult> {
