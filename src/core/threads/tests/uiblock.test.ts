@@ -30,6 +30,24 @@ describe("parseUiBlock", () => {
     expect(parsed?.root).toMatchObject({ type: "column", children: [{ type: "text" }, { type: "grid", columns: 2, children: [{ span: 2 }, {}] }] });
   });
 
+  it("reads image operations in order, with shapes defaulting to red", () => {
+    const ops = [
+      { op: "crop", x: 0.25, y: 0, w: 0.5, h: 0.5 },
+      { op: "pad", aspect: 1.5 },
+      { op: "annotate", shapes: [{ shape: "box", x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, { shape: "arrow", x1: 0, y1: 0, x2: 0.5, y2: 0.5, color: "yellow" }, { shape: "highlight", x: 0.5, y: 0.5, w: 0.5, h: 0.5, color: "green" }] },
+    ];
+    const parsed = parseUiBlock(block(image("/a.png", { ops })));
+    expect(parsed?.root).toMatchObject({ type: "image", ops });
+    expect((parsed!.root as { ops: { shapes?: { color: string }[] }[] }).ops[2]!.shapes!.map((one) => one.color)).toEqual(["red", "yellow", "green"]);
+  });
+
+  it("reads a blend of two images, counting both against the image cap", () => {
+    const parsed = parseUiBlock(block({ type: "blend", mode: "difference", a: image("/a.png"), b: image("/b.png", { ops: [{ op: "pad", aspect: 1 }] }), caption: "What changed" }));
+    expect(parsed?.root).toMatchObject({ type: "blend", mode: "difference", opacity: 0.5, caption: "What changed", a: { src: "/a.png" }, b: { src: "/b.png" } });
+    const blends = Array.from({ length: UI_BLOCK_LIMITS.images / 2 + 1 }, () => ({ type: "blend", mode: "overlay", a: image("/a.png"), b: image("/b.png") }));
+    expect(parseUiBlock(block({ type: "column", children: blends }))).toBeNull();
+  });
+
   it("ignores fields it does not know, so a later version can add one", () => {
     expect(parseUiBlock(block(image("/a.png", { future: true }), { note: "x" }))?.root).toMatchObject({ type: "image", src: "/a.png" });
   });
@@ -46,6 +64,15 @@ describe("parseUiBlock", () => {
     ["an image from a data URL", block(image("data:image/png;base64,AAAA"))],
     ["an image with no path", block(image("  "))],
     ["an operation with no name", block(image("/a.png", { ops: [{ x: 1 }] }))],
+    ["an operation it does not know", block(image("/a.png", { ops: [{ op: "sharpen" }] }))],
+    ["a crop past the image's edge", block(image("/a.png", { ops: [{ op: "crop", x: 0.6, y: 0, w: 0.5, h: 1 }] }))],
+    ["a crop with no area", block(image("/a.png", { ops: [{ op: "crop", x: 0, y: 0, w: 0, h: 1 }] }))],
+    ["a crop in pixels", block(image("/a.png", { ops: [{ op: "crop", x: 10, y: 0, w: 50, h: 20 }] }))],
+    ["a pad to an extreme shape", block(image("/a.png", { ops: [{ op: "pad", aspect: 40 }] }))],
+    ["an annotation with no shapes", block(image("/a.png", { ops: [{ op: "annotate", shapes: [] }] }))],
+    ["an annotation colour it does not know", block(image("/a.png", { ops: [{ op: "annotate", shapes: [{ shape: "box", x: 0, y: 0, w: 0.5, h: 0.5, color: "#ff0000" }] }] }))],
+    ["a blend of something that is not an image", block({ type: "blend", mode: "overlay", a: image("/a.png"), b: { type: "text", text: "x" } })],
+    ["a blend with a mode it does not know", block({ type: "blend", mode: "multiply", a: image("/a.png"), b: image("/b.png") })],
   ])("is not a block for %s", (_name, json) => {
     expect(parseUiBlock(json)).toBeNull();
   });

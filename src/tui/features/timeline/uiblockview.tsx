@@ -4,7 +4,7 @@ import type { UiBlock, UiNode } from "../../../core/threads/uiblock.js";
 import { useMeasuredWidth } from "../../hooks/useMeasuredWidth.js";
 import { gridCellWidth, gridColumnsThatFit, splitColumns } from "../../model/uilayout.js";
 import { COLOR } from "../../theme.js";
-import { ReplyImage } from "./replyimage.js";
+import { BlendedImage, ReplyImage } from "./replyimage.js";
 
 /** The widest a block is drawn, pane permitting, and what a first frame assumes the pane and its gutter take from the screen. */
 const MAX_BLOCK_COLUMNS = 100;
@@ -30,7 +30,9 @@ export function UiBlockView({ block }: { block: UiBlock }) {
 function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
   switch (node.type) {
     case "image":
-      return <ReplyImage path={node.src} alt={node.alt} caption={node.caption} maxColumns={columns} fill />;
+      return <ReplyImage path={node.src} alt={node.alt} caption={node.caption} maxColumns={columns} ops={node.ops} fill />;
+    case "blend":
+      return <BlendedImage a={node.a} b={node.b} mode={node.mode} opacity={node.opacity} caption={node.caption} maxColumns={columns} fill />;
     case "text":
       return (
         <text fg={COLOR.text} wrapMode="word" selectable>

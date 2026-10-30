@@ -29,14 +29,31 @@ export const UI_BLOCK_LIMITS = {
   children: 12,
   /** Columns of a grid. */
   columns: 6,
-  /** Image operations on one image (what they are is `image operations`' to say). */
+  /** Operations on one image, and shapes in one annotation. */
   ops: 8,
+  shapes: 12,
   /** Characters of one text, caption, alt or path. */
   text: 2_000,
 } as const;
 
-/** An image operation as the block carries it: validated only as far as its name; the layout owns the rest. */
-export type UiOp = { op: string } & Record<string, unknown>;
+/** The colours an annotation can take: named, so a model never has to pick a hex that vanishes on its image. */
+export const UI_COLORS = ["red", "yellow", "green", "blue", "white", "black"] as const;
+export type UiColor = (typeof UI_COLORS)[number];
+
+/** A mark drawn on an image. Coordinates are fractions (0 to 1) of the image as it is at that step. */
+export type UiShape =
+  | { shape: "box" | "highlight"; x: number; y: number; w: number; h: number; color: UiColor }
+  | { shape: "arrow"; x1: number; y1: number; x2: number; y2: number; color: UiColor };
+
+/**
+ * What is done to an image before it is drawn, in order. A crop is also the
+ * zoom: the picture is fitted to its cells, so a small part fills them.
+ */
+export type UiOp =
+  | { op: "crop"; x: number; y: number; w: number; h: number }
+  /** Pad (transparent, centred) to this width ÷ height, so images of different shapes get cells of one shape. */
+  | { op: "pad"; aspect: number }
+  | { op: "annotate"; shapes: UiShape[] };
 
 interface UiBase {
   /** The share of a row's or column's space this child takes (default 1). */
@@ -45,10 +62,14 @@ interface UiBase {
   span?: number;
 }
 
+export type UiImage = UiBase & { type: "image"; src: string; alt: string; caption?: string; ops: UiOp[] };
+
 export type UiNode =
   | (UiBase & { type: "row" | "column"; gap: number; children: UiNode[] })
   | (UiBase & { type: "grid"; columns: number; gap: number; children: UiNode[] })
-  | (UiBase & { type: "image"; src: string; alt: string; caption?: string; ops: UiOp[] })
+  | UiImage
+  /** Two images in one: `overlay` lays `b` over `a` at `opacity`; `difference` shows where they differ. */
+  | (UiBase & { type: "blend"; mode: "overlay" | "difference"; opacity: number; a: UiImage; b: UiImage; caption?: string })
   | (UiBase & { type: "text" | "caption"; text: string });
 
 export interface UiBlock {
@@ -108,12 +129,15 @@ function node(value: unknown, depth: number, count: Count): UiNode {
       if (built.some((child) => (child.span ?? 1) > columns)) reject();
       return { ...base, type: "grid", columns, gap: whole(value.gap, 0, 4, 1), children: built };
     }
-    case "image": {
-      if (++count.images > UI_BLOCK_LIMITS.images) reject();
-      const src = text(value.src, true);
-      if (src.trim().length === 0 || !isLocalPath(src)) reject();
+    case "image":
+      return image(value, base, count);
+    case "blend": {
+      const mode = value.mode;
+      if (mode !== "overlay" && mode !== "difference") reject();
+      const opacity = value.opacity === undefined ? 0.5 : fraction(value.opacity);
+      count.nodes += 2;
       const caption = value.caption === undefined ? undefined : text(value.caption, true);
-      return { ...base, type: "image", src, alt: text(value.alt, false), ...(caption === undefined ? {} : { caption }), ops: ops(value.ops) };
+      return { ...base, type: "blend", mode, opacity, a: image(value.a, {}, count), b: image(value.b, {}, count), ...(caption === undefined ? {} : { caption }) };
     }
     case "text":
     case "caption":
@@ -130,12 +154,70 @@ function children(parent: Record<string, unknown>, depth: number, count: Count):
   return list.map((child) => node(child, depth + 1, count));
 }
 
+function image(value: unknown, base: UiBase, count: Count): UiImage {
+  if (!isRecord(value) || value.type !== "image") reject();
+  if (++count.images > UI_BLOCK_LIMITS.images) reject();
+  const src = text(value.src, true);
+  if (src.trim().length === 0 || !isLocalPath(src)) reject();
+  const caption = value.caption === undefined ? undefined : text(value.caption, true);
+  return { ...base, type: "image", src, alt: text(value.alt, false), ...(caption === undefined ? {} : { caption }), ops: ops(value.ops) };
+}
+
+/** A number from 0 to 1 (a fraction of an image, or an opacity). */
+function fraction(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) reject();
+  return value;
+}
+
+function color(value: unknown): UiColor {
+  if (value === undefined) return "red";
+  if (typeof value !== "string" || !(UI_COLORS as readonly string[]).includes(value)) reject();
+  return value as UiColor;
+}
+
+function shape(value: unknown): UiShape {
+  if (!isRecord(value)) reject();
+  switch (value.shape) {
+    case "box":
+    case "highlight": {
+      const [x, y, w, h] = [fraction(value.x), fraction(value.y), fraction(value.w), fraction(value.h)];
+      if (!(w > 0) || !(h > 0) || x + w > 1 + EDGE || y + h > 1 + EDGE) reject();
+      return { shape: value.shape, x, y, w, h, color: color(value.color) };
+    }
+    case "arrow":
+      return { shape: "arrow", x1: fraction(value.x1), y1: fraction(value.y1), x2: fraction(value.x2), y2: fraction(value.y2), color: color(value.color) };
+    default:
+      return reject();
+  }
+}
+
+/** Rounding slack: a box that ends at 1 may come out a hair over. */
+const EDGE = 1e-6;
+
 function ops(value: unknown): UiOp[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > UI_BLOCK_LIMITS.ops) reject();
-  return value.map((entry) => {
-    if (!isRecord(entry) || typeof entry.op !== "string" || entry.op.length === 0) reject();
-    return entry as UiOp;
+  return value.map((entry): UiOp => {
+    if (!isRecord(entry)) reject();
+    switch (entry.op) {
+      case "crop": {
+        const [x, y, w, h] = [fraction(entry.x), fraction(entry.y), fraction(entry.w), fraction(entry.h)];
+        if (!(w > 0) || !(h > 0) || x + w > 1 + EDGE || y + h > 1 + EDGE) reject();
+        return { op: "crop", x, y, w, h };
+      }
+      case "pad": {
+        const aspect = entry.aspect;
+        if (typeof aspect !== "number" || !Number.isFinite(aspect) || aspect < 0.2 || aspect > 5) reject();
+        return { op: "pad", aspect };
+      }
+      case "annotate": {
+        const shapes = entry.shapes;
+        if (!Array.isArray(shapes) || shapes.length === 0 || shapes.length > UI_BLOCK_LIMITS.shapes) reject();
+        return { op: "annotate", shapes: shapes.map(shape) };
+      }
+      default:
+        return reject();
+    }
   });
 }
 

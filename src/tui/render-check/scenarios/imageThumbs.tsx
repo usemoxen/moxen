@@ -11,6 +11,9 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { fail } from "../helpers.js";
 import { imageDimensions } from "../../../core/attachments.js";
 import { encodeRgbaPng, shrinkImage } from "../../model/imageshrink.js";
+import { blendLoaded, processImage } from "../../model/imageops.js";
+import { NativeImage } from "@opentui/core";
+import type { LoadedImage } from "../../model/imagethumb.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
 import { ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { solidPng } from "../png.js";
@@ -120,6 +123,7 @@ export async function runImageThumbs(): Promise<void> {
   runShrink();
   await runReplyImage(png);
   await runUiBlock(png);
+  await runImageOps();
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
 }
 
@@ -437,4 +441,101 @@ async function runUiBlock(png: Buffer): Promise<void> {
   if (lines().filter((line) => line.includes("▀")).length < 6) fail("the block's images are not drawn as text cells under a modal");
   await act(async () => setOpen(false));
   await settle(300);
+}
+
+/** A `w`×`h` PNG, `left` on its left half and `right` on its right. */
+function twoTone(w: number, h: number, left: [number, number, number], right: [number, number, number]): LoadedImage {
+  const pixels = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) pixels.set([...(x < w / 2 ? left : right), 255], (y * w + x) * 4);
+  return { mimeType: "image/png", bytes: encodeRgbaPng(w, h, pixels, w * 4, true), size: { width: w, height: h } };
+}
+
+/** The pixel at (x, y) of a PNG, read back through the real decoder. */
+function pixelOf(image: LoadedImage, x: number, y: number): number[] {
+  const decoded = NativeImage.decode(image.bytes);
+  try {
+    const raw = decoded.raw();
+    const at = y * raw.stride + x * 4;
+    return [...raw.data.slice(at, at + 4)];
+  } finally {
+    decoded.dispose();
+  }
+}
+
+/**
+ * The operations a `moxen-ui` image asks for, on the real native image (the
+ * unit tests stand one in): the pixels that come out are the ones the reply
+ * asked for, and a block that uses every one of them draws.
+ */
+async function runImageOps(): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const split = twoTone(200, 100, [255, 0, 0], [0, 0, 255]);
+
+  const cropped = processImage(split, [{ op: "crop", x: 0.5, y: 0, w: 0.5, h: 1 }]);
+  if (cropped.size.width !== 100 || cropped.size.height !== 100) fail(`the crop is ${cropped.size.width}x${cropped.size.height}, not 100x100`);
+  if (pixelOf(cropped, 0, 0).join() !== "0,0,255,255" || pixelOf(cropped, 99, 99).join() !== "0,0,255,255") fail("a crop of the right half is not all blue");
+
+  const padded = processImage(split, [{ op: "pad", aspect: 1 }]);
+  if (padded.size.width !== 200 || padded.size.height !== 200) fail(`the pad is ${padded.size.width}x${padded.size.height}, not 200x200`);
+  if (pixelOf(padded, 0, 0)[3] !== 0 || pixelOf(padded, 0, 100).join() !== "255,0,0,255") fail("the padding is not transparent around the centred image");
+
+  const marked = processImage(twoTone(100, 100, [0, 0, 255], [0, 0, 255]), [{ op: "annotate", shapes: [{ shape: "box", x: 0.2, y: 0.2, w: 0.6, h: 0.6, color: "red" }] }]);
+  if (pixelOf(marked, 20, 50)[0]! < 200 || pixelOf(marked, 50, 50).join() !== "0,0,255,255") fail("a box is not drawn on its edge and left clear inside");
+
+  const huge = twoTone(3000, 1000, [1, 2, 3], [1, 2, 3]);
+  const capped = processImage(huge, [{ op: "crop", x: 0, y: 0, w: 1, h: 1 }]);
+  if (capped.size.width * capped.size.height > 2_000_000) fail(`a 3 MP image was not brought under the pixel cap: ${capped.size.width}x${capped.size.height}`);
+  if (Math.abs(capped.size.width / capped.size.height - 3) > 0.05) fail("the pixel cap changed the image's shape");
+
+  const red = twoTone(40, 40, [255, 0, 0], [255, 0, 0]);
+  const blue = twoTone(40, 40, [0, 0, 255], [0, 0, 255]);
+  const mixed = blendLoaded(red, blue, "overlay", 0.5);
+  if (mixed === null) fail("an overlay could not be made");
+  const [r, g, b] = pixelOf(mixed, 5, 5);
+  if (r! < 100 || b! < 100 || g !== 0) fail(`a half overlay of blue on red is ${pixelOf(mixed, 5, 5)}, not a mix`);
+  if (pixelOf(blendLoaded(red, red, "difference", 0.5)!, 5, 5).join() !== "0,0,0,255") fail("the difference of an image with itself is not black");
+  if (pixelOf(blendLoaded(red, blue, "difference", 0.5)!, 5, 5).join() !== "255,0,255,255") fail("the difference of red and blue is not magenta");
+  if (processImage({ ...split, bytes: new Uint8Array([1, 2, 3]) }, [{ op: "pad", aspect: 1 }]).bytes.length !== 3) fail("an image that cannot be decoded should come back as it was");
+
+  // Every operation in one block, drawn.
+  const png = Buffer.from(split.bytes);
+  const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+  const block = JSON.stringify({
+    v: 1,
+    root: {
+      type: "column",
+      children: [
+        {
+          type: "row",
+          children: [
+            { type: "image", src: "/tmp/shot.png", caption: "Cropped", ops: [{ op: "crop", x: 0, y: 0, w: 0.5, h: 1 }, { op: "pad", aspect: 2 }] },
+            { type: "image", src: "/tmp/shot.png", caption: "Marked", ops: [{ op: "annotate", shapes: [{ shape: "box", x: 0.1, y: 0.1, w: 0.3, h: 0.5 }, { shape: "arrow", x1: 0.9, y1: 0.9, x2: 0.6, y2: 0.5, color: "yellow" }, { shape: "highlight", x: 0.5, y: 0, w: 0.5, h: 0.4, color: "green" }] }] },
+          ],
+        },
+        { type: "blend", mode: "difference", caption: "What changed", a: { type: "image", src: "/tmp/shot.png" }, b: { type: "image", src: "/tmp/other.png" } },
+      ],
+    },
+  });
+  const width = 80;
+  const height = 50;
+  const setup = await testRender(
+    <ReplyImageReaderContext.Provider value={async () => ({ mimeType: "image/png", dataUrl })}>
+      <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+        <MessageBody entry={{ text: `\`\`\`moxen-ui\n${block}\n\`\`\``, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+      </box>
+    </ReplyImageReaderContext.Provider>,
+    { width, height, exitOnCtrlC: false },
+  );
+  await act(async () => {
+    for (let waited = 0; waited < 800; waited += 25) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await setup.flush();
+    }
+  });
+  const frame = setup.captureCharFrame();
+  console.log("--- moxen-ui block: crop, pad, annotate and a difference ---");
+  console.log(frame);
+  for (const caption of ["Cropped", "Marked", "What changed"]) if (!frame.includes(caption)) fail(`the block's "${caption}" picture is not drawn`);
+  if (frame.includes("could not be drawn") || frame.includes("not found")) fail("a picture of the block failed to draw");
 }

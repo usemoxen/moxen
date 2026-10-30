@@ -3,9 +3,10 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
-import { ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
+import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
+import { encodeRgbaPng } from "../../model/imageshrink.js";
 import { MessageBody } from "../../features/timeline/timeline.js";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
@@ -46,6 +47,45 @@ const UI_GRID = uiBlock({
   children: [
     { type: "text", text: "Three screens, the last one wide:" },
     { type: "grid", columns: 2, children: [image("one", "Shot 1"), image("two", "Shot 2"), image("three", "Shot 3", { span: 2 })] },
+  ],
+});
+/** A 240×160 picture of four colour quadrants with a white disc, so a crop, a mark and a difference show on it. `shifted` moves the disc. */
+const quadrants = (shifted: boolean): Buffer => {
+  const w = 240;
+  const h = 160;
+  const px = new Uint8Array(w * h * 4);
+  const [cx, cy] = shifted ? [150, 90] : [120, 80];
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const colour = x < w / 2 ? (y < h / 2 ? [220, 80, 80] : [80, 160, 90]) : y < h / 2 ? [80, 120, 220] : [230, 190, 70];
+      px.set(Math.hypot(x - cx, y - cy) < 28 ? [255, 255, 255] : colour, (y * w + x) * 4);
+      px[(y * w + x) * 4 + 3] = 255;
+    }
+  }
+  return Buffer.from(encodeRgbaPng(w, h, px, w * 4, true));
+};
+const QUADRANTS = [quadrants(false), quadrants(true)];
+const OPS_READER: AttachmentReader = async (path) => ({ mimeType: "image/png", dataUrl: `data:image/png;base64,${QUADRANTS[path.includes("after") ? 1 : 0]!.toString("base64")}` });
+const BEFORE = { type: "image" as const, src: "/tmp/before.png", alt: "", ops: [] };
+const AFTER = { type: "image" as const, src: "/tmp/after.png", alt: "", ops: [] };
+const UI_OPS = uiBlock({
+  type: "column",
+  children: [
+    {
+      type: "row",
+      children: [
+        image("before", "Cropped to the top right", { ops: [{ op: "crop", x: 0.5, y: 0, w: 0.5, h: 0.5 }] }),
+        image("before", "Marked", { ops: [{ op: "annotate", shapes: [{ shape: "box", x: 0.05, y: 0.05, w: 0.4, h: 0.4 }, { shape: "arrow", x1: 0.95, y1: 0.95, x2: 0.62, y2: 0.62, color: "black" }, { shape: "highlight", x: 0.5, y: 0.5, w: 0.5, h: 0.5, color: "white" }] }] }),
+      ],
+    },
+    {
+      type: "row",
+      children: [
+        { type: "blend", mode: "overlay", opacity: 0.5, caption: "Overlay", a: image("before", "a"), b: image("after", "b") },
+        { type: "blend", mode: "difference", caption: "What moved", a: image("before", "a"), b: image("after", "b") },
+        image("before", "Padded to a square", { ops: [{ op: "pad", aspect: 1 }] }),
+      ],
+    },
   ],
 });
 const SCROLL = { current: null };
@@ -602,6 +642,41 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     ),
     drive: async () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    },
+  },
+  {
+    id: "ui-block-ops",
+    group: "timeline",
+    title: "UiBlockView, crop, annotate, overlay, difference and pad",
+    width: 90,
+    height: 40,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={OPS_READER}>
+        <Stage width={90} height={40}>
+          <UiBlockView block={UI_OPS} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 600)));
+    },
+  },
+  {
+    id: "blended-image",
+    group: "timeline",
+    title: "BlendedImage, two images of a reply in one (a difference, and one that is missing)",
+    width: 70,
+    height: 22,
+    element: () => (
+      <ReplyImageReaderContext.Provider value={async (path) => (path.includes("gone") ? Promise.reject(new Error("IMAGE_NOT_FOUND")) : OPS_READER(path))}>
+        <Stage width={70} height={22}>
+          <BlendedImage a={BEFORE} b={AFTER} mode="difference" opacity={0.5} caption="What moved" maxColumns={30} />
+          <BlendedImage a={BEFORE} b={{ ...AFTER, src: "/tmp/gone.png" }} mode="overlay" opacity={0.5} />
+        </Stage>
+      </ReplyImageReaderContext.Provider>
+    ),
+    drive: async () => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 600)));
     },
   },
   {
