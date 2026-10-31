@@ -212,7 +212,8 @@ describe("provider session resume", () => {
     const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "remember 7" });
     const transport = new FakeOpencodeTransport();
     const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
-    await ensureDriverSession(driver, thread);
+    await ensureDriverSession(driver, thread, { store });
+    const sessionsBeforeTurn = (await store.readThreadRecord(thread.id))?.providerSessions;
     const running = executeTurn({
       store,
       driver,
@@ -229,11 +230,12 @@ describe("provider session resume", () => {
     transport.servers[0]!.title = nativeTitle;
     await transport.servers[0]?.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
     await running;
-    return { store, threadId: thread.id, driver, server: transport.servers[0]!, root };
+    return { store, threadId: thread.id, driver, server: transport.servers[0]!, root, sessionsBeforeTurn };
   }
 
-  it("records the native session on the thread, keyed by driver", async () => {
-    const { store, threadId } = await ranThread();
+  it("records the native session before sending the first turn, keyed by driver", async () => {
+    const { store, threadId, sessionsBeforeTurn } = await ranThread();
+    expect(sessionsBeforeTurn).toEqual({ opencode: "opencode-session-1" });
     const record = await store.readThreadRecord(threadId);
     expect(record?.providerSessions).toEqual({ opencode: "opencode-session-1" });
   });

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as Effect from "effect/Effect";
 
 import { testHarness } from "../../core/testing/harness.js";
@@ -11,11 +11,17 @@ import { openQuestions } from "../../core/threads/views.js";
 import { toThreadEnvelope } from "../../core/threads/project.js";
 import { DirectConnection } from "../connection.js";
 
+const connections: DirectConnection[] = [];
+afterEach(async () => {
+  for (const connection of connections.splice(0).reverse()) await connection.close();
+});
+
 async function setup(failRequests: Record<string, string> = {}) {
   const transport = new FakeCodexTransport({ failRequests });
   const driver = new CodexDriver({ transport });
   const harness = await testHarness({ drivers: { codex: () => driver } });
   const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+  connections.push(connection);
   const project = await ensureStoredProject(harness.root, { workspaceRoot: path.resolve(harness.work) });
   await connection.dispatch({ type: "thread.create", threadId: "thread", projectId: project.project.id, title: "Async question", modelSelection: { instanceId: "codex", model: "gpt-test" } });
   await connection.dispatch({ type: "thread.turn.start", threadId: "thread", message: { text: "Research compaction" } });
@@ -51,6 +57,7 @@ describe("Codex asynchronous questions", () => {
       transport = new FakeCodexTransport();
       driver = new CodexDriver({ transport });
       connection = new DirectConnection({ storeRoot: current.harness.root, drivers: { codex: () => driver } });
+      connections.push(connection);
     }
     const requestId = "codex-async:codex-thread-1:question";
     const questionId = JSON.stringify(["request_user_input_async", "question", 0]);

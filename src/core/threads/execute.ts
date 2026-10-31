@@ -581,6 +581,9 @@ export async function ensureDriverSession(
       ...(options.moxenMemory === true ? { moxenMemory: true } : {}),
     }),
   );
+  // A first-turn question can be answered before sendTurn returns. Its
+  // conversation identity must already be durable when that question appears.
+  if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
   if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null);
