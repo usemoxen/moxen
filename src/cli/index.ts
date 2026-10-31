@@ -569,8 +569,8 @@ program.command("doctor").description("Check provider binaries, auth, store, and
 
 program
   .command("update")
-  .description("Update Claude Code or OpenCode with its own updater, and report the version before and after.")
-  .argument("<provider>", "claude | opencode")
+  .description("Update Claude Code, OpenCode or Codex with its own updater, and report the version before and after.")
+  .argument("<provider>", "claude | opencode | codex")
   .action((provider: string) =>
     action(async () => {
       const context = await commandContext();

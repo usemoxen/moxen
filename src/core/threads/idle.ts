@@ -32,7 +32,7 @@ export function durationMs(text: string | undefined): number | null {
 }
 
 /** The idle lifetime for one provider's sessions: its own, else the global one. Null: never ended. */
-export function sessionTtlFor(config: CliConfig, kind: "claude" | "opencode" | "harness" | null): number | null {
+export function sessionTtlFor(config: CliConfig, kind: "claude" | "codex" | "opencode" | "harness" | null): number | null {
   const own = kind === null ? undefined : config.providers?.[kind]?.sessionTtl;
   return durationMs(own ?? config.sessionTtl);
 }

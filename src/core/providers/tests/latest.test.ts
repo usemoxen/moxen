@@ -36,6 +36,7 @@ describe("latestVersions", () => {
     "@anthropic-ai%2Fclaude-code/latest": "2.1.293",
     "@anthropic-ai%2Fclaude-code/stable": "2.1.285",
     "@opencode%2Fcli/latest": "2.0.24",
+    "@openai%2Fcodex/latest": "0.164.0",
   };
 
   it("asks the registry for the channel the install follows, and for OpenCode's newest", async () => {
@@ -43,6 +44,7 @@ describe("latestVersions", () => {
     expect(await latestVersions({}, latest.deps)).toEqual({
       claude: { latest: "2.1.293", channel: "latest" },
       opencode: { latest: "2.0.24", channel: null },
+      codex: { latest: "0.164.0", channel: null },
     });
     forgetLatestVersions();
     const stable = world(TAGS, "stable");
@@ -54,6 +56,7 @@ describe("latestVersions", () => {
     expect(await latestVersions({}, offline.deps)).toEqual({
       claude: { latest: null, channel: "latest" },
       opencode: { latest: null, channel: null },
+      codex: { latest: null, channel: null },
     });
     const garbage = world({ "@opencode%2Fcli/latest": null, "@anthropic-ai%2Fclaude-code/latest": "not a version" });
     const result = await latestVersions({}, garbage.deps);

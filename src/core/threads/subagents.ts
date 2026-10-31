@@ -139,7 +139,7 @@ export async function subagentTranscript(
   agentId: string,
   readHistory?: SubagentHistoryReader,
   /** Whose store `readHistory` reads: it decides which of the thread's sessions must exist, and how the tool rows are mapped. */
-  historyProvider: "opencode" | "harness" = "opencode",
+  historyProvider: "opencode" | "codex" | "harness" = "opencode",
 ): Promise<SubagentTranscript> {
   const thread = await store.readThreadRecord(threadId);
   const agent = thread?.nativeSubagents?.find((entry) => entry.agentId === agentId) ?? null;
@@ -213,7 +213,7 @@ function historyEnvelopes(
   agentId: string,
   history: readonly SubagentHistoryItem[],
   startedAt: string,
-  provider: "opencode" | "harness",
+  provider: "opencode" | "codex" | "harness",
 ): { messages: MessageEnvelope[]; activities: ActivityEnvelope[] } {
   const turnId = `subagent:${agentId}`;
   const base = Date.parse(startedAt);

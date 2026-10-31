@@ -151,7 +151,7 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   if (options.drivers) return options.drivers;
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
   const factory = (): TurnDriver => new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers);
-  return { claude: factory, opencode: factory };
+  return { claude: factory, codex: factory, opencode: factory };
 }
 
 export async function testHarness(options: TestHarnessOptions = {}) {

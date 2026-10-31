@@ -1544,7 +1544,7 @@ describe("DirectConnection settings", () => {
 
       config = { ...config, updates: { checkLatest: false } } as typeof config;
       const off = await connection.query({ type: "provider.latest" });
-      expect(off).toEqual({ enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null } });
+      expect(off).toEqual({ enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null }, codex: { latest: null, channel: null } });
       expect(asked).toHaveLength(1);
     } finally {
       await connection.close();

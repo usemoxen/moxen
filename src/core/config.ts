@@ -13,6 +13,7 @@ import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeS
 import { isSecretRef, secretRef, writeSecret } from "./secrets.js";
 import type {
   ClaudeProviderConfig,
+  CodexProviderConfig,
   CliConfig,
   ForgeConfig,
   GitConfig,
@@ -374,6 +375,11 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
     const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
     const models = handoffModelsOf(input.claude, "providers.claude");
     if (claude || args || models) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models };
+  }
+  if (input.codex !== undefined) {
+    const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"]);
+    const models = handoffModelsOf(input.codex, "providers.codex");
+    if (codex || models) result.codex = { ...codex, ...models };
   }
   if (input.opencode !== undefined) {
     const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"]);

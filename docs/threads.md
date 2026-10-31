@@ -153,6 +153,16 @@ row can never be answered. Tool approvals work the same way: a
 agent's reason, and the permission panel (yes / yes for the session / no)
 answers it with `thread.permission.respond`.
 
+Codex uses the Harness `ask` tool in that same answer panel, waiting until it is
+answered or dismissed. Its native question tools are disabled. Previously
+opened native asynchronous questions remain answerable while the agent keeps
+working. They stay pending after its turn finishes, and across a server restart,
+until answered or dismissed. Answering steers a running turn or starts a normal
+follow-up turn when idle; dismissing closes the question without sending an
+answer. These questions do not become final-answer text or pause the work clock.
+Answer-panel replies stay in the ledger for delivery and recovery, but do not
+appear as user messages in the conversation.
+
 ## Steering
 
 Sending into a running turn steers it when the provider takes mid-turn

@@ -37,7 +37,7 @@ export function webServerKind(target: readonly string[]): WebServerKind | null {
  * off, not limited to other providers, not excluded on the provider's own page.
  * (A project's `moxen.json` can add more; the settings page does not see it.)
  */
-export function attachedSearchServers(config: CliConfig, provider: "claude" | "opencode"): Array<{ readonly name: string; readonly kind: WebServerKind }> {
+export function attachedSearchServers(config: CliConfig, provider: "claude" | "codex" | "opencode"): Array<{ readonly name: string; readonly kind: WebServerKind }> {
   const excluded = new Set(parseNameList(config.providers?.[provider]?.mcpExclude));
   const found: Array<{ name: string; kind: WebServerKind }> = [];
   for (const [name, entry] of Object.entries(config.mcpServers ?? {}) as Array<[string, McpServerEntry]>) {
@@ -62,13 +62,14 @@ export interface WebOrderEntry {
   readonly locked: string | null;
 }
 
-const NATIVE_NAMES: Readonly<Record<"claude" | "opencode", Readonly<Record<WebRole, string>>>> = {
+const NATIVE_NAMES: Readonly<Record<"claude" | "codex" | "opencode", Readonly<Record<WebRole, string>>>> = {
+  codex: { search: "web_search", fetch: "web_search" },
   claude: { search: "WebSearch", fetch: "WebFetch" },
   opencode: { search: "websearch", fetch: "webfetch" },
 };
 
 /** The tools a provider's search or fetch order can rank, with the ones it cannot use marked. */
-export function webOrderEntries(config: CliConfig, provider: "claude" | "opencode", role: WebRole): WebOrderEntry[] {
+export function webOrderEntries(config: CliConfig, provider: "claude" | "codex" | "opencode", role: WebRole): WebOrderEntry[] {
   const attached = new Set(attachedSearchServers(config, provider).map((server) => server.kind));
   const own = config.providers?.[provider];
   const nativeName = NATIVE_NAMES[provider][role];
@@ -76,7 +77,7 @@ export function webOrderEntries(config: CliConfig, provider: "claude" | "opencod
   const added = (kind: WebServerKind, label: string): string | null => (attached.has(kind) ? null : `${label} is not added, or is off for this provider`);
   const native: WebOrderEntry = {
     id: "native",
-    label: `${provider === "claude" ? "Claude Code" : "OpenCode"}'s own`,
+    label: `${provider === "codex" ? "Codex" : provider === "claude" ? "Claude Code" : "OpenCode"}'s own`,
     summary: nativeName,
     locked: nativeOff ? "switched off under Built-in tools off" : null,
   };
@@ -95,7 +96,7 @@ export function webOrderEntries(config: CliConfig, provider: "claude" | "opencod
 }
 
 /** Why a provider's order for this role can do nothing yet, or undefined when it can. */
-export function webOrderUnavailable(config: CliConfig, provider: "claude" | "opencode", role: WebRole): string | undefined {
+export function webOrderUnavailable(config: CliConfig, provider: "claude" | "codex" | "opencode", role: WebRole): string | undefined {
   const entries = webOrderEntries(config, provider, role).filter((entry) => entry.id !== "native");
   if (role === "search") {
     return entries.some((entry) => entry.locked === null)

@@ -100,8 +100,9 @@ function normalizeQuestions(raw: readonly unknown[]): Array<Record<string, unkno
     if (question === null) return;
     // Duplicate question text would collide on the answers key; the panel
     // keys drafts by id too, so a collision would answer both at once.
-    const id = seen.has(question) ? `${question} (${index + 1})` : question;
-    seen.add(question);
+    const nativeId = asString(record.id) ?? question;
+    const id = seen.has(nativeId) ? `${nativeId} (${index + 1})` : nativeId;
+    seen.add(nativeId);
     questions.push({
       id,
       question,
@@ -139,7 +140,9 @@ export function userInputActivityRow(event: UserInputRuntimeEvent): RequestActiv
     key: `${event.requestId}:requested`,
     kind: "user-input.requested",
     summary: first ?? `Asked ${questions.length} question${questions.length === 1 ? "" : "s"}`,
-    payload: { requestId: event.requestId, provider: event.provider, questions },
+    payload: { requestId: event.requestId, provider: event.provider, questions,
+      ...(raw?.delivery === "async" ? { delivery: "async", nativeThreadId: raw.nativeThreadId } : {}),
+    },
   };
 }
 

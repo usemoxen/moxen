@@ -19,7 +19,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | --- | --- |
 | `--prompt`, `--prompt-file`, `--stdin` | Exactly one is required |
 | `--open` | `auto`, `desktop`, `browser`, `none` |
-| `--provider` | A provider instance id from `providers list` (`claudeAgent`, `opencode/<provider>`) |
+| `--provider` | A provider instance id from `providers list` (`claudeAgent`, `codex`, `opencode/<provider>`) |
 | `--model` | A model slug supported by that provider instance |
 | `--speed`, `--speed-mode` | `standard`, `fast` |
 | `--thinking-effort` | A model-supported value such as `low`, `medium`, `high`, `xhigh` or `max` |
@@ -27,7 +27,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | `--mode`, `--interaction-mode` | `build`/`default`, `research` or `orchestrate` (see [Modes](threads.md#modes-build-research-and-orchestrate)). Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
 | `--checkout`, `--env-mode` | `current`/`local`, `worktree`, or the resolved default via `auto` |
 
-Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is the explicit installation default (`codex` / `gpt-5.4`).
+Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is `MOXEN_DEFAULT_MODEL` when set, otherwise Claude Code's catalog default when Claude Code is installed. Native Codex is selected with `--provider codex --model <model>` or the corresponding defaults in Settings.
 
 Speed and thinking effort are stored as model options. The provider driver applies the option ids supported by the selected provider/model. If `--provider` changes the project's default provider instance, also pass `--model` because provider instance ids can be user-defined and do not imply a model.
 
@@ -206,7 +206,7 @@ Exa Search, GitHub…) asks for its key and fills in the command; `mcpRunner` (`
 key as the `x-api-key` header.
 
 Which provider gets which server is set on the provider's own page (Settings → Claude Code,
-OpenCode or Moxen Harness → MCP servers), or with `providers.<claude|opencode|harness>.mcpExclude`:
+OpenCode or Moxen Harness → MCP servers), or with `providers.<claude|opencode|codex|harness>.mcpExclude`:
 the names of servers that provider does not get, comma-separated. Every server is on by default, so a
 server added later reaches every provider until switched off. A server switched off on its own entry
 (`disabled`) or limited by an older `providers` list on it stays out either way.
@@ -214,7 +214,7 @@ server added later reaches every provider until switched off. A server switched 
 ### Web tools
 
 Claude Code and OpenCode ship their own search and fetch, and you may have attached Brave or Exa. Per
-provider (`providers.<claude|opencode>.…`):
+provider (`providers.<claude|opencode|codex>.…`):
 
 - `webSearchOrder` and `webFetchOrder`: the order the model should try them in, comma-separated ids (search:
   `brave`, `exa`, `native`; fetch: `moxen`, `exa`, `native`; `native` is the provider's own). The prompt says
@@ -339,3 +339,13 @@ moxen handover --stdin
 ## Opening threads
 
 `--open` is accepted everywhere for script compatibility, but there is no desktop app to deep-link into: `opened.kind` is always `none`. The TUI (`moxen tui`) is the interactive interface; use `--open none` for headless runs.
+
+Provider updates run on the server machine: `moxen update claude`,
+`moxen update opencode`, or `moxen update codex`. They use each provider’s
+own updater and report the version before and after.
+
+`moxen memory list` lists the current project's and global memories. Agents
+can also use the read-only `memory_search` MCP tool to search names,
+descriptions and bodies by keyword, including entries omitted from the
+capped index. It returns up to 10 excerpts by default (`limit`: 1–50), with
+an optional `project` or `global` scope. See [Memory](threads.md#memory).

@@ -146,11 +146,19 @@ export interface WebView {
   tool: string;
   query: string;
   running: boolean;
+  provider?: string;
+  action?: "search" | "openPage" | "findInPage" | "other";
+  url?: string;
+  pattern?: string;
 }
 
 export interface ImageView {
   kind: "image";
   path: string;
+  generated?: boolean;
+  running?: boolean;
+  failed?: boolean;
+  error?: string | null;
 }
 
 export interface ToolView {
@@ -913,9 +921,10 @@ export function prettyMcpTool(tool: string): string {
  * how each one spells it (Claude's `WebSearch`, OpenCode's `websearch`, the
  * harness's `web_search`). Null when the name says nothing.
  */
-export function webToolSource(tool: string): string | null {
+export function webToolSource(tool: string, provider?: string): string | null {
   const mcp = parseMcpToolName(tool);
   if (mcp !== null) return prettyMcpServer(mcp.server);
+  if (provider === "codex" && webToolKind(tool) !== null) return "Codex";
   const bare = tool.trim().split(".").pop() ?? "";
   if (/^Web(?:Search|Fetch)$/u.test(bare)) return "Claude Code";
   if (/^(?:mcp-)?web(?:search|fetch)$/u.test(bare)) return "OpenCode";
@@ -1054,17 +1063,25 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     };
   }
 
-  if (itemType === "image_view") {
+  if (itemType === "image_view" || itemType === "image_generation") {
     const imagePath = asString(data.imagePath) ?? asString(payload.detail) ?? "(image)";
-    return { kind: "image", path: imagePath.split(/[\\/]/).pop() ?? imagePath };
+    return { kind: "image", path: imagePath.split(/[\\/]/).pop() ?? imagePath, ...(itemType === "image_generation" ? { generated: true, running, failed: payload.status === "failed", error: asString(input.error) } : {}) };
   }
 
   if (itemType === "web_search") {
+    const provider = asString(payload.provider);
+    const action = input.action;
+    const url = asString(input.url);
+    const pattern = asString(input.pattern);
     return {
       kind: "web",
       tool: tool ?? "web",
-      query: asString(input.query) ?? asString(input.url) ?? firstString(input.urls) ?? title,
+      query: asString(input.query) ?? asString(input.url) ?? firstString(input.urls) ?? (provider === "codex" ? "" : title),
       running,
+      ...(provider ? { provider } : {}),
+      ...(action === "search" || action === "openPage" || action === "findInPage" || action === "other" ? { action } : {}),
+      ...(url ? { url } : {}),
+      ...(pattern ? { pattern } : {}),
     };
   }
 
@@ -1106,8 +1123,11 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     // match branches on the trailing segment so namespaced calls get the
     // same mapped views instead of the raw generic fallback. Clean names
     // are unaffected (the trailing segment is the whole name).
+    // An MCP server's own `read` (`mcp__claude_ai_Claude_Docs__read`) takes
+    // no file path; it is a generic tool call, not the file Read view.
+    const mcpTool = parseMcpToolName(display) !== null;
     const short = name.split(/[^a-z]+/).filter((part) => part.length > 0).pop() ?? name;
-    if (short === "read") {
+    if (short === "read" && !mcpTool) {
       // Claude's real Read tool call uses the snake_case `file_path` param
       // (same as Edit/Write); only checking `filePath` here always missed it
       // and silently fell back to the generic "Tool call" title instead.

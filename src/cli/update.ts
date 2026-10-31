@@ -1,6 +1,6 @@
 /**
- * `moxen update <claude|opencode>`: runs that provider's own updater
- * (`claude update`, `opencode upgrade`) where the sessions run — on the shared
+ * `moxen update <claude|opencode|codex>`: runs that provider's own updater
+ * (`claude update`, `opencode upgrade`, `codex update`) where the sessions run — on the shared
  * server when there is one, since that is the machine whose binary matters —
  * and reports the version before and after.
  */

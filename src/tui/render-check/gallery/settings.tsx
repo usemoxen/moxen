@@ -40,7 +40,7 @@ const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name:
 const page = (label: string): PageRef => ref(label, label, side(label));
 
 /** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Model servers", "MCP servers"].map(page);
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Model servers", "MCP servers"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
@@ -51,7 +51,7 @@ const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
  * and every profile and MCP server gets pages, wizards and editors.
  */
 export const CONFIGURED_PAGES: readonly PageRef[] = [
-  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode"].map(page),
+  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex"].map(page),
   ref("Harness Defaults", "Defaults (Harness)", side("Defaults", 1)),
   page("Tools"),
   ref("Harness Long threads", "Long threads (Harness)", side("Long threads", 1)),
@@ -86,6 +86,7 @@ const models = (names: readonly string[]): ProviderSummary["models"] =>
   names.map((name, index) => ({ slug: name.toLowerCase().replace(/\s+/g, "-"), name, isCustom: false, isDefault: index === 0, isHidden: false, efforts: [] }));
 
 export const SETTINGS_PROVIDERS: ProviderSummary[] = [
+  { instanceId: "codex", driver: "codex", displayName: "Codex", enabled: true, installed: true, status: null, authStatus: "chatgpt", models: models(["Codex model"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "claudeAgent", driver: "claudeAgent", displayName: "Claude", enabled: true, installed: true, status: null, authStatus: null, models: models(["Claude Opus 5", "Claude Sonnet 5.5"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "opencode", driver: "opencode", displayName: "OpenCode", enabled: true, installed: true, status: null, authStatus: null, models: models(["GPT-5.5", "Kimi K3"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
 ];
@@ -164,6 +165,7 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
         onImport={noop}
         notice={null}
         versions={{
+          codex: { ok: true, installed: true, version: "codex-cli 0.164.0", login: "inherit", minVersion: "0.164.0" },
           claude: { ok: true, installed: true, version: "2.1.293 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
         }}
@@ -240,6 +242,7 @@ function pageOf(descriptor: SettingDescriptor): string {
     agent: "Agent context",
     interface: "Interface",
     git: "Git and forges",
+    "provider:codex": "Codex",
     "provider:claude": "Claude Code",
     "provider:opencode": "OpenCode",
     "provider:harness": "Model servers",

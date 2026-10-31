@@ -119,6 +119,7 @@ describe("provider updates on the settings page", () => {
   it("offers an update only on the sections of providers that have one", () => {
     expect(updatableProviderOf("provider:claude")).toBe("claude");
     expect(updatableProviderOf("provider:opencode")).toBe("opencode");
+    expect(updatableProviderOf("provider:codex")).toBe("codex");
     expect(updatableProviderOf("general")).toBeNull();
     expect(updatableProviderOf("git")).toBeNull();
   });
@@ -241,6 +242,11 @@ describe("a provider's own tools and web preference on its page", () => {
     expect(control.kind === "tools" && control.excluded).toEqual(["websearch", "madeup"]);
     expect(settingValueLabel(d, "websearch, madeup", control)).toBe("2 off");
     expect(settingValueLabel(d, undefined, settingControl(d, undefined, settings, null))).toBe("All on");
+    const codex = settings.find((entry) => entry.descriptor.key === "providers.codex.disabledNativeTools")!.descriptor;
+    const native = settingControl(codex, undefined, settings, null);
+    expect(native.kind).toBe("tools");
+    if (native.kind !== "tools") throw new Error("expected native tools");
+    expect(native.tools.find((tool) => tool.name === "apply_patch")).toMatchObject({ enabledWhenLocked: true, locked: expect.stringContaining("no independent removal control") });
   });
 
   it("greys each web order out until a tool it could rank is available to the provider, and says what it covers", () => {

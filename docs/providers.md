@@ -9,15 +9,16 @@ stay dependency-clean.
 |---|---|---|---|
 | 1 | Claude Code | Official `claude` CLI via the Agent SDK | Inherited CLI login (Pro/Max), API key, Bedrock |
 | 2 | OpenCode | OpenCode v2 (2.0+): `opencode serve` plus the generated client | API keys; ChatGPT Pro/Plus and SuperGrok logins are built into v2 (`opencode auth login`) |
-| 3 | Moxen Harness | Our own agent loop over an endpoint you configure (`providers.harness.profiles`): OpenAI Chat Completions, OpenAI Responses or Anthropic Messages | A key kept in the OS keychain, or read from the environment variable a profile names; never in the config file |
+| 3 | Codex | `codex app-server` over stdio JSON-RPC (tested on 0.166.0) | Inherited `codex login`; the CLI owns authentication |
+| 4 | Moxen Harness | Our own agent loop over an endpoint you configure (`providers.harness.profiles`): OpenAI Chat Completions, OpenAI Responses or Anthropic Messages | A key kept in the OS keychain, or read from the environment variable a profile names; never in the config file |
 
 Credentials live with the provider CLIs (OpenCode keeps them in its own
 SQLite, read only as provider type). This CLI never handles their tokens; the
 only keys Moxen holds are a harness profile's and a search key, in the OS
 keychain.
 
-GPT (ChatGPT Pro/Plus) and Grok (SuperGrok) models run through
-OpenCode; there are no native Codex or Grok drivers.
+GPT models can run through native Codex or OpenCode. Grok (SuperGrok) models
+run through OpenCode; there is no native Grok driver.
 
 ## Defaults
 
@@ -44,6 +45,141 @@ the default outright.
   `/simplify`, `/verify`, …) and a user's, project's, plugin's or MCP
   server's own commands are all offered. The list is a deny-list in
   `core/providers/claude/commands.ts`.
+
+## Codex
+
+Install Codex and run `codex login` on the machine running Moxen's server.
+Select **Codex** in the model picker, or set `provider` to `codex` with
+`moxen config set provider codex` and
+`moxen config set providers.codex.model codex-default`. The model and effort choices come from
+`model/list`, including all pages, with the CLI's current default marked.
+Existing `codex-default` selections still mean the CLI's configured default.
+Moxen never reads or copies Codex credentials. Catalog and skill scans start
+only a short-lived protocol connection; they create no Codex threads.
+
+The Codex settings tab uses the same table as the CLI: `providers.codex.*`.
+It includes executable and configuration directory, extra launch arguments,
+default model, effort and permissions, instructions, idle lifetime, MCP access,
+Moxen tools and memory, usage-limit continuation, compaction and hand-off rules.
+`homePath` overrides `CODEX_HOME`; otherwise Codex's normal home is used.
+Launch arguments are tokenized and passed as argv, never executed as a shell
+command. The Settings page, command palette and `moxen update codex` run
+`codex update` on the server machine, using the configured executable. The
+page checks the published version alongside Claude Code and OpenCode. Running
+sessions keep their current build until restarted.
+
+| Moxen feature | Codex integration |
+|---|---|
+| Persistent conversations | Native thread start/resume; the saved handle survives idle expiry and Moxen restart |
+| Models, effort and speed | Live model and effort discovery; model/effort changes per turn; service-tier options are forwarded |
+| Streaming and timeline | Separate progress notes and final answers, detailed reasoning summaries with section boundaries, command output, file patches and MCP calls |
+| Images and steering | Native image inputs and steering; distinct image-generation status, saved files and generated-image counts |
+| Permissions and questions | Harness shell approvals and `ask` questions in the existing panels; native file/MCP approvals and elicitation remain supported |
+| Tasks and agents | Native checklist and subagent lifecycle/history; Harness background commands with output and individual stop controls; native agents can be interrupted individually |
+| Delegation and memory | Moxen's MCP tools, plus native conversation forks for delegated threads |
+| Side questions and titles | `/btw` uses a disposable read-only native fork; native title read/rename, automatic generation and explicit regeneration on a fork; manual titles win over pending generation |
+| Context and limits | Reported context totals, estimated categories from retained history after compaction, token usage and subscription windows; shared usage-limit continuation |
+| Prompt suggestions | Native completed predictions feed Moxen’s composer when Codex emits them |
+| Long threads | Native `/compact`, Moxen hand-off rules and optional Moxen-driven compaction |
+| Rollback | Paginated retained history and `thread/revert`, with hydrated-history/`thread/rollback` fallback for older runtimes; files remain owned by Moxen's checkpoints |
+| Diagnostics | Codex executable/version included in `doctor`; CLI JSON envelopes keep their existing fields |
+
+Codex maps Supervised to untrusted/read-only, Auto-accept edits and Auto to
+on-request/workspace-write, and Full access to never/danger-full-access. Auto
+routes native approval review through Codex’s automatic reviewer; the other
+modes use the user reviewer.
+These policies govern Codex's remaining native tools. Shell commands run in
+Moxen's process through the same Harness tools and safety checks as a Harness
+session, rather than inside Codex's OS sandbox: Supervised and Auto-accept
+edits ask about commands, Auto applies the Harness command assessment, and Full
+access allows commands except those the Harness refuses as catastrophic.
+Session approvals cover the matching command pattern, not every command.
+Changes apply at the next turn. A worktree-isolated thread keeps a
+workspace-write sandbox for native tools even in Full access; the Harness
+worktree guard also refuses shell redirects into the protected checkout.
+
+Moxen disables native `exec_command`, `write_stdin`, `request_user_input` and
+`request_user_input_async`. The private `moxen_harness` MCP server supplies
+`bash`, `powershell` when installed on Windows, `ask`, `task_output` and
+`task_stop`, using the Harness implementations. This transport also attaches
+the tools to existing rollouts without replacing the conversation. Disabling
+Shell in Codex's tool settings removes the replacement shell tools too.
+Delegated threads have no `ask` tool and refuse commands that need an absent
+user's approval. Shell environments exclude provider keys, including configured
+Harness profile key variables.
+
+`ask` waits for the answer panel; dismissing it lets the model choose an
+assumption. Interrupting a turn releases pending questions and approvals and
+stops its foreground command. Commands started with `run_in_background`
+survive turn interruption, expose output and an individual Stop action in the
+tasks panel, and stop when the session ends. Completion is reported in the
+next tool result or next turn; it does not wake an idle Codex session.
+
+Native web activity preserves Codex’s provider identity and distinguishes searches
+(including multiple queries), page opens and in-page finds. Older rows use the
+turn’s saved provider when their activity payload has no provider identity.
+MCP calls retain the server name and use the same readable server/tool labels as
+Claude Code, such as `Linear · Get issue`, instead of bare method names and raw
+response JSON.
+
+Codex discovers and loads skills itself, including implicit activation. Reading a
+chosen `SKILL.md` through a shell command is normal native Codex behavior; it has
+no separate Claude-style Skill tool. Moxen’s skill picker reads the native
+`skills/list` inventory and sends explicit `/name` or `$name` selections as
+structured native skill references (name and path). See [native skills](https://developers.openai.com/codex/skills).
+
+Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
+with Automatic, Concise and Off also available. Moxen preserves the reported
+sections and renders their markdown; the amount of reasoning exposed remains
+model-dependent. See [summary settings](https://developers.openai.com/codex/config-reference).
+
+Image generation has its own running, completed and failed rows and counts. The
+installed native protocol reports no numerical generation progress, so a
+running generation shows a plain status label rather than a guessed
+percentage. The runtime instructions tell models to embed a generated or edited
+image’s absolute saved path in their final reply; a tool result alone does not
+display an image in the answer.
+
+Gaps and native limits:
+
+- Dollar cost is not supplied. Context categories are explicitly estimates,
+  using the same method as OpenCode; native totals remain authoritative.
+- Legacy native command output remains visible, with no independent stop
+  operation; stopping the parent turn remains available. New commands use the
+  Harness tools. Native agent cancellation targets only that agent's current
+  turn. Moxen delegated threads remain fully managed.
+- Native plan mode is not exposed; Moxen’s interaction modes use shared
+  instructions. Prompt suggestions depend on the runtime emitting predictions.
+- The tool page lists shell, patching, subagents, web search, local image
+  viewing, image generation, browser, computer, apps and sleep. Supported
+  switches disable the native tool or family; availability still depends on
+  Codex’s model and setup. Patching is shown as always on because Codex has no
+  independent removal switch. Pre-tool hooks can deny it, but session-injected
+  hooks need separate exact-hash trust approval; Moxen does not bypass that
+  boundary. Switching the to-do list off instructs the model not to call
+  `update_plan` and suppresses checklist updates; it cannot remove that tool.
+- `/btw` disables inherited MCP servers, apps, plugins, shell, subagents,
+  web search, image tools, browser/computer tools, sleep and goals on its read-only fork, and declines approval requests.
+  Unlike Claude's empty tool list, Codex may still offer harmless native
+  tools such as its checklist. The parent conversation is never changed.
+- Simple MCP elicitation forms use the answer panel; URL/OAuth elicitations
+  are declined because Moxen does not host their browser sign-in flow.
+- Previously opened native async questions still use the answer panel.
+  Replies carry Codex's stable question IDs through
+  its answered-question envelope, and can be submitted after the turn finishes
+  or the server restarts. Pending questions are stored in Moxen's ledger.
+  Answer-panel replies are internal inputs, hidden from the conversation view.
+- MCP and native-tool configuration apply when a session starts. Restart an
+  existing session to change them. Codex-owned compaction uses its native
+  threshold; Moxen-driven modes suppress that threshold and invoke native
+  compaction at Moxen's line. Per-model native compaction changes require a
+  new session.
+
+Protocol references: [Codex app-server](https://developers.openai.com/codex/app-server),
+[configuration reference](https://developers.openai.com/codex/config-reference),
+and [hooks and trust](https://developers.openai.com/codex/hooks).
+The installed CLI's `app-server generate-ts` schemas were also checked; no
+generated third-party protocol code is included in Moxen.
 
 ## OpenCode's system prompt
 

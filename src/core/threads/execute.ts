@@ -25,6 +25,7 @@ import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit } from "../usage/limits.js";
 import type { McpServerSpec } from "../mcp.js";
 
+import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
 import { HarnessDriver } from "../providers/harness/driver.js";
@@ -162,6 +163,7 @@ export interface TurnOutcome {
 }
 
 export interface TurnDriverFactories {
+  readonly codex?: () => TurnDriver;
   readonly claude?: () => TurnDriver;
   readonly opencode?: () => TurnDriver;
   readonly harness?: () => TurnDriver;
@@ -211,13 +213,18 @@ export function driverForInstance(
     byFactories.set(factories, cache);
   }
   const existing = cache.get(key);
-  if (existing) return existing;
+  const secretEnv = (providers?.harness?.profiles ?? []).map((profile) => profile.apiKeyEnv).filter((name): name is string => typeof name === "string" && name !== "");
+  if (existing) {
+    if (existing instanceof CodexDriver) existing.setSecretEnv(secretEnv);
+    return existing;
+  }
   let driver: TurnDriver | undefined;
   // Provider settings are read here, once, because the driver owns the
   // spawned process: an already-running session cannot be moved to a
   // different binary or config directory. The schema says as much
   // (`appliesAt: "server-restart"`), so a change applies to the next server start.
   if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver({ ...(providers?.claude ? { settings: providers.claude } : {}), skillsMod: locateSkillsMod() });
+  else if (key === "codex") driver = factories.codex?.() ?? new CodexDriver({ ...(providers?.codex ? { settings: providers.codex } : {}) });
   else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
   if (!driver) {
@@ -225,6 +232,7 @@ export function driverForInstance(
       details: { instanceId },
     });
   }
+  if (driver instanceof CodexDriver) driver.setSecretEnv(secretEnv);
   cache.set(key, driver);
   return driver;
 }
@@ -622,6 +630,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
     return;
   }
   let lastTasks = "";
+  const lateQuestions = new Set<string>();
   let chain: Promise<void> = Promise.resolve();
   const latestTurnId = async (): Promise<string | null> => {
     const turns = await store.readTurns(threadId);
@@ -649,6 +658,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   };
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
     touchSession(driver, threadId, event.type === "background.tasks.changed" ? event.tasks.length : undefined);
+    if (event.type === "session.title.updated") void adoptProviderTitle(store, threadId, event.title).catch(() => undefined);
     // A compaction makes the provider read its rule files again: what it holds now is what is on disk.
     // The summary may drop a mode's procedure, so the next prompt carries it again (`modes.ts`).
     if (event.type === "session.notice" && event.notice === "compacted") {
@@ -687,6 +697,14 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       // — without this its row stayed "running" for good.
       if ((recordingTurns.get(threadId) ?? 0) > 0) return;
       record("subagent", `${event.agentType} ${event.status}`, subagentPayload(event));
+      return;
+    }
+    if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId) ?? 0) === 0) {
+      const row = userInputActivityRow(event);
+      if (row?.payload.delivery === "async" && !lateQuestions.has(row.key)) {
+        lateQuestions.add(row.key);
+        record(row.kind, row.summary, row.payload);
+      }
       return;
     }
     if (event.type === "prompt.suggested") {

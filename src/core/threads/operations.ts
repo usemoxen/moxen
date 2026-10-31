@@ -266,7 +266,7 @@ async function sessionSetup(
   // Servers switched off, or not offered to this provider, drop out; tools switched off are hidden by the driver.
   const { servers: mcpServers, disabledTools: disabledMcpTools } = kind === null ? { servers: merged, disabledTools: [] } : routeMcpServers(merged, kind, providerConfig?.mcpExclude);
   // Only Claude Code and OpenCode ship tools to switch off or tips to give; the Harness has its own.
-  const nativeKind = kind === "claude" || kind === "opencode" ? kind : null;
+  const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" ? kind : null;
   const nativeConfig = nativeKind === null ? undefined : ctx.config.providers?.[nativeKind];
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));

@@ -1,7 +1,7 @@
 import { type MessageKey, t as tr, tx } from "../../i18n/index.js";
 import { webToolKind } from "../../../core/threads/views.js";
 import type { ReactNode, RefObject } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes, bold, fg, t } from "@opentui/core";
 import { chipSegments, splitChipBlocks, splitReplyImages, type ReplyBlock } from "../../model/messagechips.js";
@@ -73,6 +73,7 @@ function ToolChip({
   rail,
   glyph,
   title,
+  titleSuffix = "",
   titleBold = false,
   time,
   meta = [],
@@ -86,6 +87,7 @@ function ToolChip({
   title: string;
   /** Claude Code weights the file-change header (`Update(path)`) bolder than
       a plain tool title — every other kind stays at the regular weight. */
+  titleSuffix?: string;
   titleBold?: boolean;
   time: string;
   /** Outcome facts (`exit 0`, `3s`) shown after the time on the header line. */
@@ -132,7 +134,7 @@ function ToolChip({
           attributes={titleBold ? TextAttributes.BOLD : 0}
           selectable={false}
         >
-          {tx(title)}
+          {titleSuffix ? `${tx(truncate(title, Math.max(4, 72 - titleSuffix.length)))}${titleSuffix}` : tx(title)}
         </text>
         <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{[time, ...meta].filter((part) => part.length > 0).map((part) => `  ·  ${tx(part)}`).join("")}</text>
         {toggleable ? (
@@ -169,8 +171,11 @@ function TodoRows({ items }: { items: { content: string; status: string }[] }) {
   );
 }
 
+const RuntimeProvider = createContext<string | undefined>(undefined);
+
 function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { entry: TimelineEntry; now: number; turnFiles?: readonly PatchFile[]; onOpenUrl?: ((url: string) => void) | undefined; width?: number }) {
   const [expanded, setExpanded] = useState(false);
+  const runtimeProvider = useContext(RuntimeProvider);
   if (entry.activity === null) return null;
   const view = describeActivity(entry.activity);
   const time = clockTime(entry.at, now);
@@ -426,29 +431,36 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
 
   if (view.kind === "web") {
     const web = webToolKind(view.tool);
-    const url = /^https?:\/\//i.test(view.query) ? view.query : null;
+    const target = view.url ?? view.query;
+    const url = /^https?:\/\//i.test(target) ? target : null;
     const title =
-      web === "fetch"
-        ? tr("timeline.fetched", { what: url === null ? truncate(view.query, 48) : hostOf(url) })
+      view.action === "findInPage"
+        ? tr("timeline.findInPage", { pattern: view.pattern ?? view.query, where: url === null ? tr("timeline.webPage") : hostOf(url) })
+        : view.action === "other"
+          ? tr("timeline.browsedWeb")
+        : web === "fetch"
+        ? tr("timeline.fetched", { what: url === null ? view.query : hostOf(url) })
         : web === "search"
-          ? tr("timeline.searchedFor", { query: truncate(view.query, 48) })
+          ? view.query ? tr("timeline.searchedFor", { query: view.query }) : tr(view.running ? "timeline.searchingWeb" : "timeline.browsedWeb")
           : view.tool;
-    const source = web === null ? null : webToolSource(view.tool);
+    const source = web === null ? null : webToolSource(view.tool, view.provider ?? runtimeProvider);
     return (
-      <ToolChip rail={COLOR.agent} glyph="○" title={truncate(source === null ? title : `${title} · ${source}`, 72)} time={time} running={view.running}>
+      <ToolChip rail={COLOR.agent} glyph="○" title={title} titleSuffix={source === null ? "" : ` · ${source}`} time={time} running={view.running}>
         {url === null || onOpenUrl === undefined ? null : (
-          <text fg={COLOR.accent} attributes={TextAttributes.UNDERLINE} selectable={false} onMouseDown={() => onOpenUrl(url)}>
-            {truncate(url, 72)}
-          </text>
+          <text fg={COLOR.accent} attributes={TextAttributes.UNDERLINE} selectable={false} onMouseDown={() => onOpenUrl(url)} width={72}>{url}</text>
         )}
       </ToolChip>
     );
   }
 
   if (view.kind === "image") {
+    const generated = view.generated === true;
+    const title = generated ? view.failed ? tr("timeline.imageFailed") : view.running ? tr("timeline.imageGenerating") : tr("timeline.imageGenerated") : tr("timeline.imageRead");
+    const glyph = generated && view.running ? " " : "▣";
     return (
-      <ToolChip rail={COLOR.diff} glyph="▣" title="image" time={time} running={false}>
-        <text fg={COLOR.diff}>{view.path}</text>
+      <ToolChip rail={view.failed ? COLOR.danger : COLOR.diff} glyph={glyph} title={title} time={time} running={view.running === true}>
+        {view.path === "(image)" && generated ? null : <text fg={COLOR.diff}>{view.path}</text>}
+        {view.error ? <text fg={COLOR.danger} wrapMode="word">{view.error}</text> : null}
       </ToolChip>
     );
   }
@@ -474,9 +486,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
         {view.running && hasText ? (
           // Streaming: the whole block in place, like the live reply — a
           // tail window re-cut on every delta and read as jitter.
-          <text fg={COLOR.dim} attributes={TextAttributes.ITALIC} wrapMode="word">{view.text.trim()}</text>
+          <markdown content={view.text.trim()} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
         ) : expanded && hasText ? (
-          <text fg={COLOR.dim} wrapMode="word">{view.text}</text>
+          <markdown content={view.text} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
         ) : null}
       </ToolChip>
     );
@@ -553,9 +565,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
 
   if (view.kind === "tool") {
     return (
-      <ToolChip rail={COLOR.tool} glyph="•" title={truncate(view.tool, 48)} time={time} running={view.running}>
+      <ToolChip rail={COLOR.tool} glyph="•" title={view.tool} time={time} running={view.running}>
         {view.detail.length === 0 ? null : (
-          <text fg={COLOR.dim}>{truncate(clamp(view.detail, 2), 160)}</text>
+          <text fg={COLOR.dim} wrapMode="word">{clamp(view.detail, 2)}</text>
         )}
       </ToolChip>
     );
@@ -1559,7 +1571,7 @@ export function Timeline({
   subtitle: string;
   /** The model that ran a given turn — each turn keeps its own, so a
       mid-thread model switch never relabels earlier replies. */
-  modelForTurn: (turnId: string | null) => { name: string; color: string | null };
+  modelForTurn: (turnId: string | null) => { name: string; color: string | null; provider?: string };
   /** Names an `instance/model` reference (a delegated task's model). */
   modelLabel: (model: string) => { name: string; color: string | null };
   homeDir: string | undefined;
@@ -1676,8 +1688,8 @@ export function Timeline({
           const checkpointFiles = diffTurnCount === undefined ? undefined : turnFileDiffs.get(diffTurnCount);
           const turnModel = modelForTurn(group.turnId);
           return (
+            <RuntimeProvider.Provider key={group.id} value={turnModel.provider}>
             <TurnBlock
-              key={group.id}
               group={group}
               model={turnModel.name}
               modelColor={turnModel.color}
@@ -1711,6 +1723,7 @@ export function Timeline({
               onOpenUrl={onOpenUrl}
               width={width}
             />
+            </RuntimeProvider.Provider>
           );
         })}
       </scrollbox>

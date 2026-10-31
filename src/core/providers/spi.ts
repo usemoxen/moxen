@@ -15,10 +15,11 @@ import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
 /** Provider surfaces we own. Cursor and Antigravity are out of scope. */
-export type ProviderDriverKind = "claude" | "opencode" | "harness";
+export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
+  "codex",
   "opencode",
   "harness",
 ];
@@ -247,6 +248,7 @@ export interface RateLimitWindow {
  * transports these plus thread-lifecycle events.
  */
 export type ProviderRuntimeEvent =
+  | { readonly type: "session.title.updated"; readonly provider: ProviderDriverKind; readonly threadId: ThreadId; readonly title: string }
   | {
       /**
        * Streamed assistant text. `text` is a *delta*, appended to the
@@ -489,6 +491,8 @@ export type SubagentHistoryItem =
   | { readonly kind: "tool"; readonly id: string; readonly at: string | null; readonly tool: string; readonly raw: Record<string, unknown> };
 
 export interface BackgroundTaskSummary {
+  /** False when the native runtime reports work but cannot stop it independently. */
+  readonly stoppable?: boolean;
   readonly taskId: string;
   readonly taskType: string | null;
   readonly description: string;

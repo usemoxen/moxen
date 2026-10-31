@@ -84,6 +84,14 @@ describe("summarizeWork", () => {
     expect(summarizeWork(entries)).toBe("Ran 2 commands, read 1 file, asked 1 question");
   });
 
+  it("counts generated images separately from reads and does not call failed generations successful", () => {
+    const image = (id: string, status: string, itemType = "image_generation") => toolEntry(id, "tool.completed", { itemType, status, toolCallId: id, detail: "/work/image.png", data: { state: { input: {} } } });
+    expect(summarizeWork([image("a", "completed")])).toBe("Generated 1 image");
+    expect(summarizeWork([image("a", "completed"), image("b", "completed"), image("c", "completed", "image_view")])).toBe("Generated 2 images, read 1 file");
+    expect(summarizeWork([image("a", "inProgress")])).toBe("Generating 1 image");
+    expect(summarizeWork([image("a", "failed")])).toBe("Failed to generate 1 image");
+  });
+
   it("counts Moxen's memory tools apart from other tools", () => {
     const memory = (id: string, tool: string, input: Record<string, unknown>): TimelineEntry =>
       toolEntry(id, "tool.completed", {

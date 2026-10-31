@@ -79,6 +79,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   agent: "Moxen",
   interface: "Moxen",
   git: "Moxen",
+  "provider:codex": "Providers",
   "provider:claude": "Providers",
   "provider:opencode": "Providers",
   "provider:harness": "Moxen Harness",
@@ -154,7 +155,7 @@ export function SettingsModal({
   onImport: (file: string) => void;
   notice: { readonly text: string; readonly error: boolean } | null;
   /** Each updatable provider's install, from the doctor query; null until it answers. */
-  versions: { readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView } | null;
+  versions: { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView } | null;
   /** The newest release of each, from the registry; null until it answers. */
   latest: LatestVersions | null;
   /** The providers whose updater is running now. */
@@ -754,7 +755,7 @@ export function SettingsModal({
                     <ProviderUpdateCard
                       provider={updatable}
                       check={versions?.[updatable]}
-                      latest={latest === null ? undefined : { enabled: latest.enabled, ...latest[updatable] }}
+                      latest={latest === null ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[updatable] }}
                       updating={updating.has(updatable)}
                       width={paneWidth}
                       onUpdate={() => onUpdate(updatable)}
@@ -828,8 +829,8 @@ function BackButton({ onBack }: { onBack: () => void }) {
   );
 }
 
-const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode" };
-const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade" };
+const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" };
+const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade", codex: "codex update" };
 
 /**
  * Where a provider's install stands, and the button that runs its own updater

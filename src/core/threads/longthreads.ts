@@ -72,8 +72,8 @@ export { LINE_PERCENT_MAX, LINE_PERCENT_MIN, LINE_TOKENS_MAX, LINE_TOKENS_MIN, c
 
 // -- what is in force, most specific first ------------------------------------
 
-export type LongThreadKind = "claude" | "opencode" | "harness";
-export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "opencode", "harness"];
+export type LongThreadKind = "claude" | "codex" | "opencode" | "harness";
+export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "codex", "opencode", "harness"];
 
 /**
  * Who compacts a long thread: the provider itself, Moxen asking first, Moxen
@@ -83,18 +83,20 @@ export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "opencode
  */
 export type CompactionMode = "provider" | "ask" | "auto" | "off";
 export const COMPACTION_MODES: Readonly<Record<LongThreadKind, readonly CompactionMode[]>> = {
+  codex: ["provider", "ask", "auto", "off"],
   claude: ["provider", "ask", "auto", "off"],
   opencode: ["provider", "ask", "auto", "off"],
   harness: ["ask", "auto", "off"],
 };
 /** What the global Compaction means on each provider: the Harness's own compaction is its automatic one. */
 const GLOBAL_COMPACTION_ON: Readonly<Record<LongThreadKind, (mode: CompactionMode) => CompactionMode>> = {
+  codex: (mode) => mode,
   claude: (mode) => mode,
   opencode: (mode) => mode,
   harness: (mode) => (mode === "provider" ? "auto" : mode),
 };
 const isCompactionMode = (value: unknown): value is CompactionMode => value === "provider" || value === "ask" || value === "auto" || value === "off";
-export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { claude: "ask", opencode: "provider", harness: "auto" };
+export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { codex: "provider", claude: "ask", opencode: "provider", harness: "auto" };
 
 export const DEFAULT_AUTO_COMPACT_PERCENT = 80;
 /** Where Moxen compacts when no tab sets a line; the Harness has its own rule by window size (`compactsettings.ts`). */
@@ -113,7 +115,7 @@ const isHandoffMode = (value: unknown): value is AutoHandoffMode => value === "o
 function kindOf(instanceId: string | undefined): LongThreadKind | undefined {
   if (instanceId === undefined) return undefined;
   const kind = driverKindOfInstance(instanceId);
-  return kind === "claude" || kind === "opencode" || kind === "harness" ? kind : undefined;
+  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" ? kind : undefined;
 }
 
 /** The first candidate that holds a value. Within one level the newer key comes first, so it wins over the older one beside it. */
@@ -298,6 +300,7 @@ export function driverProviders(config: LongThreadConfig): ProvidersConfig | und
   const opencodeAuto = opencodeMode === "provider" ? (opencodeOwn === true ? true : undefined) : false;
   return {
     ...providers,
+    codex: { ...providers?.codex, compaction: compactionModeFor(config, "codex").value },
     claude: {
       ...claudeRest,
       autoCompact: claudeMode === "provider" ? "claude" : claudeMode,

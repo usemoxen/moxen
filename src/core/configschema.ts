@@ -22,7 +22,7 @@
 import { readListScalar, resolveListKey, type ListDescriptor, type ListTarget } from "./configlist.js";
 import { CliError } from "./errors.js";
 import { webOrderEntries, webOrderUnavailable, type WebOrderEntry, type WebRole } from "./webservers.js";
-import { CLAUDE_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
+import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
 import { formatHandoffModels, formatModeModels } from "./handoffmodels.js";
 import { numberLabel } from "./configformat.js";
 import {
@@ -62,6 +62,7 @@ export const SETTING_SECTIONS = [
   "git",
   "provider:claude",
   "provider:opencode",
+  "provider:codex",
   "provider:harness",
   "mcp",
 ] as const;
@@ -76,6 +77,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   agent: "Agent context",
   interface: "Interface",
   git: "Git and forges",
+  "provider:codex": "Codex",
   "provider:claude": "Claude Code",
   "provider:opencode": "OpenCode",
   "provider:harness": "Moxen Harness",
@@ -117,7 +119,7 @@ export type SettingKind =
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
-      readonly providerKind?: "claude" | "opencode" | "harness";
+      readonly providerKind?: "claude" | "codex" | "opencode" | "harness";
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`
@@ -319,6 +321,7 @@ const DURATION_PRESETS = ["2m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "8h
 const LINE_PRESETS = ["40%", "50%", "60%", "70%", "80%", "90%", "8K", "16K", "24K", "32K", "64K", "128K", "256K", "512K", "1M"] as const;
 
 const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; readonly description: string }>> = {
+  codex: { own: "Codex", description: "Who compacts a thread as it fills. Codex compacts near its model limit; Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction." },
   claude: {
     own: "Claude Code",
     description:
@@ -341,14 +344,14 @@ const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider
 /** The sentence every Long threads group ends on, so the two lines are never read apart. */
 const LINES_INTERACT = "Handing off is offered first when its line is lower than compaction's; past both, the lower one acts first.";
 
-const PROVIDER_NAME: Readonly<Record<"claude" | "opencode" | "harness", string>> = { claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness" };
+const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "opencode" | "harness", string>> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness" };
 
 /**
  * One Tools group per provider, from one template so the three tabs cannot drift: Moxen's own tools
  * and skills, MCP reach, the to-do list, and (Claude Code, OpenCode) the web orders and the
  * provider's own tools to switch off.
  */
-function toolSettings(kind: "claude" | "opencode" | "harness"): SettingDescriptor[] {
+function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const base = { section, group: "Tools", appliesAt: "next-session" } as const;
@@ -422,16 +425,16 @@ function toolSettings(kind: "claude" | "opencode" | "harness"): SettingDescripto
       ...base,
       key: `providers.${kind}.disabledNativeTools`,
       label: "Built-in tools off",
-      description: `${name}'s own tools to switch off: each is taken out of the model's list.`,
+      description: kind === "codex" ? "Codex tools and tool families to switch off. Supported switches remove tools from the model; an always-on entry explains the native restriction." : `${name}'s own tools to switch off: each is taken out of the model's list.`,
       ...(kind === "opencode" ? { appliesAt: "provider-restart" as const } : {}),
-      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
+      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
       defaultValue: undefined,
     },
   ];
 }
 
 /** A provider's switch for the skills Moxen used to ship (MXN-138): kept so older configs still load, and does nothing. */
-function moxenSkillsSetting(kind: "claude" | "opencode" | "harness"): SettingDescriptor {
+function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor {
   return {
     key: `providers.${kind}.moxenSkills`,
     label: "Moxen's skills",
@@ -449,7 +452,7 @@ function moxenSkillsSetting(kind: "claude" | "opencode" | "harness"): SettingDes
  * One Sessions group per provider, the global Sessions settings narrowed to it: instructions that only this
  * provider's threads get, and whether a usage limit is waited out. Unset, each follows the global one.
  */
-function sessionSettings(kind: "claude" | "opencode" | "harness"): SettingDescriptor[] {
+function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   return [
@@ -466,7 +469,7 @@ function sessionSettings(kind: "claude" | "opencode" | "harness"): SettingDescri
     {
       key: `providers.${kind}.sessionTtl`,
       label: "Idle session lifetime",
-      description: `How long ${kind === "claude" ? "a" : kind === "opencode" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back." }[kind]}`,
+      description: `How long ${kind === "claude" ? "a" : kind === "opencode" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back." }[kind]}`,
       section,
       group: "Sessions",
       kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Shorter", high: "Longer" } },
@@ -1279,6 +1282,65 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
 
   // -- OpenCode --------------------------------------------------------------
   {
+    key: "providers.codex.runtimeMode",
+    label: "Permissions",
+    description: "How much a new Codex thread may do without asking.",
+    section: "provider:codex",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Codex's own rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.codex.model",
+    label: "Model",
+    description: "The model a new Codex thread starts with, when neither the request nor the project names one.",
+    section: "provider:codex",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "codex" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.codex.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new Codex thread starts at, for models that take one.",
+    section: "provider:codex",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "codex" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  {
+    key: "providers.codex.reasoningSummary",
+    label: "Thinking summaries",
+    description: "How much of Codex's reasoning summary to show. The model decides what summary it can provide.",
+    section: "provider:codex",
+    group: "Defaults",
+    kind: { type: "enum", choices: [choice("detailed", "Detailed"), choice("auto", "Automatic"), choice("concise", "Concise"), choice("none", "Off")] },
+    defaultValue: "detailed",
+    appliesAt: "server-restart",
+  },
+  ...toolSettings("codex"),
+  ...sessionSettings("codex"),
+  ...longThreadSettings("codex"),
+  ...(["binaryPath", "homePath", "launchArgs"] as const).map((field): SettingDescriptor => ({
+    key: `providers.codex.${field}`,
+    label: { binaryPath: "Executable", homePath: "Config directory", launchArgs: "Launch arguments" }[field],
+    description: { binaryPath: "The Codex executable to run.", homePath: "The Codex configuration and login directory to use.", launchArgs: "Extra arguments passed to Codex app-server." }[field],
+    section: "provider:codex", group: "Runtime", kind: { type: "string" },
+    defaultValue: field === "binaryPath" ? "codex" : undefined,
+    appliesAt: "server-restart",
+  })),
+  {
     key: "providers.opencode.runtimeMode",
     label: "Permissions",
     description: "How much a new OpenCode thread may do without asking.",
@@ -1553,7 +1615,7 @@ function orderDefaults(settings: readonly SettingDescriptor[]): readonly Setting
 
 function orderProviderGroups(settings: readonly SettingDescriptor[]): readonly SettingDescriptor[] {
   const out = [...settings];
-  for (const section of ["provider:claude", "provider:opencode", "provider:harness"] as const) {
+  for (const section of ["provider:codex", "provider:claude", "provider:opencode", "provider:harness"] as const) {
     const slots = out.flatMap((entry, at) => (entry.section === section ? [at] : []));
     const rank = (entry: SettingDescriptor): number => {
       const at = entry.group === undefined ? -1 : PROVIDER_GROUP_ORDER.indexOf(entry.group);
@@ -1819,7 +1881,7 @@ function settingPlace(from: SettingDescriptor, to: SettingDescriptor): string {
 
 /** The provider a Long threads row is on; undefined for the global one. */
 const longThreadKindOf = (descriptor: SettingDescriptor): LongThreadKind | undefined =>
-  /^providers\.(claude|opencode|harness)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
+  /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
 
 /** What a long-thread rule found, said on `descriptor`'s page: the value as that page writes it, and where it is set (nothing for the built-in default). */
 function sourcedEffective(descriptor: SettingDescriptor, value: string, key: string | null): SettingEffective {
@@ -1831,7 +1893,7 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
-    const kind = /^providers\.(claude|opencode|harness)\./.exec(descriptor.key)?.[1] as "claude" | "opencode" | "harness" | undefined;
+    const kind = /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
   },
@@ -1849,7 +1911,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {
-    const kind = /^providers\.(claude|opencode|harness)\.model$/.exec(descriptor.key)?.[1];
+    const kind = /^providers\.(claude|codex|opencode|harness)\.model$/.exec(descriptor.key)?.[1];
     const global = BY_KEY.get("model")!;
     const aimed = kind !== undefined && config.provider !== undefined && driverKindOfInstance(config.provider) === kind;
     if (aimed && config.model !== undefined && config.model.trim() !== "") return { value: config.model, label: config.model, origin: settingPlace(descriptor, global) };
@@ -1884,7 +1946,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     const buffer = kind === "opencode" ? config.providers?.opencode?.compactBuffer : undefined;
     return {
       value: undefined,
-      label: kind === "claude" ? "Claude Code's own, tuned per model" : buffer !== undefined ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit` : "OpenCode's own, 10% before the limit",
+      label: kind === "codex" ? "Codex's own" : kind === "claude" ? "Claude Code's own, tuned per model" : buffer !== undefined ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit` : "OpenCode's own, 10% before the limit",
     };
   },
 };
@@ -1929,9 +1991,9 @@ function settingUnavailable(config: CliConfig, descriptor: SettingDescriptor): s
 }
 
 /** A web order's provider and role, from its key. */
-function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "opencode"; role: WebRole } | null {
-  const match = /^providers\.(claude|opencode)\.web(Search|Fetch)Order$/.exec(descriptor.key);
-  return match === null ? null : { provider: match[1] as "claude" | "opencode", role: match[2] === "Search" ? "search" : "fetch" };
+function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "codex" | "opencode"; role: WebRole } | null {
+  const match = /^providers\.(claude|codex|opencode)\.web(Search|Fetch)Order$/.exec(descriptor.key);
+  return match === null ? null : { provider: match[1] as "claude" | "codex" | "opencode", role: match[2] === "Search" ? "search" : "fetch" };
 }
 
 export function describeSettings(config: CliConfig): readonly SettingView[] {

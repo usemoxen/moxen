@@ -35,6 +35,11 @@ const CLAUDE_QUESTION = {
 };
 
 describe("userInputActivityRow", () => {
+  it("preserves Codex question IDs so the answer panel can round-trip them", () => {
+    const row = userInputActivityRow(opened({ params: { questions: [{ id: "scope", question: "Which scope?", header: "Scope", options: [{ label: "Project" }] }] } }, "codex"));
+    expect(row?.payload.questions).toMatchObject([{ id: "scope", question: "Which scope?", options: [{ label: "Project" }] }]);
+  });
+
   it("normalizes a parked Claude AskUserQuestion into a requested row", () => {
     const row = userInputActivityRow(opened(CLAUDE_QUESTION));
     expect(row).toMatchObject({

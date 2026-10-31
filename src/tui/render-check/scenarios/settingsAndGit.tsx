@@ -69,6 +69,7 @@ async function runSettings(): Promise<void> {
         notice={null}
         // Claude Code older than the floor, OpenCode current: both statuses show.
         versions={{
+          codex: { ok: true, installed: true, version: "codex-cli 0.164.0", login: "inherit", minVersion: "0.164.0" },
           claude: { ok: false, installed: true, version: "2.1.280 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
         }}
@@ -251,6 +252,18 @@ async function runSettings(): Promise<void> {
   }
   if (!sawExecutable) fail("the OpenCode tab does not show its executable");
   if (!sawDefaultOn) fail("the OpenCode tab does not read an unset 'Compaction' as Default (OpenCode)");
+  await act(async () => setup.mockInput.pressTab());
+  await setup.flush();
+  const codex = setup.captureCharFrame();
+  console.log("--- settings page, Codex tab ---");
+  console.log(codex);
+  if (!codex.includes("0.164.0") || !codex.includes("Permissions") || !codex.includes("Effort")) fail("the Codex tab is missing its version or shared defaults");
+  if (!codex.includes("codex update") || !codex.includes("[ Update ]")) fail("the Codex tab has no native update action");
+  await act(async () => setup.mockInput.pressKey("u"));
+  if (updated.at(-1) !== "codex") fail("the Codex tab does not dispatch its own updater");
+  await act(async () => setup.mockInput.pressTab({ shift: true }));
+  await setup.flush();
+
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
   await act(async () => setup.mockInput.pressTab({ shift: true }));

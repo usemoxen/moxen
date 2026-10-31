@@ -241,6 +241,7 @@ export const NO_REDELEGATION_GUIDANCE =
 export function harnessName(instanceId: string): string {
   const key = instanceId.trim().toLowerCase();
   if (key === "claudeagent" || key === "claude") return "Claude Code";
+  if (key === "codex") return "Codex";
   if (key === "opencode" || key.startsWith("opencode/")) return "OpenCode";
   if (key === "harness" || key.startsWith("harness/")) return "Moxen Harness";
   return instanceId;

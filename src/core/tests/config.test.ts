@@ -72,6 +72,13 @@ describe("config", () => {
     expect(config.providers?.claude).toEqual({ autoCompact: "auto", autoCompactPercent: 70 });
   });
 
+  it("keeps Codex's reasoning-summary choice through the config file and CLI", () => {
+    const config = normalizeConfig({ providers: { codex: { reasoningSummary: "detailed" } } });
+    expect(config.providers?.codex?.reasoningSummary).toBe("detailed");
+    expect(setConfigValue(config, "providers.codex.reasoningSummary", "none").providers?.codex?.reasoningSummary).toBe("none");
+    expect(() => normalizeConfig({ providers: { codex: { reasoningSummary: "unlimited" } } })).toThrow(/reasoningSummary/);
+  });
+
   it("keeps a provider's hand-off share and per-model tokens, and sets them from text", () => {
     const config = normalizeConfig({ providers: { claude: { autoHandoffPercent: 75, autoHandoffTokens: 131072, autoHandoffModels: { "claude-opus-4-5": "500k", "gpt-5": 1_000_000 } } } });
     expect(config.providers?.claude).toEqual({ autoHandoffPercent: 75, autoHandoffTokens: 131072, autoHandoffModels: { "claude-opus-4-5": 500_000, "gpt-5": 1_000_000 } });

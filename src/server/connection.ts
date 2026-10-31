@@ -61,6 +61,7 @@ import { startMcpHttpServer, type McpHttpServer } from "./mcp/http.js";
 import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
 import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
 import { noteMessageId } from "../core/threads/views.js";
+import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
@@ -218,6 +219,7 @@ export class DirectConnection implements ClientApi {
       const claudeBinary = providers?.claude?.binaryPath || "claude";
       return await buildDirectProviders({
         harness: providers?.harness,
+        ...(providers?.codex ? { codex: providers.codex } : {}),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
       });
     });
@@ -1145,6 +1147,10 @@ export class DirectConnection implements ClientApi {
       await this.context();
       return this.driverFor(selection.instanceId);
     }
+    if (driverKey(selection.instanceId) === "codex" && thread.providerSessions?.["codex"] !== undefined) {
+      await this.context();
+      return this.driverFor(selection.instanceId);
+    }
     if (thread.providerSessions?.["opencode"] === undefined) return null;
     if (driverKey(selection.instanceId) !== "opencode") return null;
     await this.context();
@@ -1180,6 +1186,7 @@ export class DirectConnection implements ClientApi {
    * joins on the same separator the options are listed with.
    */
   private async userInputRespond(threadId: string, requestId: string, answers: UserInputAnswers): Promise<void> {
+    if (await respondToAsyncInput(await this.context(), threadId, requestId, answers)) return;
     const driver = await this.driverForThread(threadId);
     if (!driver.respondToUserInput) {
       throw new CliError("REQUEST_UNSUPPORTED", "This provider cannot be answered.");
@@ -1197,6 +1204,7 @@ export class DirectConnection implements ClientApi {
    * on, which is what "the agent is not messaged" means in practice.
    */
   private async userInputDismiss(threadId: string, requestId: string): Promise<void> {
+    if (await respondToAsyncInput(await this.context(), threadId, requestId, null)) return;
     const driver = await this.driverForThread(threadId);
     if (!driver.respondToRequest) {
       throw new CliError("REQUEST_UNSUPPORTED", "This provider cannot be answered.");
@@ -1289,7 +1297,7 @@ export class DirectConnection implements ClientApi {
         return { providers: withLiveUsage(await this.providers()) };
       case "doctor": {
         const providers = (await this.loadConfig()).providers;
-        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath);
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath);
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
@@ -1311,7 +1319,8 @@ export class DirectConnection implements ClientApi {
         const thread = await store.readThreadRecord(query.threadId);
         const selection = [...(await store.readTurns(query.threadId))].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
         const harness = selection !== undefined && driverKey(selection.instanceId) === "harness";
-        const cursor = thread?.providerSessions?.[harness ? "harness" : "opencode"] ?? null;
+        const historyProvider = harness ? "harness" : selection && driverKey(selection.instanceId) === "codex" ? "codex" : "opencode";
+        const cursor = thread?.providerSessions?.[historyProvider] ?? null;
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId, cursor) : undefined;
         return await subagentTranscript(store, query.threadId, query.agentId, readHistory, harness ? "harness" : "opencode");
       }
@@ -1319,7 +1328,7 @@ export class DirectConnection implements ClientApi {
         // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
         const config = await this.loadConfig();
         if (config.updates?.checkLatest === false) {
-          return { enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null } };
+          return { enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null }, codex: { latest: null, channel: null } };
         }
         return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
       }

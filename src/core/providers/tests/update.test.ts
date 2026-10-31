@@ -32,6 +32,9 @@ describe("updateProvider", () => {
     const opencode = fake(["opencode v2.0.20", "opencode v2.0.22"]);
     expect(await updateProvider("opencode", { run: opencode.run })).toMatchObject({ before: "2.0.20", after: "2.0.22", updated: true });
     expect(opencode.calls).toContain("opencode upgrade");
+    const codex = fake(["codex-cli 0.164.0", "codex-cli 0.165.0"]);
+    expect(await updateProvider("codex", { run: codex.run })).toMatchObject({ provider: "codex", updated: true, before: "0.164.0", after: "0.165.0" });
+    expect(codex.calls).toEqual(["codex --version", "codex update", "codex --version"]);
   });
 
   it("reports an update that changed nothing, with the tool's own words", async () => {

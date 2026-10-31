@@ -1,7 +1,7 @@
 # Overview
 
 Moxen is a terminal UI and CLI for coding-agent threads. It drives provider
-CLIs directly — `claude`, `opencode` — instead of calling
+CLIs directly — `claude`, `codex app-server`, `opencode` — instead of calling
 provider APIs itself. Provider CLIs own their own logins; Moxen never sees
 credentials, only whether a login exists.
 

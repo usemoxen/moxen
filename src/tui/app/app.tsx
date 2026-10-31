@@ -2053,6 +2053,15 @@ export function App({
                   providerUpdates.update("opencode");
                 },
               },
+              {
+                key: "update:codex",
+                label: t("app.update_codex"),
+                meta: "codex update", // i18n-exempt: executable command
+                onPick: () => {
+                  closePicker("chat");
+                  providerUpdates.update("codex");
+                },
+              },
             ],
           },
           remoteSection(),
@@ -2686,17 +2695,16 @@ export function App({
                   : String(selected.title ?? selected.id)
             }
             subtitle={subagentView.target !== null ? t("subagent.word") : sessionStatusLabel(session?.status ?? "idle")}
-            modelForTurn={(turnId) =>
-              labelFor(
-                turnModelSelection(
-                  {
-                    modelSelection: selected?.modelSelection,
-                    turnModelSelections: threadState.thread?.turnModelSelections ?? selected?.turnModelSelections,
-                  },
-                  turnId,
-                ),
-              )
-            }
+            modelForTurn={(turnId) => {
+              const selection = turnModelSelection(
+                {
+                  modelSelection: selected?.modelSelection,
+                  turnModelSelections: threadState.thread?.turnModelSelections ?? selected?.turnModelSelections,
+                },
+                turnId,
+              );
+              return { ...labelFor(selection), ...(subagentView.target === null && selection ? { provider: selection.instanceId } : {}) };
+            }}
             modelLabel={modelLabelOf}
             homeDir={homeDir}
             readAttachment={readAttachment}

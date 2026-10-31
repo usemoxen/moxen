@@ -1,8 +1,7 @@
 /**
- * Which version of Claude Code and OpenCode is newest, for the settings page's
- * "update available" line. Neither tool can be asked without installing
- * (`claude update` and `opencode upgrade` both just do it), so this reads the
- * public npm registry, which publishes both: `@anthropic-ai/claude-code` with a
+ * Which version of Claude Code, OpenCode and Codex is newest, for the settings
+ * page's "update available" line. This reads the public npm registry:
+ * `@openai/codex`, `@anthropic-ai/claude-code` with a
  * dist-tag per release channel, and `@opencode/cli` (the v2 CLI: it ships the
  * `opencode` binary, from the same repository, on the 2.0.x line).
  *
@@ -15,7 +14,7 @@ import { runProcess } from "../infra/process.js";
 import type { LatestVersion, LatestVersions } from "../catalog/update.js";
 
 const REGISTRY = "https://registry.npmjs.org";
-const PACKAGES = { claude: "@anthropic-ai/claude-code", opencode: "@opencode/cli" } as const;
+const PACKAGES = { claude: "@anthropic-ai/claude-code", opencode: "@opencode/cli", codex: "@openai/codex" } as const;
 const TIMEOUT_MS = 5_000;
 const KEEP_MS = 10 * 60_000;
 
@@ -78,8 +77,8 @@ export async function latestVersions(options: { readonly claudeBinaryPath?: stri
   };
   const opencode = (): Promise<LatestVersion> =>
     cached("opencode", deps, async () => ({ latest: await tagVersion(PACKAGES.opencode, "latest", deps), channel: null }));
-  const [claudeResult, opencodeResult] = await Promise.all([claude(), opencode()]);
-  return { claude: claudeResult, opencode: opencodeResult };
+  const [claudeResult, opencodeResult, codex] = await Promise.all([claude(), opencode(), cached("codex", deps, async () => ({ latest: await tagVersion(PACKAGES.codex, "latest", deps), channel: null }))]);
+  return { claude: claudeResult, opencode: opencodeResult, codex };
 }
 
 /** Forget what was kept (tests). */

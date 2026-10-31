@@ -1,3 +1,5 @@
+import { runCodexMedia } from "./scenarios/codexMedia.js";
+import { runAsyncQuestions } from "./scenarios/asyncQuestions.js";
 import { testRender } from "./testrender.js";
 
 import { App, client } from "./fixtures.js";
@@ -125,5 +127,7 @@ export async function runWalkthrough(): Promise<void> {
   await runSpanishSettings();
   await runServerLink();
   await runSettingsCoverage();
+  await runCodexMedia();
+  await runAsyncQuestions();
 
 }

@@ -32,12 +32,12 @@ function stubAdapter(): ProviderAdapter {
 
 describe("provider SPI", () => {
   it("names exactly the owned surfaces", () => {
-    expect([...PROVIDER_DRIVER_KINDS]).toEqual(["claude", "opencode", "harness"]);
+    expect([...PROVIDER_DRIVER_KINDS]).toEqual(["claude", "codex", "opencode", "harness"]);
   });
 
   it("guards driver kinds", () => {
     expect(isProviderDriverKind("claude")).toBe(true);
-    expect(isProviderDriverKind("codex")).toBe(false);
+    expect(isProviderDriverKind("codex")).toBe(true);
     expect(isProviderDriverKind("grok")).toBe(false);
     expect(isProviderDriverKind("opencode")).toBe(true);
     expect(isProviderDriverKind("cursor")).toBe(false);

@@ -52,7 +52,7 @@ describe("buildDirectProviders", () => {
     expect(claude?.installed).toBe(false);
     expect(claude?.enabled).toBe(false);
     expect(claude?.status).toBe("not installed");
-    expect(providers.map((entry) => entry.driver)).not.toContain("codex");
+    expect(providers.find((entry) => entry.driver === "codex")).toMatchObject({ installed: false, enabled: false, status: "not installed" });
     expect(providers.map((entry) => entry.driver)).not.toContain("grok");
     const opencode = providers.find((entry) => entry.instanceId === "opencode");
     expect(opencode?.installed).toBe(false);

@@ -9,6 +9,7 @@
  * Moxen starts its OpenCode servers with `update: "disable"`, so an explicit
  * call like this one is the only way one of them changes under a running app.
  */
+import { codexLaunchCommand } from "./codex/transport.js";
 import { CliError } from "../errors.js";
 import { runProcess } from "../infra/process.js";
 import { describeUpdate, UPDATABLE_PROVIDERS, type ProviderUpdate, type UpdatableProvider } from "../catalog/update.js";
@@ -18,6 +19,7 @@ export { describeUpdate, UPDATABLE_PROVIDERS };
 export type { ProviderUpdate, UpdatableProvider };
 
 const COMMANDS: Record<UpdatableProvider, { readonly binary: string; readonly args: readonly string[]; readonly label: string }> = {
+  codex: { binary: "codex", args: ["update"], label: "Codex" },
   claude: { binary: "claude", args: ["update"], label: "Claude Code" },
   opencode: { binary: "opencode", args: ["upgrade"], label: "OpenCode" },
 };
@@ -56,7 +58,10 @@ export async function updateProvider(provider: UpdatableProvider, deps: UpdateDe
   const { args, label } = COMMANDS[provider];
   const binary = deps.binaryPath?.trim() || COMMANDS[provider].binary;
   const env = deps.env ?? process.env;
-  const run = deps.run ?? defaultRun;
+  const run: NonNullable<UpdateDeps["run"]> = deps.run ?? ((binary, argv, env) => {
+    const launch = provider === "codex" ? codexLaunchCommand(binary, argv, env) : { command: binary, args: argv };
+    return defaultRun(launch.command, launch.args, env);
+  });
   const before = await versionOf(binary, env, run);
   let result: { stdout: string; stderr: string; exitCode: number };
   try {

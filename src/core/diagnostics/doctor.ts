@@ -12,6 +12,7 @@ import { access, constants } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { codexLaunchCommand } from "../providers/codex/transport.js";
 import { commandExists, runProcess } from "../infra/process.js";
 import { readStoredAuthTypes } from "../providers/opencode/catalog.js";
 import { CLAUDE_CODE_MIN_VERSION } from "../providers/claude/version.js";
@@ -39,6 +40,7 @@ export interface Diagnosis {
   readonly node: { readonly ok: true; readonly version: string };
   readonly git: { readonly ok: boolean };
   readonly providers: {
+    readonly codex?: ProviderCheck;
     readonly claude: ProviderCheck;
     readonly opencode: ProviderCheck;
   };
@@ -53,11 +55,11 @@ export interface Diagnosis {
   };
 }
 
-async function probeProvider(binary: string, login: string, minVersion?: string): Promise<ProviderCheck> {
+async function probeProvider(binary: string, login: string, minVersion?: string, prefix: readonly string[] = []): Promise<ProviderCheck> {
   const installed = await commandExists(binary);
   if (!installed) return { ok: false, installed, version: null, login };
   try {
-    const result = await runProcess(binary, ["--version"], { timeoutMs: 10_000 });
+    const result = await runProcess(binary, [...prefix, "--version"], { timeoutMs: 10_000 });
     const firstLine = result.stdout.split("\n")[0]?.trim() ?? "";
     const version = firstLine.length > 0 ? firstLine.slice(0, 80) : null;
     if (minVersion === undefined) return { ok: true, installed, version, login };
@@ -72,8 +74,8 @@ async function probeProvider(binary: string, login: string, minVersion?: string)
  * configured with (`providers.<name>.binaryPath`), probed here too so the check
  * and the sessions look at the same binary; unset, the one on PATH.
  */
-export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string): Promise<Diagnosis> {
-  const [git, claude, opencode] = await Promise.all([
+export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string, codexBinaryPath?: string): Promise<Diagnosis> {
+  const [git, claude, opencode, codex] = await Promise.all([
     commandExists("git"),
     probeProvider(claudeBinaryPath ?? "claude", "inherit from `claude auth login`", CLAUDE_CODE_MIN_VERSION),
     probeProvider(
@@ -81,6 +83,12 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
       "`opencode auth login` (openai, xai and more built in) or provider API keys",
       OPENCODE_MIN_VERSION,
     ),
+    (async () => {
+      try {
+        const launch = codexLaunchCommand(codexBinaryPath ?? "codex", [], process.env);
+        return await probeProvider(launch.command, "inherit from `codex login`", "0.164.0", launch.args);
+      } catch { return { ok: false, installed: false, version: null, login: "inherit from `codex login`" }; }
+    })(),
   ]);
   const storeWritable = await access(path.dirname(storeRoot), constants.W_OK)
     .then(() => true)
@@ -92,7 +100,7 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
   return {
     node: { ok: true, version: process.version },
     git: { ok: git },
-    providers: { claude, opencode },
+    providers: { claude, opencode, codex },
     store: { ok: storeWritable, path: storeRoot },
     auth: { ok: authProviders.length > 0, path: path.join(dataDir, "opencode", "opencode.db"), providers: authProviders, types },
   };

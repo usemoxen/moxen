@@ -68,7 +68,7 @@ export function McpAccessEditor({
     return () => clearTimeout(timer);
   }, [at]);
 
-  const on = servers.filter((server) => server.locked === null && !off.has(server.name)).length;
+  const on = servers.filter((server) => (server.locked === null ? !off.has(server.name) : server.enabledWhenLocked === true)).length;
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
       <Back onBack={onExit} />
@@ -79,7 +79,7 @@ export function McpAccessEditor({
       <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
         {servers.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{noun === "tools" ? t("ma.noTools") : t("ma.noServers")}</text> : null}
         {servers.map((server, index) => (
-          <Row key={server.name} id={`mcp-access-${index}`} server={server} checked={server.locked === null && !off.has(server.name)} active={index === at} width={width} onPress={() => { setCursor(index); toggle(server); }} />
+          <Row key={server.name} id={`mcp-access-${index}`} server={server} checked={server.locked === null ? !off.has(server.name) : server.enabledWhenLocked === true} active={index === at} width={width} onPress={() => { setCursor(index); toggle(server); }} />
         ))}
       </scrollbox>
       <box style={{ flexDirection: "row", flexShrink: 0, height: 1, marginTop: 1 }} backgroundColor={SURFACE.raised}>

@@ -11,7 +11,9 @@
  * session, worktree and browser utilities, which ask for no permission and so
  * have nothing to deny.
  */
-export type NativeToolProvider = "claude" | "opencode";
+import { CliError } from "./errors.js";
+
+export type NativeToolProvider = "claude" | "codex" | "opencode";
 
 export interface NativeTool {
   /** Claude: the tool's name, as `disallowedTools` takes it. OpenCode: the permission action. */
@@ -19,6 +21,10 @@ export interface NativeTool {
   readonly label: string;
   readonly group: "Files" | "Commands" | "Web" | "Agents" | "Interaction" | "Automation";
   readonly summary: string;
+  /** Native tools that can be inspected but have no supported removal control. */
+  readonly disabledReason?: string;
+  /** Codex configuration switch that removes this tool or tool family. */
+  readonly codexControl?: { readonly key: string; readonly off: boolean | string };
 }
 
 export const CLAUDE_NATIVE_TOOLS: readonly NativeTool[] = [
@@ -61,8 +67,32 @@ export const OPENCODE_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "question", label: "Ask a question", group: "Interaction", summary: "Asks you a question." },
 ];
 
+/** Feature switches verified with the installed CLI's strict configuration validator. */
+export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
+  { name: "shell", label: "Shell", group: "Commands", summary: "exec_command and write_stdin; commands, file reading and search.", codexControl: { key: "features.shell_tool", off: false } },
+  { name: "apply_patch", label: "Apply patch", group: "Files", summary: "Creates, edits and deletes files with patches.", disabledReason: "Codex has no independent removal control; tool hooks require separate trust." },
+  { name: "subagents", label: "Subagents", group: "Agents", summary: "spawn_agent, send_input, resume_agent, wait_agent and close_agent.", codexControl: { key: "features.multi_agent", off: false } },
+  { name: "web_search", label: "Web search", group: "Web", summary: "Searches and reads web pages.", codexControl: { key: "web_search", off: "disabled" } },
+  { name: "view_image", label: "View image", group: "Files", summary: "Reads local images.", codexControl: { key: "features.view_image", off: false } },
+  { name: "image_generation", label: "Image generation", group: "Files", summary: "Generates and edits images when available for the model.", codexControl: { key: "features.image_generation", off: false } },
+  { name: "browser", label: "Browser", group: "Web", summary: "Agent-driven browser tools, when configured in Codex.", codexControl: { key: "features.browser_use", off: false } },
+  { name: "computer", label: "Computer use", group: "Automation", summary: "Agent-driven computer tools, when configured in Codex.", codexControl: { key: "features.computer_use", off: false } },
+  { name: "apps", label: "App tools", group: "Agents", summary: "Codex app and connector tools; Moxen's MCP servers are separate.", codexControl: { key: "features.apps", off: false } },
+  { name: "sleep", label: "Sleep", group: "Automation", summary: "Pauses an agent before it continues.", codexControl: { key: "features.sleep_tool", off: false } },
+];
+
+export function codexDisabledToolConfig(names: readonly string[]): Record<string, boolean | string> {
+  const config: Record<string, boolean | string> = {};
+  for (const name of names) {
+    const tool = CODEX_NATIVE_TOOLS.find((tool) => tool.name === name);
+    if (!tool?.codexControl) throw new CliError("CODEX_TOOL_CONTROL_UNSUPPORTED", `Codex cannot remove the built-in tool ${name}. ${tool?.disabledReason ?? "Use one of the supported tool controls."}`);
+    config[tool.codexControl.key] = tool.codexControl.off;
+  }
+  return config;
+}
+
 export function nativeToolsOf(provider: NativeToolProvider): readonly NativeTool[] {
-  return provider === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS;
+  return provider === "codex" ? CODEX_NATIVE_TOOLS : provider === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS;
 }
 
 /**

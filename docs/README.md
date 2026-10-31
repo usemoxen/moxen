@@ -2,7 +2,7 @@
 
 - [Overview](overview.md) — what Moxen is, its concepts, and how it runs.
 - [Threads and turns](threads.md) — the turn lifecycle, the activity ledger, steering, background work, revert.
-- [Providers](providers.md) — the three providers (Claude Code, OpenCode, Moxen Harness), how they authenticate, defaults, and per-provider gaps.
+- [Providers](providers.md) — the four providers (Claude Code, Codex, OpenCode, Moxen Harness), how they authenticate, defaults, and per-provider gaps.
 - [CLI reference](cli.md) — every command, flag, setting, and output shape.
 - [Contributing](contributing.md) — working on Moxen: layout, workflow, conventions, boundaries, tests.
 

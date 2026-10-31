@@ -189,8 +189,8 @@ export interface StoredMessage {
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
 }
 
-/** `task-notification`: delegated tasks settling. `usage-continue`: picking up after a usage limit reset. */
-export type MessageOrigin = "task-notification" | "usage-continue";
+/** Internal inputs: task results, usage reset continuations, and answer-panel replies. */
+export type MessageOrigin = "task-notification" | "usage-continue" | "question-answer";
 
 export interface StoredActivity {
   readonly id: string;

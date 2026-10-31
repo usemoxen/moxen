@@ -1,10 +1,10 @@
 # moxen
 
-`moxen` drives provider CLIs directly from your terminal: a full interactive TUI for working with threads, plus a scriptable CLI for handovers, thread inspection, messaging, and automation. Threads, projects, and orchestration live in a local store (`~/.moxen`), and turns run against `claude` or `opencode serve` through their own logins.
+`moxen` drives provider CLIs directly from your terminal: a full interactive TUI for working with threads, plus a scriptable CLI for handovers, thread inspection, messaging, and automation. Threads, projects, and orchestration live in a local store (`~/.moxen`), and turns run against `claude`, `codex app-server` or `opencode serve` through their own logins.
 
 ## Requirements
 
-Bun (it manages packages and runs everything) and at least one provider CLI: `claude` (`claude auth login`) or `opencode` v2 or newer (`opencode auth login`, including `openai` for ChatGPT and `xai` for SuperGrok, or provider API keys).
+Bun (it manages packages and runs everything) and at least one provider CLI: `claude` (`claude auth login`), `codex` 0.164.0 or newer (`codex login`), or `opencode` v2 or newer (`opencode auth login`, including `openai` for ChatGPT and `xai` for SuperGrok, or provider API keys).
 
 ## Install
 

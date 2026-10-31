@@ -18,6 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { codexProvider } from "../providers/codex/catalog.js";
 import { claudeCatalogModels, setLiveClaudeModels } from "../providers/claude/catalog.js";
 import { resolveLiveModels } from "../providers/claude/livemodels.js";
 import { binaryOnPath } from "../infra/process.js";
@@ -37,11 +38,13 @@ import {
   type ModelsDevModel,
   type ModelsDevProvider,
 } from "../providers/opencode/catalog.js";
-import type { HarnessProviderConfig } from "../types.js";
+import type { CodexProviderConfig, HarnessProviderConfig } from "../types.js";
 import type { EffortDescriptor, ModelSummary, ProviderSummary } from "./summary.js";
 
 export interface DirectCatalogOptions {
   readonly env?: NodeJS.ProcessEnv;
+  readonly codex?: CodexProviderConfig;
+  readonly fetchCodexProvider?: () => Promise<ProviderSummary>;
   readonly workingDirectory?: string;
   readonly storeRoot?: string;
   readonly modelsDev?: () => Promise<LoadedModelsDevCatalog>;
@@ -296,5 +299,6 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
 
   const harness = harnessProviders(options.harness, env, (instanceId, slug) => isModelHidden(prefs, instanceId, slug));
 
-  return [claude, ...harness, ...opencode, compat];
+  const codex = await (options.fetchCodexProvider ?? (() => codexProvider(options.codex, env, options.workingDirectory ?? process.cwd())))();
+  return [claude, { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, "codex", model.slug) })) }, ...harness, ...opencode, compat];
 }

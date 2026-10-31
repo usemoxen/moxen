@@ -796,6 +796,7 @@ function stringOf(value: unknown): string | null {
 }
 
 export interface BackgroundTaskRow {
+  stoppable?: boolean;
   taskId: string;
   taskType: string | null;
   description: string;
@@ -824,6 +825,7 @@ export function latestBackgroundTasks(state: ThreadState): BackgroundTaskRow[] {
       return [
         {
           taskId,
+          ...(task.stoppable === false ? { stoppable: false } : {}),
           taskType: stringOf(task.taskType),
           description: stringOf(task.description) ?? taskId,
           toolName: stringOf(task.toolName),
@@ -1216,6 +1218,40 @@ function laterOf(at: string, other: string | undefined): string {
   return other !== undefined && other > at ? other : at;
 }
 
+/**
+ * Replies made by the answer panel are control input, not chat prompts. Older
+ * builds wrote them without an origin; identify those only through an answered
+ * async request and the exact display format immediately preceding its resolve.
+ */
+function questionAnswerMessageIds(state: ThreadState): Set<string> {
+  const hidden = new Set(state.messages.filter((message) => message.role === "user" && message.origin === "question-answer").map((message) => message.id));
+  for (const resolved of state.activities) {
+    const payload = asRecord(resolved.payload);
+    if (resolved.kind !== "user-input.resolved" || resolved.summary !== "Question answered" || payload?.delivery !== "async") continue;
+    const asked = state.activities.find((activity) => activity.kind === "user-input.requested" && asRecord(activity.payload)?.requestId === payload.requestId);
+    const questions = asRecord(asked?.payload)?.questions;
+    if (!asked || !Array.isArray(questions) || questions.length === 0) continue;
+    const candidate = state.messages.filter((message) => message.role === "user" && message.createdAt >= asked.createdAt && message.createdAt <= resolved.createdAt).at(-1);
+    if (!candidate || candidate.origin !== undefined) continue;
+    let remaining = candidate.text;
+    let matches = true;
+    for (let index = 0; index < questions.length; index++) {
+      const title = asText(asRecord(questions[index])?.question);
+      const prefix = title === null ? null : `> ${title}\n\n`;
+      if (prefix === null || !remaining.startsWith(prefix)) { matches = false; break; }
+      remaining = remaining.slice(prefix.length);
+      if (index + 1 < questions.length) {
+        const next = asText(asRecord(questions[index + 1])?.question);
+        const boundary = next === null ? -1 : remaining.indexOf(`\n\n> ${next}\n\n`);
+        if (boundary < 1) { matches = false; break; }
+        remaining = remaining.slice(boundary + 2);
+      } else if (!remaining.trim()) matches = false;
+    }
+    if (matches) hidden.add(candidate.id);
+  }
+  return hidden;
+}
+
 /** Messages and activities interleaved into the single chronological list the chat pane renders. */
 export function timeline(state: ThreadState): TimelineEntry[] {
   const checkpointsByTurn = new Map(state.checkpoints.map((checkpoint) => [checkpoint.turnId, checkpoint]));
@@ -1225,6 +1261,7 @@ export function timeline(state: ThreadState): TimelineEntry[] {
   );
   // Taken back before running: gone from the transcript, prompt and all.
   const cancelled = cancelledBeforeStart(state.activities);
+  const questionAnswers = questionAnswerMessageIds(state);
   // When a queued or scheduled turn was actually sent. Its prompt was
   // written when the user queued it — mid-way through the turn it waited
   // behind — so placed by that time it landed inside the earlier turn, with
@@ -1243,7 +1280,7 @@ export function timeline(state: ThreadState): TimelineEntry[] {
   const explainedWakes = new Set(nativeNotices.map((notice) => notice.turnId ?? ""));
   const entries: TimelineEntry[] = [
     ...[...state.messages, ...nativeNotices]
-      .filter((message) => !retracted.messages.has(message.id) && !cancelled.has(message.turnId ?? ""))
+      .filter((message) => !retracted.messages.has(message.id) && !cancelled.has(message.turnId ?? "") && !questionAnswers.has(message.id))
       // A message the agent has not been sent yet — queued behind the
       // running turn, scheduled, or held for a usage reset — is the Queued
       // panel's (and a waiting continue the usage-limit banner's). It joins

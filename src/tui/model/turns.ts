@@ -343,8 +343,10 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
         break;
       case "read":
       case "list":
-      case "image":
         bump("read");
+        break;
+      case "image":
+        bump(view.generated ? view.failed ? "image-failed" : view.running ? "image-generating" : "image-generated" : "read");
         break;
       case "grep":
         bump("grep");
@@ -395,6 +397,12 @@ function summarizePart(key: string, count: number): string {
       return t("summary.file_updated", { count });
     case "read":
       return t("summary.read", { count });
+    case "image-generated":
+      return t("summary.imageGenerated", { count });
+    case "image-generating":
+      return t("summary.imageGenerating", { count });
+    case "image-failed":
+      return t("summary.imageFailed", { count });
     case "grep":
       return t("summary.grep", { count });
     case "web":

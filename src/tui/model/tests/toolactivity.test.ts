@@ -37,6 +37,53 @@ function event(partial: Partial<ToolRuntimeEvent> & { provider: ToolRuntimeEvent
 }
 
 describe("toolActivityRow", () => {
+  it.each([
+    ["linear", "list_issues", "Linear · List issues"],
+    ["claude_ai_Linear", "get_issue", "Linear · Get issue"],
+    ["plugin_linear_linear", "mcp__linear__get_issue", "Linear · Get issue"],
+    ["docs", "read", "Docs · Read"],
+  ])("retains the Codex MCP server %s for tool %s", (server, tool, label) => {
+    const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "mcp", type: "mcpToolCall", server, tool, status: "completed", arguments: {}, result: { content: [{ type: "text", text: "RAW_MCP_RESPONSE" }], structuredContent: null } } } }))!;
+    expect(view(row)).toMatchObject({ kind: "tool", tool: label, detail: "", running: false });
+  });
+
+  it.each([
+    [null, "legacy query", { tool: "websearch", query: "legacy query" }],
+    [{ type: "search", query: "full query", queries: null }, "short", { action: "search", query: "full query" }],
+    [{ type: "search", query: "first", queries: ["first", "second"] }, "short", { query: "first · second" }],
+    [{ type: "openPage", url: "https://example.org/visual" }, "ignored", { tool: "webfetch", action: "openPage", query: "https://example.org/visual", url: "https://example.org/visual" }],
+    [{ type: "findInPage", url: "https://example.org/visual", pattern: "key visual" }, "ignored", { action: "findInPage", query: "key visual", pattern: "key visual", url: "https://example.org/visual" }],
+    [{ type: "other" }, "", { action: "other", query: "" }],
+  ])("preserves Codex web action %j and provider identity", (action, query, expected) => {
+    const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { type: "webSearch", id: "search", action, query } } }))!;
+    expect(view(row)).toMatchObject({ kind: "web", provider: "codex", running: false, ...expected });
+  });
+
+  it("does not discard a web action update just because its status and output length stayed the same", () => {
+    const search = (query: string) => toolActivityRow(event({ provider: "codex", raw: { item: { type: "webSearch", id: "search", query, action: { type: "search", query } } } }))!;
+    expect(search("first").signature).not.toBe(search("second").signature);
+  });
+
+  it("distinguishes native image generation from viewing and never stores the image bytes", () => {
+    const image = (status: string, extra: Record<string, unknown> = {}) => toolActivityRow(event({ provider: "codex", type: status === "inProgress" ? "tool.execute.started" : "tool.execute.completed", raw: { item: { id: "image", type: "imageGeneration", status, ...extra } } }))!;
+    const started = image("inProgress");
+    expect(view(started)).toMatchObject({ kind: "image", generated: true, running: true, failed: false });
+    const completed = image("completed", { savedPath: "/work/image.png", result: "DO_NOT_STORE_IMAGE_BYTES" });
+    expect(view(completed)).toMatchObject({ kind: "image", generated: true, running: false, path: "image.png", failed: false });
+    expect(JSON.stringify(completed.payload)).not.toContain("DO_NOT_STORE_IMAGE_BYTES");
+    expect(view(image("completed", { failure: { type: "usageLimitExceeded" } }))).toMatchObject({ generated: true, failed: true, error: "usageLimitExceeded" });
+    const read = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "read", type: "imageView", path: "/work/image.png" } } }))!;
+    expect(view(read)).toEqual({ kind: "image", path: "image.png" });
+  });
+
+  it("renders Codex command output and native patches from the provider item", () => {
+    const command = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", tool: "commandExecution", raw: { item: { type: "commandExecution", id: "cmd", command: "git status", cwd: "/repo", aggregatedOutput: "clean", exitCode: 0, status: "completed" } } }));
+    expect(view(command!)).toMatchObject({ kind: "command", command: "git status", running: false });
+    const patch = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", tool: "fileChange", raw: { item: { type: "fileChange", id: "patch", status: "completed", changes: [{ path: "a.ts", kind: { type: "update" }, diff: "@@ -1 +1 @@\n-old\n+new" }] } } }));
+    expect(patch?.payload).toMatchObject({ itemType: "file_change", data: { files: [{ path: "a.ts" }] } });
+    expect(toolActivityRow(event({ provider: "codex", raw: { item: { id: "m", type: "agentMessage", text: "answer" } } }))).toBeNull();
+  });
+
   it("maps a Claude Bash call to a command row and settles it on the tool result", () => {
     const started = toolActivityRow(
       event({

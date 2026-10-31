@@ -214,11 +214,145 @@ const DETAIL_LIMIT = 4000;
  * or an item that is not a tool call at all). Never throws: a shape
  * we fail to read must cost a transcript row, not the turn.
  */
+function fromCodex(event: ToolRuntimeEvent, raw: Record<string, unknown>): NativeToolCall | null {
+  const item = asRecord(raw.item);
+  if (item === null) return null;
+  const callId = asString(item.id);
+  if (callId === null) return null;
+  const type = asString(item.type) ?? "dynamicToolCall";
+  const rawStatus = asString(item.status);
+  const status: ToolCallStatus = rawStatus === "failed" || rawStatus === "interrupted"
+    ? "failed"
+    : rawStatus === "completed"
+      ? "completed"
+      : rawStatus === "inProgress"
+        ? "inProgress"
+        : statusOfEvent(event.type);
+  const durationMs = asNumber(item.durationMs);
+
+  if (type === "commandExecution") {
+    const exit = asNumber(item.exitCode);
+    return {
+      callId,
+      tool: "bash",
+      input: {
+        command: asString(item.command) ?? "",
+        ...(asString(item.cwd) ? { workdir: asString(item.cwd) } : {}),
+      },
+      output: asString(item.aggregatedOutput),
+      status: exit !== null && exit !== 0 ? "failed" : status,
+      exit,
+      startMs: null,
+      endMs: durationMs,
+      files: [],
+      patch: null,
+      title: null,
+      itemType: "command_execution",
+    };
+  }
+  if (type === "fileChange") {
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    const files = changes.flatMap((entry) => {
+      const change = asRecord(entry);
+      const path = change === null ? null : asString(change.path);
+      if (path === null) return [];
+      const diff = change === null ? null : asString(change.diff);
+      return [diff === null ? { path } : { path, diff }];
+    });
+    // Codex is the only provider that ships ready-made unified patches.
+    // They belong where the renderer looks for a provider patch; leaving
+    // them only in `files[]` dropped them and rendered a diff-less row.
+    const patch = files
+      .map((file) => file.diff)
+      .filter((diff): diff is string => diff !== undefined && diff.length > 0)
+      .join("\n");
+    return {
+      callId,
+      tool: asString(asRecord(changes[0])?.kind) ?? "edit",
+      input: {},
+      output: null,
+      status,
+      exit: null,
+      startMs: null,
+      endMs: null,
+      files,
+      patch: patch.length > 0 ? patch : null,
+      title: null,
+      itemType: "file_change",
+    };
+  }
+  if (type === "webSearch") {
+    const action = asRecord(item.action);
+    const queries = Array.isArray(action?.queries) ? action.queries.filter((query): query is string => typeof query === "string") : [];
+    const actionType = asString(action?.type);
+    const url = asString(action?.url);
+    const pattern = asString(action?.pattern);
+    const query = actionType === "openPage" ? url : actionType === "findInPage" ? pattern : asString(queries.join(" · ")) ?? asString(action?.query);
+    return {
+      callId,
+      tool: actionType === "openPage" ? "webfetch" : "websearch",
+      input: { query: query ?? asString(item.query) ?? "", ...(actionType ? { action: actionType } : {}), ...(url ? { url } : {}), ...(pattern ? { pattern } : {}), ...(queries.length ? { queries } : {}) },
+      output: null,
+      status,
+      exit: null,
+      startMs: null,
+      endMs: null,
+      files: [],
+      patch: null,
+      title: null,
+      itemType: "web_search",
+    };
+  }
+  if (type === "imageView" || type === "imageGeneration") {
+    const generated = type === "imageGeneration";
+    const failure = asRecord(item.failure);
+    const savedPath = asString(item.savedPath) ?? asString(item.path);
+    return {
+      callId,
+      tool: generated ? "image_generation" : "imageview",
+      input: generated ? { path: savedPath, prompt: asString(item.revisedPrompt), error: asString(failure?.type) } : {},
+      output: savedPath,
+      status: failure ? "failed" : status,
+      exit: null,
+      startMs: null,
+      endMs: null,
+      files: [],
+      patch: null,
+      title: savedPath,
+      itemType: generated ? "image_generation" : "image_view",
+    };
+  }
+  if (type === "mcpToolCall" || type === "dynamicToolCall" || type === "collabAgentToolCall") {
+    const tool = asString(item.tool) ?? "tool";
+    const server = type === "mcpToolCall" ? asString(item.server) : null;
+    return {
+      callId,
+      tool: server && !/^mcp__.+?__.+/u.test(tool) ? `mcp__${server}__${tool}` : tool,
+      input: asRecord(item.arguments) ?? {},
+      output: item.error ? JSON.stringify(item.error) : item.result ? JSON.stringify(item.result) : null,
+      status,
+      exit: null,
+      startMs: null,
+      endMs: durationMs,
+      files: [],
+      patch: null,
+      title: null,
+      itemType: type === "collabAgentToolCall" ? "collab_agent_tool_call" : "dynamic_tool_call",
+    };
+  }
+  // Reasoning, plan and message items are not tool calls; the transcript
+  // renders those from their own channels.
+  return null;
+}
+
 export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null {
   const raw = asRecord(event.raw);
   if (raw === null) return null;
   let native: NativeToolCall | null = null;
   switch (event.provider) {
+    case "codex":
+      native = fromCodex(event, raw);
+      break;
     case "claude":
       native = fromClaude(event, raw);
       break;
@@ -238,6 +372,7 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
   const detail = native.output === null ? null : native.output.slice(0, DETAIL_LIMIT);
   const payload: Record<string, unknown> = {
     itemType,
+    ...(itemType === "web_search" ? { provider: event.provider } : {}),
     status: native.status,
     toolCallId: native.callId,
     title: native.title ?? native.tool,
@@ -278,6 +413,6 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
     // Output length stands in for the output itself: a streaming command
     // grows it monotonically, so every real change registers without
     // hashing kilobytes of terminal scrollback on each delta.
-    signature: `${native.status}${native.stopped === true ? "!" : ""}|${itemType}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}`,
+    signature: `${native.status}${native.stopped === true ? "!" : ""}|${itemType}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}${itemType === "web_search" ? `|${JSON.stringify(native.input)}` : ""}`,
   };
 }

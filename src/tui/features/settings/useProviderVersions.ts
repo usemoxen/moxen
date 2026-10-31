@@ -4,7 +4,7 @@ import type { LatestVersions } from "../../../core/catalog/update.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { ProviderCheckView } from "../../model/settings.js";
 
-type Installs = { readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView };
+type Installs = { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView };
 
 /**
  * What the settings page shows of each provider's install: the versions
@@ -28,7 +28,7 @@ export function useProviderVersions(client: ClientApi, open: boolean): {
     void client
       .query({ type: "doctor" })
       .then((diagnosis) => {
-        if (installs.current === mine) setVersions({ claude: diagnosis.providers.claude, opencode: diagnosis.providers.opencode });
+        if (installs.current === mine) setVersions({ ...(diagnosis.providers.codex ? { codex: diagnosis.providers.codex } : {}), claude: diagnosis.providers.claude, opencode: diagnosis.providers.opencode });
       })
       .catch(() => undefined);
     const theirs = (registry.current += 1);

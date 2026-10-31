@@ -45,6 +45,28 @@ describe("applyThreadFrame message streaming", () => {
   });
 });
 
+describe("answer-panel replies in the conversation", () => {
+  const at = (second: number) => `2026-10-31T12:00:0${second}.000Z`;
+  const message = (id: string, text: string, second: number, extra = {}) => ({ id, role: "user" as const, text, turnId: "reply-turn", streaming: false, createdAt: at(second), updatedAt: at(second), ...extra });
+
+  it("hides internal replies received live while keeping assistant continuations and ordinary quoted prompts", () => {
+    let state = emptyThreadState();
+    for (const item of [message("prompt", "> Which images?\n\nAn ordinary quoted prompt", 0), message("reply", "> Which images?\n\nRecent only", 2, { origin: "question-answer" }), message("continuation", "Research result.", 3, { role: "assistant" })]) {
+      state = applyThreadFrame(state, { kind: "event", event: { type: "thread.message-sent", payload: item } });
+    }
+    expect(state.messages).toHaveLength(3);
+    expect(timeline(state).filter((entry) => entry.kind === "user" || entry.kind === "assistant").map((entry) => entry.id)).toEqual(["prompt", "continuation"]);
+  });
+
+  it.each([false, true])("hides a previously stored untagged reply only when its async question was answered (resolved=%s)", (answered) => {
+    const state = emptyThreadState();
+    state.messages = [message("ordinary", "> Which images?\n\nBefore the question", 0), message("old-reply", "> Which images?\n\nRecent only\n\n> Keep text?\n\nYes", 2), message("later", "> Which images?\n\nA later prompt", 4)];
+    state.activities = [{ id: "asked", kind: "user-input.requested", tone: "info", summary: "Question", turnId: "asking-turn", createdAt: at(1), payload: { requestId: "async-images", delivery: "async", questions: [{ question: "Which images?" }, { question: "Keep text?" }] } }];
+    if (answered) state.activities.push({ id: "resolved", kind: "user-input.resolved", tone: "info", summary: "Question answered", turnId: "asking-turn", createdAt: at(3), payload: { requestId: "async-images", delivery: "async" } });
+    expect(timeline(state).filter((entry) => entry.kind === "user" || entry.kind === "assistant").map((entry) => entry.id)).toEqual(answered ? ["ordinary", "later"] : ["ordinary", "old-reply", "later"]);
+  });
+});
+
 describe("applyThreadFrame contextUsage", () => {
   it("decodes contextUsage off a provider-thread.updated event", () => {
     let state = emptyThreadState();

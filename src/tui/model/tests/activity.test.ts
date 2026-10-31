@@ -986,6 +986,9 @@ describe("webToolSource", () => {
     expect(webToolSource("mcp__brave-search__brave_web_search")).toBe("Brave Search");
     expect(webToolSource("WebSearch")).toBe("Claude Code");
     expect(webToolSource("webfetch")).toBe("OpenCode");
+    expect(webToolSource("websearch", "codex")).toBe("Codex");
+    expect(webToolSource("webfetch", "codex")).toBe("Codex");
+    expect(webToolSource("mcp__exa__web_search_exa", "codex")).toBe("Exa");
     expect(webToolSource("mcp-websearch")).toBe("OpenCode");
     expect(webToolSource("default.web_search")).toBe("Moxen Harness");
     expect(webToolSource("bash")).toBeNull();

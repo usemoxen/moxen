@@ -1,5 +1,6 @@
 import { t } from "../../i18n/index.js";
 import { handoffModelsFromText, type LongThreadConfig } from "../../model/autohandoff.js";
+import { modesFromText } from "../../model/settings.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -286,7 +287,10 @@ export function longThreadConfigFromSnapshot(snapshot: SettingsSnapshot | null, 
     const leaf = path.pop()!;
     let cursor: Record<string, unknown> = out;
     for (const segment of path) cursor = (cursor[segment] ??= {}) as Record<string, unknown>;
-    cursor[leaf] = (leaf === "autoHandoffModels" || leaf === "compactAtModels") && typeof view.value === "string" ? handoffModelsFromText(view.value) : view.value;
+    cursor[leaf] = typeof view.value !== "string" ? view.value
+      : leaf === "autoHandoffModels" || leaf === "compactAtModels" ? handoffModelsFromText(view.value)
+      : leaf === "handoffModels" || leaf === "compactionModels" ? modesFromText(view.value)
+      : view.value;
   }
   if (harnessProfiles !== undefined) {
     const providers = (out.providers ??= {}) as Record<string, Record<string, unknown>>;
@@ -295,4 +299,4 @@ export function longThreadConfigFromSnapshot(snapshot: SettingsSnapshot | null, 
   return out as LongThreadConfig;
 }
 
-const LONG_THREAD_KEY = /^(longThreads\.\w+|ui\.autoHandoff\w*|providers\.(claude|opencode|harness)\.(handoff|handoffAt|compaction|compactAt|compactAtModels|autoHandoff\w*|autoCompact\w*))$/;
+const LONG_THREAD_KEY = /^(longThreads\.\w+|ui\.autoHandoff\w*|providers\.(claude|codex|opencode|harness)\.(handoff|handoffAt|handoffModels|compaction|compactionModels|compactAt|compactAtModels|autoHandoff\w*|autoCompact\w*))$/;

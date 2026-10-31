@@ -199,13 +199,11 @@ export interface OpenRequest {
 }
 
 /**
- * Questions the running turn is parked on: `user-input.requested` rows of
- * the running turn with no `user-input.resolved` row after them. A turn
- * that ended took its questions with it, so only the running one counts.
+ * Blocking questions belong to the running turn. Async questions remain
+ * answerable after it finishes, until explicitly answered or dismissed.
  */
 export function openQuestions(thread: ThreadEnvelope): OpenRequest[] {
   const turnId = thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null;
-  if (turnId === null) return [];
   const resolved = new Set<string>();
   const open: OpenRequest[] = [];
   for (const activity of thread.activities ?? []) {
@@ -213,8 +211,8 @@ export function openQuestions(thread: ThreadEnvelope): OpenRequest[] {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
     if (requestId === null) continue;
     if (activity.kind === "user-input.resolved") resolved.add(requestId);
-    else if (activity.kind === "user-input.requested" && activity.turnId === turnId && Array.isArray(payload?.questions)) {
-      open.push({ requestId, turnId, questions: payload.questions as OpenQuestion[] });
+    else if (activity.kind === "user-input.requested" && (payload?.delivery === "async" || turnId !== null && activity.turnId === turnId) && Array.isArray(payload?.questions)) {
+      open.push({ requestId, turnId: activity.turnId ?? null, questions: payload.questions as OpenQuestion[] });
     }
   }
   return open.filter((request) => !resolved.has(request.requestId));

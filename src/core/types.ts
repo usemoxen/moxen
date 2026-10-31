@@ -130,7 +130,15 @@ export interface ForgeConfig {
   glabPath?: string;
 }
 
+/** Codex app-server, using the CLI login and configuration. */
+export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  homePath?: string;
+  launchArgs?: string;
+  reasoningSummary?: "auto" | "concise" | "detailed" | "none";
+}
+
 export interface ProvidersConfig {
+  codex?: CodexProviderConfig;
   claude?: ClaudeProviderConfig;
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
@@ -638,8 +646,9 @@ export interface WorkspaceResolution {
 }
 
 /** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "opencode" | "harness" | null {
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | null {
   const key = instanceId.trim().toLowerCase();
+  if (key === "codex") return "codex";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
   if (key === "claudeagent" || key === "claude") return "claude";

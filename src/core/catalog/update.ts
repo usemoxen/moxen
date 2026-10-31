@@ -4,7 +4,7 @@
  * Pure; running the updater is `providers/update.ts`.
  */
 
-export const UPDATABLE_PROVIDERS = ["claude", "opencode"] as const;
+export const UPDATABLE_PROVIDERS = ["claude", "opencode", "codex"] as const;
 export type UpdatableProvider = (typeof UPDATABLE_PROVIDERS)[number];
 
 export interface ProviderUpdate {
@@ -18,14 +18,14 @@ export interface ProviderUpdate {
   readonly output: string;
 }
 
-const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode" };
+const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" };
 
 /** What to tell the user once an update ran: what changed, and what still runs the old build. */
 export function describeUpdate(update: ProviderUpdate): string {
   const label = LABELS[update.provider];
   if (update.updated) {
     const restart =
-      update.provider === "claude"
+      update.provider !== "opencode"
         ? "New sessions use it; a session already running keeps the old build until it restarts."
         : "New sessions use it once the OpenCode server restarts; one already running keeps the old build.";
     return `${label} ${update.before} → ${update.after}. ${restart}`;
@@ -73,6 +73,8 @@ export interface LatestVersions {
   readonly enabled: boolean;
   readonly claude: LatestVersion;
   readonly opencode: LatestVersion;
+  /** Absent on older Moxen servers. */
+  readonly codex?: LatestVersion;
 }
 
 /**

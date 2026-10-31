@@ -129,7 +129,7 @@ export function BackgroundTasksModal({
     }
     if (key.sequence === "x") {
       const target = detailTaskId !== null ? liveDetail : ordered[safeIndex];
-      if (target) onStop(target);
+      if (target && target.stoppable !== false) onStop(target);
       return;
     }
     if (detailTaskId !== null) {
@@ -212,6 +212,7 @@ export function BackgroundTasksModal({
             </box>
           </>
         ) : null}
+        {liveDetail?.stoppable === false ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("bgm.independentStopUnavailable")}</text> : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
           <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.output_29c2")}</text>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
@@ -238,11 +239,10 @@ export function BackgroundTasksModal({
             </scrollbox>
           )}
         </box>
+        {liveDetail?.stoppable === false ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("bgm.independentStopUnavailable")}</text> : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
-          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {truncate(detailFinished ? t("bgm.back_esc_close_d83a") : t("bgm.back_x_stop_esc_be25"), Math.max(0, inner - 8))}
-          </text>
-          {detailFinished || liveDetail === null ? null : (
+          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{detailFinished || liveDetail?.stoppable === false ? t("bgm.back_esc_close_d83a") : t("bgm.back_x_stop_esc_be25")}</text>
+          {detailFinished || liveDetail === null || liveDetail.stoppable === false ? null : (
             <HoverButton label={t("bgm.stop_ec99")} fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => onStop(liveDetail)} />
           )}
         </box>

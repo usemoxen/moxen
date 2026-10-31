@@ -492,6 +492,18 @@ describe("session setup", () => {
     }
   });
 
+  it("routes native Codex through the server with its instructions and filtered MCP tools", async () => {
+    const { harness, connection, startOf } = await connected({ instructions: "Global rule.", providers: { codex: { instructions: "Codex rule.", mcpExclude: "docs", disabledNativeTools: "web_search" } }, mcpServers: { docs: { command: "docs-mcp" } } });
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "codex", model: "codex-default" });
+      const start = startOf(created.threadId);
+      expect(start?.instructions).toContain("Codex rule.");
+      expect(start?.disabledNativeTools).toEqual(["web_search"]);
+      expect((start?.mcpServers as Array<{ name: string }>).map((server) => server.name)).toEqual(["moxen"]);
+      expect(start?.modelSelection).toMatchObject({ instanceId: "codex", model: "codex-default" });
+    } finally { await connection.close(); }
+  });
+
   it("puts a provider's own instructions between the global ones and the project's, for that provider only", async () => {
     const { harness, connection, startOf } = await connected({ instructions: "Config rule.", providers: { claude: { instructions: "Claude rule." } } });
     try {

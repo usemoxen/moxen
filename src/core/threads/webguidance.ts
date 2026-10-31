@@ -80,8 +80,8 @@ const toolName = (label: string): string => label.split(" ")[0]!;
 /** The part of the instructions about web tools; empty when there is nothing to say. */
 export function buildWebGuidance(input: WebGuidanceInput): string {
   const claude = input.provider === "claude";
-  const nativeSearch = claude ? "WebSearch" : "websearch";
-  const nativeFetch = claude ? "WebFetch" : "webfetch";
+  const nativeSearch = input.provider === "codex" ? "web_search" : claude ? "WebSearch" : "websearch";
+  const nativeFetch = input.provider === "codex" ? "web_search" : claude ? "WebFetch" : "webfetch";
   const searchOn = !isNativeToolDisabled(input.disabledNativeTools, nativeSearch, input.provider);
   const fetchOn = !isNativeToolDisabled(input.disabledNativeTools, nativeFetch, input.provider);
 
@@ -101,9 +101,9 @@ export function buildWebGuidance(input: WebGuidanceInput): string {
 
   const tips: string[] = [];
   if (searchOn && claude) tips.push('WebSearch: when it has a mode option, use "extended" for anything recent or time-sensitive ("standard" can return older results); allowed_domains and blocked_domains cannot be combined.');
-  if (searchOn && !claude) tips.push("websearch: it returns titles, URLs and snippets, not page text; read the page before relying on what a snippet cut off.");
+  if (searchOn && input.provider === "opencode") tips.push("websearch: it returns titles, URLs and snippets, not page text; read the page before relying on what a snippet cut off.");
   if (fetchOn && claude) tips.push('WebFetch: the prompt decides what comes back, so an answer that a page does not mention something may only mean the prompt did not ask; responses are cached for 15 minutes, and offset reads on through a long page.');
-  if (fetchOn && !claude) tips.push("webfetch: returns text (markdown by default); it cannot read images or other binary files.");
+  if (fetchOn && input.provider === "opencode") tips.push("webfetch: returns text (markdown by default); it cannot read images or other binary files.");
   for (const tool of [...mcpSearch, ...mcpFetch]) tips.push(tool.tip);
   if (tips.length > 0) lines.push(`Using the web tools well:\n${tips.map((tip) => `- ${tip}`).join("\n")}`);
 
