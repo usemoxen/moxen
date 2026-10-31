@@ -8,6 +8,7 @@ import type { CodexSpawnOptions, CodexTransport } from "../transport.js";
 
 export interface FakeCodexScript {
   readonly account?: unknown;
+  readonly config?: Record<string, unknown>;
   readonly threadId?: string;
   readonly rateLimits?: unknown;
   readonly models?: unknown[];
@@ -59,7 +60,7 @@ export class FakeCodexServer {
       case "thread/fork":
         return { thread: { id: "fork-1" } };
       case "config/read":
-        return { config: { mcp_servers: { private: {} } } };
+        return { config: this.script.config ?? { mcp_servers: { private: {} } } };
       case "thread/name/set":
         return {};
       case "thread/resume": {

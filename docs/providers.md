@@ -104,6 +104,12 @@ Moxen disables native `exec_command`, `write_stdin`, `request_user_input` and
 `task_stop`, using the Harness implementations. This transport also attaches
 the tools to existing rollouts without replacing the conversation. Disabling
 Shell in Codex's tool settings removes the replacement shell tools too.
+All MCP servers attached by Moxen, including its own memory/delegation tools and
+configured servers, are exposed as direct tool calls alongside the Harness
+tools. They bypass `functions.exec` and tool-search deferral. Other code-mode
+options and existing direct-only namespace choices are preserved; strict
+third-party deferral is disabled so it cannot move these tools back behind the
+executor.
 Delegated threads have no `ask` tool and refuse commands that need an absent
 user's approval. Shell environments exclude provider keys, including configured
 Harness profile key variables.

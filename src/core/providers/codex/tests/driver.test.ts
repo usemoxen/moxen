@@ -573,8 +573,30 @@ const MCP = [
 ];
 
 describe("codex MCP injection", () => {
+  it.each([
+    { mode: undefined, preserved: {} },
+    { mode: true, preserved: { enabled: true } },
+    { mode: false, preserved: { enabled: false } },
+    { mode: { enabled: true, default_exec_yield_time_ms: 42, excluded_tool_namespaces: ["other"], direct_only_tool_namespaces: ["custom", "mcp__moxen_harness"] }, preserved: { enabled: true, default_exec_yield_time_ms: 42, excluded_tool_namespaces: ["other"] } },
+  ])("keeps attached MCPs direct while preserving inherited code-mode options: $mode", async ({ mode, preserved }) => {
+    for (const resumeCursor of [undefined, "old-thread"]) {
+      const transport = new FakeCodexTransport({ config: { features: { code_mode: mode, code_mode_only: true, code_mode_only_strict_3p_tools: true } } });
+      const driver = new CodexDriver({ transport });
+      try {
+        await Effect.runPromise(driver.startSession({ ...START, ...(resumeCursor ? { resumeCursor } : {}), mcpServers: [{ name: "moxen", type: "http", url: "http://localhost/mcp", headers: {} }] }));
+        const params = transport.sessions[0]!.server.requestsTo(resumeCursor ? "thread/resume" : "thread/start")[0]!.params as { config: Record<string, unknown> };
+        const names = typeof mode === "object" ? ["custom", "mcp__moxen_harness", "moxen_harness", "moxen", "mcp__moxen"] : ["moxen_harness", "mcp__moxen_harness", "moxen", "mcp__moxen"];
+        expect(params.config["features.code_mode"]).toEqual({ ...preserved, direct_only_tool_namespaces: names });
+        expect(params.config["features.code_mode_only_strict_3p_tools"]).toBe(false);
+        expect(params.config).not.toHaveProperty("features.code_mode_only");
+      } finally { await Effect.runPromise(driver.stopAll()); }
+    }
+  });
+
   it("adds each server as its own mcp_servers.<name> override, on start and on resume", async () => {
     const expected = {
+      "features.code_mode": { direct_only_tool_namespaces: ["moxen_harness", "mcp__moxen_harness", "docs", "mcp__docs", "fs", "mcp__fs"] },
+      "features.code_mode_only_strict_3p_tools": false,
       "mcp_servers.docs": { url: "https://docs.example/mcp", http_headers: { Authorization: "Bearer t" } },
       "mcp_servers.fs": { command: "npx", args: ["-y", "fs-mcp"], env: { ROOT: "/" } },
     };

@@ -415,6 +415,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         const account = await peer.request(CODEX_METHODS.accountRead, {});
         session.accountType = codexAccountTypeOf(account);
         await this.probeRateLimits(session);
+        const inheritedConfig = asRecord(await peer.request("config/read", { includeLayers: false }))?.["config"];
         const requestedPolicy = staticPolicyForRuntimeMode(session.runtimeMode);
         const policy = session.isolation && requestedPolicy.sandbox === "danger-full-access" ? { approvalPolicy: "on-request", sandbox: "workspace-write" } : requestedPolicy;
         const overrides = {
@@ -425,6 +426,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           sandbox: policy.sandbox,
           config: {
             ...codexMcpConfig(input.mcpServers ?? [], input.disabledMcpTools),
+            ...codexDirectMcpConfig(inheritedConfig, [CODEX_HARNESS_SERVER, ...(input.mcpServers ?? []).map((server) => server.name)]),
             ...((this.providerConfig.compactionModels?.[input.modelSelection?.model ?? ""] ?? this.providerConfig.compaction ?? "provider") !== "provider" ? { model_auto_compact_token_limit: Number.MAX_SAFE_INTEGER } : {}),
             ...codexDisabledToolConfig(input.disabledNativeTools ?? []),
             ...CODEX_HARNESS_CONFIG,
@@ -1568,4 +1570,25 @@ function codexMcpConfig(servers: readonly McpServerSpec[], disabled: readonly st
           },
     ]),
   );
+}
+
+/** Keep Moxen-attached tools directly callable, including in code-mode-only sessions. */
+function codexDirectMcpConfig(config: unknown, servers: readonly string[]): Record<string, unknown> {
+  const raw = asRecord(asRecord(config)?.["features"])?.["code_mode"];
+  // Codex accepts both the older boolean and the configurable table. Preserve
+  // its enablement and other options when adding the namespace override.
+  const codeMode: Record<string, unknown> = typeof raw === "boolean" ? { enabled: raw } : asRecord(raw) ?? {};
+  const existing = codeMode["direct_only_tool_namespaces"];
+  const namespaces = Array.isArray(existing) ? existing.filter((name): name is string => typeof name === "string") : [];
+  return {
+    "features.code_mode": {
+      ...codeMode,
+      // Codex's non_prefixed_mcp_tool_names feature changes the namespace.
+      // Both spellings are exact matches, so neither needs to change that feature.
+      direct_only_tool_namespaces: [...new Set([...namespaces, ...servers.flatMap((name) => [name, `mcp__${name}`])])],
+    },
+    // Strict third-party deferral runs after direct-only overrides and would
+    // otherwise put these tools back behind exec/tool search.
+    "features.code_mode_only_strict_3p_tools": false,
+  };
 }
