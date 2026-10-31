@@ -23,6 +23,7 @@ import { CliError } from "../../errors.js";
 import { killProcessGroup, killProcessTree } from "../../infra/process.js";
 import {
   buildServerConfigContent,
+  locateCompactionMod,
   compareSemver,
   OPENCODE_DEFAULT_HOSTNAME,
   OPENCODE_SERVER_READY_PATTERN,
@@ -763,7 +764,7 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
     const password = resolveSpawnedServerPassword(settings, baseEnv);
     const childEnv: NodeJS.ProcessEnv = {
       ...baseEnv,
-      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, { auto: settings.autoCompact, buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true),
+      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, { auto: settings.autoCompact, buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true, locateCompactionMod()),
       OPENCODE_PASSWORD: password,
       OPENCODE_SERVER_PASSWORD: password,
       OPENCODE_DISABLE_AUTOUPDATE: "1",

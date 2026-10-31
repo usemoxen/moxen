@@ -6,9 +6,9 @@
  * walking up to `package.json`, so it is the same folder in source and in the
  * bundled `dist`.
  */
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { locateBundledMod } from "../mods.js";
 
 export interface SkillsMod {
   /** The mod's plugin directory. */
@@ -17,13 +17,6 @@ export interface SkillsMod {
 
 /** The mod of this install, or null when the package has no mod folder (a trimmed copy). */
 export function locateSkillsMod(from: string = path.dirname(fileURLToPath(import.meta.url))): SkillsMod | null {
-  let root = from;
-  while (!existsSync(path.join(root, "package.json"))) {
-    const parent = path.dirname(root);
-    if (parent === root) return null;
-    root = parent;
-  }
-  const mod = path.join(root, "mods", "agent-skills");
-  if (!existsSync(path.join(mod, "hooks", "hooks.json"))) return null;
-  return { path: mod };
+  const mod = locateBundledMod("agent-skills", path.join("hooks", "hooks.json"), from);
+  return mod ? { path: mod } : null;
 }

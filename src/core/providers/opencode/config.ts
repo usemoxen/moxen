@@ -12,6 +12,8 @@
 import { opencodeDisabledToolConfig } from "../../nativetools.js";
 import { buildOpencodeSystemPrompt } from "./prompt.js";
 import { randomBytes } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import { locateBundledMod } from "../mods.js";
 
 export const OPENCODE_DEFAULT_BINARY = "opencode";
 export const OPENCODE_MIN_VERSION = "2.0.0";
@@ -87,6 +89,8 @@ export function buildServerConfigContent(
   disabledNativeTools?: string,
   /** Replace OpenCode's base prompt for its `build` agent with Moxen's (`prompt.ts`). */
   moxenPrompt = false,
+  /** Local V2 plugin directory; external servers keep their own configuration. */
+  compactionMod: string | null = null,
 ): string {
   let parsed: Record<string, unknown> = {};
   if (existing && existing.trim().length > 0) {
@@ -106,15 +110,22 @@ export function buildServerConfigContent(
   const off = opencodeDisabledToolConfig(disabledNativeTools);
   const agents = moxenPrompt ? withMoxenSystem(parsed.agents, buildOpencodeSystemPrompt(disabledNativeTools)) : parsed.agents;
   const ownRules = Array.isArray(parsed.permissions) ? (parsed.permissions as unknown[]) : [];
+  const plugin = compactionMod ? pathToFileURL(compactionMod).href : null;
+  const plugins = Array.isArray(parsed.plugins) ? parsed.plugins : [];
   return JSON.stringify({
     ...parsed,
     ...(Object.keys(merged).length > 0 ? { compaction: merged } : {}),
     ...(agents !== undefined ? { agents } : {}),
+    ...(plugin ? { plugins: plugins.includes(plugin) ? plugins : [...plugins, plugin] } : {}),
     ...(off.websearch === false ? { websearch: false } : {}),
     ...(off.permissions ? { permissions: [...ownRules, ...off.permissions] } : {}),
     share: "disabled",
     update: "disable",
   });
+}
+
+export function locateCompactionMod(): string | null {
+  return locateBundledMod("opencode-compaction", "index.js");
 }
 
 /** The user's `agents`, with Moxen's prompt as the `system` of `build` unless they set one. */

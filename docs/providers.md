@@ -59,6 +59,32 @@ config, so a change to it waits until nothing runs on that server, then restarts
 Moxen does not use OpenCode's free models any way but through OpenCode itself: those are served to OpenCode's own client,
 and Moxen does not imitate it.
 
+Servers Moxen starts also load the bundled `moxen.compaction` plugin. Its
+compaction hook adds guidance to preserve pending user requests, decisions and
+constraints, actionable file paths (including files inside the working directory),
+validation results, failed approaches and unfinished work. OpenCode still writes
+and installs the summary in its native format, including its normal retry,
+overflow recovery, background-summary and usage-accounting behavior.
+
+The plugin also keeps a durable cache of recent whole exchanges. The retained
+tail is bounded to 12,000 estimated tokens and 16 MiB. After summary compaction it restores those
+exchanges as real messages: roles, exact text, complete tool calls and results,
+and actual attached image inputs with their original requests. It does not keep
+older reference images outside that recent tail. An exchange that exceeds the
+allowance or has an incomplete tool pair stays represented by OpenCode's summary
+instead of being partially replayed. When the native retained range is longer
+than the cached tail, its serialized historical prefix remains alongside the
+restored messages. The cache survives OpenCode server restarts and repeated
+compaction; reverted checkpoints do not gain future messages. Native replay
+proof is removed when restoring onto a different model.
+
+This applies to manual and automatic summary compaction, independently of
+`moxenPrompt`. Native provider
+compaction uses the provider's own checkpoint instead. External OpenCode servers
+keep their own plugin configuration; they can load `mods/opencode-compaction`
+from the Moxen installation through their `plugins` list. A running server loads
+the bundled hook when it next starts.
+
 Without a login, the pickers offer OpenCode's own provider's free tier only: models models.dev lists at no cost that
 OpenCode's inference endpoint (`https://opencode.ai/inference/v1/models`) still serves, so retired free models are
 not offered. The endpoint's list is cached beside the models.dev cache (`~/.moxen/cache/opencode-served-models.json`)

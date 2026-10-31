@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   buildServerConfigContent,
+  locateCompactionMod,
   compareSemver,
   isOpencodeAuthErrorText,
   normalizeOpencodeSettings,
@@ -102,6 +105,30 @@ describe("opencode config", () => {
     expect(theirs.agents.build.system).toBe("Mine.");
   });
 
+
+  it("loads the bundled compaction hook without losing or duplicating user plugins", async () => {
+    const mod = locateCompactionMod();
+    expect(mod).not.toBeNull();
+    const own = ["user-plugin", { package: "custom", options: { keep: true } }];
+    const first = buildServerConfigContent(JSON.stringify({ plugins: own }), {}, undefined, false, mod);
+    const plugins = [...own, pathToFileURL(mod!).href];
+    expect(JSON.parse(first).plugins).toEqual(plugins);
+    expect(JSON.parse(buildServerConfigContent(first, {}, undefined, false, mod)).plugins).toEqual(plugins);
+    // Import the shipped artifact rather than a copy of its callback. Only
+    // Compaction requests receive guidance without replacing native generation.
+    const plugin = (await import(pathToFileURL(path.join(mod!, "index.js")).href)).default;
+    const hooks = new Map<string, (event: unknown) => void>();
+    await plugin.setup({ storage: { get: async () => undefined, set: async () => {} }, session: { hook: async (name: string, callback: (event: unknown) => void) => { hooks.set(name, callback); } } });
+    expect([...hooks.keys()]).toEqual(["context", "generate", "compaction"]);
+    const history = [{ id: "msg_user", role: "user", content: [{ type: "text", text: "Finish MXN-202; keep my edits." }] }];
+    const event = { sessionID: "session", system: [{ type: "text", text: "Original system" }], messages: history, options: { maxTokens: 8192 } };
+    await hooks.get("compaction")!(event);
+    expect(event.system[0]).toEqual({ type: "text", text: "Original system" });
+    expect(event.system[1]?.text).toContain("including paths inside the working directory");
+    expect(event.messages).toEqual(history);
+    expect(event.options).toEqual({ maxTokens: 8192 });
+    expect(event).not.toHaveProperty("result");
+  });
 
   it("compares semver with unparseable reading as too old", () => {
     expect(parseSemver("v1.18.30")).toEqual([1, 18, 30]);
