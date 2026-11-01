@@ -196,6 +196,7 @@ const NOISE_EVENTS: ReadonlySet<string> = new Set([
  */
 export class OpencodeEventTranslator {
   private readonly texts = new Map<string, string>();
+  private readonly generationStarts = new Map<string, number>();
   /** Open reasoning stretches (the model's thinking summary), by message and ordinal: text so far and when each began. */
   private readonly reasonings = new Map<string, { text: string; start: number | undefined }>();
   private readonly tools = new Map<string, ToolState>();
@@ -225,6 +226,7 @@ export class OpencodeEventTranslator {
    */
   resetLive(): void {
     this.texts.clear();
+    this.generationStarts.clear();
     this.reasonings.clear();
     this.tools.clear();
     this.pendingInbox.clear();
@@ -244,6 +246,7 @@ export class OpencodeEventTranslator {
     const created = asNumber(event.created);
     switch (type) {
       case "session.text.started":
+        if (created !== undefined) this.generationStarts.set(`text:${this.textKey(data)}`, created);
         this.texts.set(this.textKey(data), this.texts.get(this.textKey(data)) ?? "");
         return [];
       case "session.text.delta": {
@@ -259,9 +262,10 @@ export class OpencodeEventTranslator {
         const final = typeof data.text === "string" ? data.text : (this.texts.get(key) ?? "");
         const previous = this.texts.get(key) ?? "";
         this.texts.delete(key);
+        const measurement = this.generationPart(data, `text:${key}`, final, created);
         // The deltas already said it all: nothing to reconcile.
-        if (final === previous || final.length === 0) return [];
-        return [this.textPart(data, key, final)];
+        if (final === previous || final.length === 0) return measurement;
+        return [...measurement, this.textPart(data, key, final)];
       }
       case "session.reasoning.started": {
         const key = this.textKey(data);
@@ -288,11 +292,14 @@ export class OpencodeEventTranslator {
       case "session.tool.input.started": {
         const call = this.tool(data, created);
         if (!call) return [];
+        if (created !== undefined) this.generationStarts.set(`tool:${this.toolKey(data)}`, created);
         const name = asString(data.name);
         if (name) call.tool = name;
         call.status = "pending";
         return [this.toolPart(data, call)];
       }
+      case "session.tool.input.ended":
+        return this.generationPart(data, `tool:${this.toolKey(data)}`, typeof data.text === "string" ? data.text : "", created);
       case "session.tool.called": {
         const call = this.tool(data, created);
         if (!call) return [];
@@ -482,6 +489,13 @@ export class OpencodeEventTranslator {
 
   private textKey(data: Record<string, unknown>): string {
     return `${asString(data.assistantMessageID) ?? ""}:${asNumber(data.ordinal) ?? 0}`;
+  }
+
+  private generationPart(data: Record<string, unknown>, id: string, text: string, end: number | undefined): OpencodeSubscribedEvent[] {
+    const start = this.generationStarts.get(id);
+    this.generationStarts.delete(id);
+    if (start === undefined || end === undefined || end <= start || !text) return [];
+    return [{ type: "generation.measured", properties: { sessionID: asString(data.sessionID) ?? "", id, characters: text.length, start, end } }];
   }
 
   private textPart(data: Record<string, unknown>, key: string, text: string): OpencodeSubscribedEvent {

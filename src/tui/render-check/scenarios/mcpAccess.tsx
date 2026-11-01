@@ -68,15 +68,23 @@ export async function runMcpAccess(): Promise<void> {
 
   // Claude Code's page: the MCP servers row says how many it gets.
   const side = setup.captureCharFrame().split("\n");
-  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.includes("│"));
+  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28 && row.includes("│"));
   await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude Code") + 1, claudeRow));
   await settle();
-  const page = setup.captureCharFrame();
+  let page = setup.captureCharFrame();
+  let rows = page.split("\n");
+  let row = -1;
+  for (let step = 0; step < 60; step++) {
+    page = setup.captureCharFrame();
+    rows = page.split("\n");
+    row = rows.findIndex((line) => line.includes("MCP servers") && line.includes("│") && line.indexOf("MCP servers") > 20);
+    if (row >= 0) break;
+    await act(async () => setup.mockInput.pressArrow("down"));
+    await settle();
+  }
   console.log("--- claude page ---");
   console.log(page);
-  const rows = page.split("\n");
-  const row = rows.findIndex((line) => line.includes("MCP servers") && line.includes("│") && line.indexOf("MCP servers") > 20);
-  if (row < 0) fail("Claude Code's page has no MCP servers row");
+  if (row < 0) fail(`Claude Code's page has no MCP servers row\n${page}`);
   if (!rows[row]!.includes("All 3 servers") && !rows.slice(row, row + 3).join("\n").includes("All 3 servers")) fail("the MCP servers row does not say every server is on");
   await act(async () => setup.mockMouse.click(rows[row]!.indexOf("MCP servers", 20) + 1, row));
   await settle();

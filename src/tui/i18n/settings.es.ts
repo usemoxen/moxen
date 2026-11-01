@@ -7,6 +7,23 @@
  * has no entry.
  */
 export const settingsEs: Readonly<Record<string, string>> = {
+  "Memory embeddings": "Embeddings de memoria",
+  "Find memories by meaning as well as keywords with a local model. Enabling this downloads the optional runtime and q4 text model (about 207 MB of weights), checks retrieval and speed, and indexes existing memories before activation.": "Busca recuerdos por significado y por palabras clave con un modelo local. Al activarlo se descargan el entorno opcional y el modelo de texto q4 (unos 207 MB de pesos), se comprueban aciertos y velocidad y se indexan los recuerdos existentes antes de activarlo.",
+  "Model loading": "Carga del modelo",
+  "Keep the local memory model ready between searches, or release it after inactivity. Keeping it loaded uses more memory and avoids loading delays.": "Mantén el modelo local listo entre búsquedas o libéralo cuando no se use. Mantenerlo cargado consume más memoria y evita esperas de carga.",
+  "Keep loaded": "Mantener cargado",
+  "Load the validated model when the server starts and keep it ready until shutdown.": "Carga el modelo validado al iniciar el servidor y lo mantiene listo hasta que se cierre.",
+  "On demand": "Bajo demanda",
+  "Load on the first search and unload after one minute without inference.": "Carga el modelo en la primera búsqueda y lo libera tras un minuto sin usarlo.",
+  "Let Claude Code threads use Moxen's shared project and global memory. The global and project memory switches still apply.": "Permite que los hilos de Claude Code usen la memoria compartida de Moxen, tanto la del proyecto como la global. Se respetan los interruptores global y del proyecto.",
+  "Let Codex threads use Moxen's shared project and global memory. The global and project memory switches still apply.": "Permite que los hilos de Codex usen la memoria compartida de Moxen, tanto la del proyecto como la global. Se respetan los interruptores global y del proyecto.",
+  "Let OpenCode threads use Moxen's shared project and global memory. The global and project memory switches still apply.": "Permite que los hilos de OpenCode usen la memoria compartida de Moxen, tanto la del proyecto como la global. Se respetan los interruptores global y del proyecto.",
+  "Let Moxen Harness threads use Moxen's shared project and global memory. The global and project memory switches still apply.": "Permite que los hilos de Moxen Harness usen la memoria compartida de Moxen, tanto la del proyecto como la global. Se respetan los interruptores global y del proyecto.",
+  "The memory model took more than one second per query in the readiness check. Semantic search was not enabled.": "El modelo de memoria ha tardado más de un segundo por consulta en la prueba. No se ha activado la búsqueda por significado.",
+  "Could not install embedding runtime": "No se ha podido instalar el entorno del modelo de memoria",
+  "Embedding runtime installation timed out": "Se ha agotado el tiempo de instalación del entorno del modelo de memoria",
+  "Local memory model unavailable. Retry setup in Settings → Memory.": "El modelo local de memoria no está disponible. Reintenta la instalación en Ajustes → Memoria.",
+  "Memory setup could not finish. Retry setup or use keyword memory.": "La configuración de memoria no ha podido terminar. Reinténtalo o usa la memoria por palabras clave.",
   // sections and groups
   "Web tools": "Herramientas web",
   "Remote access": "Acceso remoto",
@@ -184,6 +201,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Moxen's web_fetch": "web_fetch de Moxen",
   "Give Claude Code threads Moxen's web_fetch: it reads a page as text, and loads it in a browser when a plain request cannot. It follows the global Web tools settings.": "Da a los hilos de Claude Code el web_fetch de Moxen: lee una página como texto y, si una petición normal no puede, la carga en un navegador. Sigue los ajustes globales de Herramientas web.",
   "MCP servers": "Servidores MCP",
+  "Skills": "Habilidades",
   "Which of your MCP servers Claude Code threads get: switch off the ones this provider should not see. A server switched off on its own entry stays out either way.": "Cuáles de tus servidores MCP reciben los hilos de Claude Code: desactiva los que este proveedor no deba ver. Un servidor desactivado en su propia entrada queda fuera de todos modos.",
   "To-do list": "Lista de tareas",
   "Let Claude Code models keep a to-do list (the Tasks panel).": "Deja que los modelos de Claude Code lleven una lista de tareas (el panel Tareas).",

@@ -1,5 +1,6 @@
 import { hash2, noise, smoothstep, splat, type Pointer, type SceneEngine } from "./raster.js";
 import { DEG, landAt, moonPhase, subsolarPoint } from "./sky.js";
+import { aurora } from "./aurora.js";
 
 /**
  * Terra — the Earth, seen from the Moon: Earthrise.
@@ -14,7 +15,8 @@ import { DEG, landAt, moonPhase, subsolarPoint } from "./sky.js";
  *
  * Real coastlines (Natural Earth, via `sky.ts`), oceans with a sun-glint,
  * deserts, forests and ice by latitude, drifting cloud, a thin blue
- * atmosphere at the limb, city lights on the night side.
+ * atmosphere at the limb, city lights and a shifting polar aurora on
+ * the night side.
  *
  * The pointer is the Sun: move it and the daylight swings round with it.
  */
@@ -154,6 +156,13 @@ export function createTerraScene(): SceneEngine {
             cr += AIR[0] * haze;
             cg += AIR[1] * haze;
             cb += AIR[2] * haze;
+            // A moving polar oval on the night side. Its folds follow
+            // longitude rather than the screen, so they turn with Earth.
+            const polar = Math.exp(-Math.pow((Math.abs(lat) - 66 - 4 * Math.sin(lon * DEG * 3 + t * 0.08)) / 7, 2));
+            const curtain = aurora(lon * 0.7, 3 + (1 - nz) * 3, t) * polar * (1 - day) * (1 - cloud * 0.6) * 0.8;
+            cr += curtain * 0.15;
+            cg += curtain;
+            cb += curtain * 0.62;
           } else {
             // The thin blue line above the limb, where sunlight reaches it.
             const height = Math.sqrt(rr) - 1;

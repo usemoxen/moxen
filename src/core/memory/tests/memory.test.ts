@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, MAX_INDEX_LINES, memoryIndexText, readMemory, saveMemory } from "../memory.js";
+import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, MAX_INDEX_LINES, memoryIndexText, readMemory, saveMemory, searchMemories } from "../memory.js";
 
 async function location(projectId: string | null = "p1") {
   return { storeRoot: await mkdtemp(path.join(os.tmpdir(), "moxen-memory-")), projectId };
@@ -95,7 +95,53 @@ describe("Moxen memory", () => {
     );
     const text = (await memoryIndexText(where))!;
     expect(text.split("\n").filter((line) => line.startsWith("- [")).length).toBe(MAX_INDEX_LINES);
-    expect(text).toContain("(2 more not listed: call memory_read with no name for the whole index.)");
+    expect(text).toContain("(2 more not listed: use memory_search to find memories by keyword.)");
+    expect(text).not.toContain("[m-201]");
+    expect((await searchMemories(where, { query: "201" })).memories).toMatchObject([{ name: "m-201", scope: "global" }]);
+    const found = await searchMemories(where, { query: "Memory" });
+    expect(found.total).toBe(MAX_INDEX_LINES + 2);
+    expect(found.memories).toHaveLength(10);
+  });
+
+  it("ranks distinct keywords before field weights, without losing body-only hits or short and Unicode terms", async () => {
+    const where = await location();
+    const save = (name: string, description: string, body: string, scope = "project") => saveMemory(where, { name, description, body, scope, type: "feedback" });
+    await save("ci", "CI", "One keyword repeated: CI CI CI.");
+    await save("checks", "CI café", "Run the checks.");
+    await save("body-only", "Workflow", `${"Earlier context. ".repeat(30)}CI café. ${"Later context. ".repeat(30)}`);
+    await save("checks", "CI café", "User preference.", "global");
+    // A different project's memories must not enter these results.
+    await saveMemory({ ...where, projectId: "p2" }, { ...fact, name: "other-project", scope: "project", body: "CI café" });
+    const found = await searchMemories(where, { query: "CI, CAFÉ ci", limit: 3 });
+    expect(found.total).toBe(4);
+    expect(found.memories.map(({ name, scope }) => [name, scope])).toEqual([["checks", "project"], ["checks", "global"], ["body-only", "project"]]);
+    expect(found.memories[2]!.excerpt).toContain("CI café.");
+    expect(found.memories[2]!.excerpt).toMatch(/^….*…$/u);
+    expect(found.memories[2]!.excerpt.length).toBeLessThanOrEqual(242);
+    expect(found.memories[2]).not.toHaveProperty("body");
+    expect((await searchMemories(where, { query: "CI café", scope: "global" })).memories.map(({ scope }) => scope)).toEqual(["global"]);
+    expect((await searchMemories({ ...where, projectId: null }, { query: "CI café" })).total).toBe(1);
+    expect(await searchMemories(where, { query: "missing" })).toEqual({ memories: [], total: 0 });
+    expect(await searchMemories(where, { query: "  ...  " })).toEqual({ memories: [], total: 0 });
+    // Repeating query words cannot change ranking.
+    expect(await searchMemories(where, { query: "CI café", limit: 3 })).toEqual(found);
+  });
+
+  it("searches current files after save, edit, append and delete, with deterministic ties", async () => {
+    const where = await location();
+    for (const name of ["z-last", "a-first"]) await saveMemory(where, { ...fact, name, scope: "project", body: "needle" });
+    expect((await searchMemories(where, { query: "needle" })).memories.map(({ name }) => name)).toEqual(["a-first", "z-last"]);
+    await editMemory(where, { name: "a-first", scope: "project", oldText: "needle", newText: "changed" });
+    expect((await searchMemories(where, { query: "needle" })).total).toBe(1);
+    await appendMemory(where, { name: "a-first", scope: "project", text: "appended" });
+    expect((await searchMemories(where, { query: "appended" })).memories[0]).toMatchObject({ name: "a-first", excerpt: "changed appended" });
+    await deleteMemory(where, "z-last", "project");
+    expect((await searchMemories(where, { query: "needle" })).total).toBe(0);
+    for (const limit of [0, -1, 1.5, 51, NaN]) {
+      await expect(searchMemories(where, { query: "bun", limit })).rejects.toMatchObject({ code: "INVALID_MEMORY" });
+    }
+    await expect(searchMemories(where, { query: "x".repeat(1001) })).rejects.toMatchObject({ code: "INVALID_MEMORY" });
+    await expect(searchMemories({ ...where, projectId: null }, { query: "bun", scope: "project" })).rejects.toMatchObject({ code: "MEMORY_PROJECT_REQUIRED" });
   });
 
   it("imports Claude Code's memories as it writes them, user ones to the global scope, keeping what Moxen already has", async () => {

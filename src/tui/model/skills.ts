@@ -90,13 +90,7 @@ export function matchRange(label: string, query: string): [number, number] | nul
  * a `   •   ` gap instead of snapping back, so the wrap reads as continuous
  * scroll rather than a jump cut. Returns `text` unchanged when it already fits.
  */
-export function marqueeWindow(text: string, width: number, tick: number): string {
-  if (text.length <= width || width <= 0) return text;
-  const loop = `${text}   •   `;
-  const doubled = loop + loop;
-  const offset = ((tick % loop.length) + loop.length) % loop.length;
-  return doubled.slice(offset, offset + width);
-}
+export { marqueeWindow } from "./textoverflow.js";
 
 /**
  * The command a draft opens with, when it names one the picker knows: `[0, end)`

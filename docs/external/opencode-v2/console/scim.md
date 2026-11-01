@@ -3,7 +3,7 @@
 > Source: https://opencode.ai/v2/docs/console/scim/
 > Use this file to discover all available pages before exploring further.
 
-# Directory Sync
+# Directory sync
 
 Directory sync (SCIM 2.0) adds people to the workspace when you assign them in your identity provider, and removes
 their access when you unassign them. Roles stay managed in the Console.
@@ -19,6 +19,8 @@ https://opencode.ai/console/scim/v2
   people on a verified domain; invite anyone else from [Members](/console/members).
 
 ## Create a token
+
+Only workspace owners can set up directory sync or create and revoke its tokens.
 
 1. Open **Settings › Security** and click **Set up** under **Directory sync**.
 2. Copy the **SCIM base URL** and the token. The token is shown only once, so store it in a secrets manager.

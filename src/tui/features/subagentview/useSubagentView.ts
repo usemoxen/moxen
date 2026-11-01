@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { ClientApi, QueryResult } from "../../../server/api.js";
 import { emptyThreadState, timeline } from "../../model/thread.js";
 import { formatDuration, groupTurns, type TurnGroup } from "../../model/turns.js";
+import { startPolling } from "../../hooks/poll.js";
+import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 
 export type SubagentTranscript = QueryResult<"thread.subagent">;
 
@@ -36,6 +38,7 @@ export function useSubagentView(
   }, [openThreadId, target]);
 
   const running = transcript === null || transcript.agent === null || transcript.agent.status === "running";
+  const terminalVisible = useTerminalVisible();
   useEffect(() => {
     if (visible === null) {
       setTranscript(null);
@@ -49,15 +52,14 @@ export function useSubagentView(
           if (!cancelled) setTranscript(result);
         })
         .catch(() => undefined);
-    void load();
-    const timer = running ? setInterval(() => void load(), POLL_MS) : null;
+    const stop = startPolling(load, running && terminalVisible ? POLL_MS : null);
     return () => {
       cancelled = true;
-      if (timer !== null) clearInterval(timer);
+      stop();
     };
     // Keyed on the ids, not the object: a re-render must not restart the poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, visible?.threadId, visible?.agentId, running]);
+  }, [client, visible?.threadId, visible?.agentId, running, terminalVisible]);
 
   const groups = useMemo(
     () => (transcript === null ? [] : groupTurns(timeline({ ...emptyThreadState(), messages: transcript.messages, activities: transcript.activities }))),

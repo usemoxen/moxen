@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useHover } from "../hooks/useHover.js";
 import { COLOR, SURFACE } from "../theme.js";
 import { HoverButton } from "./hoverbutton.js";
+import { OverflowText } from "./overflowtext.js";
 
 export interface NoticeAction {
   label: string;
@@ -113,6 +114,7 @@ export function NoticeBanner({
   const inline = headWidth(tags.length) + 2 + actionsWidth(notice.actions) + pager <= inner;
   let shownTags = tags.length;
   if (!inline) while (shownTags > 0 && headWidth(shownTags) + pager > inner) shownTags -= 1;
+  const titleWidth = Math.max(0, inner - 2 - pager - tags.slice(0, shownTags).reduce((sum, tag) => sum + 5 + tag.text.length, 0) - (inline ? 2 + actionsWidth(notice.actions) : 0));
   const actions = (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
       {notice.actions.map((action, actionIndex) => (
@@ -131,7 +133,7 @@ export function NoticeBanner({
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 1, overflow: "hidden" }}>
           <text fg={notice.glyphColor} selectable={false}>{`${notice.glyph} `}</text>
-          <text fg={COLOR.bright} selectable={false}>{notice.title}</text>
+          <OverflowText fg={COLOR.bright} selectable={false} width={titleWidth}>{notice.title}</OverflowText>
           {tags.slice(0, shownTags).map((tag) => (
             <text key={tag.text} fg={tag.color} selectable={false}>{`  ·  ${tag.text}`}</text>
           ))}
@@ -141,7 +143,7 @@ export function NoticeBanner({
           <Pager position={position} count={notices.length} onPage={onPage} />
         </box>
       </box>
-      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, overflow: "hidden" }}>{notice.detail}</box>
+      <box style={{ flexDirection: "row", flexWrap: "wrap", flexShrink: 0, width: inner }}>{notice.detail}</box>
       {inline ? null : <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginLeft: 1 }}>{actions}</box>}
     </box>
   );

@@ -1,6 +1,7 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useHover } from "../../hooks/useHover.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 
 /**
  * Where the composer sits while a native subagent's conversation is open:
@@ -39,7 +40,7 @@ export function SubagentBar({
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.diff} bg={SURFACE.raised} selectable={false}>{"◇ "}</text>
-        <text fg={COLOR.text} bg={SURFACE.raised} selectable={false}>{truncate(title, room)}</text>
+        <OverflowText fg={COLOR.text} bg={SURFACE.raised} selectable={false} width={room} active={hovered}>{title}</OverflowText>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{suffix}</text>
       </box>
       <text

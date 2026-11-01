@@ -193,12 +193,14 @@ describe("claude streaming output", () => {
     await sleep(15);
     query.push(blockStop(0));
     query.push(successResult("Option B."));
-    await driver.awaitTurn("thread-1", sent.turnId);
+    const outcome = await driver.awaitTurn("thread-1", sent.turnId);
     const reasoning = events.filter((event) => event.type === "reasoning.updated") as Array<Extract<ProviderRuntimeEvent, { type: "reasoning.updated" }>>;
     expect(reasoning.map((event) => event.status)).toEqual(["running", "completed"]);
     expect(reasoning[0]).toMatchObject({ reasoningId: "msg-3:0", text: "", turnId: sent.turnId });
     expect(reasoning[1]).toMatchObject({ reasoningId: "msg-3:0", text: "Weighing the two options." });
     expect(reasoning[1]!.durationMs).toBeGreaterThanOrEqual(10);
+    expect(outcome.generation?.characters).toBe("Weighing the two options.".length);
+    expect(outcome.generation?.durationMs).toBeGreaterThanOrEqual(10);
     // In between, the summary streams live under the same id.
     const deltas = events.filter((event) => event.type === "reasoning.delta") as Array<Extract<ProviderRuntimeEvent, { type: "reasoning.delta" }>>;
     expect(deltas.map((event) => [event.reasoningId, event.text, event.turnId])).toEqual([

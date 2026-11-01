@@ -31,8 +31,9 @@ import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/cl
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
+import { APP_VERSION } from "../server/api.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
-import { importClaudeMemory, listMemory } from "./memory/memory.js";
+import { importClaudeMemory, listMemory, memoryEmbeddings } from "./memory/memory.js";
 import { writeError, writeSuccess } from "./output.js";
 import {
   createHandoverThread,
@@ -95,7 +96,7 @@ const program = new Command();
 program
   .name("moxen")
   .description("Create projects and handover threads from the current folder.")
-  .version("0.1.0")
+  .version(APP_VERSION)
   .option("--json", "Emit stable JSON envelopes.")
   .option("--config <path>", "Use a specific config file.")
   .option("--server <name>", "Talk to a paired moxen server on another machine (by name or address) instead of this one's. MOXEN_SERVER=<name> does the same.")
@@ -1681,6 +1682,18 @@ models
   );
 
 const memory = program.command("memory").description("Moxen memory: what agents keep across sessions, per project and global.");
+const embeddings = memory.command("embeddings").description("Set up and inspect local semantic memory search on the server.");
+for (const operation of ["setup", "rebuild", "status", "unload"] as const) {
+  embeddings.command(operation)
+    .description({ setup: "Download the optional q4 text model and runtime, then index existing memories.", rebuild: "Repair embeddings from current memory files without downloading.", status: "Show runtime readiness, download progress and the last indexing count.", unload: "Stop the model process and cancel its pending work." }[operation])
+    .option("--cwd <path>", "The project resolved from this folder on the server.")
+    .option("--all", "Index global memory and all registered projects; skip projects with memory off.")
+    .action((options: { cwd?: string; all?: boolean }) => action(async () => {
+      const context = await commandContext();
+      const result = await memoryEmbeddings(context.config, operation, options);
+      writeSuccess(result, context, JSON.stringify(result, null, 2));
+    }));
+}
 memory
   .command("list")
   .description("List the memories a project's threads see: the global ones, then the project's.")

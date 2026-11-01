@@ -292,6 +292,92 @@ export async function listMemories(location: MemoryLocation): Promise<Memory[]> 
   return [...global, ...project];
 }
 
+export interface MemorySearch {
+  readonly memories: readonly (Omit<Memory, "body"> & { readonly excerpt: string })[];
+  /** Matches before the result limit was applied. */
+  readonly total: number;
+  readonly semantic?: { readonly state: "ready" | "unavailable"; readonly message?: string };
+}
+
+/**
+ * Keyword search over the current project and global memory, including entries
+ * omitted from the index. More distinct terms rank first, then matches in the
+ * name and description (twice the weight of body matches). Repetition adds no
+ * weight. Read fresh files so edits and deletes need no separate search index.
+ */
+export async function searchMemories(
+  location: MemoryLocation,
+  input: { readonly query: string; readonly scope?: MemoryScope; readonly limit?: number },
+  semantic?: (memories: readonly Memory[]) => Promise<ReadonlyMap<string, number>>,
+): Promise<MemorySearch> {
+  const limit = input.limit ?? 10;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new CliError("INVALID_MEMORY", "limit must be a whole number from 1 to 50.", { exitCode: 2 });
+  }
+  if (input.query.length > 1000) throw new CliError("INVALID_MEMORY", "query must be at most 1000 characters.", { exitCode: 2 });
+  const scope = input.scope === undefined ? undefined : memoryScope(input.scope);
+  const terms = [...new Set(input.query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])];
+  if (terms.length === 0) return { memories: [], total: 0 };
+  const memories = scope === undefined
+    ? await listMemories(location)
+    : await readAll(memoryDir(location.storeRoot, scope, location.projectId), scope);
+  const ranked = memories.flatMap((memory) => {
+    const fields = [memory.name, memory.description, memory.body].map((text) => text.toLowerCase());
+    let matched = 0;
+    let score = 0;
+    for (const term of terms) {
+      const weights = fields.map((text, index) => text.includes(term) ? (index === 2 ? 1 : 2) : 0);
+      if (weights.some((weight) => weight > 0)) matched++;
+      score += weights.reduce<number>((sum, weight) => sum + weight, 0);
+    }
+    return matched === 0 ? [] : [{ memory, matched, score }];
+  });
+  ranked.sort((a, b) => b.matched - a.matched || b.score - a.score ||
+    Number(b.memory.scope === "project") - Number(a.memory.scope === "project") ||
+    (a.memory.name < b.memory.name ? -1 : a.memory.name > b.memory.name ? 1 : 0));
+  let semanticStatus: MemorySearch["semantic"];
+  if (semantic) {
+    try {
+      const scores = await semantic(memories);
+      // Reciprocal rank fusion avoids mixing incomparable cosine and keyword
+      // scores. Exact memory slugs stay first for targeted lookups.
+      const lexical = new Map(ranked.map((entry, index) => [`${entry.memory.scope}:${entry.memory.name}`, index + 1]));
+      const semanticRank = new Map([...scores].sort((a, b) => b[1] - a[1] ||
+        Number(b[0].startsWith("project:")) - Number(a[0].startsWith("project:")) ||
+        (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, 10).map(([key], index) => [key, index + 1]));
+      const combined = memories.flatMap((memory) => {
+        const key = `${memory.scope}:${memory.name}`;
+        const keyword = lexical.get(key);
+        const meaning = semanticRank.get(key);
+        return keyword === undefined && meaning === undefined ? [] : [{
+          memory, matched: memory.name.toLowerCase() === input.query.trim().toLowerCase() ? 1 : 0,
+          score: (keyword === undefined ? 0 : 1 / (60 + keyword)) + (meaning === undefined ? 0 : 1 / (60 + meaning)),
+        }];
+      });
+      combined.sort((a, b) => b.matched - a.matched || b.score - a.score ||
+        Number(b.memory.scope === "project") - Number(a.memory.scope === "project") ||
+        (a.memory.name < b.memory.name ? -1 : a.memory.name > b.memory.name ? 1 : 0));
+      ranked.splice(0, ranked.length, ...combined);
+      semanticStatus = { state: "ready" };
+    } catch {
+      semanticStatus = { state: "unavailable", message: "Using keyword search while the local model is unavailable or busy. Setup, progress and retry are available in Settings → Memory." };
+    }
+  }
+  return {
+    ...(semanticStatus ? { semantic: semanticStatus } : {}),
+    total: ranked.length,
+    memories: ranked.slice(0, limit).map(({ memory: { body, ...memory } }) => {
+      const flat = oneLine(body);
+      const lower = flat.toLowerCase();
+      const matches = terms.map((term) => lower.indexOf(term)).filter((at) => at >= 0);
+      const from = matches.length === 0 ? 0 : Math.max(0, Math.min(...matches) - 60);
+      const to = Math.min(flat.length, from + 240);
+      const excerpt = `${from > 0 ? "…" : ""}${flat.slice(from, to)}${to < flat.length ? "…" : ""}`;
+      return { ...memory, excerpt };
+    }),
+  };
+}
+
 /** One scope's index as `memory_read` returns it: capped in lines and characters, with a note saying what was left out. */
 function cappedIndex(memories: readonly Memory[]): string {
   const lines: string[] = [];
@@ -303,7 +389,7 @@ function cappedIndex(memories: readonly Memory[]): string {
     used += line.length + 1;
   }
   const left = memories.length - lines.length;
-  if (left > 0) lines.push(`(${left} more not listed: call memory_read with no name for the whole index.)`);
+  if (left > 0) lines.push(`(${left} more not listed: use memory_search to find memories by keyword.)`);
   return lines.join("\n");
 }
 

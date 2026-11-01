@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { CHECKING, COMMANDS, COMMUNICATING, DOING_THE_WORK, GIT, WRITING_CODE, careSection } from "../sharedprompt.js";
+import { CHARACTER, CHECKING, COMMANDS, COMMUNICATING, DOING_THE_WORK, GIT, WRITING_CODE, careSection } from "../sharedprompt.js";
 
 export interface PromptInput {
   readonly cwd: string;
@@ -167,7 +167,7 @@ export function instructionsIn(prompt: string): string | null {
 
 export function buildSystemPrompt(input: PromptInput): string {
   const shell = has(input, "bash") || has(input, "powershell");
-  const parts = [IDENTITY, DOING_THE_WORK, WRITING_CODE, CHECKING, careSection(REFUSAL), ...(shell ? [GIT, COMMANDS] : []), COMMUNICATING, toolSection(input), collaborationSection(input), mcpSection(input), examples(input)].filter((part) => part !== "");
+  const parts = [IDENTITY, CHARACTER, DOING_THE_WORK, WRITING_CODE, CHECKING, careSection(REFUSAL), ...(shell ? [GIT, COMMANDS] : []), COMMUNICATING, toolSection(input), collaborationSection(input), mcpSection(input), examples(input)].filter((part) => part !== "");
 
   const rules = readProjectRules(input.cwd);
   if (rules.length > 0) {

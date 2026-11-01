@@ -2,6 +2,7 @@ import { AnswerPanel } from "../../features/answerpanel/answerpanel.js";
 import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
+import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
@@ -261,6 +262,18 @@ const composer = (width: number, mode: InteractionMode, draft: string, running: 
 );
 
 export const FEATURE_GALLERY: GalleryEntry[] = [
+  {
+    id: "memory-runtime",
+    group: "settings",
+    title: "Memory setup, validation and failure",
+    width: 90,
+    height: 26,
+    element: () => <Stage width={90} height={26}>
+      <MemoryRuntimePanel status={{ state: "loading", phase: "downloading", device: null, message: null, file: "onnx/model_q4.onnx_data", percent: 62, validation: null, busy: true, indexed: 0 }} onSetup={() => {}} onCancel={() => {}} onKeyword={() => {}} />
+      <MemoryRuntimePanel status={{ state: "ready", phase: "idle", device: "webgpu", message: null, file: null, percent: null, validation: { version: "fixture", platform: "fixture", arch: "fixture", device: "webgpu", correct: 6, total: 6, queryP95Ms: 24, documentMs: 130, checkedAt: "2026-11-01" }, busy: false, indexed: 8 }} onSetup={() => {}} onCancel={() => {}} onKeyword={() => {}} />
+      <MemoryRuntimePanel status={{ state: "failed", phase: "idle", device: null, message: null, file: null, percent: null, validation: null, busy: false, indexed: 0 }} onSetup={() => {}} onCancel={() => {}} onKeyword={() => {}} />
+    </Stage>,
+  },
   {
     id: "composer-modes",
     group: "composer",

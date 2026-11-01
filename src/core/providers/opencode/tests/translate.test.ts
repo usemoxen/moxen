@@ -55,6 +55,13 @@ describe("v2 event translation, against a real shell turn", () => {
     expect(texts[0]!.messageID).toBe("msg_0f224d72f001fI8DzJWxhAWqYl");
   });
 
+  it("measures generated tool input before execution, not the shell runtime", () => {
+    const measured = events.filter((event) => event.type === "generation.measured");
+    expect(measured).toContainEqual(expect.objectContaining({ properties: expect.objectContaining({ id: "tool:call_b89aee2d3ba0488fa39560cd", characters: '{"command": "echo probe-ok"}'.length, start: expect.any(Number), end: expect.any(Number) }) }));
+    const tool = measured.find((event) => event.properties.id === "tool:call_b89aee2d3ba0488fa39560cd")!;
+    expect((tool.properties.end as number) - (tool.properties.start as number)).toBe(636);
+  });
+
   it("walks a tool through pending, running and completed with the command and its output", () => {
     const tools = parts(events, "tool");
     expect(tools.map((part) => part.state.status)).toEqual(["pending", "running", "running", "completed"]);
@@ -91,7 +98,7 @@ describe("v2 event translation, against a real shell turn", () => {
     ]);
     expect(events.at(-1)?.type).toBe("session.idle");
     const kinds = new Set(events.map((event) => event.type));
-    expect([...kinds].sort()).toEqual(["message.part.updated", "permission.asked", "permission.replied", "session.idle"]);
+    expect([...kinds].sort()).toEqual(["generation.measured", "message.part.updated", "permission.asked", "permission.replied", "session.idle"]);
   });
 
   it("passes a permission reply through with its session and request", () => {

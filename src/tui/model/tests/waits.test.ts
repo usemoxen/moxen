@@ -31,6 +31,10 @@ function entry(id: string, seconds: number, kind: TimelineEntry["kind"] = "activ
 }
 
 describe("waitSpans", () => {
+  it("does not stop the work clock for a nonblocking question", () => {
+    const question = activity("user-input.requested", 10, "async");
+    expect(waitSpans([{ ...question, payload: { requestId: "async", delivery: "async" } }]).size).toBe(0);
+  });
   it("pairs a question with its answer, and a permission prompt with its decision", () => {
     const waits = waitSpans([
       activity("user-input.requested", 10, "q1"),

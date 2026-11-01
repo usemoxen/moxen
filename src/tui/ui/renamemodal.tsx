@@ -1,10 +1,11 @@
+import { OverflowText } from "./overflowtext.js";
 import { t } from "../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
 import { ModalShell } from "./modalshell.js";
 import { markModalDismissed } from "../model/modalDismiss.js";
-import { COLOR, SURFACE, truncate } from "../theme.js";
+import { COLOR, SURFACE } from "../theme.js";
 
 /** Thread titles cap at 80 chars, matching the CLI handover title. */
 const MAX_TITLE_LENGTH = 80;
@@ -83,7 +84,7 @@ export function RenameModal({
         />
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <text fg={COLOR.faint} bg={SURFACE.raised}>{truncate(hint, inner)}</text>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} width={inner}>{hint}</OverflowText>
       </box>
     </ModalShell>
   );

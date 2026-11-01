@@ -1,5 +1,9 @@
 import { runCodexMedia } from "./scenarios/codexMedia.js";
+import { runThroughput } from "./scenarios/throughput.js";
+import { runFileEdits } from "./scenarios/fileEdits.js";
+import { runToolRejection } from "./scenarios/toolRejection.js";
 import { runAsyncQuestions } from "./scenarios/asyncQuestions.js";
+import { runOverflowText } from "./scenarios/overflowText.js";
 import { testRender } from "./testrender.js";
 
 import { App, client } from "./fixtures.js";
@@ -30,6 +34,8 @@ import { runScheduleModal } from "./scenarios/scheduleModal.js";
 import { runSidePanelTabs } from "./scenarios/sidePanelTabs.js";
 import { runNoticeBanner } from "./scenarios/noticeBanner.js";
 import { runImageThumbs } from "./scenarios/imageThumbs.js";
+import { runImageVisibility } from "./scenarios/imageVisibility.js";
+import { runMessageCaching } from "./scenarios/messageCaching.js";
 import { runPathChips } from "./scenarios/pathChips.js";
 import { runTerminalVisibility } from "./scenarios/terminalVisibility.js";
 import { runImageTokens } from "./scenarios/imageTokens.js";
@@ -40,6 +46,7 @@ import { runSettingsAndGit } from "./scenarios/settingsAndGit.js";
 import { runSettingsModelList, runSettingsSlider } from "./scenarios/settingsSlider.js";
 import { runHarnessProfiles } from "./scenarios/harnessProfiles.js";
 import { runMcpAccess } from "./scenarios/mcpAccess.js";
+import { runSkillsManagement } from "./scenarios/skillsManagement.js";
 import { runHandoffModels } from "./scenarios/handoffModels.js";
 import { runSettingsSidebarScroll } from "./scenarios/settingsSidebarScroll.js";
 import { runQueueAndSide } from "./scenarios/queueAndSide.js";
@@ -49,6 +56,7 @@ import { runRemoteAccess } from "./scenarios/remoteAccess.js";
 import { runServerLink } from "./scenarios/serverLink.js";
 import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
+import { runExperience } from "./scenarios/experience.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -110,12 +118,15 @@ export async function runWalkthrough(): Promise<void> {
   await runSettingsModelList();
   await runHarnessProfiles();
   await runMcpAccess();
+  await runSkillsManagement();
   await runHandoffModels();
   await runSettingsSidebarScroll();
   await runQueueAndSide();
   await runNoticeBanner();
   await runImageTokens();
   await runImageThumbs();
+  await runImageVisibility();
+  await runMessageCaching();
   await runTerminalVisibility();
   await runPathChips();
   await runInteractionModes();
@@ -127,7 +138,12 @@ export async function runWalkthrough(): Promise<void> {
   await runSpanishSettings();
   await runServerLink();
   await runSettingsCoverage();
+  await runOverflowText();
   await runCodexMedia();
+  await runThroughput();
+  await runFileEdits();
+  await runToolRejection();
   await runAsyncQuestions();
+  await runExperience();
 
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { toActivityEnvelope, toCheckpointEnvelope, toMessageEnvelope, toThreadEnvelope } from "../project.js";
+import { turnThroughput } from "../throughput.js";
 import type { StoredThread, StoredTurn } from "../types.js";
 
 function thread(overrides: Partial<StoredThread> = {}): StoredThread {
@@ -48,6 +49,23 @@ function turn(overrides: Partial<StoredTurn> = {}): StoredTurn {
 }
 
 describe("toThreadEnvelope", () => {
+  it("excludes turns without observed generation time from throughput", () => {
+    const usage = { input: 10, cacheRead: 0, cacheCreate: 0, output: 120, thinking: 0 };
+    const selection = { instanceId: "opencode", model: "model" };
+    const base = turn({ usage, modelSelection: selection, startedAt: "2026-01-01T00:00:30.000Z" });
+    expect(turnThroughput([
+      { ...base, generation: { characters: 400, durationMs: 2000 } },
+      turn({ id: "old", usage, modelSelection: selection }),
+      turn({ id: "claude", usage, modelSelection: { instanceId: "claudeAgent", model: "model" }, turnOutputTokens: 30 }),
+      turn({ id: "old-claude", usage, modelSelection: { instanceId: "claudeAgent", model: "model" } }),
+      turn({ id: "running", status: "running", usage, completedAt: null }),
+      turn({ id: "failed", status: "failed", usage }),
+      turn({ id: "missing", usage: null }),
+      turn({ id: "zero", usage: { ...usage, output: 0 } }),
+      turn({ id: "bad-time", usage, startedAt: "invalid" }),
+      turn({ id: "instant", usage, startedAt: "2026-01-01T00:01:00.000Z" }),
+    ])).toEqual({ "turn-1": 50 });
+  });
   it("projects catalog rows without ledgers", () => {
     const projected = toThreadEnvelope(thread(), [turn()]);
     expect(projected.latestTurn).toMatchObject({ turnId: "turn-1", state: "completed" });

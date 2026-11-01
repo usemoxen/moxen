@@ -1,8 +1,9 @@
+import { OverflowText } from "./overflowtext.js";
 import { t } from "../i18n/index.js";
 import type { ReactNode } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 
-import { COLOR, SURFACE, truncate } from "../theme.js";
+import { COLOR, SURFACE } from "../theme.js";
 import { isTerminalTooSmall, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH } from "../model/display.js";
 
 /**
@@ -49,23 +50,13 @@ export function MinSizeGate({ children, onQuit }: { children: ReactNode; onQuit:
         selectable={false}
         onMouseDown={() => {}}
       >
-        <text fg={COLOR.warn} selectable={false}>
-          {truncate(t("ui.terminal_too_small_25f3"), inner)}
-        </text>
+        <OverflowText fg={COLOR.warn} selectable={false} width={inner}>{t("ui.terminal_too_small_25f3")}</OverflowText>
         <box style={{ height: 1, flexShrink: 0 }} />
-        <text fg={COLOR.dim} selectable={false}>
-          {truncate(t("gate.size", { width, height }), inner)}
-        </text>
-        <text fg={COLOR.text} selectable={false}>
-          {truncate(`${MIN_TERMINAL_WIDTH} × ${MIN_TERMINAL_HEIGHT}.`, inner)}
-        </text>
+        <OverflowText fg={COLOR.dim} selectable={false} width={inner}>{t("gate.size", { width, height })}</OverflowText>
+        <OverflowText fg={COLOR.text} selectable={false} width={inner}>{`${MIN_TERMINAL_WIDTH} × ${MIN_TERMINAL_HEIGHT}.`}</OverflowText>
         <box style={{ height: 1, flexShrink: 0 }} />
-        <text fg={COLOR.dim} selectable={false}>
-          {truncate(t("ui.resize_the_terminal_to_75ec"), inner)}
-        </text>
-        <text fg={COLOR.dim} selectable={false}>
-          {truncate(t("ui.or_press_ctrlc_to_12c8"), inner)}
-        </text>
+        <OverflowText fg={COLOR.dim} selectable={false} width={inner}>{t("ui.resize_the_terminal_to_75ec")}</OverflowText>
+        <OverflowText fg={COLOR.dim} selectable={false} width={inner}>{t("ui.or_press_ctrlc_to_12c8")}</OverflowText>
       </box>
     </>
   );

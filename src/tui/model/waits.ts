@@ -37,6 +37,7 @@ export function waitSpans(activities: readonly ActivityEnvelope[]): TurnWaits {
   const opened = new Map<string, { turnId: string; start: number }>();
   const closed = new Map<string, number>();
   for (const activity of activities) {
+    if ((activity.payload as Record<string, unknown> | null)?.delivery === "async") continue;
     const requestId = requestIdOf(activity);
     if (requestId === null) continue;
     const at = Date.parse(activity.createdAt);

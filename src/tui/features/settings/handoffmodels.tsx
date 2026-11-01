@@ -1,10 +1,11 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, currentLanguage, t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 
 import { useHover } from "../../hooks/useHover.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import {
   HANDOFF_MODE_CHOICES,
   handoffStops,
@@ -153,7 +154,7 @@ export function HandoffModelsEditor({
 
   const footer = (text: string) => (
     <box style={{ flexDirection: "row", flexShrink: 0, height: 1, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-      <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(text, width)}</text>
+      <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={width}>{text}</OverflowText>
     </box>
   );
 
@@ -165,7 +166,7 @@ export function HandoffModelsEditor({
       <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
         <Back onBack={() => setChoosing(null)} />
         <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(`${t(spec.label)}: ${open.name}`, width)}</text>
+          <OverflowText fg={COLOR.bright} bg={SURFACE.raised} selectable={false} width={width}>{`${t(spec.label)}: ${open.name}`}</OverflowText>
           <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
             {spec.size ? t("ho.sizeHelp", { slug: open.slug, verb }) : t("ho.modeHelp", { label: t(spec.label), slug: open.slug })}
           </text>
@@ -209,7 +210,7 @@ export function HandoffModelsEditor({
       <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
         <Back onBack={() => setPage(null)} />
         <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(`${title}: ${open.name}`, width)}</text>
+          <OverflowText fg={COLOR.bright} bg={SURFACE.raised} selectable={false} width={width}>{`${title}: ${open.name}`}</OverflowText>
           <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("ho.modelPage", { slug: open.slug })}</text>
         </box>
         <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
@@ -302,8 +303,8 @@ function Row({ id, label, right, set, active, width, onPress }: { id: string; la
   const rightWidth = Math.max(0, Math.min(right.length, width - 6 - Math.min(left.length, Math.floor(width / 2))));
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
-      <text fg={active ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(left, Math.max(8, width - rightWidth - 5))}</text>
-      <text fg={set ? COLOR.accent : COLOR.dim} bg={bg} selectable={false}>{truncate(right, rightWidth)}</text>
+      <OverflowText fg={active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(8, width - rightWidth - 5)} prefix={active ? "▌ " : "  "} active={active || hovered}>{label}</OverflowText>
+      <OverflowText fg={set ? COLOR.accent : COLOR.dim} bg={bg} selectable={false} width={rightWidth} active={active || hovered}>{right}</OverflowText>
     </box>
   );
 }
@@ -313,7 +314,7 @@ function StopRow({ id, label, active, chosen, width, onPress }: { id: string; la
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1 }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
-      <text fg={active ? COLOR.bright : chosen ? COLOR.accent : COLOR.text} bg={bg} selectable={false}>{truncate(`${active ? "▌ " : "  "}${label}${chosen ? "  ✓" : ""}`, width - 2)}</text>
+      <OverflowText fg={active ? COLOR.bright : chosen ? COLOR.accent : COLOR.text} bg={bg} selectable={false} width={width - 2} prefix={active ? "▌ " : "  "} suffix={chosen ? "  ✓" : ""} active={active || hovered}>{label}</OverflowText>
     </box>
   );
 }

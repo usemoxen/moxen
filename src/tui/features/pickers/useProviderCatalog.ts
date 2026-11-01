@@ -178,7 +178,7 @@ export function useProviderCatalog(params: {
    * Switching models keeps the effort-style options that still exist on the
    * new model; dropping them would silently reset the effort knob.
    */
-  const pickModel = (choice: { instanceId: string; model: string }) => {
+  const pickModel = (choice: { instanceId: string; model: string }, forDraft = false) => {
     const catalogModel = providers
       ?.find((provider) => provider.instanceId === choice.instanceId)
       ?.models.find((model) => model.slug === choice.model);
@@ -198,11 +198,13 @@ export function useProviderCatalog(params: {
       if (value !== null) defaults.push({ id: descriptor.id, value });
     }
     const options = [...kept, ...defaults];
-    setThreadModel({
+    const selection = {
       instanceId: choice.instanceId,
       model: choice.model,
       ...(options.length > 0 ? { options } : {}),
-    });
+    };
+    if (forDraft) setCreatingModelSelection(selection);
+    else setThreadModel(selection);
   };
 
   const pickEffort = (descriptorId: string, choiceId: string) => {
@@ -289,6 +291,7 @@ export function useProviderCatalog(params: {
 
   return {
     providers,
+    reload: load,
     providersError,
     model,
     effort,

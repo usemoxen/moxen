@@ -21,11 +21,13 @@ Keep this file under 200 lines and 10,000 characters.
 - Write tests to pin a bug, a contract or an invariant, not for coverage.
 - Match the code around you, and look for an existing helper before writing
   one.
+- For visual changes, use the render harness and inspect the result to verify
+  how it looks.
 - If you change behavior a doc describes, update the doc.
 
 ## Cross-platform
 
-Moxen runs on more than one OS, and nothing you write may assume one. Never
+Moxen runs on Windows and macOS, and nothing you write may assume either. Never
 hardcode a path style, separator, home variable, shell, newline or timing.
 The checklist is in `docs/contributing.md`. If you can't run a platform
 yourself, reason about it and say what you couldn't verify.
@@ -42,17 +44,42 @@ yourself, reason about it and say what you couldn't verify.
 
 ## Linear
 
-All work has a Linear issue (team Moxen, `MXN-n`).
+All work has a Linear issue (team Moxen, `MXN-n`, project Moxen Agent).
 
-1. Search for an existing issue first.
-2. If there is none, show the user the issue you'd create and wait for a yes.
-3. Set it In Progress when you start and In Review when the work is done and
-   checked. Never set Done yourself. Write what happened in the issue.
-4. Big work gets a main issue with sub-issues, labelled. The main issue isn't
-   In Review until all its sub-issues are.
-5. After the work is finished and moved into In review, commit. Put the key in the commit subject, e.g. `(MXN-151)`.
+- Search for an existing issue first. If there is none, show the user the issue
+  you'd create (title, labels, description) and wait for a yes.
+- The user writes the main issue and its title is the subject of the work.
+  Don't rewrite that subject. A small edit is fine when the scope moved a
+  little and the subject stays the same: a typo, a word, a clarified qualifier.
+  A different subject means a different issue, so leave the title alone and
+  split the work instead. Turning "A lion and a horse" into something else is
+  not an edit.
+- When the work outgrows the issue, add sub-issues under it rather than
+  widening the parent. One piece of work each, in order, same labels. The main
+  issue is not In Review until all of its sub-issues are.
+- Set the issue In Progress when you start and In Review when the work is done
+  and checked. Never set Done yourself: the user moves issues to Done, and may
+  ask you to do it for them.
+- Follow the format the team already uses:
+  - Title: `<area>: <what it does>`, lowercase after the colon, for example
+    `tui: image viewer pan, zoom and stepping through a set`, or
+    `core+tui: ...` when more than one area is involved. Keep the user's own
+    words when they wrote the issue; add the area, don't rename.
+  - Labels: one type (`Feature`, `Improvement`, `Bug`) plus every area that
+    applies (`TUI`, `Desktop`, `Cleanup`, `macOS`, `Windows`). Label
+    sub-issues the same way.
+  - Description: the problem in prose, then optional `## Design`,
+    `## Out of scope` and `## Open` sections. Link related issues, and start a
+    sub-issue with "Part of MXN-n".
+- The description may grow to explain the core problem in more depth. It does
+  not hold progress, and it does not explain what the sub-issues did.
+- Put progress in a comment on the issue, or on the sub-issue where it
+  happened: what changed, what was checked, what wasn't, what is left. Status
+  updates never go in the description.
+- After the work is finished and moved to In Review, commit. Put the key in the
+  commit subject, e.g. `(MXN-151)`.
 
 ## Git
 
-- Commit only when asked. Stage files by name, not `git add -A`.
+- Stage files by name, not `git add -A`.
 - Don't skip hooks, force-push, or amend pushed commits.

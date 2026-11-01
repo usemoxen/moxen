@@ -62,7 +62,7 @@ describe("Moxen's own tools, switched per provider", () => {
   };
 
   it("keeps web_fetch with orchestration off, and the delegation tools with web_fetch off", async () => {
-    const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save"];
+    const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
     expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads, "web_fetch"]);
     expect(await moxenTools({ orchestration: false })).toEqual([...memory, "web_fetch"]);
@@ -75,7 +75,7 @@ describe("Moxen's own tools, switched per provider", () => {
     expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
     expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["web_fetch"]);
     // Memory alone keeps the server, with its tools only.
-    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save"]);
+    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"]);
   });
 });
 
@@ -400,10 +400,10 @@ describe("Moxen memory", () => {
     }
   });
 
-  it("is off for a project whose moxen.json says so: no tools, no rules, Claude Code's memory left alone", async () => {
-    const { harness, connection, startOf } = await connected();
+  it.each(["project", "provider"])("is off for a %s that opts out: no tools, no rules, Claude Code's memory left alone", async (source) => {
+    const { harness, connection, startOf } = await connected(source === "provider" ? { providers: { claude: { memory: false } } } : {});
     try {
-      await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ memory: false }));
+      if (source === "project") await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ memory: false }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const start = startOf(done.threadId)!;
       expect(String(start.instructions)).not.toContain("persistent memory");

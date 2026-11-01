@@ -21,3 +21,11 @@ export async function importClaudeMemory(config: CliConfig, options: { cwd?: str
   const projectId = await projectFor(config, options.cwd);
   return await (await cliClient(config)).dispatch({ type: "memory.import-claude", ...(projectId === null ? {} : { projectId }) });
 }
+
+export async function memoryEmbeddings(config: CliConfig, operation: "setup" | "rebuild" | "status" | "unload", options: { cwd?: string; all?: boolean }) {
+  const client = await cliClient(config);
+  if (operation === "status") return await client.query({ type: "memory.embeddings.status" });
+  if (operation === "unload") return await client.dispatch({ type: "memory.embeddings.unload" });
+  const projectId = options.all ? null : await projectFor(config, options.cwd);
+  return await client.dispatch({ type: operation === "setup" ? "memory.embeddings.setup" : "memory.embeddings.rebuild", ...(projectId === null ? {} : { projectId }), ...(options.all === undefined ? {} : { all: options.all }) });
+}

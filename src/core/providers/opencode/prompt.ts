@@ -22,7 +22,7 @@
  * environment block, and a prompt that changes loses the provider's cache.
  */
 import { OPENCODE_NATIVE_TOOLS, isNativeToolDisabled } from "../../nativetools.js";
-import { CHECKING, COMMANDS, COMMUNICATING, DOING_THE_WORK, GIT, WRITING_CODE, careSection } from "../sharedprompt.js";
+import { CHARACTER, CHECKING, COMMANDS, COMMUNICATING, DOING_THE_WORK, GIT, WRITING_CODE, careSection } from "../sharedprompt.js";
 
 const IDENTITY =
   "You are a coding agent running in the user's terminal, in OpenCode's harness. You help with software engineering work by reading and changing code in their project and running commands. " +
@@ -94,5 +94,5 @@ export function opencodeKeptTools(disabledNativeTools: string | undefined): Set<
 export function buildOpencodeSystemPrompt(disabledNativeTools?: string): string {
   const tools = opencodeKeptTools(disabledNativeTools);
   // `write` rides with `edit` in OpenCode's permissions.
-  return [IDENTITY, HARNESS, DOING_THE_WORK, WRITING_CODE, CHECKING, careSection(REFUSAL), ...(tools.has("shell") ? [GIT, COMMANDS] : []), COMMUNICATING, toolSection(tools), example(tools)].filter((part) => part !== "").join("\n\n");
+  return [IDENTITY, CHARACTER, HARNESS, DOING_THE_WORK, WRITING_CODE, CHECKING, careSection(REFUSAL), ...(tools.has("shell") ? [GIT, COMMANDS] : []), COMMUNICATING, toolSection(tools), example(tools)].filter((part) => part !== "").join("\n\n");
 }

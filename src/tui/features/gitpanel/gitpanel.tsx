@@ -1,9 +1,10 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useMemo, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 
 import { useHover } from "../../hooks/useHover.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import { Heading, usePanelWidth } from "../sidepanel/sidepanel.js";
 import { FileSection } from "../diffpanel/diffpanel.js";
 import { splitPatchByFile } from "../../model/patch.js";
@@ -56,10 +57,10 @@ export function GitFooter({ overview, forge, width }: { overview: GitOverview | 
   const branch = overview === null || !overview.isRepository ? null : (overview.status?.branch ?? overview.branch ?? t("git.detached_1594"));
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-      <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{truncate(where, inner)}</text>
+      <OverflowText fg={COLOR.dim} bg={SURFACE.panel} selectable={false} width={inner}>{where}</OverflowText>
       {branch === null ? null : (
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-          <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>{truncate(branch, Math.max(8, inner - status.length - 3))}</text>
+          <OverflowText fg={COLOR.bright} bg={SURFACE.panel} selectable={false} width={Math.max(8, inner - status.length - 3)}>{branch}</OverflowText>
           <text fg={status === t("git.clean") ? COLOR.faint : COLOR.warn} bg={SURFACE.panel} selectable={false}>{status ? ` · ${status}` : ""}</text>
         </box>
       )}
@@ -139,7 +140,7 @@ function RunList({ runs, width }: { runs: readonly ForgeCheckRun[]; width: numbe
         return (
           <Row key={`${run.name}:${index}`}>
             <text fg={mark.color} selectable={false}>{`  ${mark.glyph} `}</text>
-            <text fg={run.state === "failed" ? COLOR.text : COLOR.dim} selectable={false}>{truncate(run.name, Math.max(4, width - 4))}</text>
+            <OverflowText fg={run.state === "failed" ? COLOR.text : COLOR.dim} selectable={false} width={Math.max(4, width - 4)}>{run.name}</OverflowText>
           </Row>
         );
       })}
@@ -280,7 +281,7 @@ export function GitTab({
     <box style={{ flexDirection: "column" }}>
       {error === null ? null : (
         <Row>
-          <text fg={COLOR.danger} selectable={false}>{truncate(error, width)}</text>
+          <OverflowText fg={COLOR.danger} selectable={false} width={width}>{error}</OverflowText>
         </Row>
       )}
       {busy === null ? null : (
@@ -289,12 +290,10 @@ export function GitTab({
         </Row>
       )}
 
-      <Heading text={forge?.kind === "gitlab" ? t("git.merge_request_55bc") : t("git.pull_request_7354")} {...(checkedOut === null ? {} : { meta: truncate(checkedOut, Math.max(4, width - 18)) })} />
+      <Heading text={forge?.kind === "gitlab" ? t("git.merge_request_55bc") : t("git.pull_request_7354")} {...(checkedOut === null ? {} : { meta: checkedOut })} />
       {forge === null || forge.kind === null ? (
         <Row>
-          <text fg={COLOR.dim} selectable={false}>
-            {truncate(`  ${loadingForge ? t("settings.update.checking") : (forge?.reason ?? t("git.no_forge_for_this_92ba"))}`, width)}
-          </text>
+          <OverflowText fg={COLOR.dim} selectable={false} width={width}>{`  ${loadingForge ? t("settings.update.checking") : (forge?.reason ?? t("git.no_forge_for_this_92ba"))}`}</OverflowText>
         </Row>
       ) : status !== null ? (
         <RequestCard
@@ -325,14 +324,12 @@ export function GitTab({
       ) : (
         <>
           <Row>
-            <text fg={COLOR.dim} selectable={false}>{truncate(t("git.noRequestFor", { what: noun.short, where: checkedOut ?? t("git.thisCheckout") }), width)}</text>
+            <OverflowText fg={COLOR.dim} selectable={false} width={width}>{t("git.noRequestFor", { what: noun.short, where: checkedOut ?? t("git.thisCheckout") })}</OverflowText>
           </Row>
           {/* Where it merges: asked here, not guessed by the agent. */}
           <Row {...(baseChoices.length > 1 ? { onClick: () => setPickingBase((open) => !open) } : {})}>
             <text fg={COLOR.dim} selectable={false}>{t("git.into_a41c")}</text>
-            <text fg={base === null ? COLOR.faint : COLOR.bright} selectable={false}>
-              {truncate(base ?? t("git.the_default_branch_390e"), Math.max(4, width - 10))}
-            </text>
+            <OverflowText fg={base === null ? COLOR.faint : COLOR.bright} selectable={false} width={Math.max(4, width - 10)}>{base ?? t("git.the_default_branch_390e")}</OverflowText>
             {baseChoices.length > 1 ? <text fg={COLOR.dim} selectable={false}>{pickingBase ? " ▴" : " ▾"}</text> : null}
           </Row>
           {pickingBase
@@ -345,28 +342,26 @@ export function GitTab({
                     setPickingBase(false);
                   }}
                 >
-                  <text fg={choice === base ? COLOR.bright : COLOR.text} selectable={false}>
-                    {truncate(`    ${choice === base ? "● " : "  "}${choice}`, width)}
-                  </text>
+                  <OverflowText fg={choice === base ? COLOR.bright : COLOR.text} selectable={false} width={width}>{`    ${choice === base ? "● " : "  "}${choice}`}</OverflowText>
                 </Row>
               ))
             : null}
           {opener.label === null ? (
             <Row>
-              <text fg={COLOR.faint} selectable={false}>{truncate(t("git.no_agent_has_usage_e85a"), width)}</text>
+              <OverflowText fg={COLOR.faint} selectable={false} width={width}>{t("git.no_agent_has_usage_e85a")}</OverflowText>
             </Row>
           ) : (
             <>
               <Row onClick={busy === null ? () => onAgentOpen(true) : undefined}>
-                <text fg={COLOR.accent} selectable={false}>{truncate(t("git.haveOpenDraft", { who: opener.label, what: noun.short }), width)}</text>
+                <OverflowText fg={COLOR.accent} selectable={false} width={width}>{t("git.haveOpenDraft", { who: opener.label, what: noun.short })}</OverflowText>
               </Row>
               <Row onClick={busy === null ? () => onAgentOpen(false) : undefined}>
-                <text fg={COLOR.text} selectable={false}>{truncate(t("git.haveOpenReady", { who: opener.label }), width)}</text>
+                <OverflowText fg={COLOR.text} selectable={false} width={width}>{t("git.haveOpenReady", { who: opener.label })}</OverflowText>
               </Row>
             </>
           )}
           <Row onClick={busy === null ? () => onCreate(true) : undefined}>
-            <text fg={COLOR.dim} selectable={false}>{truncate(t("git.openDraftYourself", { what: noun.short }), width)}</text>
+            <OverflowText fg={COLOR.dim} selectable={false} width={width}>{t("git.openDraftYourself", { what: noun.short })}</OverflowText>
           </Row>
         </>
       )}
@@ -380,7 +375,7 @@ export function GitTab({
             return (
               <Row key={request.number} {...(request.url === null ? {} : { onClick: () => onOpenUrl(request.url!) })}>
                 <text fg={request.state === "draft" ? COLOR.faint : COLOR.accent} selectable={false}>{`#${request.number} `}</text>
-                <text fg={COLOR.text} selectable={false}>{truncate(request.title, titleWidth).padEnd(titleWidth)}</text>
+                <OverflowText fg={COLOR.text} selectable={false} width={titleWidth} padToWidth>{request.title}</OverflowText>
                 {glance === null ? null : <text fg={TONE[glance.tone]} selectable={false}>{tail}</text>}
               </Row>
             );
@@ -395,9 +390,7 @@ export function GitTab({
         const active = (selectedBranch ?? overview.branch) === branch.name;
         return (
           <Row key={branch.name} onClick={() => onSelectBranch(branch.name === overview.branch ? null : branch.name)} active={active}>
-            <text fg={branch.current ? COLOR.bright : branch.remote ? COLOR.dim : COLOR.text} selectable={false}>
-              {truncate(`${branch.current ? "* " : "  "}${branch.name}`, nameWidth).padEnd(nameWidth)}
-            </text>
+            <OverflowText fg={branch.current ? COLOR.bright : branch.remote ? COLOR.dim : COLOR.text} selectable={false} width={nameWidth} padToWidth active={active}>{`${branch.current ? "* " : "  "}${branch.name}`}</OverflowText>
             <text fg={track === t("git.in_sync_1199") ? COLOR.faint : COLOR.warn} selectable={false}>{track ? ` ${track}` : ""}</text>
           </Row>
         );
@@ -410,7 +403,7 @@ export function GitTab({
         </Row>
       ) : null}
 
-      <Heading text="Commits" meta={truncate(selectedBranch ?? overview.branch ?? t("git.detachedWord"), Math.max(4, width - 12))} />
+      <Heading text="Commits" meta={selectedBranch ?? overview.branch ?? t("git.detachedWord")} />
       {overview.commits.length === 0 ? (
         <Row>
           <text fg={COLOR.dim} selectable={false}>{loadingGit ? t("git.reading_f65c") : t("git.no_commits_1e4d")}</text>
@@ -456,7 +449,7 @@ function RequestCard({ request, width, actions }: { request: ForgeRequestStatus;
           </>
         )}
         {request.mergeable === "conflicting" ? <text fg={COLOR.danger} selectable={false}>{t("git.conflicts_4ddb")}</text> : null}
-        {request.targetBranch === null ? null : <text fg={COLOR.faint} selectable={false}>{truncate(t("git.into", { branch: request.targetBranch }), Math.max(0, width - 30))}</text>}
+        {request.targetBranch === null ? null : <OverflowText fg={COLOR.faint} selectable={false} width={Math.max(0, width - 30)}>{t("git.into", { branch: request.targetBranch })}</OverflowText>}
       </Row>
       {hasSize ? (
         <Row>
@@ -509,11 +502,11 @@ function CommitRow({
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={bg} onMouseDown={onOpen} selectable={false} {...handlers}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={bg}>
-        <text fg={hovered ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(commit.subject, Math.max(4, width - shaWidth)).padEnd(Math.max(4, width - shaWidth))}</text>
+        <OverflowText fg={hovered ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(4, width - shaWidth)} padToWidth active={hovered}>{commit.subject}</OverflowText>
         <text fg={COLOR.faint} bg={bg} selectable={false}>{` ${commit.shortSha}`}</text>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={bg}>
-        <text fg={COLOR.dim} bg={bg} selectable={false}>{truncate(meta, Math.max(4, width - tail.length))}</text>
+        <OverflowText fg={COLOR.dim} bg={bg} selectable={false} width={Math.max(4, width - tail.length)} active={hovered}>{meta}</OverflowText>
         {glance === null ? null : (
           <>
             <text fg={COLOR.faint} bg={bg} selectable={false}>{" · "}</text>
@@ -572,9 +565,9 @@ function CommitView({
             )}
             <text fg={COLOR.faint}>{detail.sha}</text>
             {detail.parents.length === 0 ? null : (
-              <text fg={COLOR.faint} selectable={false}>{truncate(t("git.parents", { count: detail.parents.length, list: detail.parents.map((parent) => parent.slice(0, 7)).join(" ") }), width)}</text>
+              <OverflowText fg={COLOR.faint} selectable={false} width={width}>{t("git.parents", { count: detail.parents.length, list: detail.parents.map((parent) => parent.slice(0, 7)).join(" ") })}</OverflowText>
             )}
-            {detail.refs.length === 0 ? null : <text fg={COLOR.diff} selectable={false}>{truncate(detail.refs.join(", "), width)}</text>}
+            {detail.refs.length === 0 ? null : <OverflowText fg={COLOR.diff} selectable={false} width={width}>{detail.refs.join(", ")}</OverflowText>}
           </box>
           {commit.runs === null || commit.runs.length === 0 ? null : (
             <>

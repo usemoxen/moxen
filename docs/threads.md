@@ -1,5 +1,10 @@
 # Threads and turns
 
+Long single-line labels scroll sideways when hovered or selected, after a short
+pause. Moving away or changing the selection restores the beginning. This
+applies to titles, settings, pickers and task labels; adjacent columns stay
+still. Longer descriptions and task output wrap inside their scrollable views.
+
 ## Lifecycle
 
 A turn goes from queued to running to settled. A running turn records the
@@ -17,6 +22,23 @@ A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds
 them between the calls they narrate. Completed thinking is stored whole;
 live thinking streams only.
+
+Failed MCP calls show their failure and the error returned by the provider,
+including a reason when an automatic approval review rejects a call.
+
+For Claude Code, OpenCode and Codex, a completed reply can show an estimated tokens per second.
+It estimates tokens from the characters streamed in thinking, messages and
+tool inputs, and divides by the observed time for those blocks. Tool execution
+and waits are excluded; network and stream delays can affect the estimate.
+Thinking contributes when the provider supplies it. Codex's estimate covers
+streamed messages only: its app-server does not provide tool-input generation
+timing, and its reasoning summaries are not full thinking traces. Turns without
+streaming measurements, including older turns, do not show a rate.
+
+When one tool call edits several files, its inline diffs have separate sections
+with each file's full path and its own added/removed line counts. The tool header
+names the first file and how many others the operation touches; counts beneath
+a file describe that file's displayed diff.
 
 A provider session stays warm between turns until it has been idle for its
 lifetime (`sessionTtl`, 1h unless set; `providers.<kind>.sessionTtl` over it):
@@ -47,11 +69,21 @@ and grids of images, text, bar charts, progress rows, key-value lists and
 status grids. An image can be cropped (which is also the zoom), padded to a
 shape and annotated with boxes, arrows and highlights, and two images can be
 laid over each other or differenced. The TUI draws it from the theme's colours
-and stacks it in a narrow pane; under a modal the images are text cells. A
+and stacks it in a narrow pane; under a modal the images are text cells.
+Only images in the visible part of the transcript hold native image resources;
+scrolling them out releases those resources while keeping their space in the reply. A
 block that is not valid, over a limit (8 images, 4 levels, 12 bars, 20 rows) or
 still streaming stays the code the model wrote, and the desktop app, which has
 no renderer for it yet, and the CLI show it the same way. Images are files on
 the machine the session runs on, read by path.
+
+Click an image to open the viewer on that picture. Left and right step through
+the loaded images in its layout block, showing each caption. Use +/− or the
+mouse wheel to zoom. The fitted image grows across the canvas and clips at the
+pane boundary. Use 0 (or the percentage button) to fit again, up/down and
+Shift+left/right to pan, or drag the image. Stepping to another picture resets
+the view. Esc, the close button and a click outside the pane close the viewer;
+the composer stays below it.
 
 The Shell section is built from the machine (`core/threads/shells.ts`): its
 platform, the login shell and the shells found on `PATH`, and whether the
@@ -122,12 +154,68 @@ so a change on Claude's side does not change it.
   `reference`) frontmatter, and `MEMORY.md`, the index, which Moxen writes
   itself on every save and delete.
 - **Tools:** `memory_read` (no name: the index as it is now),
-  `memory_save` and `memory_delete` on the `moxen` MCP server. The model
-  picks the scope. A delegated task gets `memory_read` only.
+  `memory_search`, `memory_save`, `memory_edit`, `memory_append` and
+  `memory_delete` on the `moxen` MCP server. The model picks the scope.
+  A delegated task gets `memory_read` and `memory_search` only.
 - **Reading:** the index is not shipped in the runtime instructions: it can
   reach 200 lines / 25 KB, and `memory_read` with no name returns it as it is
   now, so the rules point there instead of duplicating it. A memory itself is
   read on demand, and the agent decides which ones the work touches.
+- **Searching:** `memory_search` searches names, descriptions and bodies in
+  the current project and global memory, including entries omitted from the
+  capped index. An optional `scope` restricts it to `project` or `global`.
+  Keywords are case-insensitive and split at punctuation, including short
+  terms such as `CI`. Any keyword can match; more distinct matching keywords
+  rank first, then matches in names and descriptions, weighted twice as much
+  as body matches. Ties prefer project memory, then name order. Results include
+  short excerpts; read a result in full with `memory_read` and its name and
+  scope. `limit` defaults to 10 (1–50); queries are at most 1,000 characters.
+  Searches read the current files and never download anything.
+- **Semantic search (optional):** choose **With embeddings** in onboarding,
+  or enable **Memory embeddings** on the **Memory** settings page. This
+  explicitly authorizes installing the pinned Transformers.js 4.3.2 runtime
+  and EmbeddingGemma 2 q4 text weights on the server. Setup tests retrieval
+  against six labelled queries with distractors, including Spanish; every
+  query must retrieve its expected document and warm query p95 must be at
+  most one second. This is a readiness smoke check, not a general accuracy
+  benchmark. Setup then backfills global memory and every registered project
+  with memory enabled; semantic search is activated only after all steps pass.
+  Failure offers retry or keyword memory, and progress/results appear inline.
+  `moxen memory embeddings setup` remains an administrative option for the
+  current project (`--all` for every registered project).
+  The model is about 207 MB, plus roughly 471 MiB of runtime dependencies.
+  No vision or audio weights are loaded. A project's `moxen.json`
+  may set `memoryEmbeddings` to override the global preference; memory off
+  still wins. Changes apply to the next search without restarting the server.
+  Native inference runs in a managed process. Setup tries WebGPU on Windows
+  and macOS, with CPU fallback if loading, correctness or latency checks fail.
+  The passing backend and measurements are saved against the pinned runtime
+  and model identity. Search is fully offline, combining the
+  keyword and cosine rankings by reciprocal rank fusion (`k=60`), with exact
+  memory slugs first. Semantic candidates are the ten highest cosine matches;
+  keyword candidates remain available regardless of semantic rank. This is
+  retrieval ranking, not a calibrated confidence score.
+  Content/model-versioned sidecars are rebuilt from memory files after writes
+  and before search. Missing or corrupt cache files are repaired; edits and
+  deletions cannot reuse stale vectors. Searches use keywords while indexing
+  is busy. An incomplete cache contributes only compatible vectors; a search
+  repairs at most eight entries within a 15-second inference budget and keeps
+  all keyword matches. Documents are truncated at 2,048 tokens for inference;
+  keyword search still covers their entire body. `moxen memory embeddings rebuild`
+  repairs the current project's cache (`--all` for every registered project).
+  `moxen memory embeddings status` reports loading, readiness, failures and
+  download files and per-file progress; `unload` cancels pending inference and releases
+  the model. **Model loading** (`memoryEmbeddingLoading`) defaults to **Keep
+  loaded**: a validated local model loads asynchronously at server startup and
+  stays resident until shutdown. **On demand** loads on the first search and
+  unloads after 60 seconds idle. Startup never installs or downloads anything;
+  a missing or incompatible readiness record requires setup again to preload.
+  Disabled or failed inference leaves keyword search working; a requested
+  semantic search reports when it fell back to keywords, including in the
+  model-visible MCP response when there are no keyword matches. Its 15-second
+  inference budget cancels queued requests too; an active inference is stopped
+  by terminating the model process. Filesystem reads and keyword matching are
+  outside that inference deadline.
 - **Rules:** always on while memory is (`MEMORY_GUIDANCE` in
   `threads/instructions.ts`): what to save, what to skip, which scope.
   Lessons from a session are saved on the agent's own initiative.
@@ -135,7 +223,8 @@ so a change on Claude's side does not change it.
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in the process Moxen starts), so
   there is one memory, not two. The user's own `claude` keeps its memory.
 - **Switching off:** the `memory` setting, or `"memory": false` in a
-  project's `moxen.json`.
+  project's `moxen.json`. Each provider also has a Memory participation switch
+  (`providers.<kind>.memory`); a provider cannot override global/project off.
 - **Importing Claude's:** only on request: `moxen memory import-claude`,
   or Import Claude Code memory in the command palette. `user` memories go to
   the global scope; a memory Moxen already has under the same name stays.

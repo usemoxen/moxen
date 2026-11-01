@@ -180,7 +180,10 @@ async function runSettings(): Promise<void> {
 
   // The later sections: a restart-only setting says so, and a boolean
   // flips in place on click.
-  for (let step = 0; step < 3; step += 1) await act(async () => setup.mockInput.pressTab());
+  const sideRows = setup.captureCharFrame().split("\n");
+  const claudeTab = sideRows.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28);
+  if (claudeTab < 0) fail("the settings sidebar has no Claude Code tab");
+  await act(async () => setup.mockMouse.click(sideRows[claudeTab]!.indexOf("Claude Code") + 1, claudeTab));
   await setup.flush();
   const claude = setup.captureCharFrame();
   console.log("--- settings page, Claude Code tab ---");

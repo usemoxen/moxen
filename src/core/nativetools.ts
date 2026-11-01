@@ -79,6 +79,7 @@ export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "computer", label: "Computer use", group: "Automation", summary: "Agent-driven computer tools, when configured in Codex.", codexControl: { key: "features.computer_use", off: false } },
   { name: "apps", label: "App tools", group: "Agents", summary: "Codex app and connector tools; Moxen's MCP servers are separate.", codexControl: { key: "features.apps", off: false } },
   { name: "sleep", label: "Sleep", group: "Automation", summary: "Pauses an agent before it continues.", codexControl: { key: "features.sleep_tool", off: false } },
+  { name: "goals", label: "Goals", group: "Agents", summary: "create_goal, get_goal and update_goal; long-running goals with their own completion audit.", codexControl: { key: "features.goals", off: false } },
 ];
 
 export function codexDisabledToolConfig(names: readonly string[]): Record<string, boolean | string> {
@@ -101,6 +102,14 @@ export function nativeToolsOf(provider: NativeToolProvider): readonly NativeTool
  */
 export function disabledNativeToolNames(setting: string | undefined): string[] {
   return [...new Set((setting ?? "").split(",").map((name) => name.trim()).filter((name) => name !== ""))];
+}
+
+/** What a provider switches off until the user chooses otherwise. Codex's goals tools are opt-in. */
+export const DEFAULT_DISABLED_NATIVE_TOOLS: Partial<Record<NativeToolProvider, string>> = { codex: "goals" };
+
+/** The setting as it applies: what the user set, or the provider's default when nothing is set (an empty value is a choice: nothing off). */
+export function effectiveDisabledNativeTools(provider: NativeToolProvider, setting: string | undefined): string | undefined {
+  return setting ?? DEFAULT_DISABLED_NATIVE_TOOLS[provider];
 }
 
 export function isNativeToolDisabled(setting: string | undefined, name: string, provider: NativeToolProvider): boolean {

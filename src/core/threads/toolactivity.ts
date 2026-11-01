@@ -329,7 +329,7 @@ function fromCodex(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nativ
       callId,
       tool: server && !/^mcp__.+?__.+/u.test(tool) ? `mcp__${server}__${tool}` : tool,
       input: asRecord(item.arguments) ?? {},
-      output: item.error ? JSON.stringify(item.error) : item.result ? JSON.stringify(item.result) : null,
+      output: item.error ? asString(asRecord(item.error)?.message) ?? JSON.stringify(item.error) : item.result ? JSON.stringify(item.result) : null,
       status,
       exit: null,
       startMs: null,

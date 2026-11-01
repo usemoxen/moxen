@@ -102,6 +102,7 @@ export interface OpenCodeTurnOutcome {
   readonly status: OpenCodeTurnStatus;
   readonly text: string;
   readonly usage: TokenUsageDelta;
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
   readonly error: string | null;
 }
 
@@ -133,6 +134,7 @@ interface OpenCodeTurn {
   readonly activeTools: Set<string>;
   /** The thinking summary each reasoning part has shown so far, so a cumulative part is sent on as its delta. */
   reasoningTexts?: Map<string, string>;
+  generationParts?: Map<string, { characters: number; start: number; end: number }>;
   /** Set once an interrupt is on its way: the server's idle then acknowledges it rather than completes the turn. */
   interrupting: boolean;
   /** The server has confirmed the interrupt (recorded even when it beats the HTTP reply, before anyone waits). */
@@ -140,6 +142,20 @@ interface OpenCodeTurn {
   interruptAck: (() => void) | null;
   /** A `/compact` turn: it asks the server to compact instead of prompting, and ends when the compaction does. */
   compacting?: boolean;
+}
+
+function generationOf(turn: OpenCodeTurn): { characters: number; durationMs: number } | undefined {
+  const parts = [...(turn.generationParts?.values() ?? [])].sort((a, b) => a.start - b.start);
+  if (parts.length === 0) return undefined;
+  let end = -Infinity;
+  let durationMs = 0;
+  let characters = 0;
+  for (const part of parts) {
+    characters += part.characters;
+    durationMs += Math.max(0, part.end - Math.max(end, part.start));
+    end = Math.max(end, part.end);
+  }
+  return { characters, durationMs };
 }
 
 type ParkedKind = "permission" | "question";
@@ -1170,7 +1186,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       });
     }
     if (turn.status !== "running") {
-      return { status: turn.status, text: turn.text, usage: turn.usage, error: turn.error };
+      return { status: turn.status, text: turn.text, usage: turn.usage, ...(generationOf(turn) ? { generation: generationOf(turn)! } : {}), error: turn.error };
     }
     if (signal?.aborted === true) {
       throw new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
@@ -1451,6 +1467,14 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const active = this.openTurn(session);
     if (active) active.lastActivityAt = Date.now();
     switch (event.type) {
+      case "generation.measured": {
+        const turn = this.openTurn(session);
+        const { id, characters, start, end } = event.properties;
+        if (turn && typeof id === "string" && typeof characters === "number" && typeof start === "number" && typeof end === "number") {
+          (turn.generationParts ??= new Map()).set(id, { characters, start, end });
+        }
+        return;
+      }
       case "message.part.updated":
         this.onPartUpdated(session, event);
         break;
@@ -1582,6 +1606,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     shown.set(partId, text);
     if (delta) this.publish({ type: "reasoning.delta", ...base, text: delta });
     if (asString(asRecord(part.state)?.status) === "completed") {
+      if (start !== null && end !== null && end > start && text.length > 0) {
+        (turn.generationParts ??= new Map()).set(partId, { characters: text.length, start, end });
+      }
       this.publish({
         type: "reasoning.updated",
         ...base,
@@ -2086,6 +2113,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         status,
         text: open?.text ?? "",
         usage: open?.usage ?? emptyUsage(),
+        ...(open && generationOf(open) ? { generation: generationOf(open)! } : {}),
         error: open?.error ?? null,
       });
     }

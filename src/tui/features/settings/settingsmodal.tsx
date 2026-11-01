@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { StyledText, TextAttributes, fg } from "@opentui/core";
@@ -6,8 +7,11 @@ import { useKeyboard } from "@opentui/react";
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
 import { McpAccessEditor } from "./mcpaccess.js";
+import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
+import { MemoryRuntimePanel, useMemoryRuntime } from "../memory/memoryruntime.js";
+import type { ClientApi } from "../../../server/api.js";
 import { TextField } from "./textfield.js";
 import type { HarnessRun } from "./useSettings.js";
 import { APPLIES_AT_TEXT, type ListItemView } from "../../../core/configschema.js";
@@ -77,6 +81,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   sessions: "Moxen",
   "long-threads": "Moxen",
   agent: "Moxen",
+  memory: "Moxen",
   interface: "Moxen",
   git: "Moxen",
   "provider:codex": "Providers",
@@ -84,6 +89,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   "provider:opencode": "Providers",
   "provider:harness": "Moxen Harness",
   mcp: "Integrations",
+  skills: "Integrations",
 };
 
 /** Sections long enough to be split in the sidebar, one entry per heading on the page. */
@@ -111,6 +117,7 @@ interface SidebarEntry {
 const NESTED_LISTS: readonly string[] = ["providers.harness.profiles", "mcpServers"];
 
 export function SettingsModal({
+  client,
   snapshot: rawSnapshot,
   loading,
   saving,
@@ -137,7 +144,9 @@ export function SettingsModal({
   width,
   height,
   onClose,
+  initialSection = SETTING_SECTIONS[0],
 }: {
+  client?: ClientApi;
   snapshot: SettingsSnapshot | null;
   loading: boolean;
   saving: string | null;
@@ -170,13 +179,15 @@ export function SettingsModal({
   width: number;
   height: number;
   onClose: () => void;
+  initialSection?: SettingSection;
 }) {
   const language = currentLanguage();
   // The page draws the snapshot in the current language; what it writes back is by key and value, which stay as they were.
   const snapshot = useMemo(() => localizeSnapshot(rawSnapshot), [rawSnapshot, language]);
   const inner = Math.max(40, width - 4);
   const paneWidth = Math.max(24, inner - TAB_WIDTH - 3);
-  const [tab, setTab] = useState<SettingSection>(SETTING_SECTIONS[0]);
+  const [tab, setTab] = useState<SettingSection>(initialSection);
+  const memoryStatus = useMemoryRuntime(client, tab === "memory");
   /** The heading the open page is narrowed to, in a paged section; null shows the whole section. */
   const [pageGroup, setPageGroup] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
@@ -196,7 +207,7 @@ export function SettingsModal({
   const [handoffOpen, setHandoffOpen] = useState<string | null>(null);
 
   const sections = useMemo(
-    () => SETTING_SECTIONS.filter((section) => snapshot?.settings.some((view) => view.descriptor.section === section && view.descriptor.hidden !== true) === true),
+    () => SETTING_SECTIONS.filter((section) => section === "skills" || snapshot?.settings.some((view) => view.descriptor.section === section && view.descriptor.hidden !== true) === true),
     [snapshot],
   );
   const items = useMemo<readonly SettingItem[]>(() => {
@@ -456,6 +467,7 @@ export function SettingsModal({
   const handoffItem = handoffOpen === null ? undefined : items.find((item) => item.descriptor.key === handoffOpen);
 
   useKeyboard((key) => {
+    if (tab === "skills" && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
     if (listOpen !== null || accessOpen !== null || handoffOpen !== null || key.defaultPrevented) return;
     const escape = key.name === "escape" || key.name === "esc";
@@ -560,7 +572,7 @@ export function SettingsModal({
         : current?.control.kind === "toggle"
           ? t("settings.hint.toggle")
           : t("settings.hint.open");
-  const hint = listOpen !== null || handoffOpen !== null ? "" : picking === null && updatable !== null ? t("settings.hint.update", { hint: base }) : base;
+  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null ? "" : picking === null && updatable !== null ? t("settings.hint.update", { hint: base }) : base;
 
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
@@ -575,9 +587,7 @@ export function SettingsModal({
       ) : (
         <>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-            <text fg={COLOR.faint} bg={SURFACE.raised}>
-              {truncate(snapshot.exists ? snapshot.path : t("settings.notCreated", { path: snapshot.path }), inner)}
-            </text>
+            <OverflowText fg={COLOR.faint} bg={SURFACE.raised} width={inner}>{snapshot.exists ? snapshot.path : t("settings.notCreated", { path: snapshot.path })}</OverflowText>
           </box>
           <box style={{ flexDirection: "row", flexGrow: 1, marginTop: 1 }}>
             {/* Taller than the window once the Harness and MCP servers nest their entries: it scrolls, so it never runs over the hint. */}
@@ -615,7 +625,9 @@ export function SettingsModal({
               borderColor={SURFACE.border}
               backgroundColor={SURFACE.raised}
             >
-              {handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
+              {tab === "skills" ? (
+                <SkillsPanel client={client} width={paneWidth} showHint={false} onClose={() => { markModalDismissed(); onClose(); }} />
+              ) : handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
                 <HandoffModelsEditor
                   title={handoffItem.descriptor.label}
                   description={handoffItem.descriptor.description}
@@ -761,6 +773,10 @@ export function SettingsModal({
                       onUpdate={() => onUpdate(updatable)}
                     />
                   )}
+                  {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
+                    onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
+                    onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
+                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }} /> : null}
                 <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {items.map((item, itemIndex) => {
                     const group = item.descriptor.group;
@@ -769,7 +785,7 @@ export function SettingsModal({
                     <Fragment key={item.descriptor.key}>
                     {startsGroup ? (
                       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: itemIndex === 0 ? 0 : 2, paddingLeft: 1 }} backgroundColor={SURFACE.raised}>
-                        <text fg={COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${truncate(group ?? "", paneWidth - 4)} `}</text>
+                        <OverflowText fg={COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false} width={paneWidth - 3}>{`${group ?? ""} `}</OverflowText>
                         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(Math.max(0, paneWidth - (group ?? "").length - 4))}</text>
                       </box>
                     ) : null}
@@ -801,11 +817,11 @@ export function SettingsModal({
           <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
             {error === null ? null : (
               <box style={{ flexDirection: "row", height: 1 }}>
-                <text fg={COLOR.danger} bg={SURFACE.raised}>{truncate(error, inner)}</text>
+                <OverflowText fg={COLOR.danger} bg={SURFACE.raised} width={inner}>{error}</OverflowText>
               </box>
             )}
             <box style={{ flexDirection: "row", height: 1 }}>
-              <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(hint, inner)}</text>
+              <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{hint}</OverflowText>
             </box>
           </box>
         </>
@@ -884,7 +900,7 @@ function ProviderUpdateCard({
 function CategoryHeading({ label, first, width }: { label: string; first: boolean; width: number }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: first ? 0 : 1, marginBottom: 0, paddingLeft: 2 }} backgroundColor={SURFACE.raised} selectable={false}>
-      <text fg={COLOR.faint} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{truncate(label.toUpperCase(), width - 3)}</text>
+      <OverflowText fg={COLOR.faint} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false} width={width - 3}>{label.toUpperCase()}</OverflowText>
     </box>
   );
 }
@@ -896,7 +912,7 @@ function SectionTab({ id, label, prefix, active, width, onSelect }: { id: string
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, marginRight: 1 }} backgroundColor={bg} onMouseDown={onSelect} selectable={false} {...handlers}>
       <text fg={active ? COLOR.accent : COLOR.faint} bg={bg} selectable={false}>{active ? "▌ " : "  "}</text>
       {prefix === "" ? null : <text fg={COLOR.faint} bg={bg} selectable={false}>{prefix}</text>}
-      <text fg={active ? COLOR.bright : hovered ? COLOR.text : COLOR.dim} bg={bg} selectable={false}>{truncate(label, width - 4 - prefix.length)}</text>
+      <OverflowText fg={active ? COLOR.bright : hovered ? COLOR.text : COLOR.dim} bg={bg} selectable={false} width={width - 4 - prefix.length} active={active || hovered}>{label}</OverflowText>
     </box>
   );
 }
@@ -970,10 +986,10 @@ function SettingCard({
     >
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={bg}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 1 }} backgroundColor={bg}>
-          <text fg={item.unavailable !== undefined ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(descriptor.label, labelWidth)}</text>
+          <OverflowText fg={item.unavailable !== undefined ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={labelWidth} active={active || hovered}>{descriptor.label}</OverflowText>
           {note === "" ? null : <text fg={COLOR.faint} bg={bg} selectable={false}>{note}</text>}
         </box>
-        {editing ? null : <text fg={valueColor} bg={bg} style={{ marginLeft: 2, flexShrink: 0 }} selectable={false}>{shown}</text>}
+        {editing ? null : <OverflowText fg={valueColor} bg={bg} style={{ marginLeft: 2, flexShrink: 0 }} selectable={false} width={shown.length} active={active || hovered}>{fullValue}</OverflowText>}
       </box>
       {editing ? (
         <TextField
@@ -1028,7 +1044,7 @@ function OptionRow({
   const { hovered, handlers } = useHover();
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   const room = Math.max(0, width - label.length - 8 - (badge === undefined ? 0 : badge.length + 2));
-  const detail = description === undefined ? "" : truncate(description, room);
+  const detail = description ?? "";
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPick} selectable={false} {...handlers}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={bg}>
@@ -1039,12 +1055,12 @@ function OptionRow({
         {columns !== undefined ? (
           <>
             <text fg={COLOR.accent} bg={bg} selectable={false}>{(badge ?? "").padEnd(columns.badge + 2)}</text>
-            <text fg={COLOR.dim} bg={bg} selectable={false}>{detail.padEnd(columns.detail)}</text>
+            <OverflowText fg={COLOR.dim} bg={bg} selectable={false} width={columns.detail} padToWidth active={active || hovered}>{detail}</OverflowText>
           </>
         ) : (
           <>
             {badge === undefined ? null : <text fg={COLOR.accent} bg={bg} selectable={false}>{detail === "" ? badge : `${badge}  `}</text>}
-            {detail === "" ? null : <text fg={COLOR.dim} bg={bg} selectable={false}>{detail}</text>}
+            {detail === "" ? null : <OverflowText fg={COLOR.dim} bg={bg} selectable={false} width={room} active={active || hovered}>{detail}</OverflowText>}
           </>
         )}
       </box>

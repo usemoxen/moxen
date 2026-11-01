@@ -37,6 +37,21 @@ export interface McpTool {
 /** Models listed per provider before the rest are only counted: a catalog can run to hundreds. */
 export const MAX_MODELS_PER_PROVIDER = 40;
 
+export const IMAGE_GENERATION_TOOL: McpTool = {
+  name: "image_gen",
+  description: "Generate or edit an image through Codex's native image tool using the user's paid ChatGPT subscription. Pass prompt and optionally up to five absolute reference-image paths to start a focused Codex task. Returns at once with taskId; a notification arrives when it settles. Then call image_gen with taskId (and optional waitMs, max 45000) to read the actual generated image paths. Treat an empty images list as failure, regardless of the agent's report. Cancel a running image task with task_cancel. New generations require at least 3% five-hour and 1% weekly Codex usage remaining; Moxen checks this at every invocation.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      prompt: { type: "string", description: "The image to generate or the changes to make. Do not pass with taskId." },
+      references: { type: "array", items: { type: "string" }, maxItems: 5, description: "Absolute paths to reference images on the server machine." },
+      taskId: { type: "string", description: "Read a previously started image task instead of starting one." },
+      waitMs: { type: "number", description: "Wait up to 45000 ms for a task's result." },
+    },
+    additionalProperties: false,
+  },
+};
+
 export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: "delegate",
@@ -191,9 +206,9 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task is itself the delegation, so it gets none.
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "thread_search", "thread_read"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "thread_search", "thread_read", "image_gen"]);
 
-/** Moxen memory, as a session has it: every tool, `memory_read` alone (a delegated task), or none. */
+/** Moxen memory, as a session has it: every tool, read/search (a delegated task), or none. */
 export type MemoryAccess = "write" | "read" | "off";
 
 const MEMORY_SCOPE_ADVICE =
@@ -205,13 +220,32 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
     name: "memory_read",
     description:
       "Read Moxen's persistent memory. With a name: that memory in full (the project's first, then the global, unless scope says which). " +
-      "With no name: the index of every memory as it is now, global first, one line each.",
+      "With no name: the current index, global first, one line each, capped per scope. Use memory_search for topics missing from it.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "The memory's name, as the index lists it." },
         scope: { type: "string", enum: ["project", "global"] },
       },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "memory_search",
+    description:
+      "Search Moxen's persistent memory across names, descriptions and bodies, including memories omitted from the index. " +
+      "Searches the current project and global scope, or just the scope given. Case-insensitive, with words split at punctuation; " +
+      "any word can match. When local embeddings are enabled and set up, semantic relevance also finds paraphrases; otherwise keywords rank by distinct words, then name and description matches. Returns names, scopes, descriptions and short excerpts. " +
+      "Read a result in full with memory_read using its name and scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", maxLength: 1000, description: "Words or a question to find in memory." },
+        scope: { type: "string", enum: ["project", "global"] },
+        limit: { type: "integer", minimum: 1, maximum: 50, description: "Maximum results, from 1 to 50 (default 10)." },
+      },
+      required: ["query"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true },
@@ -288,6 +322,7 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
 const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_edit", "memory_append", "memory_delete"]);
 
 export interface MoxenToolOptions {
+  readonly imageGeneration?: boolean;
   readonly checklist?: boolean;
   readonly delegated?: boolean;
   readonly webFetch?: boolean;
@@ -307,7 +342,13 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
+  if (options.imageGeneration === true && options.delegated !== true) tools.push(IMAGE_GENERATION_TOOL);
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
+}
+
+export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+  const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
+  return moxenToolsFor({ ...options, imageGeneration });
 }
 
 /**
@@ -431,6 +472,10 @@ export async function callMoxenTool(
   }
   try {
     switch (name) {
+      case "image_gen": {
+        const result = await imageGenerationTool(api, parentThreadId, args, sleep);
+        return { ...ok(result), isError: "error" in result };
+      }
       case "delegate":
         return ok(await delegateTool(api, parentThreadId, args));
       case "task_status":
@@ -461,6 +506,22 @@ export async function callMoxenTool(
           ...(typeof args.before === "number" ? { before: args.before } : {}),
         });
         return { text: read.text, isError: false };
+      }
+      case "memory_search": {
+        const found = await api.query({
+          type: "memory.search",
+          threadId: parentThreadId,
+          query: argString(args, "query", true)!,
+          ...(args.scope !== undefined ? { scope: args.scope as "project" | "global" } : {}),
+          ...(args.limit !== undefined ? { limit: args.limit as number } : {}),
+        });
+        const notice = found.semantic?.state === "unavailable"
+          ? `${found.semantic.message ?? "Semantic search is unavailable; using keyword search."}\n\n`
+          : "";
+        if (found.total === 0) return { text: `${notice}No matching memories.`, isError: false };
+        const lines = found.memories.map((memory) =>
+          `- ${memory.name} (${memory.scope}, ${memory.type}): ${memory.description}\n  ${memory.excerpt}`);
+        return { text: `${notice}${found.total} matching memories; showing ${found.memories.length}.\n\n${lines.join("\n\n")}\n\nRead a memory in full with memory_read(name, scope).`, isError: false };
       }
       case "memory_read": {
         const name = argString(args, "name");
@@ -596,6 +657,34 @@ async function currentWebPolicy(api: ClientApi): Promise<WebPolicy> {
 
 function ok(value: unknown): ToolResult {
   return { text: JSON.stringify(value, null, 2), isError: false };
+}
+
+async function imageGenerationTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>, sleep: (ms: number) => Promise<void>) {
+  const prompt = argString(args, "prompt");
+  const taskId = argString(args, "taskId");
+  if ((prompt === undefined) === (taskId === undefined)) throw new CliError("INVALID_TOOL_INPUT", "Pass either prompt to generate an image or taskId to read its result.");
+  if (taskId !== undefined) {
+    const status = await statusTool(api, parentThreadId, args, sleep);
+    // task_status above verifies that this task belongs to the caller before reading its ledger.
+    const { thread } = await api.query({ type: "thread.read", threadId: taskId, view: "turn-items", lastTurn: true });
+    const images = new Set<string>();
+    if (thread.view === "turn-items") {
+      const latest = new Map<string, Record<string, unknown>>();
+      for (const activity of thread.items) {
+        const payload = activity.payload as Record<string, unknown> | undefined;
+        if (payload?.itemType === "image_generation" && typeof payload.toolCallId === "string") latest.set(payload.toolCallId, payload);
+      }
+      for (const payload of latest.values()) {
+        const data = payload.data as { state?: { input?: { path?: unknown }; status?: string } } | undefined;
+        const file = data?.state?.input?.path;
+        if (data?.state?.status === "completed" && typeof file === "string" && path.isAbsolute(file)) images.add(file);
+      }
+    }
+    return { ...status, images: [...images], ...(status.finished && images.size === 0 ? { error: "Codex finished without a successful image-generation result." } : {}) };
+  }
+  if (args.references !== undefined && (!Array.isArray(args.references) || args.references.length > 5 || !args.references.every((file) => typeof file === "string" && path.isAbsolute(file)))) throw new CliError("INVALID_TOOL_INPUT", "references must contain at most five absolute image paths.");
+  const delegated = await api.dispatch({ type: "thread.image.generate", parentThreadId, prompt: prompt!, ...(args.references === undefined ? {} : { references: args.references as string[] }) });
+  return { taskId: delegated.task.taskId, status: delegated.task.status, next: "An image task is running. Wait for its notification, then call image_gen with taskId to read generated image paths. Use task_cancel to cancel it." };
 }
 
 async function delegateTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>) {

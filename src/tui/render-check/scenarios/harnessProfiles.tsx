@@ -183,7 +183,7 @@ export async function runHarnessProfiles(): Promise<void> {
   await act(async () => setup.mockMouse.click(sideRows[samplingRow]!.indexOf("Sampling") + 1, samplingRow));
   await setup.flush();
   const sampling = setup.captureCharFrame();
-  if (!sampling.includes("Temperature") || sampling.includes("Base URL")) fail("a heading in the sidebar did not narrow the profile editor to that heading");
+  if (!sampling.includes("Temperature") || sampling.includes("Base URL")) fail(`a heading in the sidebar did not narrow the profile editor to that heading:\n${sampling}`);
   const quirksRow = sideRows.findIndex((row) => row.includes("└ Template quirks") && row.indexOf("└ Template quirks") < 28);
   await act(async () => setup.mockMouse.click(sideRows[quirksRow]!.indexOf("Template quirks") + 1, quirksRow));
   await setup.flush();

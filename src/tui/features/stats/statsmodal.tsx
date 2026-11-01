@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { useState, type ReactNode } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -23,7 +24,7 @@ import {
 } from "../../model/stats.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { ModalShell } from "../../ui/modalshell.js";
-import { COLOR, SURFACE, lerpColor, truncate } from "../../theme.js";
+import { COLOR, SURFACE, lerpColor } from "../../theme.js";
 import { useUsageStats } from "./useUsageStats.js";
 
 type StatsTab = "overview" | "models";
@@ -63,8 +64,8 @@ function monthName(month: number): string {
 function Tile({ label, value, width }: { label: string; value: string; width: number }) {
   return (
     <box style={{ flexDirection: "column", width, height: 2, flexShrink: 0 }}>
-      <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{truncate(label, width - 1)}</text>
-      <text fg={COLOR.bright} bg={SURFACE.raised}>{truncate(value, width - 1)}</text>
+      <OverflowText fg={COLOR.dim} bg={SURFACE.raised} selectable={false} width={width - 1}>{label}</OverflowText>
+      <OverflowText fg={COLOR.bright} bg={SURFACE.raised} width={width - 1}>{value}</OverflowText>
     </box>
   );
 }
@@ -232,7 +233,7 @@ function Models({
           <box key={bucket.key} style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
               <text fg={colorOf(bucket.key)} bg={SURFACE.raised} selectable={false}>{"■ "}</text>
-              <text fg={COLOR.text} bg={SURFACE.raised}>{truncate(modelName(bucket.key, otherCount), nameWidth)}</text>
+              <OverflowText fg={COLOR.text} bg={SURFACE.raised} width={nameWidth}>{modelName(bucket.key, otherCount)}</OverflowText>
             </box>
             <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
               {`${usageLine(bucket)}  ${costText(bucket.costUsd, bucket.unpricedTurns)}  ${formatPercent(bucket.share)}`}
@@ -244,7 +245,7 @@ function Models({
         <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{t("stats.byProvider")}</text>
         {providers.map((bucket) => (
           <box key={bucket.key} style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-            <text fg={COLOR.text} bg={SURFACE.raised}>{truncate(providerNames.get(bucket.key) ?? bucket.key, nameWidth)}</text>
+            <OverflowText fg={COLOR.text} bg={SURFACE.raised} width={nameWidth}>{providerNames.get(bucket.key) ?? bucket.key}</OverflowText>
             <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
               {`${t("stats.sessionsCount", { count: bucket.sessions })}  ${t("stats.tokensOf", { count: formatCount(bucket.tokens) })}  ${costText(bucket.costUsd, bucket.unpricedTurns)}  ${formatPercent(bucket.share)}`}
             </text>
@@ -352,7 +353,7 @@ export function StatsModal({
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", marginTop: 1 }}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
           <HoverButton label={t("stats.copyCard")} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopyCard(range)} />
-          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(` · ${t("stats.hint")}`, Math.max(0, inner - 40))}</text>
+          <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 40)}>{` · ${t("stats.hint")}`}</OverflowText>
         </box>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{loading ? t("stats.updating") : stats !== null && stats.unpricedTurns > 0 && stats.costUsd !== null ? t("stats.costNote") : ""}</text>
       </box>

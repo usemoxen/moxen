@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, t } from "../../i18n/index.js";
 import { createContext, useContext, type ReactNode, type RefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -9,7 +10,7 @@ import { prettyToolName } from "../../model/activity.js";
 import { contextShares, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
 import { backgroundTaskKind, backgroundTaskTitle, untilLabel, type BackgroundTaskRow, type ContextUsage } from "../../model/thread.js";
 import { formatDuration, formatTokenCount, formatUsd } from "../../model/turns.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 
 /** The text width inside the panel frame (border, padding and scrollbar taken off), for rules and bars. */
 const PanelWidth = createContext(40);
@@ -210,7 +211,7 @@ export function Heading({ text, meta }: { text: string; meta?: string }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
       <text fg={COLOR.bright} attributes={TextAttributes.BOLD}>{text}</text>
-      <text fg={COLOR.dim}>{tail}</text>
+      <OverflowText fg={COLOR.dim} width={Math.max(0, width - text.length)}>{tail}</OverflowText>
       <text fg={SURFACE.border}>{"─".repeat(rule)}</text>
     </box>
   );
@@ -281,7 +282,7 @@ function Split({ left, right, leftColor, rightColor, width }: { left: string; ri
   const leftWidth = Math.max(4, width - (right ? right.length + 1 : 0));
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-      <text fg={leftColor}>{truncate(left, leftWidth).padEnd(leftWidth)}</text>
+      <OverflowText fg={leftColor} width={leftWidth} padToWidth>{left}</OverflowText>
       {right ? <text fg={rightColor}>{` ${right}`}</text> : null}
     </box>
   );
@@ -336,7 +337,7 @@ export function AgentsTab({
                 <Split left={agent.title} right={state} leftColor={COLOR.text} rightColor={running ? COLOR.warn : color} width={inner - 2} />
               </box>
               {/* The row opens the thread: anything to tell it goes there. */}
-              <text fg={COLOR.faint}>{`  ${truncate(agent.model ?? "", Math.max(4, inner - 2))}`}</text>
+              <OverflowText fg={COLOR.faint} width={Math.max(4, inner - 2) + 2}>{`  ${agent.model ?? ""}`}</OverflowText>
             </Row>
           );
         })
@@ -353,7 +354,7 @@ export function AgentsTab({
             <Row key={agent.agentId} spaced {...(onOpenSubagent === undefined ? {} : { onClick: () => onOpenSubagent(agent.agentId) })}>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                 <text fg={agent.running ? COLOR.warn : COLOR.added}>{agent.running ? "● " : "✓ "}</text>
-                <text fg={COLOR.text}>{truncate(agent.agentType, typeWidth)}</text>
+                <OverflowText fg={COLOR.text} width={typeWidth}>{agent.agentType}</OverflowText>
                 <Split
                   left={agent.description === null ? "" : ` · ${agent.description}`}
                   right={state}
@@ -364,7 +365,7 @@ export function AgentsTab({
               </box>
               {agent.lastMessage === null ? null : (
                 <box style={{ flexDirection: "row", flexShrink: 0, paddingLeft: 2 }}>
-                  <text fg={COLOR.dim} wrapMode="word">{truncate(subagentPreview(agent.lastMessage), (inner - 2) * 2)}</text>
+                  <text fg={COLOR.dim} wrapMode="word">{subagentPreview(agent.lastMessage)}</text>
                 </box>
               )}
               {agent.running && onStopSubagent !== undefined ? (
@@ -437,7 +438,7 @@ export function InfoTab({ info, now, onOpen }: { info: DelegatedInfo; now: numbe
         <Empty glyph="○" text={t("side.no_message_yet_ddcc")} />
       ) : (
         <box style={{ flexDirection: "row", flexShrink: 0, paddingLeft: 1 }}>
-          <text fg={COLOR.dim} wrapMode="word">{truncate(info.task, 1200)}</text>
+          <text fg={COLOR.dim} wrapMode="word">{info.task}</text>
         </box>
       )}
     </box>
@@ -573,7 +574,7 @@ export function ContextTab({
                 <box key={segment.name} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
                   <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                     <text fg={segment.color}>{segment.kind === "free" ? "░ " : "█ "}</text>
-                    <text fg={segment.kind === "used" ? COLOR.text : COLOR.dim}>{truncate(segment.name, Math.max(4, inner - 16))}</text>
+                    <OverflowText fg={segment.kind === "used" ? COLOR.text : COLOR.dim} width={Math.max(4, inner - 16)}>{segment.name}</OverflowText>
                   </box>
                   <text fg={COLOR.dim}>{`${formatTokenCount(segment.tokens)} · ${segment.percent.toFixed(1)}%`}</text>
                 </box>
@@ -599,7 +600,7 @@ export function ContextTab({
                   const bar = meter(barWidth, heaviest > 0 ? tool.tokens / heaviest : 0);
                   return (
                     <box key={tool.key} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                      <text fg={COLOR.text}>{`${truncate(tool.name, nameWidth).padEnd(nameWidth)} `}</text>
+                      <OverflowText fg={COLOR.text} width={nameWidth + 1} padToWidth suffix=" ">{tool.name}</OverflowText>
                       {bar.filled ? <text fg={COLOR.command}>{bar.filled}</text> : null}
                       {bar.empty ? <text fg={COLOR.faint}>{bar.empty}</text> : null}
                       <text fg={COLOR.dim}>{` ${values[index]!.padStart(valueWidth)}`}</text>
@@ -636,7 +637,7 @@ export function ContextTab({
             const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
             return (
               <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <text fg={COLOR.text}>{`${truncate(window.label, labelWidth).padEnd(labelWidth)} `}</text>
+                <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{window.label}</OverflowText>
                 <BarRow width={barWidth} fraction={fraction} filledColor={color} />
                 <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
                 {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
@@ -681,12 +682,12 @@ export function BackgroundTab({
                 <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                   <text fg={COLOR.warn}>{"● "}</text>
                   <text fg={COLOR.dim}>{`${KIND_LABEL()[backgroundTaskKind(task)] ?? t("side.task_eaeb")} · `}</text>
-                  <text fg={COLOR.text}>{truncate(backgroundTaskTitle(task), Math.max(4, inner - 22))}</text>
+                  <OverflowText fg={COLOR.text} width={Math.max(4, inner - 22)}>{backgroundTaskTitle(task)}</OverflowText>
                 </box>
                 {started === null ? null : <text fg={COLOR.faint}>{started}</text>}
               </box>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-                <text fg={COLOR.faint}>{`  ${truncate(task.command?.split("\n")[0] ?? "", Math.max(4, inner - 12))}`}</text>
+                <OverflowText fg={COLOR.faint} width={Math.max(4, inner - 12) + 2}>{`  ${task.command?.split("\n")[0] ?? ""}`}</OverflowText>
                 <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />
               </box>
             </Row>

@@ -33,6 +33,10 @@ export interface CliConfig {
   instructions?: string;
   /** Moxen memory (`core/memory/`); false turns it off everywhere. A project's moxen.json can turn it off for itself. */
   memory?: boolean;
+  /** Opt-in local semantic search; provisioning requires memory embeddings setup. */
+  memoryEmbeddings?: boolean;
+  /** Whether a validated local memory model stays resident while the server runs. */
+  memoryEmbeddingLoading?: "keep-loaded" | "on-demand";
   /**
    * When a plan usage limit stops a turn, schedule a "continue" for just
    * after the limit resets (at most `usageLimitContinues` in a row). Off unless set: it runs
@@ -146,6 +150,7 @@ export interface ProvidersConfig {
 
 /** Moxen Harness: our own agent loop against endpoints the user configures. */
 export interface HarnessProviderConfig {
+  memory?: boolean;
   /** Whether the Harness compacts on its own. Unset: `autoCompact`, else on. */
   compaction?: "ask" | "auto" | "off";
   /** Hand off long threads on this provider: ask, on its own, or never. Unset: `autoHandoff` here, else the global one (`core/threads/longthreads.ts`). */
@@ -313,6 +318,7 @@ export interface HarnessProfileConfig {
 
 /** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
 export interface OpencodeProviderConfig {
+  memory?: boolean;
   /** Who compacts: OpenCode itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact` (off when false), else OpenCode. */
   compaction?: "provider" | "ask" | "auto" | "off";
   /** Hand off long threads on this provider: ask, on its own, or never. Unset: `autoHandoff` here, else the global one (`core/threads/longthreads.ts`). */
@@ -355,7 +361,7 @@ export interface OpencodeProviderConfig {
   todos?: boolean;
   /** Replace OpenCode's own base system prompt with Moxen's. Unset: yes. */
   moxenPrompt?: boolean;
-  /** The provider's own tools to switch off, as comma-separated names (`core/nativetools.ts`). Unset: it keeps them all. Settings key: `providers.<kind>.disabledNativeTools`. */
+  /** The provider's own tools to switch off, as comma-separated names (`core/nativetools.ts`). Unset: it keeps them all, except Codex's goals tools, which are off until chosen. Settings key: `providers.<kind>.disabledNativeTools`. */
   disabledNativeTools?: string;
   /** The order the model should prefer web search tools in, as comma-separated ids (`brave`, `exa`, `native`). Unset: no preference. Settings key: `providers.<kind>.webSearchOrder`. */
   webSearchOrder?: string;
@@ -377,6 +383,7 @@ export interface OpencodeProviderConfig {
 }
 
 export interface ClaudeProviderConfig {
+  memory?: boolean;
   /** Who compacts: Claude Code itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact`, else Moxen asking. */
   compaction?: "provider" | "ask" | "auto" | "off";
   /** Hand off long threads on this provider: ask, on its own, or never. Unset: `autoHandoff` here, else the global one (`core/threads/longthreads.ts`). */
@@ -417,7 +424,7 @@ export interface ClaudeProviderConfig {
   mcpExclude?: string;
   /** Offer the model a to-do list on this provider. Unset: yes. */
   todos?: boolean;
-  /** The provider's own tools to switch off, as comma-separated names (`core/nativetools.ts`). Unset: it keeps them all. Settings key: `providers.<kind>.disabledNativeTools`. */
+  /** The provider's own tools to switch off, as comma-separated names (`core/nativetools.ts`). Unset: it keeps them all, except Codex's goals tools, which are off until chosen. Settings key: `providers.<kind>.disabledNativeTools`. */
   disabledNativeTools?: string;
   /** The order the model should prefer web search tools in, as comma-separated ids (`brave`, `exa`, `native`). Unset: no preference. Settings key: `providers.<kind>.webSearchOrder`. */
   webSearchOrder?: string;
@@ -548,6 +555,8 @@ export interface ThreadEnvelope {
    * were stored are absent; read those as the thread's selection.
    */
   turnModelSelections?: Record<string, ModelSelection>;
+  /** Completed turns' output tokens per wall-clock second, supplied in thread subscriptions. */
+  turnThroughput?: Record<string, number>;
   /**
    * Messages waiting their turn, oldest first: queued behind the running
    * turn, or scheduled for later (`scheduledFor`). Absent when there are none.

@@ -49,6 +49,8 @@ import type {
 } from "../spi.js";
 import { CodexBackground } from "./background.js";
 import { CodexHarnessTools, CODEX_HARNESS_CONFIG, CODEX_HARNESS_SERVER } from "./tools.js";
+import { codexDeveloperInstructions } from "./instructions.js";
+import { buildCodexSystemPrompt } from "./prompt.js";
 import { resolveStoreRoot } from "../../threads/store.js";
 import { codexAsyncQuestions } from "./questions.js";
 import { conversationContextBreakdown } from "../context.js";
@@ -100,6 +102,7 @@ export interface CodexTurnOutcome {
   readonly status: CodexTurnStatus;
   readonly text: string;
   readonly usage: TokenUsageDelta;
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
   readonly error: string | null;
 }
 
@@ -124,6 +127,8 @@ interface TranscriptTurn {
    */
   readonly messages: Map<string, AgentMessage>;
   usage?: TokenUsageDelta;
+  generation?: { characters: number; durationMs: number };
+  generationStarts?: Map<string, number>;
 }
 
 interface AgentMessage {
@@ -373,7 +378,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         harness: new CodexHarnessTools({
           threadId: input.threadId, cwd: input.workingDirectory,
           artifactDir: path.join(resolveStoreRoot(), "codex", "artifacts", randomUUID()),
-          delegated: input.delegated === true, shellDisabled: input.disabledNativeTools?.includes("shell") === true,
+          delegated: input.delegated === true, shellDisabled: input.disabledNativeTools?.includes("shell") === true, checklist: input.checklist !== false,
           isolation: input.isolation ?? null,
           secretEnv: () => this.secretEnv,
           mode: () => session.runtimeMode,
@@ -433,8 +438,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
             [`mcp_servers.${CODEX_HARNESS_SERVER}`]: harnessConfig,
             ...(input.moxenMemory ? { "features.memories": false } : {}),
           },
-          // `ThreadStartParams` / `ThreadResumeParams.developerInstructions`.
-          developerInstructions: [input.instructions, `Moxen supplies shell and question tools through ${CODEX_HARNESS_SERVER}. Use its bash or powershell for commands, reading and search, ask for questions, and task_output/task_stop for background commands. Native shell and question tools are disabled.`, input.checklist === false ? "Moxen's to-do list is off. Do not call update_plan." : null].filter(Boolean).join("\n\n"),
+          // `ThreadStartParams` / `ThreadResumeParams`: `baseInstructions` replaces the model's own prompt.
+          baseInstructions: buildCodexSystemPrompt({ checklist: input.checklist }),
+          developerInstructions: codexDeveloperInstructions(input.instructions, input.checklist),
         };
         const codexThreadId =
           (await this.resumeThread(peer, this.resumable.get(input.threadId) ?? input.resumeCursor, overrides)) ??
@@ -704,6 +710,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         status: turn.status,
         text: turn.text,
         usage: this.usageOf(session, turnId),
+        ...(turn.generation ? { generation: turn.generation } : {}),
         error: turn.error,
       };
     }
@@ -764,6 +771,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       status,
       text: open?.text ?? "",
       usage: usage ?? { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 },
+      ...(open?.generation ? { generation: open.generation } : {}),
       error: open?.error ?? detail,
     };
     for (const waiter of waiters) waiter.resolve(outcome);
@@ -1072,6 +1080,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         const itemId = asString(asRecord(params)?.["itemId"]) ?? "";
         if (open?.messages.get(itemId)?.delivery === "async") return;
         if (text && open) {
+          if (itemId && !open.generationStarts?.has(itemId)) (open.generationStarts ??= new Map()).set(itemId, Date.now());
           const message = open.messages.get(itemId) ?? { text: "", phase: null };
           message.text += text;
           open.messages.set(itemId, message);
@@ -1157,6 +1166,16 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           const message = open.messages.get(agentMessage.id) ?? { text: "", phase: null };
           message.phase = agentMessage.phase ?? message.phase;
           message.delivery = agentMessage.delivery ?? message.delivery ?? null;
+          if (method === CODEX_METHODS.itemStarted && message.delivery !== "async") (open.generationStarts ??= new Map()).set(agentMessage.id, Date.now());
+          if (method === CODEX_METHODS.itemCompleted) {
+            const start = open.generationStarts?.get(agentMessage.id);
+            open.generationStarts?.delete(agentMessage.id);
+            const elapsed = start === undefined ? 0 : Date.now() - start;
+            if (message.delivery !== "async" && elapsed > 0 && message.text.length > 0) {
+              const prior = open.generation ?? { characters: 0, durationMs: 0 };
+              open.generation = { characters: prior.characters + message.text.length, durationMs: prior.durationMs + elapsed };
+            }
+          }
           // The completed item carries the whole message; prefer it to the
           // deltas we pieced together.
           if (method === CODEX_METHODS.itemCompleted && agentMessage.text !== null) message.text = agentMessage.text;

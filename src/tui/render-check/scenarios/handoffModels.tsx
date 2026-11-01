@@ -77,7 +77,7 @@ export async function runHandoffModels(): Promise<void> {
   await settle();
 
   const side = setup.captureCharFrame().split("\n");
-  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.includes("│"));
+  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28 && row.includes("│"));
   await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude Code") + 1, claudeRow));
   await settle();
   // The row sits under "Long threads", below the fold: step down to it by its place on the page.

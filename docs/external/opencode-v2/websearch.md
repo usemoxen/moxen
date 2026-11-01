@@ -3,7 +3,7 @@
 > Source: https://opencode.ai/v2/docs/websearch/
 > Use this file to discover all available pages before exploring further.
 
-# Websearch
+# Web search
 
 Ask OpenCode for current information and it can search the web, read the results, and include source links in its response.
 

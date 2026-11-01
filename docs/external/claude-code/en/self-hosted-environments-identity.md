@@ -8,9 +8,9 @@
 
 > [!NOTE]
 >
-> Self-hosted environments are in public beta on Team and Enterprise plans; an [Owner](/docs/en/cloud-environments#organization-shared-environments) enables them by turning on **Allow self-hosted environments** on the [**Cloud environments** admin page](https://claude.ai/admin-settings/cloud-environments). This page covers session identity verification; see the [quickstart](/docs/en/self-hosted-environments-quickstart) for setup and [Deploy to production](/docs/en/self-hosted-environments-deploy) for the fleet recipes.
+> Self-hosted environments are in public beta on Team and Enterprise plans; an [Owner](https://code.claude.com/docs/en/cloud-environments.md#organization-shared-environments) enables them by turning on **Allow self-hosted environments** on the [**Cloud environments** admin page](https://claude.ai/admin-settings/cloud-environments). This page covers session identity verification; see the [quickstart](https://code.claude.com/docs/en/self-hosted-environments-quickstart.md) for setup and [Deploy to production](https://code.claude.com/docs/en/self-hosted-environments-deploy.md) for the fleet recipes.
 
-A [self-hosted environment](/docs/en/self-hosted-environments) lets Claude Code [cloud sessions](/docs/en/claude-code-on-the-web) run on infrastructure you operate instead of on Anthropic's. Because the session runs inside your network, Claude can call your internal services directly. Those services need a way to confirm that a request came from a Claude Code session in your environment, and to identify the user or service identity that created that session.
+A [self-hosted environment](https://code.claude.com/docs/en/self-hosted-environments) lets Claude Code [cloud sessions](https://code.claude.com/docs/en/claude-code-on-the-web.md) run on infrastructure you operate instead of on Anthropic's. Because the session runs inside your network, Claude can call your internal services directly. Those services need a way to confirm that a request came from a Claude Code session in your environment, and to identify the user or service identity that created that session.
 
 Every session in a self-hosted environment receives a signed JSON Web Token (JWT) in the `CLAUDE_CODE_SESSION_ACCESS_TOKEN` environment variable. A session presents the token like any bearer credential; for example, a script Claude runs can call your service with `curl -H "Authorization: Bearer $CLAUDE_CODE_SESSION_ACCESS_TOKEN"`. Anthropic signs the token and publishes the verification keys at a public JWKS endpoint. Your services fetch those keys, verify the signature, and read the claims to decide what access to grant.
 
@@ -84,92 +84,94 @@ Reject the token if `exp` is in the past. Anthropic issues session tokens with a
 
 **7. Read the identity**
 
-The creating user's identity is in the `act` claim: `act.sub` is their Anthropic user ID in the prefixed form `user:<id>`, and `act.email`, when the creating surface recorded one, is their email address. Sessions your organization's service identity creates, including Claude Tag channel sessions, carry an `agent:` subject instead, so treat a session as user-created only when `act.sub` carries the `user:` prefix, rather than testing whether identity claims are absent. See the [claims reference](#claims-reference) for the full structure and the flat duplicate claims.
+The creating user's identity is in the `act` claim. `act.sub` is their Anthropic user ID in the prefixed form `user:<id>`, and `act.email`, when the creating surface recorded one, is their email address. Sessions your organization's service identity creates carry an `agent:` subject instead. Treat a session as user-created only when `act.sub` carries the `user:` prefix, rather than testing whether identity claims are absent.
+
+See the [claims reference](#claims-reference) for the full structure and the flat duplicate claims.
 
 The checks map directly onto standard JWT libraries. The examples below implement the full sequence in Node.js with [`jose`](https://www.npmjs.com/package/jose), which handles JWKS fetching, caching, and `kid` selection, and in Python with [`PyJWT`](https://pyjwt.readthedocs.io/) and its built-in JWKS client.
 
-**Node.js (jose)**
+> [tab] Node.js (jose)
+>
+> ```typescript theme={null}
+> import { createRemoteJWKSet, jwtVerify } from "jose";
+>
+> const JWKS = createRemoteJWKSet(
+>   new URL("https://api.anthropic.com/v1/code/.well-known/jwks.json")
+> );
+>
+> const PREFIX = "sk-ant-cc-";
+> const EXPECTED_POOL_ID = "ccpool_...";
+>
+> export async function verifySessionToken(raw: string) {
+>   if (!raw.startsWith(PREFIX)) {
+>     throw new Error("not a self-hosted runner session token");
+>   }
+>   const jwt = raw.slice(PREFIX.length);
+>
+>   const { payload } = await jwtVerify(jwt, JWKS, {
+>     issuer: "ccr",
+>     audience: EXPECTED_POOL_ID,
+>     algorithms: ["ES256"],
+>   });
+>
+>   if (payload["ccr:role"] !== "session_worker") {
+>     throw new Error("token is not a session_worker token");
+>   }
+>
+>   const act = payload.act as { email?: string; sub?: string };
+>   return {
+>     sessionId: payload["ccr:session_id"] as string,
+>     poolId: payload["ccr:pool_id"] as string,
+>     orgId: payload["ccr:org_id"] as string,
+>     creatorEmail: act?.email,
+>     creatorSub: act?.sub,
+>   };
+> }
+> ```
 
-```typescript theme={null}
-import { createRemoteJWKSet, jwtVerify } from "jose";
-
-const JWKS = createRemoteJWKSet(
-  new URL("https://api.anthropic.com/v1/code/.well-known/jwks.json")
-);
-
-const PREFIX = "sk-ant-cc-";
-const EXPECTED_POOL_ID = "ccpool_...";
-
-export async function verifySessionToken(raw: string) {
-  if (!raw.startsWith(PREFIX)) {
-    throw new Error("not a self-hosted runner session token");
-  }
-  const jwt = raw.slice(PREFIX.length);
-
-  const { payload } = await jwtVerify(jwt, JWKS, {
-    issuer: "ccr",
-    audience: EXPECTED_POOL_ID,
-    algorithms: ["ES256"],
-  });
-
-  if (payload["ccr:role"] !== "session_worker") {
-    throw new Error("token is not a session_worker token");
-  }
-
-  const act = payload.act as { email?: string; sub?: string };
-  return {
-    sessionId: payload["ccr:session_id"] as string,
-    poolId: payload["ccr:pool_id"] as string,
-    orgId: payload["ccr:org_id"] as string,
-    creatorEmail: act?.email,
-    creatorSub: act?.sub,
-  };
-}
-```
-
-**Python (PyJWT)**
-
-```python theme={null}
-import jwt
-from jwt import PyJWKClient
-
-JWKS_URL = "https://api.anthropic.com/v1/code/.well-known/jwks.json"
-PREFIX = "sk-ant-cc-"
-EXPECTED_POOL_ID = "ccpool_..."
-
-jwks = PyJWKClient(JWKS_URL)
-
-
-def verify_session_token(raw: str) -> dict:
-    if not raw.startswith(PREFIX):
-        raise ValueError("not a self-hosted runner session token")
-    token = raw.removeprefix(PREFIX)
-
-    signing_key = jwks.get_signing_key_from_jwt(token)
-    payload = jwt.decode(
-        token,
-        signing_key.key,
-        algorithms=["ES256"],
-        issuer="ccr",
-        audience=EXPECTED_POOL_ID,
-    )
-
-    if payload.get("ccr:role") != "session_worker":
-        raise ValueError("token is not a session_worker token")
-
-    act = payload.get("act") or {}
-    return {
-        "session_id": payload["ccr:session_id"],
-        "pool_id": payload["ccr:pool_id"],
-        "org_id": payload["ccr:org_id"],
-        "creator_email": act.get("email"),
-        "creator_sub": act.get("sub"),
-    }
-```
+> [tab] Python (PyJWT)
+>
+> ```python theme={null}
+> import jwt
+> from jwt import PyJWKClient
+>
+> JWKS_URL = "https://api.anthropic.com/v1/code/.well-known/jwks.json"
+> PREFIX = "sk-ant-cc-"
+> EXPECTED_POOL_ID = "ccpool_..."
+>
+> jwks = PyJWKClient(JWKS_URL)
+>
+>
+> def verify_session_token(raw: str) -> dict:
+>     if not raw.startswith(PREFIX):
+>         raise ValueError("not a self-hosted runner session token")
+>     token = raw.removeprefix(PREFIX)
+>
+>     signing_key = jwks.get_signing_key_from_jwt(token)
+>     payload = jwt.decode(
+>         token,
+>         signing_key.key,
+>         algorithms=["ES256"],
+>         issuer="ccr",
+>         audience=EXPECTED_POOL_ID,
+>     )
+>
+>     if payload.get("ccr:role") != "session_worker":
+>         raise ValueError("token is not a session_worker token")
+>
+>     act = payload.get("act") or {}
+>     return {
+>         "session_id": payload["ccr:session_id"],
+>         "pool_id": payload["ccr:pool_id"],
+>         "org_id": payload["ccr:org_id"],
+>         "creator_email": act.get("email"),
+>         "creator_sub": act.get("sub"),
+>     }
+> ```
 
 ### Verify the token inside the session
 
-[Wrapper scripts](/docs/en/self-hosted-environments-configuration#wrapper-scripts) run inside the session, before Claude starts. Instead of calling a JWT library, they can run the runner binary's `self-hosted-runner decode-token` subcommand. The subcommand reads the token from a positional argument, from `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, or from piped stdin, in that order, then strips the prefix, verifies the signature against the JWKS endpoint, checks expiry, and prints the claims as JSON. The subcommand performs the signature and expiry checks only; it doesn't check `iss`, `aud`, or `ccr:role`. When your wrapper's auth decision depends on those claims, read them from the printed JSON and compare them explicitly.
+[Wrapper scripts](https://code.claude.com/docs/en/self-hosted-environments-configuration.md#wrapper-scripts) run inside the session, before Claude starts. Instead of calling a JWT library, they can run the runner binary's `self-hosted-runner decode-token` subcommand. The subcommand reads the token from a positional argument, from `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, or from piped stdin, in that order, then strips the prefix, verifies the signature against the JWKS endpoint, checks expiry, and prints the claims as JSON. The subcommand performs the signature and expiry checks only; it doesn't check `iss`, `aud`, or `ccr:role`. When your wrapper's auth decision depends on those claims, read them from the printed JSON and compare them explicitly.
 
 This command extracts the creator identity, preferring the email address, then the creator's `act.sub` subject, `user:<id>` or `agent:<id>`:
 
@@ -185,7 +187,9 @@ If `decode-token` can't fetch the keys from the JWKS endpoint or can't verify th
 
 ## Claims reference
 
-The table below lists the session token claims relevant to verification. Read identity from the `ccr:*` namespace and the `act` chain; the flat `account_email`, `organization_uuid`, and `account_uuid` claims are backward-compatibility duplicates that may be removed. Sessions your organization's service identity creates, including Claude Tag channel sessions, carry an `agent:` subject in `act.sub` and omit `act.email`, `ccr:account_id`, `account_email`, and `account_uuid`. The two email claims are optional for user-created sessions too: Anthropic records them at session creation only when the creating request's credentials carry an email, and a session dispatched from the CLI can lack both, so key identity on `act.sub` or `ccr:account_id` rather than on email. Tokens can also carry additional claims beyond this table; ignore claims you don't recognize.
+Read identity from the `ccr:*` namespace and the `act` chain; the flat `account_email`, `organization_uuid`, and `account_uuid` claims are backward-compatibility duplicates that may be removed. Sessions your organization's service identity creates carry an `agent:` subject in `act.sub` and omit `act.email`, `ccr:account_id`, `account_email`, and `account_uuid`.
+
+The two email claims are optional for user-created sessions too. Anthropic records them at session creation only when the creating request's credentials carry an email, and a session dispatched from the CLI can lack both. Key identity on `act.sub` or `ccr:account_id` rather than on email. Tokens can also carry additional claims beyond this table; ignore claims you don't recognize. The table below lists the session token claims relevant to verification.
 
 | Claim | Type | Description |
 | :- | :- | :- |
@@ -196,10 +200,10 @@ The table below lists the session token claims relevant to verification. Read id
 | `iat` | number | Issued-at as a Unix timestamp. |
 | `jti` | string | Unique token identifier. |
 | `ccr:role` | string | Always `session_worker` for session tokens. |
-| `ccr:session_id` | string | The session ID. Same value as the suffix of `sub`. |
+| `ccr:session_id` | string | The session ID in `cse_...` form. Same value as the suffix of `sub`, and the same string as [`CLAUDE_CODE_REMOTE_SESSION_ID`](https://code.claude.com/docs/en/self-hosted-environments-configuration#wrapper-scripts). To match it to the `CLAUDE_RUNNER_SESSION_ID` that [lifecycle hooks](https://code.claude.com/docs/en/self-hosted-environments-configuration.md#lifecycle-hooks) receive, replace the `cse_` prefix with `session_`. |
 | `ccr:pool_id` | string | Your environment ID. Same value that appears in `aud`. |
 | `ccr:org_id` | string | Your Anthropic organization ID. |
-| `ccr:account_id` | string | The creating user's Anthropic account ID: the value of `act.sub` without the `user:` prefix, a tagged `user_...` ID. The same value the [spawn-runner hook](/docs/en/self-hosted-environments-configuration#the-spawn-runner-hook)'s `CLAUDE_RUNNER_ACCOUNT_ID` carries and [`--lock-to-account`](/docs/en/self-hosted-environments-reference#runner-cli-flags) accepts, so the three compare as equal strings. |
+| `ccr:account_id` | string | The creating user's Anthropic account ID: the value of `act.sub` without the `user:` prefix, a tagged `user_...` ID. The same value the [spawn-runner hook](https://code.claude.com/docs/en/self-hosted-environments-configuration.md#the-spawn-runner-hook)'s `CLAUDE_RUNNER_ACCOUNT_ID` carries and [`--lock-to-account`](https://code.claude.com/docs/en/self-hosted-environments-reference#runner-cli-flags) accepts, so the three compare as equal strings. |
 | `account_email` | string | Duplicate of `act.email`; absent whenever `act.email` is. |
 | `organization_uuid` | string | Your Anthropic organization UUID. |
 | `account_uuid` | string | The creating user's Anthropic account UUID. |
@@ -207,11 +211,11 @@ The table below lists the session token claims relevant to verification. Read id
 
 ### The `act` chain
 
-The `act` claim records the full delegation path from the user or service identity that created the session down to the [environment](/docs/en/self-hosted-environments#key-concepts) whose secret admitted the runner, and the identity that created that secret. The creator is the outermost actor, so `act.sub` identifies them directly.
+The `act` claim records the full delegation path from the user or service identity that created the session down to the [environment](https://code.claude.com/docs/en/self-hosted-environments#key-concepts) whose secret admitted the runner, and the identity that created that secret. The creator is the outermost actor, so `act.sub` identifies them directly.
 
 | Path | Description |
 | :- | :- |
-| `act.sub` | The creating user's Anthropic user ID, in the form `user:<id>`, or `agent:<id>` when your organization's service identity created the session, as it does for Claude Tag channel sessions. |
+| `act.sub` | The creating user's Anthropic user ID, in the form `user:<id>`, or `agent:<id>` when your organization's service identity created the session. |
 | `act.email` | The creating user's email address, when one was recorded at session creation. Don't require it; key on `act.sub`. |
 | `act.attested_by` | Reserved for the upstream identity provider's attestation for the creating user. Expect it to be absent, and don't depend on it. Key on `act.sub`. If you need an address, read `act.email` when it's present. |
 | `act.act` | The runner that spawned the session. `act.act.sub` is `ccr:runner:<runner_id>`. |
@@ -234,13 +238,13 @@ When your service exchanges the token for internal credentials, issue credential
 
 The creator identity also appears in plain environment variables on two surfaces that never verify the token:
 
-* **The [`spawn-runner` hook](/docs/en/self-hosted-environments-configuration#the-spawn-runner-hook), on the orchestrator**: the hook runs before any runner exists for a queued session and receives the creator identity in variables such as `CLAUDE_RUNNER_ACCOUNT_EMAIL` and `CLAUDE_RUNNER_ACCOUNT_ID`. The orchestrator reads them from the work order, the signed single-use token that authorizes spawning one runner, without verifying the work order's signature itself; the claims are trusted because the work order arrives over the orchestrator's connection to Anthropic, which the environment secret authenticates.
-* **[Wrapper scripts](/docs/en/self-hosted-environments-configuration#wrapper-scripts), inside the session**: wrappers receive `CCR_SESSION_ACCOUNT_EMAIL`, the creator's email pre-extracted from the token without signature verification. The variable is suitable for labelling, such as commit trailers, not for auth decisions.
+* **The [`spawn-runner` hook](https://code.claude.com/docs/en/self-hosted-environments-configuration#the-spawn-runner-hook), on the orchestrator**: the hook runs before any runner exists for a queued session and receives the creator identity in variables such as `CLAUDE_RUNNER_ACCOUNT_EMAIL` and `CLAUDE_RUNNER_ACCOUNT_ID`. The orchestrator reads them from the work order, the signed single-use token that authorizes spawning one runner, without verifying the work order's signature itself; the claims are trusted because the work order arrives over the orchestrator's connection to Anthropic, which the environment secret authenticates.
+* **[Wrapper scripts](https://code.claude.com/docs/en/self-hosted-environments-configuration.md#wrapper-scripts), inside the session**: wrappers receive `CCR_SESSION_ACCOUNT_EMAIL`, the creator's email pre-extracted from the token without signature verification. The variable is suitable for labelling, such as commit trailers, not for auth decisions.
 
 Use the plain variables for orchestrator-side decisions such as selecting a machine image. Use `CLAUDE_CODE_SESSION_ACCESS_TOKEN` when a downstream service needs independent cryptographic proof rather than trusting the runner's environment.
 
 ## What's next
 
-* [Self-hosted environments](/docs/en/self-hosted-environments): the environment, runner, and session model; the [quickstart](/docs/en/self-hosted-environments-quickstart) and [Deploy to production](/docs/en/self-hosted-environments-deploy) hold setup and operations
-* [Customize sessions](/docs/en/self-hosted-environments-configuration): wrapper scripts that consume the token, and the `spawn-runner` hook
-* [Reference](/docs/en/self-hosted-environments-reference): CLI flags, environment variables, and metrics
+* [Self-hosted environments](https://code.claude.com/docs/en/self-hosted-environments): the environment, runner, and session model; the [quickstart](https://code.claude.com/docs/en/self-hosted-environments-quickstart.md) and [Deploy to production](https://code.claude.com/docs/en/self-hosted-environments-deploy.md) hold setup and operations
+* [Customize sessions](https://code.claude.com/docs/en/self-hosted-environments-configuration.md): wrapper scripts that consume the token, and the `spawn-runner` hook
+* [Reference](https://code.claude.com/docs/en/self-hosted-environments-reference.md): CLI flags, environment variables, and metrics

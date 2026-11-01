@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ThreadStore } from "../../core/threads/store.js";
 
 import type { CommandOf } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
@@ -504,6 +505,75 @@ describe("DirectConnection subscriptions", () => {
     }
   });
 
+  it.each(["shell", "thread"] as const)("does not overlap slow %s polls or deliver their results after unsubscribe", async (kind) => {
+    const harness = await testHarness();
+    await createThread(harness.store, {
+      id: "slow-poll", projectId: "test-project", title: "Slow",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, shellPollMs: 5, threadPollMs: 5 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const readVersion = async () => { calls += 1; await gate; return "version"; };
+    const spy = kind === "shell"
+      ? vi.spyOn(ThreadStore.prototype, "shellVersion").mockImplementation(readVersion)
+      : vi.spyOn(ThreadStore.prototype, "threadVersion").mockImplementation(readVersion);
+    const frames: unknown[] = [];
+    const errors: unknown[] = [];
+    const stop = kind === "shell"
+      ? connection.subscribeShell({}, (frame) => frames.push(frame), (error) => errors.push(error))
+      : connection.subscribeThread("slow-poll", {}, (frame) => frames.push(frame), (error) => errors.push(error));
+    try {
+      await waitFor("slow version read", async () => calls > 0);
+      // Hold the disk operation across several polling deadlines.
+      await vi.advanceTimersByTimeAsync(40);
+      expect(calls).toBe(1);
+      stop();
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toEqual([]);
+      expect(errors).toEqual([]);
+    } finally {
+      stop();
+      release();
+      spy.mockRestore();
+      await connection.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])("does not duplicate a delayed provider bridge or attach it after unsubscribe (cancelled=%s)", async (cancelled) => {
+    const driver = new QuestionDriver();
+    const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });
+    await createThread(harness.store, { id: "slow-bridge", projectId: "test-project", title: "Slow", modelSelection: { instanceId: "opencode", model: "gpt-5.4" } });
+    let release!: () => void;
+    const gate = new Promise<boolean>((resolve) => { release = () => resolve(true); });
+    const session = vi.spyOn(driver, "hasSession").mockImplementation(() => Effect.promise(() => gate));
+    const stream = vi.spyOn(driver, "streamEvents", "get");
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, threadPollMs: 5 });
+    const stop = connection.subscribeThread("slow-bridge", {}, () => {}, () => {});
+    try {
+      await waitFor("delayed bridge", async () => session.mock.calls.length > 0);
+      await vi.advanceTimersByTimeAsync(40);
+      expect(session).toHaveBeenCalledTimes(1);
+      if (cancelled) stop();
+      release();
+      if (!cancelled) await waitFor("attached bridge", async () => stream.mock.calls.length > 0);
+      else await vi.advanceTimersByTimeAsync(0);
+      expect(stream).toHaveBeenCalledTimes(cancelled ? 0 : 1);
+    } finally {
+      stop();
+      release();
+      session.mockRestore();
+      stream.mockRestore();
+      await connection.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("streams provider text deltas into thread frames", async () => {
     const harness = await testHarness();
     const transport = new FakeOpencodeTransport();
@@ -796,7 +866,7 @@ describe("DirectConnection model and session continuity", () => {
 
     // A restart: a new process, a driver with no live session.
     const second = new HistoryDriver("ses_parent");
-    const after = new DirectConnection({ storeRoot: harness.root, drivers: { opencode: () => second } });
+    const after = new DirectConnection({ storeRoot: harness.root, drivers: { ...harness.drivers, opencode: () => second } });
     try {
       const transcript = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_child" });
       expect(second.starts).toHaveLength(1);
@@ -832,7 +902,7 @@ describe("DirectConnection model and session continuity", () => {
 
     // A new connection with a new driver is what reopening the TUI gets.
     const second = new RecordingDriver("native-2");
-    const after = new DirectConnection({ storeRoot: harness.root, drivers: { opencode: () => second } });
+    const after = new DirectConnection({ storeRoot: harness.root, drivers: { ...harness.drivers, opencode: () => second } });
     try {
       await runTurn(after, harness, "what was it?");
       expect(second.starts).toEqual([expect.objectContaining({ threadId: "thread-m", resumeCursor: "native-1" })]);
@@ -879,7 +949,7 @@ describe("DirectConnection model and session continuity", () => {
       // here the stdio child, bound to this thread and this store (no HTTP
       // endpoint: this connection never became a long-lived owner).
       expect(servers[1]).toMatchObject({ name: "moxen", type: "in-process", alwaysLoad: true });
-      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       const fallback = servers[1]!.fallback as { type: string; env: Record<string, string>; args: string[] };
       expect(fallback).toMatchObject({ type: "stdio", env: { MOXEN_STORE_ROOT: harness.root } });
       expect(fallback.args.slice(-2)).toEqual(["--thread", "thread-m"]);

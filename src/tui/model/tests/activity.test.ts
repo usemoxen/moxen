@@ -281,6 +281,18 @@ describe("describeActivity", () => {
     expect(view).toMatchObject({ kind: "tool", tool: "MysteryOp", detail: "did things" });
   });
 
+  it("shows an MCP server's own read as a tool call, not a file Read", () => {
+    const view = describeActivity(
+      activity("tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: "call-mcp-read",
+        status: "completed",
+        data: { tool: "mcp__claude_ai_Claude_Docs__read", state: { status: "completed", input: { ref: { id: "doc-1" } } } },
+      }),
+    );
+    expect(view?.kind).not.toBe("read");
+  });
+
   it("reads dynamic read/grep tools by name", () => {
     const read = describeActivity(
       activity("tool.completed", {

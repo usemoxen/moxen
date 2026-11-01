@@ -775,6 +775,8 @@ export interface FinishTurnInput {
   readonly text?: string;
   readonly error?: string;
   readonly usage?: TurnUsage | null;
+  readonly turnOutputTokens?: number;
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
 }
 
 async function finishTurn(
@@ -820,6 +822,8 @@ async function finishTurn(
       status,
       ...(status === "failed" && input.error !== undefined ? { error: input.error } : {}),
       ...(input.usage !== undefined ? { usage: input.usage } : {}),
+      ...(input.turnOutputTokens !== undefined ? { turnOutputTokens: input.turnOutputTokens } : {}),
+      ...(input.generation !== undefined ? { generation: input.generation } : {}),
       updatedAt: now,
       completedAt: now,
     });

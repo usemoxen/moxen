@@ -98,6 +98,6 @@ export async function runSettingsSidebarScroll(): Promise<void> {
   const last = check("at the last section");
   const active = last.find((row) => row.includes("▌ "));
   console.log(last.join("\n"));
-  if (active === undefined || !active.includes("MCP servers")) fail(`at the last section: the active entry is not in view (${JSON.stringify(active)})`);
+  if (active === undefined || !active.includes("Skills")) fail(`at the last section: the active entry is not in view (${JSON.stringify(active)})`);
   setup.renderer.destroy();
 }

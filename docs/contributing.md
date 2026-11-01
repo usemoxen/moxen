@@ -106,6 +106,10 @@ To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
 
 ## TUI conventions
 
+- Model backdrop gallery entries in `render-check/gallery/scenes.tsx` freeze
+  each scene at named instants, including auroras, seasonal reflections and
+  pointer interactions. `PointerMoment` advances the native renderer with a
+  fixed pointer, so these captures do not depend on mouse or clock timing.
 - New feature-specific state goes in that feature's own hook under `src/tui/features/<feature>/`; cross-cutting state that a single feature can't own goes in `src/tui/app/hooks/`. Shared, stateless-ish runtime hooks live in `src/tui/hooks/`. Avoid adding more raw `useState` to `app.tsx` itself.
 - Every modal renders inside `ModalShell`; notices go through `useToasts`.
 - Interactive chrome gets `useHover()` feedback and `selectable={false}`; only readable text stays selectable.
@@ -129,6 +133,12 @@ To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
 - Vendoring third-party code needs its notice to travel with it: MIT-licensed reuse is permitted, the combined work stays AGPL-3.0-only, never relicense vendored files and never strip notices. Grammar licenses are generated (`bun run update:tree-sitter-assets` rewrites `THIRD_PARTY_LICENSES.md`); non-grammar vendored code is recorded in `THIRD_PARTY_NOTICES.md`, creating it if absent.
 
 ## Tests
+
+For production-runtime performance samples and the scope of the MXN-84 pass,
+see [Performance checks](performance.md). `bun scripts/benchmark-tui.ts` runs
+the synthetic transcript, sidebar and reply-render benchmarks; `--profile`
+also writes a CPU profile. Run it separately from tests or builds when
+comparing timings.
 
 The suite is large (~1.2k tests) and an audit found it is not padded: almost nothing lacks an assertion and almost nothing duplicates anything, because nearly every test pins something that went wrong once. So the rule is **do not add tests for coverage's sake**, and when you do add one, add it where the area already pins that behavior.
 

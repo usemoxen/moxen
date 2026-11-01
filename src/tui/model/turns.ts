@@ -30,6 +30,8 @@ export interface TurnGroup {
   proposedPlan: TimelineEntry | null;
   /** Working time: wall time from first to last entry, minus waits on the user. */
   durationMs: number;
+  /** Estimated output tokens per second of streamed generation. */
+  tokensPerSecond: number | null;
   startedAt: string;
   /** Where the turn stood waiting on the user (a question, a permission prompt). */
   waits: readonly WaitSpan[];
@@ -42,13 +44,15 @@ export interface TurnGroup {
 }
 
 function elapsed(entries: readonly TimelineEntry[], waits: readonly WaitSpan[]): { durationMs: number; startedAt: string } {
-  const times = entries
-    .map((entry) => Date.parse(entry.at))
-    .filter((value) => !Number.isNaN(value))
-    .sort((left, right) => left - right);
-  const first = times[0];
-  const last = times[times.length - 1];
-  if (first === undefined || last === undefined) return { durationMs: 0, startedAt: entries[0]?.at ?? "" };
+  let first = Infinity;
+  let last = -Infinity;
+  for (const entry of entries) {
+    const at = Date.parse(entry.at);
+    if (Number.isNaN(at)) continue;
+    first = Math.min(first, at);
+    last = Math.max(last, at);
+  }
+  if (first === Infinity) return { durationMs: 0, startedAt: entries[0]?.at ?? "" };
   return { durationMs: workingMs(waits, first, last), startedAt: new Date(first).toISOString() };
 }
 
@@ -62,12 +66,33 @@ function landsAfterText(entry: TimelineEntry): boolean {
   return typeof payload?.toolCallId === "string";
 }
 
+/** Present a provider's multi-file patch as one timeline entry per file. */
+function splitFilePatch(entry: TimelineEntry): TimelineEntry[] {
+  const activity = entry.activity;
+  const payload = activity?.payload as Record<string, unknown> | null | undefined;
+  const data = payload?.data as Record<string, unknown> | null | undefined;
+  const files = data?.files;
+  if (payload?.itemType !== "file_change" || !Array.isArray(files) || files.length < 2 ||
+      !files.every((file) => file !== null && typeof file === "object" && typeof file.path === "string")) return [entry];
+  const state = data?.state as Record<string, unknown> | null | undefined;
+  const metadata = state?.metadata as Record<string, unknown> | null | undefined;
+  return files.map((file, index) => ({
+    ...entry,
+    id: `${entry.id}:file:${index}`,
+    editStats: null,
+    activity: activity === null || activity === undefined ? null : {
+      ...activity,
+      payload: { ...payload, data: { ...data, files: [file], state: { ...state, metadata: { ...metadata, diff: typeof file.diff === "string" ? file.diff : null } } } },
+    },
+  }));
+}
+
 /**
  * The transcript keeps a turn's prompt and closing reply visible and folds
  * everything between them into one "worked for" row; this groups the flat
  * timeline the same way so a long turn does not bury the answer.
  */
-export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits = new Map()): TurnGroup[] {
+export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits = new Map(), throughput: Readonly<Record<string, number>> = {}): TurnGroup[] {
   const groups: TurnGroup[] = [];
   let current: TurnGroup | null = null;
   // Live user prompts usually carry a null turnId — the server only assigns
@@ -90,6 +115,7 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
       diff: null,
       proposedPlan: null,
       durationMs: 0,
+      tokensPerSecond: entry.turnId === null ? null : (throughput[entry.turnId] ?? null),
       startedAt: entry.at,
       waits: [],
       limited: false,
@@ -195,7 +221,7 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
     // folding it away just because *some* tool call came after it would
     // punish the common case. Only a nudge (above) or a genuinely new reply
     // (below) proves the old one was superseded.
-    current.work.push(entry);
+    current.work.push(...splitFilePatch(entry));
   }
 
   // Prompts the server never assigned a turn — the turn hasn't started yet,

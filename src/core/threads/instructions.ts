@@ -80,6 +80,8 @@ export const LOOKUP_GUIDANCE =
 export const IMAGE_GUIDANCE =
   "You can show the user an image in your reply: put a markdown image on a line of its own, with the absolute path of an image file " +
   "on this machine (png, jpg, gif or webp), like ![what it shows](/absolute/path/chart.png). Moxen draws it in the conversation. " +
+  "When the user asks you to generate or edit an image, include the resulting image this way in your final reply without waiting for a second request. " +
+  "A native image-generation tool result or image-viewing tool call alone does not display the image to the user in Moxen. Use the generated file's saved absolute path; if no local path is returned, save the result to an image file first. " +
   "Use it when seeing the picture helps (a screenshot you took, a chart you made, a design), not to decorate.";
 
 /** The block the guidance shows: it parses, which `instructions.test.ts` pins. */
@@ -210,10 +212,12 @@ export const CHECKLIST_GUIDANCE =
  * so the rules say where it is instead of duplicating it.
  */
 export const MEMORY_GUIDANCE = [
-  "You have a persistent memory that Moxen keeps across sessions and providers, through memory_read, memory_save, memory_edit, " +
+  "You have a persistent memory that Moxen keeps across sessions and providers, through memory_read, memory_search, memory_save, memory_edit, " +
     "memory_append and memory_delete.",
   "- Reading: memory_read with no name returns the index of every memory as it is now, one line each; with a name it returns that memory " +
-    "in full. Read the memories the work touches before relying on what you think you know.",
+    "in full. The index is capped per scope; use memory_search with keywords or a question when it is truncated or a topic is missing. " +
+    "Search uses keywords and, when enabled and set up, local semantic embeddings for paraphrases. " +
+    "Search covers names, descriptions and bodies in the current project and global scope. Read the memories the work touches before relying on what you think you know.",
   "- What to save, on your own initiative: corrections and guidance on how to work (and approaches the user confirmed), decisions " +
     "and why they were made, pointers to external resources, and lessons from this session that would make the next one go better.",
   "- What to skip: what the code, the git history or AGENTS.md / CLAUDE.md already record, and what only matters to this conversation.",
@@ -229,7 +233,9 @@ export const MEMORY_GUIDANCE = [
 
 /** A delegated task reads memory but leaves it to the agent it reports to. */
 export const MEMORY_READ_ONLY_GUIDANCE =
-  "You can read Moxen's persistent memory with memory_read (no name: the index), but not change it: put anything worth remembering in your report instead.";
+  "You can read Moxen's persistent memory with memory_read (no name: the index) and search it with memory_search using keywords or a question. " +
+  "Search when the index is truncated or a topic is missing; read matching memories in full with their name and scope. " +
+  "You cannot change memory: put anything worth remembering in your report instead.";
 
 /** A subagent that delegates or hands off spawns work nobody is tracking. */
 export const NO_REDELEGATION_GUIDANCE =
@@ -336,11 +342,11 @@ export async function projectInstructions(workspaceRoot: string | null): Promise
 }
 
 /** `memory` from `<workspaceRoot>/moxen.json`: false turns Moxen memory off for the project; null when it says nothing. */
-export async function projectMemorySetting(workspaceRoot: string | null): Promise<boolean | null> {
+export async function projectMemorySetting(workspaceRoot: string | null, key: "memory" | "memoryEmbeddings" = "memory"): Promise<boolean | null> {
   if (!workspaceRoot) return null;
   try {
     const raw = JSON.parse(await readFile(path.join(workspaceRoot, `${APP_NAME}.json`), "utf8")) as unknown;
-    const value = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>).memory : undefined;
+    const value = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>)[key] : undefined;
     return typeof value === "boolean" ? value : null;
   } catch {
     return null;

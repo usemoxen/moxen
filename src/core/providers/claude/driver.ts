@@ -129,6 +129,8 @@ export interface DriverTurnOutcome {
   readonly status: DriverTurnStatus;
   readonly text: string;
   readonly usage: UsageTotals;
+  readonly turnOutputTokens: number;
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
   readonly error: string | null;
 }
 
@@ -146,6 +148,10 @@ interface TranscriptTurn {
   text: string;
   costUsd: number;
   error: string | null;
+  readonly outputAtStart: number;
+  outputAtEnd?: number;
+  generationCharacters?: number;
+  generationDurationMs?: number;
   /** Set on a turn Claude Code started itself (a background task or Monitor woke it). */
   readonly origin?: "background";
 }
@@ -872,6 +878,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         text: "",
         costUsd: 0,
         error: null,
+        outputAtStart: session.usage.output,
       };
       session.transcript.push(turn);
       session.turnsSinceCompaction += 1;
@@ -953,7 +960,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       });
     }
     if (turn.status !== "running") {
-      return { status: turn.status, text: turn.text, usage: session.usage, error: turn.error };
+      return { status: turn.status, text: turn.text, usage: session.usage, turnOutputTokens: (turn.outputAtEnd ?? session.usage.output) - turn.outputAtStart, ...(turn.generationDurationMs ? { generation: { characters: turn.generationCharacters ?? 0, durationMs: turn.generationDurationMs } } : {}), error: turn.error };
     }
     if (signal?.aborted === true) {
       throw new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
@@ -985,6 +992,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   private settleOpenTurn(session: ClaudeSession, status: DriverTurnStatus, detail: string): void {
     const open = session.transcript.find((turn) => turn.status === "running");
     if (open) {
+      open.outputAtEnd = session.usage.output;
       open.status = status;
       open.error = status === "completed" ? null : detail;
       if (status !== "completed") open.text = open.text || detail;
@@ -995,6 +1003,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       status,
       text: open?.text ?? "",
       usage: session.usage,
+      turnOutputTokens: open ? session.usage.output - open.outputAtStart : 0,
+      ...(open?.generationDurationMs ? { generation: { characters: open.generationCharacters ?? 0, durationMs: open.generationDurationMs } } : {}),
       error: open?.error ?? detail,
     };
     for (const waiter of waiters) waiter.resolve(outcome);
@@ -1306,9 +1316,12 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         return;
       }
       case "content_block_delta": {
-        const delta = event["delta"] as { type?: unknown; text?: unknown; thinking?: unknown } | undefined;
+        const delta = event["delta"] as { type?: unknown; text?: unknown; thinking?: unknown; partial_json?: unknown } | undefined;
         const messageId = session.stream.messageId;
         if (!messageId) return;
+        const block = session.stream.blocks.get(index);
+        const generated = delta?.type === "text_delta" ? delta.text : delta?.type === "thinking_delta" ? delta.thinking : delta?.type === "input_json_delta" ? delta.partial_json : null;
+        if (block && typeof generated === "string" && delta?.type !== "thinking_delta") block.text += generated;
         if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
           const open = this.turnForOutput(session);
           if (!open && session.drainUntilResult) return;
@@ -1345,9 +1358,14 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         const block = session.stream.blocks.get(index);
         const messageId = session.stream.messageId;
         session.stream.blocks.delete(index);
-        if (!block || block.type !== "thinking" || !messageId) return;
+        if (!block || !messageId) return;
         const open = session.transcript.find((turn) => turn.status === "running") ?? null;
         if (!open && session.drainUntilResult) return;
+        if (open && block.text.length > 0 && (block.type === "thinking" || block.type === "text" || block.type === "tool_use")) {
+          open.generationCharacters = (open.generationCharacters ?? 0) + block.text.length;
+          open.generationDurationMs = (open.generationDurationMs ?? 0) + Math.max(0, Date.now() - block.startedAt);
+        }
+        if (block.type !== "thinking") return;
         this.publishReasoning(session, open, `${messageId}:${index}`, "completed", block.text, block.startedAt, Date.now() - block.startedAt);
         return;
       }
@@ -1722,6 +1740,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       text: "",
       costUsd: 0,
       error: null,
+      outputAtStart: session.usage.output,
       origin: "background",
     };
     session.transcript.push(turn);

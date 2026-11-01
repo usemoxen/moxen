@@ -1,5 +1,5 @@
 import { t } from "../../i18n/index.js";
-import { useEffect, useState } from "react";
+import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { useKeyboard } from "@opentui/react";
 
 import type { RemotePairing } from "../../../server/transport/remoteaccess.js";
@@ -39,11 +39,7 @@ export function PairingCodeModal({
   onClose: () => void;
 }) {
   // Its own second hand: the app's clock ticks too slowly for a countdown.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  const now = useAnimTick(true, 1000);
   useKeyboard((key) => {
     if (key.name === "escape" || key.name === "esc" || key.name === "return" || key.name === "enter") {
       markModalDismissed();

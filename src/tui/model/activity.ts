@@ -17,12 +17,8 @@ export interface CommandView {
   running: boolean;
 }
 
-export interface FileChangeView {
-  kind: "file";
-  verb: string;
+export interface FileChangeDiff {
   path: string;
-  /** Files touched when one call edits several paths (wire `data.files`). */
-  fileCount: number | null;
   added: number | null;
   removed: number | null;
   /** Unified diff patch text ready for the `<diff>` renderable, or null when
@@ -32,6 +28,15 @@ export interface FileChangeView {
       above still reflects the true total, only the rendered patch is capped. */
   diffMore: number;
   filetype: string | undefined;
+}
+
+export interface FileChangeView extends FileChangeDiff {
+  kind: "file";
+  verb: string;
+  /** Files touched when one call edits several paths (wire `data.files`). */
+  fileCount: number | null;
+  /** Per-file sections for a multi-file operation; paths remain unshortened. */
+  files?: readonly FileChangeDiff[];
   running: boolean;
 }
 
@@ -166,6 +171,7 @@ export interface ToolView {
   tool: string;
   detail: string;
   running: boolean;
+  failed?: boolean;
 }
 
 export interface NoteView {
@@ -1049,11 +1055,20 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
         ? "Update"
         : rawVerb.charAt(0).toUpperCase() + rawVerb.slice(1);
     const { diff, added, removed, diffMore } = buildFileDiff(path, oldString, newString, data);
+    const perFile = files.flatMap((raw): FileChangeDiff[] => {
+      const file = asRecord(raw);
+      const path = file === null ? null : asString(file.path);
+      if (path === null) return [];
+      const diff = asString(file?.diff);
+      const counts = diff === null ? { added: null, removed: null } : countChangedLines(diff);
+      return [{ path, diff, ...counts, diffMore: 0, filetype: detectFiletype(path) }];
+    });
     return {
       kind: "file",
       verb,
       path,
       fileCount: files.length > 1 ? files.length : null,
+      ...(perFile.length > 1 ? { files: perFile } : {}),
       added,
       removed,
       diff,
@@ -1088,6 +1103,17 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
   if (itemType === "dynamic_tool_call" || itemType === "collab_agent_tool_call") {
     const display = tool ?? "tool";
     const name = display.toLowerCase();
+    if (parseMcpToolName(display) !== null && (payload.status === "failed" || state.status === "failed")) {
+      const output = unwrapToolOutput(asString(state.output) ?? asString(payload.detail) ?? "");
+      let detail = output;
+      try {
+        const error = asRecord(JSON.parse(output));
+        detail = asString(error?.message) ?? output;
+      } catch {
+        // Older activities may contain plain text, or JSON cut by the ledger's limit.
+      }
+      return { kind: "tool", tool: friendlyToolTitle(display), detail, running: false, failed: true };
+    }
     const moxenTool = moxenToolName(display);
     // moxen's checklist (lent to OpenCode, which has none): the tasks panel shows it.
     if (moxenTool === "todos") return { kind: "todos", title, items: decodeTodos(input.todos), running };
@@ -1408,7 +1434,7 @@ function decodeTodos(raw: unknown): TodoItem[] {
  * a row renders its own exact hunks under another edit's totals.
  */
 export function fileRowCounts(
-  view: FileChangeView,
+  view: FileChangeDiff,
   editStats: { added: number; removed: number } | null,
   overlay: { additions: number; deletions: number } | null,
 ): { added: number | null; removed: number | null } {

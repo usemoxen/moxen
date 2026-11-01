@@ -22,7 +22,7 @@
 import { readListScalar, resolveListKey, type ListDescriptor, type ListTarget } from "./configlist.js";
 import { CliError } from "./errors.js";
 import { webOrderEntries, webOrderUnavailable, type WebOrderEntry, type WebRole } from "./webservers.js";
-import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
+import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
 import { formatHandoffModels, formatModeModels } from "./handoffmodels.js";
 import { numberLabel } from "./configformat.js";
 import {
@@ -58,6 +58,7 @@ export const SETTING_SECTIONS = [
   "sessions",
   "long-threads",
   "agent",
+  "memory",
   "interface",
   "git",
   "provider:claude",
@@ -65,6 +66,7 @@ export const SETTING_SECTIONS = [
   "provider:codex",
   "provider:harness",
   "mcp",
+  "skills",
 ] as const;
 
 export type SettingSection = (typeof SETTING_SECTIONS)[number];
@@ -75,6 +77,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   sessions: "Sessions",
   "long-threads": "Long threads",
   agent: "Agent context",
+  memory: "Memory",
   interface: "Interface",
   git: "Git and forges",
   "provider:codex": "Codex",
@@ -82,6 +85,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   "provider:opencode": "OpenCode",
   "provider:harness": "Moxen Harness",
   mcp: "MCP servers",
+  skills: "Skills",
 };
 
 /** What the two ends of a slider over a setting's presets mean ("Faster" / "Smarter"). */
@@ -358,6 +362,15 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
   const settings: SettingDescriptor[] = [
     {
       ...base,
+      key: `providers.${kind}.memory`,
+      label: "Memory",
+      description: `Let ${name} threads use Moxen's shared project and global memory. The global and project memory switches still apply.`,
+      kind: { type: "boolean" },
+      defaultValue: undefined,
+      fallback: { key: "memory" },
+    },
+    {
+      ...base,
       key: `providers.${kind}.orchestration`,
       label: "Delegation tools",
       description: `Give ${name} threads Moxen's tools for coordinating threads: delegate a task to another thread, follow it, list the models it could run on, cancel it. Moxen's web_fetch is switched on its own.`,
@@ -428,7 +441,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
       description: kind === "codex" ? "Codex tools and tool families to switch off. Supported switches remove tools from the model; an always-on entry explains the native restriction." : `${name}'s own tools to switch off: each is taken out of the model's list.`,
       ...(kind === "opencode" ? { appliesAt: "provider-restart" as const } : {}),
       kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
-      defaultValue: undefined,
+      defaultValue: DEFAULT_DISABLED_NATIVE_TOOLS[kind],
     },
   ];
 }
@@ -778,10 +791,30 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     label: "Memory",
     description:
       "Lets agents keep what they learn across sessions (your preferences, corrections, project decisions) in Moxen's memory, for every provider. Turning it on also turns Claude Code's own auto memory off in Moxen's sessions. A project's moxen.json can turn it off for itself (`\"memory\": false`).",
-    section: "agent",
+    section: "memory",
     kind: { type: "boolean" },
     defaultValue: true,
     appliesAt: "next-session",
+  },
+
+  {
+    key: "memoryEmbeddings",
+    label: "Memory embeddings",
+    description: "Find memories by meaning as well as keywords with a local model. Enabling this downloads the optional runtime and q4 text model (about 207 MB of weights), checks retrieval and speed, and indexes existing memories before activation.",
+    section: "memory",
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  {
+    key: "memoryEmbeddingLoading",
+    label: "Model loading",
+    description: "Keep the local memory model ready between searches, or release it after inactivity. Keeping it loaded uses more memory and avoids loading delays.",
+    section: "memory",
+    kind: { type: "enum", choices: [
+      choice("keep-loaded", "Keep loaded", "Load the validated model when the server starts and keep it ready until shutdown."),
+      choice("on-demand", "On demand", "Load on the first search and unload after one minute without inference."),
+    ] },
+    defaultValue: "keep-loaded",
   },
 
   // -- model -----------------------------------------------------------------

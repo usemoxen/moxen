@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { clippedText, overflowColumns, textWidth } from "../textoverflow.js";
 
 import { detectSkillTrigger, filterSkills, insertSkillMention, marqueeWindow, leadingCommandRange, matchRange, pickerEntries } from "../skills.js";
 import type { SkillSummary } from "../../../core/catalog/summary.js";
@@ -86,6 +87,7 @@ describe("matchRange", () => {
 describe("marqueeWindow", () => {
   it("returns text unchanged when it already fits", () => {
     expect(marqueeWindow("short", 10, 5)).toBe("short");
+    expect(marqueeWindow("long", 0, 5)).toBe("");
   });
 
   it("slides a width-wide window forward with each tick", () => {
@@ -100,6 +102,19 @@ describe("marqueeWindow", () => {
     const loop = `${text}   •   `;
     expect(marqueeWindow(text, 4, loop.length)).toBe(marqueeWindow(text, 4, 0));
     expect(marqueeWindow(text, 4, loop.length - 1)).not.toBe(marqueeWindow(text, 4, 0));
+  });
+
+  it("never splits emoji or combining marks and fits wide text into terminal cells", () => {
+    const text = "A👩‍💻e\u0301中文Z";
+    expect(clippedText(text, 4)).toBe("A👩‍💻…");
+    expect(marqueeWindow(text, 4, 1)).toBe("👩‍💻e\u0301");
+    for (let tick = 0; tick < 20; tick += 1) expect(textWidth(marqueeWindow(text, 4, tick))).toBeLessThanOrEqual(4);
+  });
+
+  it("does not crowd descriptions out or shorten a label when both columns fit", () => {
+    expect(overflowColumns("long label", "short", 20)).toEqual({ label: 10, detail: 9 });
+    expect(overflowColumns("a".repeat(100), "b".repeat(100), 20)).toEqual({ label: 9, detail: 10 });
+    expect(overflowColumns("anything", undefined, 0)).toEqual({ label: 0, detail: 0 });
   });
 });
 

@@ -9,7 +9,7 @@ import type { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 
 import type { ClientApi } from "../api.js";
-import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./tools.js";
+import { callMoxenTool, availableMoxenTools, type MemoryAccess } from "./tools.js";
 
 /** Newest first; an unknown client version is answered with the newest. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -29,8 +29,8 @@ export const MOXEN_MCP_INSTRUCTIONS =
 export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
-export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
-export const MOXEN_MEMORY_READ_MCP_INSTRUCTIONS = "memory_read reads Moxen's persistent memory.";
+export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_search, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
+export const MOXEN_MEMORY_READ_MCP_INSTRUCTIONS = "memory_read reads Moxen's persistent memory; memory_search finds memories by keyword.";
 
 /** The server's instructions for the tools a session has: the delegation tools, `web_fetch`, memory, any of them, or none. */
 export function moxenInstructions(options: { readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess }): string {
@@ -122,7 +122,7 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
       case "ping":
         return reply({});
       case "tools/list":
-        return reply({ tools: moxenToolsFor({ checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write" }) });
+        return reply({ tools: await availableMoxenTools(options.api, options.parentThreadId, { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write" }) });
       case "tools/call": {
         const name = typeof params.name === "string" ? params.name : "";
         const args =

@@ -84,6 +84,7 @@ describe("moxen MCP server", () => {
         "thread_search",
         "thread_read",
         "memory_read",
+        "memory_search",
         "memory_save",
         "memory_edit",
         "memory_append",
@@ -115,8 +116,8 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
-      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["web_fetch", "memory_read"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["web_fetch", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();
       await connection.close();
@@ -156,6 +157,35 @@ describe("moxen MCP server", () => {
       expect(refused.text).toContain("MEMORY_EDIT_NOT_FOUND");
       expect((await call("memory_append", { name: "missing", scope: "project", text: "x" })).text).toContain("MEMORY_NOT_FOUND");
     } finally {
+      await connection.close();
+    }
+  });
+
+  it("searches memory through MCP with scope and limits, allows read-only tasks and refuses memory-off sessions", async () => {
+    const { connection, parentThreadId } = await setup();
+    const mcp = mcpSession(connection, parentThreadId);
+    try {
+      for (const scope of ["project", "global"]) {
+        await connection.dispatch({ type: "memory.save", threadId: parentThreadId, name: "checks", description: "Test workflow", memoryType: "feedback", body: "Use CI for verification.", scope: scope as "project" | "global" });
+      }
+      const searched = await mcp.request("tools/call", { name: "memory_search", arguments: { query: "CI", scope: "global", limit: 1 } });
+      const result = searched.result as { content: Array<{ text: string }>; isError: boolean };
+      expect(result.isError).toBe(false);
+      expect(result.content[0]!.text).toContain("checks (global, feedback): Test workflow");
+      expect(result.content[0]!.text).toContain("Use CI for verification.");
+      expect(result.content[0]!.text).not.toContain("checks (project");
+      const limited = await callMoxenTool(connection, parentThreadId, "memory_search", { query: "CI", limit: 1 }, { delegated: true, memory: "read" });
+      expect(limited.isError).toBe(false);
+      expect(limited.text).toContain("2 matching memories; showing 1.");
+      expect(limited.text).toContain("checks (project");
+      const disabled = await callMoxenTool(connection, parentThreadId, "memory_search", { query: "CI" }, { memory: "off" });
+      expect(disabled.isError).toBe(true);
+      expect((await callMoxenTool(connection, parentThreadId, "memory_search", { query: "missing" })).text).toBe("No matching memories.");
+      for (const args of [{}, { query: 4 }, { query: "CI", scope: "all" }, { query: "CI", limit: "1" }, { query: "CI", limit: 1.5 }, { query: "CI", limit: 51 }]) {
+        expect((await callMoxenTool(connection, parentThreadId, "memory_search", args)).isError).toBe(true);
+      }
+    } finally {
+      await mcp.close();
       await connection.close();
     }
   });
@@ -335,7 +365,7 @@ describe("moxen web_fetch", () => {
     const result = await callMoxenTool(api, "t1", "delegate", { task: "x" }, { delegated: true });
     expect(result).toMatchObject({ isError: true });
     expect(result.text).toContain("not available in a delegated task");
-    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["web_fetch", "memory_read", "todos"]);
+    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["web_fetch", "memory_read", "memory_search", "todos"]);
   });
 
   it("gives a delegated task memory to read, and refuses it the memory writes it is never shown", async () => {

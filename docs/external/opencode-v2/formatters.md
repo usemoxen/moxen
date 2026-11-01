@@ -39,7 +39,7 @@ resets them to the built-ins.
 }
 ```
 
-## Builtins
+## Built-ins
 
 OpenCode includes these formatter definitions. Most require the named command
 to be available; definitions with extra detection rules list them below.

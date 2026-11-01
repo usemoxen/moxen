@@ -9,7 +9,7 @@
 the owning Scope releases the router, Location services, fibers, and plugin registrations.
 
 ```sh
-bun add @opencode/sdk effect
+bun add @opencode/sdk effect@4.0.1
 ```
 
 ## Create a host

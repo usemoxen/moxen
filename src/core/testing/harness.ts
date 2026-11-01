@@ -8,7 +8,8 @@
  * Drivers: `completing` by default (turns finish with
  * `Completed: <prompt>`), `leaveTurnsRunning` parks them (busy/queue/
  * timeout paths), `failTurns` throws from `sendTurn` (async ledger
- * failure). Pass explicit `drivers` factories to take full control.
+ * failure). Override individual `drivers` factories for a scripted provider;
+ * unspecified native providers stay fake, including cross-provider probes.
  */
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -148,10 +149,9 @@ export interface TestHarnessOptions {
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
-  if (options.drivers) return options.drivers;
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
   const factory = (): TurnDriver => new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers);
-  return { claude: factory, codex: factory, opencode: factory };
+  return { claude: factory, codex: factory, opencode: factory, ...options.drivers };
 }
 
 export async function testHarness(options: TestHarnessOptions = {}) {

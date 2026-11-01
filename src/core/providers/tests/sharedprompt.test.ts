@@ -19,4 +19,9 @@ describe("the prose Moxen's own prompts share", () => {
     expect(care).toContain("A subagent's or another thread's is not a surprise to stop dead for");
     expect(care).not.toContain("Changes you did not make are the user's");
   });
+
+  it("puts the host's own approval wording inside the care section", () => {
+    expect(care).toContain("A refusal is final.");
+    expect(care.indexOf("When you do need approval")).toBeLessThan(care.indexOf("A refusal is final."));
+  });
 });

@@ -5,11 +5,10 @@
 
 # API Overview
 
-The Console API lets your scripts and integrations call models and manage budgets. Every request authenticates with
-an API key.
+The Console API lets your scripts and integrations call models. Every request authenticates with an API key.
 
 ```bash
-curl --fail-with-body "https://opencode.ai/console/api/v1/budgets/members" \
+curl --fail-with-body "https://opencode.ai/inference/v1/models" \
   --header "Authorization: Bearer oc_sk_..."
 ```
 
@@ -17,7 +16,6 @@ curl --fail-with-body "https://opencode.ai/console/api/v1/budgets/members" \
 | ----------------------------------- | ------------------------------------------ |
 | [Inference](/console/api/inference) | `https://opencode.ai/inference/...`        |
 | [Providers](/console/api/providers) | `https://opencode.ai/inference/custom/...` |
-| [Budgets](/console/api/budgets)     | `/api/v1/budgets/members`                  |
 
 ## API keys
 
@@ -107,11 +105,11 @@ Set each resource to **None**, **Read**, or **Write**. **Write** includes **Read
 | **This account's API keys** | **Write**             |
 
 **Models › Read** lists models, and **Models › Request** also calls them through the [Inference](/console/api/inference)
-and [Providers](/console/api/providers) APIs. For example, a key for a budget integration only needs:
+and [Providers](/console/api/providers) APIs. For example, a key that only calls models needs:
 
 ```text
 Permissions: Restricted
-Budgets:     Write
+Models:      Request
 ```
 
 Keys created as **Inference only** before scoped permissions show as **Restricted** with **Models** set to **Request**.

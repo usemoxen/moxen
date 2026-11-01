@@ -129,7 +129,10 @@ describe("claude driver turns", () => {
     transport.created[0]!.push(assistantText("b", { input_tokens: 20, output_tokens: 7 }));
     // A result reporting less than was already seen does not lower the total.
     transport.created[0]!.push(successResult("b", 0.01));
-    expect((await secondOutcome).usage).toMatchObject({ input: 30, output: 12, costUsd: 0.02 });
+    const secondResult = await secondOutcome;
+    expect(secondResult.usage).toMatchObject({ input: 30, output: 12, costUsd: 0.02 });
+    expect(secondResult.turnOutputTokens).toBe(7);
+    expect((await driver.awaitTurn("thread-1", first.turnId)).turnOutputTokens).toBe(5);
   });
 
   it("starts a session and runs a turn to completion", async () => {

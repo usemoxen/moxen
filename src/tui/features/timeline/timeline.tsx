@@ -1,4 +1,8 @@
+import { useScrollingText } from "../../hooks/useScrollingText.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, t as tr, tx } from "../../i18n/index.js";
+import { currentLanguage } from "../../i18n/index.js";
+import { useRenderer } from "@opentui/react";
 import { webToolKind } from "../../../core/threads/views.js";
 import type { ReactNode, RefObject } from "react";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
@@ -21,7 +25,7 @@ import { isCompactPrompt, isUsageContinue, taskNotifications, untilLabel, type T
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
 import { readOpenRequestPrompt, requestNoun, type OpenRequestAsk } from "../../model/gitpanel.js";
-import { COLOR, DIFF_BG, MARKER, pulseColor, SPINNER_FRAMES, SURFACE, truncate, markdownSyntaxStyle } from "../../theme.js";
+import { COLOR, DIFF_BG, MARKER, pulseColor, SPINNER_FRAMES, SURFACE, markdownSyntaxStyle } from "../../theme.js";
 
 const syntaxStyle = markdownSyntaxStyle;
 
@@ -40,9 +44,9 @@ function commandFiletype(tool: string): string {
     row carries in its header; the full URL stays clickable below it. */
 function hostOf(url: string): string {
   try {
-    return new URL(url).hostname.replace(/^www\./, "") || truncate(url, 48);
+    return new URL(url).hostname.replace(/^www\./, "") || url;
   } catch {
-    return truncate(url, 48);
+    return url;
   }
 }
 
@@ -54,7 +58,6 @@ const EMPTY_PATCH_FILES: readonly PatchFile[] = [];
 const GUTTER = 1;
 /** No scroll-changed event exists on `<scrollbox>`, so "is the pane scrolled
     away from bottom" is polled at this interval instead. */
-const SCROLL_POSITION_POLL_MS = 300;
 const jumpToBottomLabel = (): string => tr("timeline.jumpBottom");
 
 function clampInfo(value: string, maxLines: number): { text: string; truncated: boolean } {
@@ -85,9 +88,10 @@ function ToolChip({
   rail: string;
   glyph: string;
   title: string;
+  /** Keep the provider visible while a long title scrolls. */
+  titleSuffix?: string;
   /** Claude Code weights the file-change header (`Update(path)`) bolder than
       a plain tool title — every other kind stays at the regular weight. */
-  titleSuffix?: string;
   titleBold?: boolean;
   time: string;
   /** Outcome facts (`exit 0`, `3s`) shown after the time on the header line. */
@@ -129,13 +133,13 @@ function ToolChip({
           : {})}
       >
         <text fg={rail} selectable={false} style={{ flexShrink: 0 }}>{`${glyph} `}</text>
-        <text
+        <OverflowText width={72} active={hovered} suffix={titleSuffix}
           fg={toggleable && hovered ? COLOR.bright : running ? COLOR.warn : COLOR.tool}
           attributes={titleBold ? TextAttributes.BOLD : 0}
           selectable={false}
         >
-          {titleSuffix ? `${tx(truncate(title, Math.max(4, 72 - titleSuffix.length)))}${titleSuffix}` : tx(title)}
-        </text>
+          {tx(title)}
+        </OverflowText>
         <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{[time, ...meta].filter((part) => part.length > 0).map((part) => `  ·  ${tx(part)}`).join("")}</text>
         {toggleable ? (
           <text fg={COLOR.faint} selectable={false} style={{ flexShrink: 0 }}>{expanded ? " ▾" : " ▸"}</text>
@@ -160,7 +164,7 @@ function TodoRows({ items }: { items: { content: string; status: string }[] }) {
         return (
           <box key={index} style={{ flexDirection: "row" }}>
             <text fg={color}>{`${glyph} `}</text>
-            <text fg={done ? COLOR.dim : COLOR.text}>{truncate(item.content, 72)}</text>
+            <OverflowText fg={done ? COLOR.dim : COLOR.text} width={72} active={active}>{item.content}</OverflowText>
           </box>
         );
       })}
@@ -171,6 +175,7 @@ function TodoRows({ items }: { items: { content: string; status: string }[] }) {
   );
 }
 
+/** Older activity rows omitted provider identity; the turn's saved selection supplies it. */
 const RuntimeProvider = createContext<string | undefined>(undefined);
 
 function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { entry: TimelineEntry; now: number; turnFiles?: readonly PatchFile[]; onOpenUrl?: ((url: string) => void) | undefined; width?: number }) {
@@ -222,42 +227,48 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     // input-derived diff always wins — it is that exact call's hunks, while
     // the turn patch is the file's net effect for the whole turn (shared by
     // every same-file row when one turn edits a file twice).
-    const overlay = view.diff === null ? findPatchFile(turnFiles, view.path) : null;
-    const patchText = view.diff ?? overlay?.patch ?? null;
-    const filetype = view.filetype ?? overlay?.filetype;
-    // Counts follow the same precedence so the subtitle always describes the
-    // hunks below it: exact per-edit counts, else the checkpoint nets (which
-    // match checkpoint-backfilled hunks), else the overlay's own counts.
-    const { added, removed } = fileRowCounts(view, entry.editStats, overlay);
-    const stats = [
-      added === null || added === 0 ? null : tr("timeline.addedLines", { count: added }),
-      removed === null || removed === 0 ? null : tr("timeline.removedLines", { count: removed }),
-    ].filter((part): part is string => part !== null);
     const title = `${view.verb}(${view.path})${view.fileCount === null ? "" : tr("timeline.plusMore", { count: view.fileCount - 1 })}`;
     return (
       <ToolChip rail={COLOR.agent} glyph="✎" title={title} titleBold time={time} running={view.running}>
-        {stats.length === 0 && !view.running ? null : (
-          <text fg={COLOR.faint}>{stats.length > 0 ? `└ ${stats.join(", ")}` : tr("timeline.writing")}</text>
-        )}
-        {patchText === null ? null : (
-          <diff
-            diff={patchText}
-            view="unified"
-            fg={COLOR.text}
-            filetype={filetype ?? "text"}
-            syntaxStyle={syntaxStyle()}
-            showLineNumbers
-            wrapMode="word"
-            addedBg={DIFF_BG.added}
-            removedBg={DIFF_BG.removed}
-            addedContentBg={DIFF_BG.added}
-            removedContentBg={DIFF_BG.removed}
-            lineNumberFg={COLOR.faint}
-            addedLineNumberBg={DIFF_BG.addedLineNumber}
-            removedLineNumberBg={DIFF_BG.removedLineNumber}
-          />
-        )}
-        {view.diffMore === 0 ? null : <text fg={COLOR.faint}>{tr("timeline.moreLines", { count: view.diffMore })}</text>}
+        {(view.files ?? [view]).map((file) => {
+          const overlay = file.diff === null ? findPatchFile(turnFiles, file.path) : null;
+          const patchText = file.diff ?? overlay?.patch ?? null;
+          const filetype = file.filetype ?? overlay?.filetype;
+          // Multi-file counts belong to each section. The activity's checkpoint
+          // stats describe its first path, so never reuse them for its siblings.
+          const { added, removed } = fileRowCounts(file, view.files ? null : entry.editStats, overlay);
+          const stats = [
+            added === null || added === 0 ? null : tr("timeline.addedLines", { count: added }),
+            removed === null || removed === 0 ? null : tr("timeline.removedLines", { count: removed }),
+          ].filter((part): part is string => part !== null);
+          return (
+            <box key={file.path} flexDirection="column" width="100%">
+              {view.files ? <text fg={COLOR.text}><b>{file.path}</b></text> : null}
+              {stats.length === 0 && !view.running ? null : (
+                <text fg={COLOR.faint}>{stats.length > 0 ? `└ ${stats.join(", ")}` : tr("timeline.writing")}</text>
+              )}
+              {patchText === null ? null : (
+                <diff
+                  diff={patchText}
+                  view="unified"
+                  fg={COLOR.text}
+                  filetype={filetype ?? "text"}
+                  syntaxStyle={syntaxStyle()}
+                  showLineNumbers
+                  wrapMode="word"
+                  addedBg={DIFF_BG.added}
+                  removedBg={DIFF_BG.removed}
+                  addedContentBg={DIFF_BG.added}
+                  removedContentBg={DIFF_BG.removed}
+                  lineNumberFg={COLOR.faint}
+                  addedLineNumberBg={DIFF_BG.addedLineNumber}
+                  removedLineNumberBg={DIFF_BG.removedLineNumber}
+                />
+              )}
+              {file.diffMore === 0 ? null : <text fg={COLOR.faint}>{tr("timeline.moreLines", { count: file.diffMore })}</text>}
+            </box>
+          );
+        })}
       </ToolChip>
     );
   }
@@ -326,7 +337,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
             : COLOR.faint;
     return (
       <ToolChip rail={view.running ? COLOR.warn : COLOR.diff} glyph={view.source === "moxen" ? "⇢" : "◇"} title={view.title} time={time} running={view.running}>
-        {view.subject.length === 0 ? null : <text fg={COLOR.tool}>{truncate(view.subject, 96)}</text>}
+        {view.subject.length === 0 ? null : <OverflowText fg={COLOR.tool} width={96}>{view.subject}</OverflowText>}
         {view.state === null && view.facts.length === 0 ? null : (
           <box style={{ flexDirection: "row", flexShrink: 0 }}>
             {view.state === null ? null : <text fg={stateColor}>{tx(view.state)}</text>}
@@ -345,7 +356,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
       .join("  ·  ");
     return (
       <ToolChip rail={view.running ? COLOR.warn : COLOR.diff} glyph="◆" title="task" time={time} running={view.running}>
-        <text fg={COLOR.tool}>{truncate(view.title, 72)}</text>
+        <OverflowText fg={COLOR.tool} width={72}>{view.title}</OverflowText>
         {meta.length === 0 ? null : <text fg={COLOR.faint}>{meta}</text>}
       </ToolChip>
     );
@@ -354,7 +365,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
   if (view.kind === "question") {
     return (
       <ToolChip rail={COLOR.warn} glyph="?" title="question" time={time} running={view.running}>
-        <text fg={COLOR.tool}>{truncate(view.title, 72)}</text>
+        <OverflowText fg={COLOR.tool} width={72}>{view.title}</OverflowText>
         {view.detail.length === 0 ? null : (
           <text fg={COLOR.dim}>{clamp(view.detail, 2)}</text>
         )}
@@ -377,8 +388,8 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     ].filter((part): part is string => part !== null);
     return (
       <ToolChip rail={view.outcome === "rejected" ? COLOR.danger : COLOR.diff} glyph="◈" title={memoryTitle(view)} time={time} running={view.running}>
-        <text fg={COLOR.tool}>{truncate(memoryLabel(view), 72)}</text>
-        {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+        <OverflowText fg={COLOR.tool} width={72}>{memoryLabel(view)}</OverflowText>
+        {view.note === null ? null : <OverflowText fg={COLOR.danger} width={96}>{view.note}</OverflowText>}
         {stats.length === 0 ? null : <text fg={COLOR.faint}>{`└ ${stats.join(", ")}`}</text>}
         {view.diff === null ? null : (
           <diff
@@ -409,11 +420,11 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
       const shown = view.titles.slice(0, 4);
       return (
         <ToolChip rail={failed ? COLOR.danger : COLOR.agent} glyph="⌕" title={failed ? tr("timeline.searchFailed") : view.running ? tr("timeline.searching") : tr("timeline.searched")} time={time} running={view.running}>
-          <text fg={COLOR.tool}>{truncate(`"${view.query ?? ""}" · ${where}`, 72)}</text>
-          {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+          <OverflowText fg={COLOR.tool} width={72}>{`"${view.query ?? ""}" · ${where}`}</OverflowText>
+          {view.note === null ? null : <OverflowText fg={COLOR.danger} width={96}>{view.note}</OverflowText>}
           {found === null ? null : <text fg={COLOR.faint}>{`└ ${found}`}</text>}
           {shown.map((title, index) => (
-            <text key={index} fg={COLOR.dim}>{`  · ${truncate(title, 68)}`}</text>
+            <OverflowText key={index} fg={COLOR.dim} width={72}>{`  · ${title}`}</OverflowText>
           ))}
           {view.titles.length > shown.length ? <text fg={COLOR.faint}>{`  ${tr("timeline.more", { count: view.titles.length - shown.length })}`}</text> : null}
         </ToolChip>
@@ -422,8 +433,8 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     const named = view.title ?? (view.threadId === null ? tr("notify.aThread").toLowerCase() : tr("timeline.threadId", { id: view.threadId.slice(0, 8) }));
     return (
       <ToolChip rail={failed ? COLOR.danger : COLOR.agent} glyph="⌕" title={failed ? tr("timeline.notRead") : view.running ? tr("timeline.reading") : tr("timeline.read")} time={time} running={view.running}>
-        <text fg={COLOR.tool}>{truncate(view.title === null ? named : `"${named}"`, 72)}</text>
-        {view.note === null ? null : <text fg={COLOR.danger}>{truncate(view.note, 96)}</text>}
+        <OverflowText fg={COLOR.tool} width={72}>{view.title === null ? named : `"${named}"`}</OverflowText>
+        {view.note === null ? null : <OverflowText fg={COLOR.danger} width={96}>{view.note}</OverflowText>}
         {view.part === null ? null : <text fg={COLOR.faint}>{`└ ${view.part}`}</text>}
       </ToolChip>
     );
@@ -447,7 +458,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     return (
       <ToolChip rail={COLOR.agent} glyph="○" title={title} titleSuffix={source === null ? "" : ` · ${source}`} time={time} running={view.running}>
         {url === null || onOpenUrl === undefined ? null : (
-          <text fg={COLOR.accent} attributes={TextAttributes.UNDERLINE} selectable={false} onMouseDown={() => onOpenUrl(url)} width={72}>{url}</text>
+          <OverflowText fg={COLOR.accent} attributes={TextAttributes.UNDERLINE} selectable={false} onMouseDown={() => onOpenUrl(url)} width={72}>{url}</OverflowText>
         )}
       </ToolChip>
     );
@@ -459,7 +470,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     const glyph = generated && view.running ? " " : "▣";
     return (
       <ToolChip rail={view.failed ? COLOR.danger : COLOR.diff} glyph={glyph} title={title} time={time} running={view.running === true}>
-        {view.path === "(image)" && generated ? null : <text fg={COLOR.diff}>{view.path}</text>}
+        {view.path === "(image)" && generated ? null : <OverflowText fg={COLOR.diff} width={72}>{view.path}</OverflowText>}
         {view.error ? <text fg={COLOR.danger} wrapMode="word">{view.error}</text> : null}
       </ToolChip>
     );
@@ -565,9 +576,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
 
   if (view.kind === "tool") {
     return (
-      <ToolChip rail={COLOR.tool} glyph="•" title={view.tool} time={time} running={view.running}>
+      <ToolChip rail={view.failed ? COLOR.danger : COLOR.tool} glyph={view.failed ? "×" : "•"} title={view.tool} time={time} meta={view.failed ? [tr("task.failed")] : []} running={view.running}>
         {view.detail.length === 0 ? null : (
-          <text fg={COLOR.dim} wrapMode="word">{clamp(view.detail, 2)}</text>
+          <text fg={view.failed ? COLOR.danger : COLOR.dim} wrapMode="word">{view.failed ? view.detail : clamp(view.detail, 2)}</text>
         )}
       </ToolChip>
     );
@@ -595,15 +606,23 @@ export function MessageBody({
       background so the blank separator and image row never seam against it. */
   background: string;
 }) {
-  const rendered = entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message);
+  const rendered = useMemo(
+    () => entry.message === null ? { text: entry.text, images: [] } : renderMessage(entry.message),
+    [entry.message, entry.text],
+  );
   // What the text is made of: a person's message holds chips; a reply holds `moxen-ui` blocks and lone images between its markdown.
-  const parts: ReadonlyArray<ReturnType<typeof splitChipBlocks>[number] | ReplyBlock | { kind: "ui"; block: UiBlock }> = chips
+  const parts = useMemo((): ReadonlyArray<ReturnType<typeof splitChipBlocks>[number] | ReplyBlock | { kind: "ui"; block: UiBlock }> => chips
     ? splitChipBlocks(rendered.text)
     : splitUiBlocks(rendered.text).flatMap((segment): Array<ReplyBlock | { kind: "ui"; block: UiBlock }> =>
         segment.kind === "ui" ? [segment] : splitReplyImages(segment.text),
-      );
+      ), [chips, rendered.text]);
 
-  return (
+  // Clock/hover updates must not reconcile every historical markdown tree.
+  // Palette and language are mutable globals, so include their identities
+  // explicitly; descendant context subscriptions (images/modals) still update.
+  const palette = syntaxStyle();
+  const language = currentLanguage();
+  return useMemo(() => (
     <ReplyImageScopeContext.Provider value={entry.id}>
       <box style={{ flexDirection: "column", flexGrow: 1 }}>
         {rendered.text.length === 0
@@ -630,7 +649,7 @@ export function MessageBody({
                   key={index}
                   content={block.text}
                   fg={COLOR.text}
-                  syntaxStyle={syntaxStyle()}
+                  syntaxStyle={palette}
                   streaming={entry.streaming}
                   // `<markdown>` defaults to non-selectable like every Renderable —
                   // message bodies are exactly the content a user drags to copy.
@@ -656,7 +675,7 @@ export function MessageBody({
         )}
       </box>
     </ReplyImageScopeContext.Provider>
-  );
+  ), [entry.id, entry.streaming, rendered, parts, background, homeDir, palette, language]);
 }
 
 function SpeakerHeader({
@@ -758,7 +777,7 @@ function TaskNotificationBlock({
           <box key={task.taskId} style={{ flexDirection: "column", flexShrink: 0, marginTop: index === 0 && header === null ? 0 : 1 }} backgroundColor={SURFACE.panel}>
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
               <text fg={glyphColor} bg={SURFACE.panel}>{`${glyph} `}</text>
-              <text fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD}>{truncate(task.title, oneLine ? 60 : inner - 2)}</text>
+              <OverflowText fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD} width={oneLine ? 60 : inner - 2}>{task.title}</OverflowText>
               {oneLine ? factRow("  ·  ") : null}
             </box>
             {oneLine ? null : (
@@ -867,7 +886,7 @@ function CompactionLine({
   let toggleText = foldable ? `  ${toggle}` : "";
   if (!fits(`⇣ ${title}${metaText}${toggleText}`)) metaText = "";
   if (!fits(`⇣ ${title}${metaText}${toggleText}`)) toggleText = "";
-  const shownTitle = truncate(title, Math.max(4, inner - 8 - metaText.length - toggleText.length));
+  const shownTitle = useScrollingText(title, Math.max(4, inner - 8 - metaText.length - toggleText.length), hovered);
   // One styled text for the label, so no cell shifts where its colours change.
   const label = t`${fg(tone)("⇣ ")}${bold(fg(hovered && foldable ? COLOR.bright : COLOR.text)(shownTitle))}${fg(COLOR.faint)(metaText)}${fg(hovered ? COLOR.dim : COLOR.faint)(toggleText)}`;
   // The rules grow to fill what the label leaves and clip, rather than being
@@ -1223,9 +1242,7 @@ function WorkSegment({
         }}
         {...handlers}
       >
-        <text fg={hovered ? COLOR.bright : COLOR.dim} selectable={false}>
-          {`${expanded ? "▾" : "▸"} ${truncate(summary, Math.max(20, width - 8))}`}
-        </text>
+        <OverflowText fg={hovered ? COLOR.bright : COLOR.dim} selectable={false} width={Math.max(20, width - 8) + 2} active={hovered}>{`${expanded ? "▾" : "▸"} ${summary}`}</OverflowText>
       </box>
       {expanded ? tools : null}
       {message}
@@ -1453,7 +1470,7 @@ function TurnBlock({  group,
           model={model}
           modelColor={modelColor}
           homeDir={homeDir}
-          duration={open ? undefined : formatDuration(group.durationMs)}
+          duration={open ? undefined : [formatDuration(group.durationMs), ...(group.tokensPerSecond === null ? [] : [tr("timeline.tokensPerSecond", { rate: group.tokensPerSecond < 0.1 ? "<0.1" : group.tokensPerSecond.toFixed(1) })])].join(" · ")}
           now={now}
           onOpenActions={() => onOpenMessageActions(closing)}
         />
@@ -1608,18 +1625,27 @@ export function Timeline({
   const running = sessionStatus === "running" || sessionStatus === "starting";
   const live = running ? runStatus(groups[groups.length - 1], now, turnStartedAt) : null;
 
+  const titleHover = useHover();
+  const shownTitle = useScrollingText(title, Math.max(10, width - 24), focused || titleHover.hovered);
   const [atBottom, setAtBottom] = useState(true);
+  const renderer = useRenderer();
   // Jump pill breathes accent→bright only while visible (off-screen = zero cost).
   const pillTick = useAnimTick(!atBottom, 800);
   useEffect(() => {
-    const timer = setInterval(() => {
+    let previous = true;
+    const measure = () => {
       const pane = scrollRef.current;
       if (pane === null) return;
       const bottom = pane.scrollTop + pane.viewport.height >= pane.scrollHeight - 1;
-      setAtBottom((current) => (current === bottom ? current : bottom));
-    }, SCROLL_POSITION_POLL_MS);
-    return () => clearInterval(timer);
-  }, [scrollRef]);
+      if (previous === bottom) return;
+      previous = bottom;
+      setAtBottom(bottom);
+    };
+    // Scroll and layout already request frames; observing them needs no idle poll.
+    renderer.addPostProcessFn(measure);
+    renderer.requestRender();
+    return () => renderer.removePostProcessFn(measure);
+  }, [renderer, scrollRef]);
   const jumpToBottomWidth = jumpToBottomLabel().length + 4;
   const jumpToBottomLeft = Math.max(0, Math.floor((width - jumpToBottomWidth) / 2));
   const scrollToBottom = () => {
@@ -1634,7 +1660,8 @@ export function Timeline({
     <box
       style={{ flexDirection: "column", flexGrow: 1, borderStyle: "rounded", backgroundColor: SURFACE.base }}
       borderColor={focused ? SURFACE.borderFocus : SURFACE.border}
-      title={` ${truncate(title, Math.max(10, width - 24))} `}
+      title={` ${shownTitle} `}
+      {...titleHover.handlers}
       titleColor={focused ? COLOR.bright : COLOR.dim}
       bottomTitle={live === null ? ` ${subtitle} ` : ""}
       bottomTitleAlignment="right"

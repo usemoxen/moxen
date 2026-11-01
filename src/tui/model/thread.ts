@@ -1332,6 +1332,14 @@ export function timeline(state: ThreadState): TimelineEntry[] {
       })),
   ];
 
+  // Index once: rescanning the whole transcript per checkpoint/plan made
+  // every streamed delta quadratic in the number of historical turns.
+  const latestByTurn = new Map<string | null, string>();
+  for (const entry of entries) {
+    const latest = latestByTurn.get(entry.turnId) ?? "";
+    if (entry.at > latest) latestByTurn.set(entry.turnId, entry.at);
+  }
+
   // One row per turn for the turn's *net* diff, which is a different thing
   // from the per-call patches the tool rows now carry themselves: a file
   // edited three times shows three hunks inline and one combined result
@@ -1339,8 +1347,7 @@ export function timeline(state: ThreadState): TimelineEntry[] {
   // only diff available at all.)
   for (const checkpoint of state.checkpoints) {
     if (checkpoint.files.length === 0) continue;
-    const turnEntries = entries.filter((entry) => entry.turnId === checkpoint.turnId);
-    const at = turnEntries.reduce((latest, entry) => (entry.at > latest ? entry.at : latest), "");
+    const at = latestByTurn.get(checkpoint.turnId) ?? "";
     if (at === "") continue;
     entries.push({
       id: `diff:${checkpoint.turnId}`,
@@ -1363,8 +1370,9 @@ export function timeline(state: ThreadState): TimelineEntry[] {
   // the normal assistant message), so it needs its own row rather than
   // riding along on an activity.
   for (const plan of state.proposedPlans) {
-    const turnEntries = entries.filter((entry) => entry.turnId === plan.turnId);
-    const at = turnEntries.reduce((latest, entry) => (entry.at > latest ? entry.at : latest), plan.updatedAt);
+    const latest = latestByTurn.get(plan.turnId) ?? "";
+    const at = latest > plan.updatedAt ? latest : plan.updatedAt;
+    latestByTurn.set(plan.turnId, at);
     entries.push({
       id: `plan:${plan.id}`,
       at,

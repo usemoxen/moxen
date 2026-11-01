@@ -132,6 +132,10 @@ export interface StoredTurn {
   readonly error: string | null;
   /** Tokens spent by the provider run; null when the driver reported none. */
   readonly usage: TurnUsage | null;
+  /** Per-turn output when usage itself is a provider session total. */
+  readonly turnOutputTokens?: number;
+  /** Observed generated text and its streaming time, excluding tool execution. */
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
   readonly createdAt: string;
   readonly updatedAt: string;
   /** When a queued or scheduled turn actually started; a turn that ran at once started at `createdAt`. */

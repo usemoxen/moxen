@@ -1,13 +1,15 @@
 import { hash2, noise, smoothstep, splat, type Pointer, type SceneEngine } from "./raster.js";
 import { DEG, landAt, moonPhase } from "./sky.js";
+import { aurora } from "./aurora.js";
 
 /**
  * Luna — the Moon, seen from Earth orbit: Terra's view turned around.
  *
  * Along the bottom, the night side of the Earth curving away, cities
  * glittering under a thin blue atmosphere and the faint green line of
- * airglow above it — your own part of the world, roughly (the longitude
- * comes from the local timezone). Above it, the Moon in tonight's real
+ * airglow and folded auroral curtains above it — your own part of the
+ * world, roughly (the longitude comes from the local timezone).
+ * Above it, the Moon in tonight's real
  * phase: its maria and bright craters where they actually are on the
  * near side, Tycho throwing its rays, and the dark part softly lit by
  * earthshine — strongest around new Moon, when the Earth seen from there
@@ -200,6 +202,13 @@ export function createLunaScene(): SceneEngine {
             cr += AIR[0] * blue + AIRGLOW[0] * green;
             cg += AIR[1] * blue + AIRGLOW[1] * green;
             cb += AIR[2] * blue + AIRGLOW[2] * green;
+            // Folds rise from the same curved limb as the airglow, with
+            // fine green rays and a softer violet crown above them.
+            const curtain = aurora(x, height, t) * 0.5;
+            const violet = smoothstep(4, 10, height);
+            cr += curtain * (0.12 + violet * 0.55);
+            cg += curtain * (0.95 - violet * 0.65);
+            cb += curtain * (0.52 + violet * 0.4);
           }
 
           frame.light[o] = cr;

@@ -9,7 +9,7 @@
 and decodes responses into OpenCode schema values.
 
 ```sh
-bun add @opencode/client effect
+bun add @opencode/client effect@4.0.1
 ```
 
 ## Create a client
@@ -61,7 +61,7 @@ const sessions = yield* client.session.list()
 
 ## Stream events
 
-Streaming operations such as `event.subscribe()` and `session.log()` return Effect Streams.
+Streaming operations such as `event.subscribe()` and `experimental.session.log()` return Effect Streams.
 
 {/* prettier-ignore */}
 ```ts
@@ -117,7 +117,7 @@ The Node-only `@opencode/client/effect/service` entrypoint discovers, starts, au
 background service as Effects.
 
 ```sh
-bun add @effect/platform-node
+bun add @effect/platform-node@4.0.1
 ```
 
 Create an authenticated client for the ensured service.
@@ -135,7 +135,9 @@ const program = Effect.gen(function* () {
   const client = yield* OpenCode.make({ baseUrl: endpoint.url }).pipe(
     Effect.provideService(
       HttpClient.HttpClient,
-      HttpClient.mapRequest(httpClient, (request) => HttpClientRequest.setHeaders(request, Service.headers(endpoint))),
+      HttpClient.mapRequest(httpClient, (request) =>
+        HttpClientRequest.setHeaders(request, Service.headers(endpoint) ?? {}),
+      ),
     ),
   )
   return yield* client.server.info()

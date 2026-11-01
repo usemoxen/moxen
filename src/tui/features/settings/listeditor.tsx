@@ -1,3 +1,5 @@
+import { overflowColumns } from "../../model/textoverflow.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
@@ -7,7 +9,7 @@ import { TextField } from "./textfield.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
 import { useHover } from "../../hooks/useHover.js";
 import { t, tx } from "../../i18n/index.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import { TEXT_OPTION, sliderChoices, itemRows, pairNames, selectable, withPair, type EditorOption, type EditorRow } from "../../model/listeditor.js";
 import type { ListField, ListItemView, SettingDescriptor, SettingEnds } from "../../../core/configschema.js";
 import type { HarnessRun } from "./useSettings.js";
@@ -563,10 +565,10 @@ export function ListEditor({
         <text fg={saving !== null ? COLOR.faint : COLOR.dim} bg={SURFACE.raised} selectable={false}>{saving !== null ? t("le.saving") : ""}</text>
       </box>
       <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>
-        <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{truncate(title, width)}</text>
-        {profile !== undefined && model === undefined ? <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{truncate(profile.summary, width)}</text> : null}
-        {model !== undefined ? <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{truncate(model.summary, width)}</text> : null}
-        {(model ?? profile)?.status ? <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>{truncate((model ?? profile)?.status ?? "", width)}</text> : null}
+        <OverflowText fg={COLOR.bright} bg={SURFACE.raised} selectable={false} width={width}>{title}</OverflowText>
+        {profile !== undefined && model === undefined ? <OverflowText fg={COLOR.dim} bg={SURFACE.raised} selectable={false} width={width}>{profile.summary}</OverflowText> : null}
+        {model !== undefined ? <OverflowText fg={COLOR.dim} bg={SURFACE.raised} selectable={false} width={width}>{model.summary}</OverflowText> : null}
+        {(model ?? profile)?.status ? <OverflowText fg={COLOR.warn} bg={SURFACE.raised} selectable={false} width={width}>{(model ?? profile)?.status ?? ""}</OverflowText> : null}
         {profile !== undefined ? (
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
             {canTest ? <Chip label={t("le.chip.test")} keyHint="t" onPress={doTest} disabled={run?.running === true} /> : null}
@@ -647,7 +649,7 @@ export function ListEditor({
         {overlay === null && notice !== null ? <text fg={notice.error ? COLOR.warn : COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{notice.text}</text> : null}
       </scrollbox>
       <box style={{ flexDirection: "row", flexShrink: 0, marginTop: 1, ...(confirm?.action === "probe" ? {} : { height: 1 }) }} backgroundColor={SURFACE.raised}>
-        <text fg={confirm !== null ? COLOR.warn : COLOR.faint} bg={SURFACE.raised} wrapMode="word" selectable={false}>{confirm?.action === "probe" ? hint : truncate(hint, width)}</text>
+        <text fg={confirm !== null ? COLOR.warn : COLOR.faint} bg={SURFACE.raised} wrapMode="word" selectable={false}>{hint}</text>
       </box>
     </box>
   );
@@ -744,11 +746,11 @@ function Line({
 }) {
   const { hovered, handlers } = useHover();
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
-  const rightWidth = Math.max(0, width - left.length - 4);
+  const rightWidth = overflowColumns(left, right, width - 4).detail;
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
-      <text fg={accent ? COLOR.accent : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(left, Math.max(8, width - 4))}</text>
-      {right === "" || rightWidth < 4 ? null : <text fg={rightColor ?? COLOR.dim} bg={bg} selectable={false}>{truncate(right, rightWidth)}</text>}
+      <OverflowText fg={accent ? COLOR.accent : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(0, width - rightWidth - 4)} active={active || hovered}>{left}</OverflowText>
+      {right === "" || rightWidth < 4 ? null : <OverflowText fg={rightColor ?? COLOR.dim} bg={bg} selectable={false} width={rightWidth} active={active || hovered}>{right}</OverflowText>}
     </box>
   );
 }
@@ -758,14 +760,14 @@ function EditorLine({ id, row, active, first, width, onPress }: { id: string; ro
     case "heading":
       return (
         <box id={id} style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.dim} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{truncate(row.label, width)}</text>
+          <OverflowText fg={COLOR.dim} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false} width={width} active={active}>{row.label}</OverflowText>
           {row.description === undefined ? null : <text fg={COLOR.faint} bg={SURFACE.raised} wrapMode="word" selectable={false}>{row.description}</text>}
         </box>
       );
     case "resolved":
       return (
         <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{truncate(`${row.label}: ${row.value}`, Math.max(8, width - row.origin.length - 6))}</text>
+          <OverflowText fg={COLOR.dim} bg={SURFACE.raised} selectable={false} width={Math.max(8, width - row.origin.length - 6)} active={active}>{`${row.label}: ${row.value}`}</OverflowText>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{row.origin}</text>
         </box>
       );
@@ -815,7 +817,7 @@ function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
   return card(
     <>
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }} backgroundColor={SURFACE.hover}>
-        <text fg={COLOR.bright} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false}>{truncate(t("le.run.probeOf", { model: report.model }), Math.max(10, width - 24))}</text>
+        <OverflowText fg={COLOR.bright} bg={SURFACE.hover} attributes={TextAttributes.BOLD} selectable={false} width={Math.max(10, width - 24)}>{t("le.run.probeOf", { model: report.model })}</OverflowText>
         <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.hover}>
           {(["pass", "fail", "inconclusive"] as const).map((outcome) =>
             count(outcome) === 0 ? null : (
@@ -830,7 +832,7 @@ function RunPanel({ run, width }: { run: HarnessRun; width: number }) {
         <box key={check.id} style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.hover}>
           <text fg={TONE[check.outcome]} bg={SURFACE.hover} selectable={false}>{`${ICON[check.outcome]} `}</text>
           <box style={{ width: titleWidth + 2, flexShrink: 0 }} backgroundColor={SURFACE.hover}>
-            <text fg={COLOR.text} bg={SURFACE.hover} selectable={false}>{truncate(tx(check.title), titleWidth)}</text>
+            <OverflowText fg={COLOR.text} bg={SURFACE.hover} selectable={false} width={titleWidth}>{tx(check.title)}</OverflowText>
           </box>
           <box style={{ flexGrow: 1, flexShrink: 1 }} backgroundColor={SURFACE.hover}>
             <text fg={check.outcome === "fail" ? COLOR.warn : COLOR.dim} bg={SURFACE.hover} wrapMode="word" selectable={false}>{tx(check.finding)}</text>
@@ -854,8 +856,8 @@ function FieldCard({ id, row, active, first, width, onPress }: { id: string; row
   return (
     <box id={id} style={{ flexDirection: "column", flexShrink: 0, marginTop: first ? 0 : 1, paddingLeft: 1, paddingRight: 1 }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={bg}>
-        <text fg={active ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(`${active ? "▌ " : "  "}${row.label}`, Math.max(8, width - 4))}</text>
-        {rightWidth < 4 ? null : <text fg={row.explicit ? COLOR.accent : COLOR.dim} bg={bg} selectable={false}>{truncate(right, rightWidth)}</text>}
+        <OverflowText fg={active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(8, width - 4)} active={active || hovered}>{`${active ? "▌ " : "  "}${row.label}`}</OverflowText>
+        {rightWidth < 4 ? null : <OverflowText fg={row.explicit ? COLOR.accent : COLOR.dim} bg={bg} selectable={false} width={rightWidth} active={active || hovered}>{right}</OverflowText>}
       </box>
       <box style={{ paddingLeft: 2 }} backgroundColor={bg}>
         <text fg={COLOR.dim} bg={bg} wrapMode="word" selectable={false}>{row.description}</text>

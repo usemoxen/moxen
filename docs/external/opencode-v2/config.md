@@ -10,7 +10,7 @@ Create `opencode.jsonc` in your project to configure OpenCode. Add the schema fo
 ```jsonc title="opencode.jsonc"
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
 }
 ```
 
@@ -24,7 +24,7 @@ OpenCode supports JSON and JSONC. Use JSONC when you want comments or trailing c
 {
   "$schema": "https://opencode.ai/config.json",
   // Use this model by default.
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
 }
 ```
 
@@ -145,7 +145,7 @@ does not retain a `#variant`; agent and command model references can select one.
 
 ```jsonc
 {
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
 }
 ```
 
@@ -331,7 +331,7 @@ provider automatically.
 }
 ```
 
-See the [websearch guide](/websearch) for providers, credentials, selection,
+See the [web search guide](/websearch) for providers, credentials, selection,
 rate limits, and disabling search.
 
 ### MCP
@@ -366,10 +366,12 @@ Control automatic context compaction and how much recent context it preserves.
     "keep": {
       "tokens": 15000,
     },
-    "buffer": 20000,
+    "buffer": "15%",
   },
 }
 ```
+
+`buffer` is the share of the model's context window kept free before automatic compaction starts.
 
 Local summaries remain the default. Opt into native provider compaction for both
 automatic and manual requests with a provider or model policy:
@@ -380,7 +382,7 @@ automatic and manual requests with a provider or model policy:
     "openai": {
       "settings": { "compaction": { "type": "native" } },
       "models": {
-        "gpt-4.1": { "settings": { "compaction": { "type": "summary" } } },
+        "gpt-6.1-sol": { "settings": { "compaction": { "type": "summary" } } },
       },
     },
   },
@@ -507,7 +509,7 @@ Without this setting, creation uses the server's data directory under `worktree/
 Worktree creation and refresh load configuration from the project's saved canonical checkout, including when other
 clones share its project ID. Changing it does not move existing worktrees.
 
-Git is the built-in default. A [plugin](/build/plugins#worktrees) that registers a strategy automatically becomes the
+Git is the built-in default. A [plugin](/build/plugins/server#worktrees) that registers a strategy automatically becomes the
 default in that plugin runtime. Project operations use the canonical checkout's runtime. Strategy-specific options
 belong to that plugin, not the `worktree` config object.
 
@@ -542,9 +544,9 @@ headers, and model variants.
   "providers": {
     "openai": {
       "models": {
-        "gpt-5.2-custom": {
-          "modelID": "gpt-5.2",
-          "name": "GPT-5.2 Custom",
+        "gpt-6.1-sol-custom": {
+          "modelID": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol Custom",
           "limit": {
             "context": 200000,
             "output": 32000,
@@ -628,7 +630,8 @@ All experimental settings live under the `experimental` key:
   "experimental": {
     "todo": true,
     "subagent_depth": 2,
-    "portable_shell_scanner": true,
+    "background_compaction": true,
+    "image_generate": { "model": "openai/gpt-image-2" },
     "location_idle_timeout": "4 hours",
   },
 }
@@ -643,10 +646,35 @@ Set `todo` to `true` to give agents a `todowrite` tool for tracking multi-step w
 `subagent_depth` sets how deeply subagents can start their own subagents. Defaults to `1`, so a subagent cannot
 start another subagent.
 
-### Portable shell scanner
+### Background compaction
 
-Set `portable_shell_scanner` to `true` to replace the default tree-sitter shell scanner used by permission checks.
-Defaults to `false`. See [Permissions](/permissions#scanner) for how it behaves.
+Set `background_compaction` to `true` to write the compaction summary in the background before it is needed, so
+automatic compaction doesn't pause the session. Defaults to `false`. See
+[Compaction](/compaction#background-compaction) for how it works.
+
+```jsonc
+{
+  "experimental": {
+    "background_compaction": true,
+  },
+}
+```
+
+### Image generation
+
+`image_generate` sets the default model for the [`experimental_image_generate`](/tools#image-generate) tool, as
+`providerID/modelID`, optionally with `#variant`. When that model isn't available or can't handle a request, OpenCode
+picks another image model automatically.
+
+```jsonc
+{
+  "experimental": {
+    "image_generate": {
+      "model": "openai/gpt-image-2",
+    },
+  },
+}
+```
 
 ### Location idle timeout
 

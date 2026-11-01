@@ -22,8 +22,9 @@
  */
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
+import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
 import { CliError } from "../core/errors.js";
-import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemoryType } from "../core/memory/memory.js";
+import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
@@ -60,6 +61,8 @@ import type {
   MergeStrategy,
 } from "../core/forge/forge.js";
 import type { Diagnosis } from "../core/diagnostics/doctor.js";
+import type { ExperienceSnapshot } from "../core/experience/experience.js";
+import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
 import type { StatsRange, UsageStats } from "../core/usage/stats.js";
 import { type CardPalette, isCardPalette } from "../core/usage/card.js";
 import type { UsageCard } from "../core/usage/statsstore.js";
@@ -205,6 +208,11 @@ export type CommandBody =
   | ({ readonly type: "thread.handover"; readonly wait?: boolean } & HandoverRequest)
   /** A task run in a child thread of the same project. The task id is the child thread id. */
   | ({ readonly type: "thread.delegate" } & DelegateRequest)
+  | { readonly type: "thread.image.generate"; readonly parentThreadId: string; readonly prompt: string; readonly references?: readonly string[] }
+  | { readonly type: "skills.import"; readonly projectId?: string; readonly source: SkillSource; readonly from: string }
+  | ({ readonly type: "skills.save"; readonly projectId?: string; readonly text: string; readonly previous: string } & SkillAddress)
+  | ({ readonly type: "skills.enabled.set"; readonly projectId?: string; readonly enabled: boolean } & SkillAddress)
+  | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
   | { readonly type: "thread.background.stop"; readonly threadId: string; readonly taskId: string }
@@ -224,6 +232,9 @@ export type CommandBody =
   | ({ readonly type: "memory.append"; readonly name: string; readonly scope: MemoryScope; readonly text: string } & MemoryAddress)
   /** Copy Claude Code's auto memory for the project into Moxen's: only ever when the user asks. */
   | ({ readonly type: "memory.import-claude" } & MemoryAddress)
+  | ({ readonly type: "memory.embeddings.setup"; readonly all?: boolean } & MemoryAddress)
+  | ({ readonly type: "memory.embeddings.rebuild"; readonly all?: boolean } & MemoryAddress)
+  | { readonly type: "memory.embeddings.unload" }
   | {
       readonly type: "model.visibility.set";
       readonly instanceId: string;
@@ -237,6 +248,7 @@ export type CommandBody =
    * `value` is always text — the schema's parser owns the conversion.
    */
   | { readonly type: "settings.set"; readonly key: string; readonly value: string }
+  | { readonly type: "experience.update"; readonly completeOnboarding?: boolean; readonly seenRelease?: string }
   /**
    * Remote access (`transport/remoteaccess.ts`). Turning it on or off is
    * `settings.set` on `remote.enabled`; these pair and forget devices.
@@ -345,6 +357,11 @@ export interface CommandResults {
   "thread.conversation.revert": RevertResult & Accepted;
   "thread.handover": Omit<Handover, "started"> & { readonly started: StartedTurnSummary | null };
   "thread.delegate": Delegation;
+  "thread.image.generate": Delegation;
+  "skills.import": SkillAddress;
+  "skills.save": Accepted;
+  "skills.enabled.set": Accepted;
+  "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
@@ -356,7 +373,11 @@ export interface CommandResults {
   "memory.edit": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
   "memory.append": { readonly name: string; readonly scope: MemoryScope; readonly total: number };
   "memory.import-claude": ImportResult;
+  "memory.embeddings.setup": { readonly indexed: number };
+  "memory.embeddings.rebuild": { readonly indexed: number };
+  "memory.embeddings.unload": { readonly accepted: true };
   "settings.set": SettingsSnapshot & Accepted;
+  "experience.update": ExperienceSnapshot;
   "remote.pairing.start": RemotePairing;
   "remote.pairing.cancel": Accepted;
   "remote.device.revoke": Accepted;
@@ -416,6 +437,9 @@ export type Query =
   | { readonly type: "thread.turn.await"; readonly threadId: string; readonly turnId: string }
   /** The live provider catalog, probed on every call, with hidden-model preferences applied. */
   | { readonly type: "providers.list" }
+  | { readonly type: "image-generation.availability"; readonly threadId: string }
+  | { readonly type: "skills.manage.list"; readonly projectId?: string }
+  | ({ readonly type: "skills.manage.read"; readonly projectId?: string } & SkillAddress)
   /** Binaries, git, store and stored-credential presence on the machine running the sessions. */
   | { readonly type: "doctor" }
   /** Skills and slash commands one provider resolves for a working directory. */
@@ -440,8 +464,11 @@ export type Query =
     }
   /** Every memory a thread or project sees, global first, with the index a session would start with. */
   | ({ readonly type: "memory.list" } & MemoryAddress)
+  | { readonly type: "memory.embeddings.status" }
   /** One memory; without a scope, the project's first, then the global. */
   | ({ readonly type: "memory.read"; readonly name: string; readonly scope?: MemoryScope } & MemoryAddress)
+  /** Keyword matches in the current project and global memory, ranked with excerpts. */
+  | ({ readonly type: "memory.search"; readonly query: string; readonly scope?: MemoryScope; readonly limit?: number } & MemoryAddress)
   /**
    * What fills the thread's context window now, by category, from its live
    * session; `live: false` when no session runs here (read the last recorded
@@ -480,6 +507,7 @@ export type Query =
    * actually honours.
    */
   | { readonly type: "settings.read" }
+  | { readonly type: "experience.read" }
   /** The server's whole config as `moxen config show` prints it: MCP `env`/`headers` values redacted. */
   | { readonly type: "config.read" }
   /** One harness profile as a shareable JSON document (no saved key, no probe results); see `profileio.ts`. */
@@ -555,10 +583,15 @@ export interface QueryResults {
   "providers.list": { readonly providers: readonly ProviderSummary[] };
   doctor: Diagnosis;
   "skills.list": SkillInventory;
+  "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
+  "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
+  "skills.manage.read": { readonly text: string };
   "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
   "thread.agent-read": { readonly text: string };
   "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
+  "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };
   "memory.read": Memory;
+  "memory.search": MemorySearch;
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
   "thread.subagent": SubagentTranscript;
   "usage.stats": UsageStats;
@@ -568,6 +601,7 @@ export interface QueryResults {
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
+  "experience.read": ExperienceSnapshot;
   "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
@@ -990,6 +1024,18 @@ export function decodeCommand(value: unknown): Command {
         ...optionalBoolean(record, "scratch"),
         ...optionalBoolean(record, "wait"),
       };
+    case "skills.import":
+      return { ...meta, type, ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), from: requireField(record.from, type, "from") };
+    case "skills.save":
+      if (typeof record.previous !== "string") throw new CliError("INVALID_THREAD_OPTION", "skills.save requires the previous file text.");
+      return { ...meta, type, ...decodeSkillAddress(record, type), text: requireField(record.text, type, "text"), previous: record.previous };
+    case "skills.enabled.set":
+      if (typeof record.enabled !== "boolean") throw new CliError("INVALID_THREAD_OPTION", "skills.enabled.set requires enabled as a boolean.");
+      return { ...meta, type, ...decodeSkillAddress(record, type), enabled: record.enabled };
+    case "skills.remove":
+      return { ...meta, type, ...decodeSkillAddress(record, type) };
+    case "thread.image.generate":
+      return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
     case "thread.delegate":
       return {
         ...meta,
@@ -1067,6 +1113,11 @@ export function decodeCommand(value: unknown): Command {
       };
     case "memory.import-claude":
       return { ...meta, type, ...decodeMemoryAddress(record) };
+    case "memory.embeddings.setup":
+    case "memory.embeddings.rebuild":
+      return { ...meta, type, ...decodeMemoryAddress(record), ...optionalBoolean(record, "all") };
+    case "memory.embeddings.unload":
+      return { ...meta, type };
     case "model.visibility.set":
       if (typeof record.hidden !== "boolean") {
         throw new CliError("INVALID_THREAD_OPTION", `${type} requires hidden.`, { exitCode: 2 });
@@ -1125,6 +1176,8 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type };
     case "remote.device.revoke":
       return { ...meta, type, deviceId: requireField(record.deviceId, type, "deviceId") };
+    case "experience.update":
+      return { ...meta, type, ...optionalBoolean(record, "completeOnboarding"), ...optionalString(record, "seenRelease") };
     case "settings.set":
       return {
         ...meta,
@@ -1182,6 +1235,17 @@ export function decodeCommand(value: unknown): Command {
 function optionalString<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: string } {
   const value = asString(record[key]);
   return (value === null ? {} : { [key]: value }) as { [P in K]?: string };
+}
+
+function requireStrings(value: unknown, command: string, field: string): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} requires ${field} as an array of non-empty strings.`, { exitCode: 2 });
+  }
+  return value;
+}
+
+function decodeSkillAddress(record: Record<string, unknown>, type: string): SkillAddress & { projectId?: string } {
+  return { ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), folder: requireField(record.folder, type, "folder") };
 }
 
 function optionalBoolean<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: boolean } {
@@ -1320,6 +1384,7 @@ export function decodeQuery(value: unknown): Query {
     case "remote.status":
     case "remote.devices":
     case "settings.read":
+    case "experience.read":
     case "config.read":
     case "provider.latest":
       return { type };
@@ -1371,6 +1436,12 @@ export function decodeQuery(value: unknown): Query {
         branch: requireField(record.branch, type, "branch"),
         ...optionalNumber(record, "limit", type),
       };
+    case "skills.manage.list":
+      return { type, ...optionalString(record, "projectId") };
+    case "skills.manage.read":
+      return { type, ...decodeSkillAddress(record, type) };
+    case "image-generation.availability":
+      return { type, threadId: requireThreadId(record.threadId) };
     case "skills.list":
       return {
         type,
@@ -1393,12 +1464,22 @@ export function decodeQuery(value: unknown): Query {
       };
     case "memory.list":
       return { type, ...decodeMemoryAddress(record) };
+    case "memory.embeddings.status":
+      return { type };
     case "memory.read":
       return {
         type,
         ...decodeMemoryAddress(record),
         name: requireField(record.name, type, "name"),
         ...(record.scope !== undefined ? { scope: requireEnum(record.scope, type, "scope", MEMORY_SCOPES) } : {}),
+      };
+    case "memory.search":
+      return {
+        type,
+        ...decodeMemoryAddress(record),
+        query: requireField(record.query, type, "query"),
+        ...optionalEnum(record, "scope", MEMORY_SCOPES, type),
+        ...optionalNumber(record, "limit", type),
       };
     case "thread.context":
       return { type, threadId: requireThreadId(record.threadId) };

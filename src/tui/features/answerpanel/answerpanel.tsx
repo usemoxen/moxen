@@ -1,10 +1,12 @@
+import { overflowColumns } from "../../model/textoverflow.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
-import { COLOR, markdownSyntaxStyle, SURFACE, truncate } from "../../theme.js";
+import { COLOR, markdownSyntaxStyle, SURFACE } from "../../theme.js";
 import type { PendingUserInputQuestion } from "../../model/thread.js";
 
 /** A preview is a glance, not a document: long ones clip rather than push the transcript away. */
@@ -78,7 +80,7 @@ export function AnswerPanel({
         key: `option:${order}`,
         label: `${order + 1}. ${option.label}`,
         ...(option.description !== null && option.description.length > 0
-          ? { meta: truncate(option.description, 48) }
+          ? { meta: option.description }
           : {}),
         selected: pickedValues.includes(value),
         onPick: () => {
@@ -93,7 +95,7 @@ export function AnswerPanel({
           {
             key: "custom",
             label: t("answer.custom_answer_cd39"),
-            ...(customValue === undefined ? {} : { meta: truncate(customValue, 32), selected: true }),
+            ...(customValue === undefined ? {} : { meta: customValue, selected: true }),
             onPick: onCustom,
           },
         ]),
@@ -170,10 +172,12 @@ export function AnswerPanel({
                 const active = order === position;
                 // Only the open tab spells its header out; the rest stay a number
                 // (with a ✓ once answered) so a long request still fits the row.
-                const label = ` ${order + 1}${tab.answered ? "✓" : ""}${active ? ` ${truncate(tab.header, Math.max(8, inner - 30 - tabs.length * 5))}` : ""} `;
+                const label = ` ${order + 1}${tab.answered ? "✓" : ""}${active ? ` ${tab.header}` : ""} `;
                 return (
                   <HoverButton
                     key={order}
+                    width={active ? Math.max(8, inner - 26 - tabs.length * 5) : label.length}
+                    active={active}
                     label={label}
                     fg={active ? COLOR.warn : tab.answered ? COLOR.accent : COLOR.faint}
                     hoverFg={COLOR.bright}
@@ -184,9 +188,7 @@ export function AnswerPanel({
               })}
             </box>
           ) : (
-            <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
-              {truncate(`◈ ${question.header}`, inner)}
-            </text>
+            <OverflowText fg={COLOR.warn} bg={SURFACE.raised} selectable={false} width={inner}>{`◈ ${question.header}`}</OverflowText>
           )}
           <HoverButton label=" × " fg={COLOR.faint} hoverFg={COLOR.danger} bg={SURFACE.raised} onClick={onDismiss} />
         </box>
@@ -198,6 +200,7 @@ export function AnswerPanel({
         <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
           {rows.map((row, order) => {
             const active = order === safe;
+            const columns = overflowColumns(`  ${row.label}`, row.meta, inner - 2);
             return (
               <box
                 key={row.key}
@@ -206,13 +209,9 @@ export function AnswerPanel({
                 onMouseDown={row.onPick}
                 onMouseOver={() => setHighlight(order)}
               >
-                <text fg={active ? PICK_FG : row.selected === true ? COLOR.accent : COLOR.text} bg={active ? PICK_BG : SURFACE.raised} selectable={false}>
-                  {`${row.selected === true ? "● " : "  "}${truncate(row.label, Math.max(0, inner - (row.meta === undefined ? 4 : row.meta.length + 5)))}`}
-                </text>
+                <OverflowText fg={active ? PICK_FG : row.selected === true ? COLOR.accent : COLOR.text} bg={active ? PICK_BG : SURFACE.raised} selectable={false} width={columns.label} prefix={row.selected === true ? "● " : "  "} active={active}>{row.label}</OverflowText>
                 {row.meta === undefined ? null : (
-                  <text fg={active ? PICK_FG : COLOR.faint} bg={active ? PICK_BG : SURFACE.raised} selectable={false}>
-                    {` ${row.meta}`}
-                  </text>
+                  <OverflowText fg={active ? PICK_FG : COLOR.faint} bg={active ? PICK_BG : SURFACE.raised} selectable={false} width={columns.detail} active={active}>{row.meta}</OverflowText>
                 )}
               </box>
             );
@@ -233,7 +232,7 @@ export function AnswerPanel({
         )}
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-        <text fg={COLOR.faint}>{truncate(t(total > 1 ? "answer.hintMany" : "answer.hintOne"), Math.max(0, width))}</text>
+        <OverflowText fg={COLOR.faint} width={Math.max(0, width)}>{t(total > 1 ? "answer.hintMany" : "answer.hintOne")}</OverflowText>
       </box>
     </box>
   );

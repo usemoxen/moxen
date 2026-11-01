@@ -12,6 +12,7 @@ import type { BackgroundTaskSummary, ProviderApprovalDecision, ProviderRuntimeEv
 import { BackgroundShells, type BackgroundEvent } from "../harness/background.js";
 import { classificationOf, decidePermission, declinedMessage, sessionAllowKey } from "../harness/permissions.js";
 import { askTool, type AskReply } from "../harness/tools/ask.js";
+import { todoTool, type TodoItem } from "../harness/tools/todo.js";
 import { makeShellTool } from "../harness/tools/bash.js";
 import { taskOutputTool, taskStopTool } from "../harness/tools/background.js";
 import { availableShells } from "../harness/tools/shell.js";
@@ -22,6 +23,8 @@ export const CODEX_HARNESS_SERVER = "moxen_harness";
 export const CODEX_HARNESS_CONFIG = {
   "features.shell_tool": false,
   "tools.experimental_request_user_input.enabled": false,
+  // Moxen's `todo` replaces it, so the model has one checklist and the Tasks panel one source.
+  "tools.update_plan.enabled": false,
 };
 
 interface Options {
@@ -30,6 +33,8 @@ interface Options {
   readonly artifactDir: string;
   readonly delegated: boolean;
   readonly shellDisabled: boolean;
+  /** Offer the `todo` checklist; false when the user switched the to-do list off. */
+  readonly checklist: boolean;
   readonly isolation: WorktreeIsolation | null;
   readonly secretEnv: () => readonly string[];
   readonly mode: () => RuntimeMode;
@@ -58,6 +63,7 @@ export class CodexHarnessTools {
         return { ...tool, definition: { ...tool.definition, description: tool.definition.description.replace("- Do not use it to read, search, find or edit files; use read, grep, glob, edit and write, which are cheaper and safer to review.", "- Use this tool for file reading and search too. Use Codex's apply_patch for edits.") } };
       }) : []),
       taskOutputTool, taskStopTool,
+      ...(options.checklist ? [todoTool((items) => this.publishTodos(items))] : []),
       ...(!options.delegated ? [askTool((questions, signal) => this.wait("input", { toolName: "ask", input: { questions } }, signal))] : []),
     ] as unknown as readonly HarnessTool<never>[];
     this.background = new BackgroundShells({ artifactDir: options.artifactDir, onEvent: (event) => this.onBackground(event) });
@@ -128,6 +134,12 @@ export class CodexHarnessTools {
     const server = this.server;
     this.server = null;
     if (server) await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeIdleConnections(); });
+  }
+
+  /** Shown in the tasks panel the way Codex's own plan updates are (`turn/plan/updated`: `inProgress`, not `in_progress`). */
+  private publishTodos(items: readonly TodoItem[]): void {
+    const status = { pending: "pending", in_progress: "inProgress", completed: "completed" } as const;
+    this.options.publish({ type: "turn.plan.updated", provider: "codex", threadId: this.options.threadId, turnId: this.active?.id ?? null, raw: { plan: items.map((item) => ({ step: item.content, status: status[item.status] })) } });
   }
 
   takeNotes(): string { return this.notes.splice(0).join("\n\n"); }

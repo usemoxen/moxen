@@ -10,7 +10,7 @@ By default, the Agent SDK yields a complete `AssistantMessage` for each non-empt
 
 > [!TIP]
 >
-> This page covers output streaming (receiving tokens in real-time). For input modes (how you send messages), see [Send messages to agents](/docs/en/agent-sdk/streaming-vs-single-mode). You can also [stream responses using the Agent SDK via the CLI](/docs/en/headless).
+> This page covers output streaming (receiving tokens in real-time). For input modes (how you send messages), see [Send messages to agents](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode.md). You can also [stream responses using the Agent SDK via the CLI](https://code.claude.com/docs/en/headless.md).
 
 ## Enable streaming output
 
@@ -73,14 +73,14 @@ for await (const message of query({
 
 When partial messages are enabled, you receive raw Claude API streaming events wrapped in an object. The type has different names in each SDK:
 
-* **Python**: [`StreamEvent`](/docs/en/agent-sdk/python#streamevent) (import from `claude_agent_sdk.types`)
-* **TypeScript**: [`SDKPartialAssistantMessage`](/docs/en/agent-sdk/typescript#sdkpartialassistantmessage) with `type: 'stream_event'`
+* **Python**: [`StreamEvent`](https://code.claude.com/docs/en/agent-sdk/python#streamevent) (import from `claude_agent_sdk.types`)
+* **TypeScript**: [`SDKPartialAssistantMessage`](https://code.claude.com/docs/en/agent-sdk/typescript#sdkpartialassistantmessage) with `type: 'stream_event'`
 
 Both contain raw Claude API events, not accumulated text. You need to extract and accumulate text deltas yourself.
 
-The `parent_tool_use_id` field is always `None` in Python and `null` in TypeScript. Stream events are emitted for the main session only; token-level deltas from subagents aren't forwarded. To attribute output to a subagent, use complete messages, which carry `parent_tool_use_id`. See [Detect subagent invocation](/docs/en/agent-sdk/subagents#detect-subagent-invocation).
+The `parent_tool_use_id` field is always `None` in Python and `null` in TypeScript. Stream events are emitted for the main session only; token-level deltas from subagents aren't forwarded. To attribute output to a subagent, use complete messages, which carry `parent_tool_use_id`. See [Detect subagent invocation](https://code.claude.com/docs/en/agent-sdk/subagents.md#detect-subagent-invocation).
 
-Claude Code sets `user_message_uuid` on the turn's first non-ping stream event, and again when the message the turn is answering changes, under the conditions in [`user_message_uuid`](/docs/en/agent-sdk/typescript#user_message_uuid). The Python `StreamEvent` doesn't expose this field.
+Claude Code sets `user_message_uuid` on the turn's first non-ping stream event, and again when the message the turn is answering changes, under the conditions in [`user_message_uuid`](https://code.claude.com/docs/en/agent-sdk/typescript#user_message_uuid). The Python `StreamEvent` doesn't expose this field.
 
 The `event` field contains the raw streaming event from the [Claude API](https://platform.claude.com/docs/en/build-with-claude/streaming#event-types). Common event types include:
 
@@ -118,7 +118,10 @@ Without partial messages enabled, you receive all message types except `StreamEv
 
 ### Handle a stream that's cut off
 
-If a stream is cut off mid-message, such as when you interrupt the turn or the connection drops, you still receive that message's `message_stop` before the turn ends. A cut text or thinking block also gets its `content_block_stop`. A cut tool call doesn't, so if `message_stop` arrives while a tool call's block is still open, treat that call's input as incomplete.
+If a stream is cut off mid-message, you still receive that message's `message_stop` before the turn ends. Causes of a cut-off stream include an interrupted turn, a dropped connection, and a fallback to a non-streaming request. `content_block_stop` and `message_delta` can be missing before that `message_stop`:
+
+* **`content_block_stop`**: arrives for the block that was open, unless that block is a tool call. If `message_stop` arrives while a tool call's block is still open, treat that call's input as incomplete.
+* **`message_delta`**: arrives when you interrupt the turn, and can be missing after a dropped connection or a fallback to non-streaming, so don't wait for one on a cut message.
 
 Before Claude Code v2.1.290, a cut stream could end the turn without `message_stop`, so a reply you render from stream events could stay shown as in progress. The TypeScript Agent SDK bundles Claude Code v2.1.290 or later from v0.3.290, and the Python Agent SDK from v0.2.164. If a reply stays shown as in progress after the turn ends, update the SDK.
 
@@ -318,12 +321,12 @@ for await (const message of query({
 
 ## Known limitations
 
-* **Structured output**: with partial messages enabled, the JSON streams as a tool call's unvalidated `input_json_delta` chunks, and only the validated result reaches the final `ResultMessage.structured_output`. [Recognize the StructuredOutput tool call](/docs/en/agent-sdk/structured-outputs#recognize-the-structuredoutput-tool-call) covers how that call appears in your stream.
+* **Structured output**: with partial messages enabled, the JSON streams as a tool call's unvalidated `input_json_delta` chunks, and only the validated result reaches the final `ResultMessage.structured_output`. [Recognize the StructuredOutput tool call](https://code.claude.com/docs/en/agent-sdk/structured-outputs.md#recognize-the-structuredoutput-tool-call) covers how that call appears in your stream.
 
 ## Next steps
 
 Now that you can stream text and tool calls in real-time, explore these related topics:
 
-* [Interactive vs one-shot queries](/docs/en/agent-sdk/streaming-vs-single-mode): choose between input modes for your use case
-* [Structured outputs](/docs/en/agent-sdk/structured-outputs): get typed JSON responses from the agent
-* [Permissions](/docs/en/agent-sdk/permissions): control which tools the agent can use
+* [Interactive vs one-shot queries](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode.md): choose between input modes for your use case
+* [Structured outputs](https://code.claude.com/docs/en/agent-sdk/structured-outputs.md): get typed JSON responses from the agent
+* [Permissions](https://code.claude.com/docs/en/agent-sdk/permissions.md): control which tools the agent can use

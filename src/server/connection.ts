@@ -18,12 +18,16 @@
  *   effort picker) works unmodified.
  */
 import path from "node:path";
+import os from "node:os";
+import { importManagedSkill, listManagedSkills, readManagedSkill, removeManagedSkill, saveManagedSkill, setManagedSkillEnabled, type SkillRoots } from "../core/skills/management.js";
 import { randomUUID } from "node:crypto";
+import { readExperience, updateExperience } from "../core/experience/experience.js";
 import { discoverModels } from "../core/providers/harness/discover.js";
 import { primeProfileKey } from "../core/providers/harness/profiles.js";
 import { exportProfileDocument, freeProfileId, parseProfileDocument } from "../core/providers/harness/profileio.js";
 import { testMcpServer } from "../core/mcptest.js";
 import { searchThreadsView } from "../core/threads/search.js";
+import { turnThroughput } from "../core/threads/throughput.js";
 import * as Effect from "effect/Effect";
 
 import { buildDirectProviders } from "../core/catalog/direct.js";
@@ -40,6 +44,10 @@ import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig,
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
+import { CodexDriver } from "../core/providers/codex/driver.js";
+import { imageGenerationAvailability, type ImageGenerationAvailability } from "../core/providers/codex/imagegeneration.js";
+import { isNativeToolDisabled } from "../core/nativetools.js";
+import { moxenToolsOf } from "../core/mcp.js";
 import { mergeProbed, probeSettledSomething, runProbe, testProfile } from "../core/providers/harness/probe.js";
 import { readCommitDetail, readCommitDiff, readOverview } from "../core/git/history.js";
 import {
@@ -66,7 +74,10 @@ import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
-import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, type MemoryLocation } from "../core/memory/memory.js";
+import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
+import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
+import { SemanticMemory } from "../core/memory/semantic.js";
+import { projectMemorySetting } from "../core/threads/instructions.js";
 import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
 import { readAttachment, readImageFile, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
@@ -126,6 +137,7 @@ import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
+import { driverKindOfInstance } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
@@ -171,7 +183,7 @@ export interface DirectConnectionOptions {
   /** Which file `settings.set` writes; defaults to the resolved config path. */
   readonly configPath?: string;
   /** The `moxen` tools' MCP server per thread; defaults to `mcp/main.ts`. Null turns them off. */
-  readonly builtinMcpServers?: ((threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[]) | null;
+  readonly builtinMcpServers?: ((threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[] | Promise<readonly McpServerSpec[]>) | null;
   /** Runs a provider CLI's own updater (tests); defaults to the real one. */
   readonly updateProvider?: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   /** Reads the newest provider versions (tests); defaults to the npm registry. */
@@ -182,6 +194,11 @@ export interface DirectConnectionOptions {
 
 export class DirectConnection implements ClientApi {
   private readonly storeRoot: string;
+  private readonly embeddingRuntime: EmbeddingRuntime;
+  private readonly semanticMemory: SemanticMemory;
+  private embeddingSetup: Promise<{ readonly indexed: number }> | null = null;
+  private embeddingIndexed = 0;
+  private embeddingGeneration = 0;
   private remoteAccess: RemoteAccess | null = null;
   private readonly factories: TurnDriverFactories;
   private readonly shellPollMs: number;
@@ -193,7 +210,7 @@ export class DirectConnection implements ClientApi {
   /** The per-provider settings the last config read saw; see `driverFor`. */
   private lastProviders: ProvidersConfig | undefined;
   private lastWeb: WebConfig | undefined;
-  private readonly builtinMcpServers: ((threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[]) | null;
+  private readonly builtinMcpServers: DirectConnectionOptions["builtinMcpServers"];
   private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
@@ -208,6 +225,8 @@ export class DirectConnection implements ClientApi {
 
   constructor(options: DirectConnectionOptions = {}) {
     this.storeRoot = options.storeRoot ?? resolveStoreRoot();
+    this.embeddingRuntime = new EmbeddingRuntime(this.storeRoot);
+    this.semanticMemory = new SemanticMemory(this.embeddingRuntime);
     persistUsageLimits(this.storeRoot);
     this.factories = options.drivers ?? {};
     this.harnessFetch = options.harnessFetch;
@@ -239,11 +258,12 @@ export class DirectConnection implements ClientApi {
       this.lastWeb = config.web;
       return config;
     };
+    void this.applyEmbeddingPolicy().catch(() => undefined);
     this.harnessFetch = options.harnessFetch;
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
-      options.builtinMcpServers === undefined ? (threadId, serverOptions) => [this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
+      options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
   }
 
   /** Where a memory request points: the thread's project, the project named, or neither (global alone). */
@@ -256,12 +276,78 @@ export class DirectConnection implements ClientApi {
     return { storeRoot: this.storeRoot, projectId: address.projectId ?? null };
   }
 
+  private async memoryEmbeddingsEnabled(location: MemoryLocation): Promise<boolean> {
+    const config = await this.loadConfig();
+    if (config.memory === false) return false;
+    const project = location.projectId === null ? undefined : (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
+    const root = project?.workspaceRoot ?? null;
+    if (await projectMemorySetting(root) === false) return false;
+    return (await projectMemorySetting(root, "memoryEmbeddings") ?? config.memoryEmbeddings) === true;
+  }
+
+  private async applyEmbeddingPolicy(): Promise<void> {
+    const config = await this.loadConfig();
+    if (this.closed) return;
+    const keep = config.memory !== false && config.memoryEmbeddings === true && config.memoryEmbeddingLoading !== "on-demand";
+    this.embeddingRuntime.setKeepLoaded(keep);
+    if (keep) await this.embeddingRuntime.warm();
+  }
+
+  private async setupEmbeddings(command: Extract<Command, { readonly type: "memory.embeddings.setup" | "memory.embeddings.rebuild" }>): Promise<{ readonly indexed: number }> {
+    if (this.embeddingSetup) {
+      const pending = this.embeddingSetup;
+      await pending;
+      if (this.embeddingSetup === pending) this.embeddingSetup = null;
+      return await this.setupEmbeddings({ ...command, type: "memory.embeddings.rebuild" });
+    }
+    const generation = this.embeddingGeneration;
+    this.embeddingSetup = (async () => {
+      const config = await this.loadConfig();
+      const location = await this.memoryLocation(command);
+      const project = location.projectId === null ? undefined : (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
+      if (config.memory === false || (!command.all && await projectMemorySetting(project?.workspaceRoot ?? null) === false)) {
+        throw new CliError("MEMORY_DISABLED", "Memory is turned off.");
+      }
+      if (generation !== this.embeddingGeneration || this.closed) throw new Error("Memory indexing cancelled");
+      if (command.type === "memory.embeddings.setup") {
+        this.semanticMemory.cancel();
+        await this.embeddingRuntime.setup();
+        await this.embeddingRuntime.validate();
+      }
+      if (generation !== this.embeddingGeneration || this.closed) throw new Error("Memory indexing cancelled");
+      let indexed = 0;
+      this.embeddingRuntime.status = { ...this.embeddingRuntime.status, phase: "indexing" };
+      if (command.all) {
+        indexed = await this.semanticMemory.backfill({ storeRoot: this.storeRoot, projectId: null });
+        for (const project of await listStoredProjects(this.storeRoot)) {
+          if (this.closed || generation !== this.embeddingGeneration) throw new Error("Memory indexing cancelled");
+          if (await projectMemorySetting(project.workspaceRoot) === false) continue;
+          const memories = await listMemories({ storeRoot: this.storeRoot, projectId: project.id });
+          await this.semanticMemory.backfill({ storeRoot: this.storeRoot, projectId: project.id });
+          indexed += memories.filter((memory) => memory.scope === "project").length;
+        }
+      } else indexed = await this.semanticMemory.backfill(location);
+      this.embeddingIndexed = indexed;
+      this.embeddingRuntime.status = { ...this.embeddingRuntime.status, phase: "idle" };
+      return { indexed };
+    })();
+    try { return await this.embeddingSetup; }
+    catch (error) {
+      const message = this.embeddingRuntime.status.state === "failed" ? this.embeddingRuntime.status.message : "Memory setup could not finish. Retry setup or use keyword memory.";
+      this.embeddingRuntime.close();
+      this.embeddingRuntime.status = { ...this.embeddingRuntime.status, state: "failed", phase: "idle", message };
+      throw error;
+    }
+    finally { this.embeddingSetup = null; }
+  }
+
   /**
    * The moxen tools for one thread. Its environment names this store (and
    * config and server mode) outright: providers hand MCP servers a filtered
    * environment (some do), and the tools must reach the same threads.
    */
-  private moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): McpServerSpec {
+  private async moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): Promise<McpServerSpec> {
+    const imageGeneration = !delegated && (await this.imageAvailability(threadId)).available;
     // Hosted in this process: Claude calls the tools in-process, the other
     // providers over loopback HTTP served here — so a delegation always runs
     // in the process that owns its parent's session. Until the HTTP server
@@ -286,13 +372,42 @@ export class DirectConnection implements ClientApi {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
-      tools: moxenToolsFor({ delegated, webFetch, memory }),
+      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
       // Delegation is what these tools are for: never behind a tool search.
       alwaysLoad: true,
     };
+  }
+
+  private async imageAvailability(threadId: string): Promise<ImageGenerationAvailability> {
+    const ctx = await this.context();
+    const thread = await ctx.store.readThreadRecord(threadId);
+    const unavailable = (reason: string): ImageGenerationAvailability => ({ available: false, reason });
+    if (!thread || thread.modelSelection.instanceId === "codex") return unavailable("Codex threads use their native image-generation tool.");
+    const kind = driverKindOfInstance(thread.modelSelection.instanceId);
+    if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
+        (await ctx.store.readDelegations()).some((row) => row.childThreadId === threadId)) return unavailable("Image generation is unavailable in delegated tasks or with orchestration switched off.");
+    if (isNativeToolDisabled(ctx.config.providers?.codex?.disabledNativeTools, "image_generation", "codex")) return unavailable("Codex image generation is switched off.");
+    try {
+      const driver = this.driverFor("codex");
+      if (!(driver instanceof CodexDriver)) return unavailable("The Codex driver cannot check image-generation eligibility.");
+      const provider = (await this.providers()).find((entry) => entry.instanceId === "codex");
+      if (!provider?.enabled || !provider.installed) return unavailable("Codex must be installed and enabled for image generation.");
+      return await driver.withPeer(thread.env.path, imageGenerationAvailability);
+    }
+    catch { return unavailable("Could not verify Codex subscription and usage; check Codex login and try again."); }
+  }
+
+  private async skillRoots(projectId?: string): Promise<SkillRoots> {
+    if (projectId !== undefined) {
+      const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === projectId);
+      if (!project?.workspaceRoot) throw new CliError("PROJECT_NOT_FOUND", "Choose an existing project with a workspace to manage its skills.");
+      return { agents: path.join(project.workspaceRoot, ".agents", "skills"), claude: path.join(project.workspaceRoot, ".claude", "skills") };
+    }
+    const config = await this.loadConfig();
+    return { agents: path.join(os.homedir(), ".agents", "skills"), claude: path.join(resolveClaudeHomePath(config.providers?.claude?.homePath ?? ""), "skills") };
   }
 
   private moxenStdioFor(threadId: string): Extract<McpServerSpec, { type: "stdio" }> {
@@ -471,12 +586,15 @@ export class DirectConnection implements ClientApi {
     let lastFingerprint: string | null = null;
     let nextDueAt = Number.POSITIVE_INFINITY;
     let stopped = false;
+    let polling = false;
     this.startScheduling();
     const poll = async (): Promise<void> => {
-      if (stopped || this.closed) return;
+      if (stopped || this.closed || polling) return;
+      polling = true;
       try {
         const store = await this.store();
         const [version, projects] = await Promise.all([store.shellVersion(), listStoredProjects(this.storeRoot)]);
+        if (stopped || this.closed) return;
         const fingerprint = `${version}#${JSON.stringify(projects)}`;
         if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
         const threads = await listThreads(store, { status: "all" });
@@ -508,7 +626,7 @@ export class DirectConnection implements ClientApi {
         const visible = rows.filter((row) => row.archivedAt == null && row.deletedAt == null);
         lastFingerprint = fingerprint;
         const hash = JSON.stringify({ projects, threads: visible });
-        if (hash !== lastHash) {
+        if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
@@ -516,7 +634,9 @@ export class DirectConnection implements ClientApi {
           });
         }
       } catch (cause) {
-        onError(cause);
+        if (!stopped && !this.closed) onError(cause);
+      } finally {
+        polling = false;
       }
     };
     void poll().then(() => {
@@ -540,6 +660,7 @@ export class DirectConnection implements ClientApi {
     // there is nothing new to read, hash or send.
     let lastVersion: string | null = null;
     let stopped = false;
+    let polling = false;
     // When each streamed message first appeared: its place in the
     // timeline, between the tool calls around it.
     const firstSeen = new Map<string, string>();
@@ -548,7 +669,8 @@ export class DirectConnection implements ClientApi {
     // the transcript shows.
     let runningTurnId: string | null = null;
     const poll = async (): Promise<void> => {
-      if (stopped || this.closed) return;
+      if (stopped || this.closed || polling) return;
+      polling = true;
       try {
         // The poll runs every few hundred ms for as long as the thread is
         // open, and a long thread's ledgers are megabytes: read, parse and
@@ -556,6 +678,7 @@ export class DirectConnection implements ClientApi {
         // (Recovering an orphaned turn comes first — it is what writes.)
         await recoverOrphanedTurn(await this.context(), threadId);
         const version = await (await this.store()).threadVersion(threadId);
+        if (stopped || this.closed) return;
         if (version === lastVersion) return;
         const detail = await this.threadDetail(threadId);
         if (!detail) return;
@@ -563,12 +686,14 @@ export class DirectConnection implements ClientApi {
         const latest = detail.latestTurn;
         runningTurnId = latest && latest.state === "running" ? latest.turnId : null;
         const hash = JSON.stringify(detail);
-        if (hash !== lastHash) {
+        if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({ kind: "snapshot", snapshot: { snapshotSequence: 0, thread: detail } });
         }
       } catch (cause) {
-        onError(cause);
+        if (!stopped && !this.closed) onError(cause);
+      } finally {
+        polling = false;
       }
     };
     // Live assistant text only. Tool calls are *not* recorded here: the
@@ -633,21 +758,25 @@ export class DirectConnection implements ClientApi {
     // session and subscribe once it exists, so events flow even when the
     // turn was started elsewhere (CLI) while the TUI watches.
     let unsubscribeBridge: (() => void) | null = null;
+    let attachingBridge = false;
     const ensureBridge = async (): Promise<void> => {
-      if (stopped || this.closed || unsubscribeBridge) return;
+      if (stopped || this.closed || unsubscribeBridge || attachingBridge) return;
+      attachingBridge = true;
       try {
         const store = await this.store();
         const thread = await store.readThreadRecord(threadId).catch(() => null);
         if (!thread) return;
         const driver = this.driverFor(thread.modelSelection.instanceId);
         const hasSession = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
-        if (!hasSession) return;
+        if (!hasSession || stopped || this.closed) return;
         unsubscribeBridge = subscribeDriverThread(driver, threadId, onEvent);
         // Same tick as the subscribe: nothing slips between what the turn had
         // already streamed (while this thread was not open) and what follows.
         replayLiveText(driver);
       } catch {
         // Retry on the next poll.
+      } finally {
+        attachingBridge = false;
       }
     };
     void poll().then(() => {
@@ -671,11 +800,11 @@ export class DirectConnection implements ClientApi {
     const store = await this.store();
     const read = await readThread(store, threadId, { view: "messages" }).catch(() => null);
     if (!read) return null;
-    return toThreadEnvelope(read.thread, read.turns, {
+    return { ...toThreadEnvelope(read.thread, read.turns, {
       messages: read.messages,
       activities: read.activities,
       checkpoints: await this.withCheckpointFiles(read.thread.env.path, read.checkpoints),
-    });
+    }), turnThroughput: turnThroughput(read.turns) };
   }
 
   /**
@@ -711,12 +840,40 @@ export class DirectConnection implements ClientApi {
    */
   async dispatch<T extends CommandType>(command: CommandOf<T>): Promise<CommandResult<T>> {
     if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
-    return (await this.run(decodeCommand(command))) as CommandResult<T>;
+    const decoded = decodeCommand(command);
+    const result = await this.run(decoded);
+    if (decoded.type === "memory.save" || decoded.type === "memory.edit" || decoded.type === "memory.append" || decoded.type === "memory.delete" || decoded.type === "memory.import-claude") {
+      // Writes remain available even when native setup or inference failed.
+      const generation = this.embeddingGeneration;
+      void this.memoryLocation(decoded).then(async (location) => {
+        const enabled = await this.memoryEmbeddingsEnabled(location);
+        if (!this.closed && generation === this.embeddingGeneration && enabled && this.embeddingSetup === null) await this.semanticMemory.backfill(location);
+      }).catch(() => undefined);
+    }
+    return result as CommandResult<T>;
   }
 
   private async run(command: Command): Promise<CommandResult> {
     const accepted = { accepted: true } as const;
     switch (command.type) {
+      case "skills.import":
+        return await importManagedSkill(await this.skillRoots(command.projectId), command.source, command.from);
+      case "skills.save":
+        await saveManagedSkill(await this.skillRoots(command.projectId), command, command.text, command.previous);
+        return accepted;
+      case "skills.enabled.set":
+        await setManagedSkillEnabled(await this.skillRoots(command.projectId), command, command.enabled);
+        return accepted;
+      case "skills.remove":
+        return await removeManagedSkill(await this.skillRoots(command.projectId), command);
+      case "memory.embeddings.setup":
+      case "memory.embeddings.rebuild":
+        return await this.setupEmbeddings(command);
+      case "memory.embeddings.unload":
+        this.embeddingGeneration++;
+        this.semanticMemory.cancel();
+        this.embeddingRuntime.close();
+        return accepted;
       case "project.create":
         return await this.projectCreate(command);
       case "thread.create":
@@ -783,6 +940,19 @@ export class DirectConnection implements ClientApi {
       case "thread.delegate": {
         const { type: _type, commandId: _id, ...request } = command;
         return await delegate(await this.context(), request);
+      }
+      case "thread.image.generate": {
+        const availability = await this.imageAvailability(command.parentThreadId);
+        if (!availability.available) throw new CliError("IMAGE_GENERATION_UNAVAILABLE", availability.reason!);
+        const references = command.references ?? [];
+        if (references.length > 5 || references.some((file) => !path.isAbsolute(file))) throw new CliError("INVALID_THREAD_OPTION", "Reference images must be at most five absolute paths.");
+        const task = [
+          "Generate or edit an image using your native image_generation tool. Do not draw it with code, use another service, change source files, or commit anything. If generation is unavailable or fails, report the failure without substituting another approach.",
+          "Save the generated image and report its absolute file path. Only actual image-generation results count as success.",
+          ...(references.length ? ["Reference image paths (read these before editing):", ...references.map((file) => JSON.stringify(file))] : []),
+          "Image request:", command.prompt,
+        ].join("\n\n");
+        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", model: "codex-default", isolation: "shared", wait: false });
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
@@ -870,13 +1040,33 @@ export class DirectConnection implements ClientApi {
           throw new CliError("REMOTE_DEVICE_NOT_FOUND", `No paired device ${command.deviceId}.`, { details: { deviceId: command.deviceId } });
         }
         return accepted;
+      case "experience.update":
+        return await updateExperience(this.storeRoot, command);
       case "settings.set": {
         // Re-read rather than reusing a cached copy: another client may
         // have written since, and a settings page that silently reverts a
         // neighbour's edit is worse than one that is a beat behind.
         const { config, path } = await this.readConfigFile();
-        const next = await setConfigValueSecure(config, command.key, command.value);
+        let next = await setConfigValueSecure(config, command.key, command.value);
+        if (command.key === "memoryEmbeddings" && next.memoryEmbeddings === true) {
+          try { await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true }); }
+          catch (error) {
+            const current = (await this.readConfigFile()).config;
+            await saveConfig(path, await setConfigValueSecure(current, "memoryEmbeddings", "false"));
+            throw error;
+          }
+          // Setup can take time: preserve edits another client made meanwhile.
+          next = await setConfigValueSecure((await this.readConfigFile()).config, command.key, command.value);
+        }
         await saveConfig(path, next);
+        if (command.key === "memoryEmbeddings" || command.key === "memoryEmbeddingLoading" || command.key === "memory") {
+          void this.applyEmbeddingPolicy().catch(() => undefined);
+        }
+        if ((command.key === "memoryEmbeddings" && next.memoryEmbeddings !== true) || (command.key === "memory" && next.memory === false)) {
+          this.embeddingGeneration++;
+          this.semanticMemory.cancel();
+          this.embeddingRuntime.close();
+        }
         if (this.remoteAccess && command.key.startsWith("remote.")) {
           try {
             await this.remoteAccess.apply(next.remote);
@@ -1280,6 +1470,18 @@ export class DirectConnection implements ClientApi {
       }
       case "memory.read":
         return await readMemory(await this.memoryLocation(query), query.name, query.scope);
+      case "memory.search":
+      {
+        const location = await this.memoryLocation(query);
+        const generation = this.embeddingGeneration;
+        const enabled = await this.memoryEmbeddingsEnabled(location);
+        return await searchMemories(location, query, enabled && generation === this.embeddingGeneration ? (memories) => {
+          if (this.embeddingSetup !== null) return Promise.reject(new Error("Memory setup is busy"));
+          return this.semanticMemory.scores(location, query.query, memories);
+        } : undefined);
+      }
+      case "memory.embeddings.status":
+        return { ...this.embeddingRuntime.status, validation: this.embeddingRuntime.status.validation ?? await this.embeddingRuntime.readValidation(), busy: this.embeddingSetup !== null, indexed: this.embeddingIndexed };
       case "thread.inspect":
         await recoverOrphanedTurn(ctx, query.threadId);
         return await inspectThreadView(ctx, query.threadId);
@@ -1322,7 +1524,7 @@ export class DirectConnection implements ClientApi {
         const historyProvider = harness ? "harness" : selection && driverKey(selection.instanceId) === "codex" ? "codex" : "opencode";
         const cursor = thread?.providerSessions?.[historyProvider] ?? null;
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId, cursor) : undefined;
-        return await subagentTranscript(store, query.threadId, query.agentId, readHistory, harness ? "harness" : "opencode");
+        return await subagentTranscript(store, query.threadId, query.agentId, readHistory, historyProvider);
       }
       case "provider.latest": {
         // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
@@ -1349,6 +1551,8 @@ export class DirectConnection implements ClientApi {
         const remote = (await this.loadConfig()).remote;
         return { available: false, enabled: remote?.enabled === true, interfaces: remote?.interfaces ?? "both", port: remote?.port ?? DEFAULT_REMOTE_PORT, listening: [] };
       }
+      case "experience.read":
+        return await readExperience(this.storeRoot);
       case "settings.read":
         return await this.settingsSnapshot();
       case "config.read": {
@@ -1434,6 +1638,14 @@ export class DirectConnection implements ClientApi {
         const driver = this.driverFor(query.instanceId);
         return driver.skillInventory ? await driver.skillInventory(query.cwd) : EMPTY_SKILL_INVENTORY;
       }
+      case "image-generation.availability":
+        return await this.imageAvailability(query.threadId);
+      case "skills.manage.list": {
+        const roots = await this.skillRoots(query.projectId);
+        return { skills: await listManagedSkills(roots), roots };
+      }
+      case "skills.manage.read":
+        return await readManagedSkill(await this.skillRoots(query.projectId), query);
     }
   }
 
@@ -1468,6 +1680,9 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.embeddingGeneration++;
+    this.semanticMemory.cancel();
+    this.embeddingRuntime.close();
     await this.remoteAccess?.close().catch(() => undefined);
     if (this.pruneTimer !== null) clearInterval(this.pruneTimer);
     this.pruneTimer = null;

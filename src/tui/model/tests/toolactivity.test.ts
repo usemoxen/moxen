@@ -47,6 +47,16 @@ describe("toolActivityRow", () => {
     expect(view(row)).toMatchObject({ kind: "tool", tool: label, detail: "", running: false });
   });
 
+  it("shows a rejected Codex MCP call's reason instead of hiding it behind its friendly name", () => {
+    const reason = "This action was rejected.\nReason: the action needs approval.\nPlease ask the user.";
+    const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "mcp", type: "mcpToolCall", server: "linear", tool: "save_comment", status: "failed", arguments: {}, error: { message: reason } } } }))!;
+    expect(view(row)).toMatchObject({ kind: "tool", tool: "Linear · Save comment", detail: reason, failed: true, running: false });
+    const data = row.payload.data as Record<string, unknown>;
+    const state = data.state as Record<string, unknown>;
+    const historical = { ...row, payload: { ...row.payload, detail: JSON.stringify({ message: reason }), data: { ...data, state: { ...state, output: JSON.stringify({ message: reason }) } } } };
+    expect(view(historical)).toMatchObject({ detail: reason, failed: true });
+  });
+
   it.each([
     [null, "legacy query", { tool: "websearch", query: "legacy query" }],
     [{ type: "search", query: "full query", queries: null }, "short", { action: "search", query: "full query" }],
@@ -82,6 +92,19 @@ describe("toolActivityRow", () => {
     const patch = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", tool: "fileChange", raw: { item: { type: "fileChange", id: "patch", status: "completed", changes: [{ path: "a.ts", kind: { type: "update" }, diff: "@@ -1 +1 @@\n-old\n+new" }] } } }));
     expect(patch?.payload).toMatchObject({ itemType: "file_change", data: { files: [{ path: "a.ts" }] } });
     expect(toolActivityRow(event({ provider: "codex", raw: { item: { id: "m", type: "agentMessage", text: "answer" } } }))).toBeNull();
+  });
+
+  it("keeps each file's path, hunk and counts separate in a multi-file Codex edit", () => {
+    const changes = [
+      { path: "docs/README.md", kind: { type: "update" }, diff: "@@ -1 +1,3 @@\n heading\n+first\n+second" },
+      { path: "src/core/threads/operations.ts", kind: { type: "update" }, diff: "@@ -1225 +1225 @@\n-old\n+replacement" },
+      { path: "src/server/operations.ts", kind: { type: "update" }, diff: "@@ -292 +292,2 @@\n context\n+last" },
+    ];
+    const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { type: "fileChange", id: "patch", status: "completed", changes } } }))!;
+    expect(view(row)).toMatchObject({
+      kind: "file", fileCount: 3, added: 4, removed: 1,
+      files: changes.map((file, index) => ({ path: file.path, diff: file.diff, added: index === 0 ? 2 : 1, removed: index === 1 ? 1 : 0 })),
+    });
   });
 
   it("maps a Claude Bash call to a command row and settles it on the tool result", () => {

@@ -1,5 +1,8 @@
+import { useLayoutEffect, useRef } from "react";
 import type { SceneId } from "../../ui/scenes/catalog.js";
-import { SceneBackdrop } from "../../ui/scenes/scenebackdrop.js";
+import { ModelSceneRenderable, SceneBackdrop } from "../../ui/scenes/scenebackdrop.js";
+import type { Pointer } from "../../ui/scenes/raster.js";
+import { sceneBase } from "../../theme.js";
 import { LOOP as VOYAGE_SECONDS, destinationIndex } from "../../ui/scenes/astra.js";
 import { splashStart } from "../../ui/scenes/haiku.js";
 import { COMET_SECONDS, cometStart } from "../../ui/scenes/opus.js";
@@ -15,6 +18,17 @@ import { Stage, type GalleryEntry } from "./registry.js";
 interface Moment {
   name: string;
   at: number;
+  pointer?: Pointer;
+}
+
+/** Freeze the actual native renderer after advancing its pointer; no live
+ * clock or mouse timing in a gallery capture. */
+function PointerMoment({ scene, moment }: { scene: SceneId; moment: Moment }) {
+  const ref = useRef<ModelSceneRenderable | null>(null);
+  useLayoutEffect(() => {
+    ref.current?.advance(moment.at, moment.pointer ?? null);
+  }, [moment]);
+  return <modelScene ref={ref} width={80} height={20} scene={scene} motion="static" at={moment.at} base={sceneBase()} />;
 }
 
 const DAY = 86_400;
@@ -91,21 +105,30 @@ const MOMENTS: Record<SceneId, Moment[]> = {
   terra: [
     { name: "day-side", at: TODAY },
     { name: "twelve-hours-later", at: TODAY + 0.5 * DAY },
+    { name: "aurora", at: moonPhases(TODAY)[2]!.at },
   ],
-  luna: moonPhases(TODAY),
+  luna: [...moonPhases(TODAY), { name: "aurora-folds", at: TODAY + 8 }],
 };
+
+// A lens, a bow shock, strings pressed aside, moths drawn to a lamp and
+// the pointer lighting a globe are easy to miss in a motionless gallery.
+for (const scene of ["opus", "sol", "sonnet", "fable", "mythos", "astra", "terra", "luna"] as const) {
+  MOMENTS[scene].push({ name: "pointer", at: scene === "fable" || scene === "mythos" ? 23 : TODAY, pointer: { x: 48, y: 18, strength: 1 } });
+}
 
 export const SCENE_GALLERY: GalleryEntry[] = (Object.keys(MOMENTS) as SceneId[]).flatMap((scene) =>
   MOMENTS[scene].map(
     (moment): GalleryEntry => ({
-      id: MOMENTS[scene].length === 1 ? `ui-scene-${scene}` : `ui-scene-${scene}-${moment.name}`,
+      id: moment.name === "the-5" ? `ui-scene-${scene}` : `ui-scene-${scene}-${moment.name}`,
       group: "scenes",
       title: `Model backdrop: ${scene}, ${moment.name}`,
       width: 80,
       height: 20,
       element: () => (
         <Stage width={80} height={20}>
-          <SceneBackdrop scene={scene} width={80} height={20} motion="static" at={moment.at} />
+          {moment.pointer
+            ? <PointerMoment scene={scene} moment={moment} />
+            : <SceneBackdrop scene={scene} width={80} height={20} motion="static" at={moment.at} />}
         </Stage>
       ),
     }),

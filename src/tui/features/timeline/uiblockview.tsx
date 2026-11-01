@@ -1,14 +1,15 @@
 import { useTerminalDimensions } from "@opentui/react";
+import { useRef } from "react";
 
 import type { UiBlock, UiNode } from "../../../core/threads/uiblock.js";
 import { useMeasuredWidth } from "../../hooks/useMeasuredWidth.js";
 import { gridCellWidth, gridColumnsThatFit, splitColumns } from "../../model/uilayout.js";
 import { COLOR } from "../../theme.js";
-import { BlendedImage, ReplyImage } from "./replyimage.js";
+import { BlendedImage, ImagePositionContext, ReplyImage } from "./replyimage.js";
+import { ImageSetContext, type ViewedImage } from "./imageviewer.js";
 import { ChartView, KeyValueView, ProgressView, StatusView } from "./uidataview.js";
 
-/** The widest a block is drawn, pane permitting, and what a first frame assumes the pane and its gutter take from the screen. */
-const MAX_BLOCK_COLUMNS = 100;
+/** What a first frame assumes the pane and its gutter take from the screen. */
 const SIDE_ROOM = 12;
 
 /**
@@ -18,22 +19,25 @@ const SIDE_ROOM = 12;
  * narrow for readable cells), so a resize never rebuilds an image.
  */
 export function UiBlockView({ block }: { block: UiBlock }) {
+  const images = useRef(new Map<string, ViewedImage>());
   const { width: screenWidth } = useTerminalDimensions();
   const measured = useMeasuredWidth();
-  const columns = Math.max(8, Math.min(MAX_BLOCK_COLUMNS, measured.width ?? screenWidth - SIDE_ROOM));
+  const columns = Math.max(8, measured.width ?? screenWidth - SIDE_ROOM);
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, width: "100%" }} {...measured.props}>
-      <UiNodeView node={block.root} columns={columns} />
+      <ImageSetContext.Provider value={images.current}>
+        <UiNodeView node={block.root} columns={columns} position="0" />
+      </ImageSetContext.Provider>
     </box>
   );
 }
 
-function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
+function UiNodeView({ node, columns, position }: { node: UiNode; columns: number; position: string }) {
   switch (node.type) {
     case "image":
-      return <ReplyImage path={node.src} alt={node.alt} caption={node.caption} maxColumns={columns} ops={node.ops} fill />;
+      return <ImagePositionContext.Provider value={position}><ReplyImage path={node.src} alt={node.alt} caption={node.caption} maxColumns={columns} ops={node.ops} fill /></ImagePositionContext.Provider>;
     case "blend":
-      return <BlendedImage a={node.a} b={node.b} mode={node.mode} opacity={node.opacity} caption={node.caption} maxColumns={columns} fill />;
+      return <ImagePositionContext.Provider value={position}><BlendedImage a={node.a} b={node.b} mode={node.mode} opacity={node.opacity} caption={node.caption} maxColumns={columns} fill /></ImagePositionContext.Provider>;
     case "chart":
       return <ChartView title={node.title} unit={node.unit} max={node.max} bars={node.bars} columns={columns} />;
     case "progress":
@@ -59,7 +63,7 @@ function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
         <box style={{ flexDirection: "column", rowGap: node.gap, flexShrink: 0 }}>
           {node.children.map((child, at) => (
             <Cell key={at} width={columns}>
-              <UiNodeView node={child} columns={columns} />
+              <UiNodeView node={child} columns={columns} position={`${position}.${at}`} />
             </Cell>
           ))}
         </box>
@@ -74,7 +78,7 @@ function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
         <box style={{ flexDirection: widths === null ? "column" : "row", columnGap: node.gap, rowGap: node.gap, flexShrink: 0 }}>
           {node.children.map((child, at) => (
             <Cell key={at} width={widths?.[at] ?? columns}>
-              <UiNodeView node={child} columns={widths?.[at] ?? columns} />
+              <UiNodeView node={child} columns={widths?.[at] ?? columns} position={`${position}.${at}`} />
             </Cell>
           ))}
         </box>
@@ -88,7 +92,7 @@ function UiNodeView({ node, columns }: { node: UiNode; columns: number }) {
             const width = gridCellWidth(columns, fit, node.gap, child.span ?? 1);
             return (
               <Cell key={at} width={width}>
-                <UiNodeView node={child} columns={width} />
+                <UiNodeView node={child} columns={width} position={`${position}.${at}`} />
               </Cell>
             );
           })}

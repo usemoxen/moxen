@@ -1,5 +1,6 @@
 import { FrameBufferRenderable, RGBA, type FrameBufferOptions, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { extend } from "@opentui/react";
+import { isTerminalVisible, subscribeTerminalVisibility } from "../../hooks/useTerminalVisible.js";
 
 import { SURFACE, sceneBase } from "../../theme.js";
 import { createScene, type SceneId } from "./catalog.js";
@@ -51,6 +52,7 @@ const POINTER_FALL = 0.8;
 
 const players = new Set<ModelSceneRenderable>();
 let timer: ReturnType<typeof setInterval> | null = null;
+let stopVisibility: (() => void) | null = null;
 
 /**
  * Wall-clock seconds: every engine paints a pure function of this, and the
@@ -100,17 +102,31 @@ function tick(): void {
   dirty?.requestRender();
 }
 
+function syncSceneClock(): void {
+  if (players.size > 0 && isTerminalVisible()) {
+    timer ??= setInterval(tick, CLOCK_MS);
+  } else if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
 function join(player: ModelSceneRenderable): void {
   players.add(player);
-  timer ??= setInterval(tick, CLOCK_MS);
+  stopVisibility ??= subscribeTerminalVisibility(() => {
+    syncSceneClock();
+    if (isTerminalVisible()) tick();
+  });
+  syncSceneClock();
 }
 
 function leave(player: ModelSceneRenderable): void {
   players.delete(player);
-  if (players.size === 0 && timer !== null) {
-    clearInterval(timer);
-    timer = null;
+  if (players.size === 0) {
+    stopVisibility?.();
+    stopVisibility = null;
   }
+  syncSceneClock();
 }
 
 function hexTriplet(hex: string): [number, number, number] {

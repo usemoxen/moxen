@@ -14,76 +14,76 @@ Make sure you have:
 
 * A terminal or command prompt open
 * A code project to work with
-* A [Claude subscription](https://claude.com/pricing?utm_source=claude_code\&utm_medium=docs\&utm_content=quickstart_prereq) (Pro, Max, Team, or Enterprise), [Claude Console](https://platform.claude.com/) account, or access through a [supported cloud provider](/docs/en/third-party-integrations)
+* A [Claude subscription](https://claude.com/pricing?utm_source=claude_code\&utm_medium=docs\&utm_content=quickstart_prereq) (Pro, Max, Ultra, Team, or Enterprise), [Claude Console](https://platform.claude.com/) account, or access through a [supported cloud provider](https://code.claude.com/docs/en/third-party-integrations.md)
 
 > [!NOTE]
 >
 > These cases are covered on other pages:
 >
-> * **Never used a terminal before**: start with the [terminal guide](/docs/en/terminal-guide)
-> * **Want Claude Code somewhere other than the terminal**: Claude Code is also available on the [web](https://claude.ai/code), as a [desktop app](/docs/en/desktop), in [VS Code](/docs/en/vs-code) and [JetBrains IDEs](/docs/en/jetbrains), in [Slack](/docs/en/slack), and in CI/CD with [GitHub Actions](/docs/en/github-actions) and [GitLab](/docs/en/gitlab-ci-cd). See [all interfaces](/docs/en/overview#use-claude-code-everywhere).
+> * **Never used a terminal before**: start with the [terminal guide](https://code.claude.com/docs/en/terminal-guide)
+> * **Want Claude Code somewhere other than the terminal**: Claude Code is also available on the [web](https://claude.ai/code), as a [desktop app](https://code.claude.com/docs/en/desktop.md), in [VS Code](https://code.claude.com/docs/en/vs-code.md) and [JetBrains IDEs](https://code.claude.com/docs/en/jetbrains.md), in [Slack](https://code.claude.com/docs/en/slack.md), and in CI/CD with [GitHub Actions](https://code.claude.com/docs/en/github-actions.md) and [GitLab](https://code.claude.com/docs/en/gitlab-ci-cd.md). See [all interfaces](https://code.claude.com/docs/en/overview.md#use-claude-code-everywhere).
 
 ## Step 1: Install Claude Code
 
-To install Claude Code, open a terminal and run the command for your system. If you haven't used a terminal before, the [terminal guide](/docs/en/terminal-guide) shows how to open one and paste the command.
+To install Claude Code, open a terminal and run the command for your system. If you haven't used a terminal before, the [terminal guide](https://code.claude.com/docs/en/terminal-guide) shows how to open one and paste the command.
 
-**Native Install (Recommended)**
-
-**macOS, Linux, WSL:**
-
-```bash theme={null}
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-On Windows, your prompt shows `PS C:\` when you're in PowerShell and `C:\` without the `PS` when you're in CMD.
-
-**Windows PowerShell:**
-
-```powershell theme={null}
-irm https://claude.ai/install.ps1 | iex
-```
-
-**Windows CMD:**
-
-```batch theme={null}
-curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd
-```
-
-The install command shows no progress while it downloads Claude Code. When the installer finishes, open a new terminal window and run `claude --version`. A working installation prints a version number. If your shell says `claude` isn't found or isn't recognized, the install directory isn't on your PATH yet: see [Fix your PATH](/docs/en/troubleshoot-install#command-not-found-claude-after-installation).
-
-If you see `The token '&&' is not a valid statement separator`, you're in PowerShell, not CMD. If you see `'irm' is not recognized as an internal or external command`, you're in CMD, not PowerShell.
-
-If the install command fails with `syntax error near unexpected token '<'`, a `403`, or any other error, see [Troubleshoot installation](/docs/en/troubleshoot-install#find-your-error) to match the error to a fix and for alternative install methods.
-
-[Git for Windows](https://git-scm.com/downloads/win) is recommended on native Windows so Claude Code can use the Bash tool. If Git for Windows is not installed, Claude Code uses PowerShell as the shell tool instead. WSL setups do not need Git for Windows.
-
-> [!NOTE]
+> [tab] Native Install (Recommended)
 >
-> Native installations automatically update in the background to keep you on the latest version.
-
-**Homebrew**
-
-```bash theme={null}
-brew install --cask claude-code
-```
-
-Homebrew offers two casks. `claude-code` tracks the stable release channel, which is typically about a week behind and skips releases with major regressions. `claude-code@latest` tracks the latest channel and receives new versions as soon as they ship.
-
-> [!NOTE]
+> **macOS, Linux, WSL:**
 >
-> Homebrew installations do not auto-update. Run `brew upgrade claude-code` or `brew upgrade claude-code@latest`, depending on which cask you installed, to get the latest features and security fixes.
-
-**WinGet**
-
-```powershell theme={null}
-winget install Anthropic.ClaudeCode
-```
-
-> [!NOTE]
+> ```bash theme={null}
+> curl -fsSL https://claude.ai/install.sh | bash
+> ```
 >
-> WinGet installations do not auto-update. Run `winget upgrade Anthropic.ClaudeCode` periodically to get the latest features and security fixes.
+> On Windows, your prompt shows `PS C:\` when you're in PowerShell and `C:\` without the `PS` when you're in CMD.
+>
+> **Windows PowerShell:**
+>
+> ```powershell theme={null}
+> irm https://claude.ai/install.ps1 | iex
+> ```
+>
+> **Windows CMD:**
+>
+> ```batch theme={null}
+> curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd
+> ```
+>
+> The install command shows no progress while it downloads Claude Code. When the installer finishes, open a new terminal window and run `claude --version`. A working installation prints a version number. If your shell says `claude` isn't found or isn't recognized, the install directory isn't on your PATH yet: see [Fix your PATH](https://code.claude.com/docs/en/troubleshoot-install.md#command-not-found-claude-after-installation).
+>
+> If you see `The token '&&' is not a valid statement separator`, you're in PowerShell, not CMD. If you see `'irm' is not recognized as an internal or external command`, you're in CMD, not PowerShell.
+>
+> If the install command fails with `syntax error near unexpected token '<'`, a `403`, or any other error, see [Troubleshoot installation](https://code.claude.com/docs/en/troubleshoot-install.md#find-your-error) to match the error to a fix and for alternative install methods.
+>
+> [Git for Windows](https://git-scm.com/downloads/win) is recommended on native Windows so Claude Code can use the Bash tool. If Git for Windows is not installed, Claude Code uses PowerShell as the shell tool instead. WSL setups do not need Git for Windows.
+>
+> > [!NOTE]
+> >
+> > Native installations automatically update in the background to keep you on the latest version.
 
-You can also install with [apt, dnf, or apk](/docs/en/setup#install-with-linux-package-managers) on Debian, Fedora, RHEL, and Alpine.
+> [tab] Homebrew
+>
+> ```bash theme={null}
+> brew install --cask claude-code
+> ```
+>
+> Homebrew offers two casks. `claude-code` tracks the stable release channel, which is typically about a week behind and skips releases with major regressions. `claude-code@latest` tracks the latest channel and receives new versions as soon as they ship.
+>
+> > [!NOTE]
+> >
+> > Homebrew installations do not auto-update. Run `brew upgrade claude-code` or `brew upgrade claude-code@latest`, depending on which cask you installed, to get the latest features and security fixes.
+
+> [tab] WinGet
+>
+> ```powershell theme={null}
+> winget install Anthropic.ClaudeCode
+> ```
+>
+> > [!NOTE]
+> >
+> > WinGet installations do not auto-update. Run `winget upgrade Anthropic.ClaudeCode` periodically to get the latest features and security fixes.
+
+You can also install with [apt, dnf, or apk](https://code.claude.com/docs/en/setup.md#install-with-linux-package-managers) on Debian, Fedora, RHEL, and Alpine.
 
 To confirm the installation worked, run:
 
@@ -108,12 +108,12 @@ Claude Code prompts you to log in on first use. For Claude subscription or Conso
 
 You can log in using any of these account types:
 
-* [Claude Pro, Max, Team, or Enterprise](https://claude.com/pricing?utm_source=claude_code\&utm_medium=docs\&utm_content=quickstart_login) (recommended)
+* [Claude Pro, Max, Ultra, Team, or Enterprise](https://claude.com/pricing?utm_source=claude_code\&utm_medium=docs\&utm_content=quickstart_login) (recommended)
 * [Claude Console](https://platform.claude.com/) (API access with pre-paid credits). On first login, a "Claude Code" workspace is automatically created in the Console for centralized cost tracking.
-* [Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry](/docs/en/third-party-integrations) (enterprise cloud providers)
-* A self-hosted [Claude apps gateway](/docs/en/claude-apps-gateway), if your organization runs one: your admin pre-configures the gateway URL, and `/login` opens directly on the **Cloud gateway** screen for you to sign in with corporate SSO
+* [Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry](https://code.claude.com/docs/en/third-party-integrations.md) (enterprise cloud providers)
+* A self-hosted [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway), if your organization runs one: your admin pre-configures the gateway URL, and `/login` opens directly on the **Cloud gateway** screen for you to sign in with corporate SSO
 
-Once logged in, your credentials are stored and you won't need to log in again. Learn more in [Credential Management](/docs/en/authentication#credential-management).
+Once logged in, your credentials are stored and you won't need to log in again. Learn more in [Credential Management](https://code.claude.com/docs/en/authentication.md#credential-management).
 
 The Claude Code prompt appears with the version, current model, and working directory shown above it. Type `/help` for available commands or `/resume` to continue a previous conversation. To switch accounts later or re-authenticate, type `/login` inside the running session.
 
@@ -167,7 +167,7 @@ add a hello world function to the main file
 
 Claude Code finds the appropriate file and shows you the change. If it asks before making the change, select **Yes** to approve.
 
-The session's [permission mode](/docs/en/permission-modes) sets which actions Claude can take without asking you first. Press `Shift+Tab` at any time to switch the permission mode of the session you're in.
+The session's [permission mode](https://code.claude.com/docs/en/permission-modes.md) sets which actions Claude can take without asking you first. Press `Shift+Tab` at any time to switch the permission mode of the session you're in.
 
 ## Step 5: Use Git with Claude Code
 
@@ -249,7 +249,7 @@ Run these from your terminal to start or resume Claude Code.
 | `claude -c` | Continue most recent conversation in current directory | `claude -c` |
 | `claude -r` | Resume a previous conversation | `claude -r` |
 
-See the [CLI reference](/docs/en/cli-reference) for the complete list of shell commands.
+See the [CLI reference](https://code.claude.com/docs/en/cli-reference.md) for the complete list of shell commands.
 
 ### Session commands
 
@@ -261,19 +261,19 @@ Run these inside Claude Code after it starts.
 | `/help` | Show available commands | `/help` |
 | `/exit` or Ctrl+D twice | Exit Claude Code | `/exit` |
 
-See the [commands reference](/docs/en/commands) for the complete list of session commands.
+See the [commands reference](https://code.claude.com/docs/en/commands.md) for the complete list of session commands.
 
 ## Pro tips for beginners
 
-For more, see [best practices](/docs/en/best-practices) and [common workflows](/docs/en/common-workflows).
+For more, see [best practices](https://code.claude.com/docs/en/best-practices.md) and [common workflows](https://code.claude.com/docs/en/common-workflows.md).
 
-> **Be specific with your requests**
+> [accordion] Be specific with your requests
 >
 > Instead of: "fix the bug"
 >
 > Try: "fix the login bug where users see a blank screen after entering wrong credentials"
 
-> **Use step-by-step instructions**
+> [accordion] Use step-by-step instructions
 >
 > Break complex tasks into steps:
 >
@@ -283,7 +283,7 @@ For more, see [best practices](/docs/en/best-practices) and [common workflows](/
 > 3. build a webpage that allows users to see and edit their information
 > ```
 
-> **Let Claude explore first**
+> [accordion] Let Claude explore first
 >
 > Before making changes, let Claude understand your code:
 >
@@ -295,7 +295,7 @@ For more, see [best practices](/docs/en/best-practices) and [common workflows](/
 > build a dashboard showing products that are most frequently returned by our UK customers
 > ```
 
-> **Save time with shortcuts**
+> [accordion] Save time with shortcuts
 >
 > * Type `/` to see the commands and skills available to you
 > * Use Tab for command completion
@@ -306,12 +306,12 @@ For more, see [best practices](/docs/en/best-practices) and [common workflows](/
 
 Now that you've learned the basics, explore more advanced features:
 
-* [How Claude Code works](/docs/en/how-claude-code-works): understand the agentic loop, built-in tools, and how Claude Code interacts with your project
-* [Best practices](/docs/en/best-practices): get better results with effective prompting and project setup
-* [Common workflows](/docs/en/common-workflows): step-by-step guides for common tasks
-* [Extend Claude Code](/docs/en/features-overview): customize with CLAUDE.md, skills, hooks, MCP, and more
+* [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works.md): understand the agentic loop, built-in tools, and how Claude Code interacts with your project
+* [Best practices](https://code.claude.com/docs/en/best-practices.md): get better results with effective prompting and project setup
+* [Common workflows](https://code.claude.com/docs/en/common-workflows.md): step-by-step guides for common tasks
+* [Extend Claude Code](https://code.claude.com/docs/en/features-overview.md): customize with CLAUDE.md, skills, hooks, MCP, and more
 
-See [advanced setup](/docs/en/setup) for installation options, manual updates, or uninstallation instructions.
+See [advanced setup](https://code.claude.com/docs/en/setup.md) for installation options, manual updates, or uninstallation instructions.
 
 ## Getting help
 

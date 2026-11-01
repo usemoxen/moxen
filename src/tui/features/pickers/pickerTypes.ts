@@ -15,6 +15,8 @@ export type PickerName =
   | "project-new"
   | "background-tasks"
   | "settings"
+  | "onboarding"
+  | "changelog"
   | "stats"
   | "schedule"
   | "search"

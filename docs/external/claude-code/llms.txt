@@ -26,7 +26,7 @@
 - [Manage sessions](https://code.claude.com/docs/en/sessions.md): Name, resume, branch, and switch between Claude Code conversations. Covers `--continue`, `--resume`, `--from-pr`, the `/resume` picker, session naming, exporting transcripts, and where transcripts are stored.
 - [Common workflows](https://code.claude.com/docs/en/common-workflows.md): Step-by-step guides for exploring codebases, fixing bugs, refactoring, testing, and other everyday tasks with Claude Code.
 - [Prompt library](https://code.claude.com/docs/en/prompt-library.md): Copy-paste prompts for Claude Code, tagged by task and role.
-- [Best practices for Claude Code](https://code.claude.com/docs/en/best-practices.md): Tips and patterns for getting the most out of Claude Code, from configuring your environment to scaling across parallel sessions.
+- [Best practices for Claude Code](https://code.claude.com/docs/en/best-practices.md): Get more out of Claude Code: tell Claude what it can't see, give it a check to run, and enforce the rules that can't have exceptions.
 
 #### Platforms and integrations
 
@@ -38,7 +38,7 @@
 - [Let Claude use your computer from the CLI](https://code.claude.com/docs/en/computer-use.md): Enable computer use in the Claude Code CLI so Claude can open apps, click, type, and see your screen on macOS. Test native apps, debug visual issues, and automate GUI-only tools without leaving your terminal.
 - [Use Claude Code in VS Code](https://code.claude.com/docs/en/vs-code.md): Install and configure the Claude Code extension for VS Code. Get AI coding assistance with inline diffs, @-mentions, plan review, and keyboard shortcuts.
 - [JetBrains IDEs](https://code.claude.com/docs/en/jetbrains.md): Use Claude Code with JetBrains IDEs including IntelliJ, PyCharm, WebStorm, and more
-- [Claude Code in Slack](https://code.claude.com/docs/en/slack.md): Delegate coding tasks from Slack. This earlier version answers channel mentions only from Pro and Max accounts in workspaces not connected to Claude Tag.
+- [Claude Code in Slack](https://code.claude.com/docs/en/slack.md): Delegate coding tasks from Slack. This earlier version answers mentions only from Pro, Max, and Ultra accounts in workspaces not connected to Claude Tag.
 - [Claude Tag](https://code.claude.com/docs/en/claude-tag.md): Bring Claude into your team's Slack channels with Claude Tag and find its setup and usage documentation on claude.com.
 
 ##### Claude Code in the cloud
@@ -184,7 +184,7 @@
 #### Use plugins
 
 - [Install and manage plugins](https://code.claude.com/docs/en/plugins/install.md): Install Claude Code plugins from a marketplace on any surface you use, choose an install scope, and update or remove them later.
-- [Anthropic's marketplaces](https://code.claude.com/docs/en/plugins/anthropic-marketplaces.md): Anthropic's official, community, and demo plugin marketplaces for Claude Code: their names, repositories, how you add each, and where to browse their plugins.
+- [Anthropic's marketplaces](https://code.claude.com/docs/en/plugins/anthropic-marketplaces.md): Anthropic's official and community plugin marketplaces for Claude Code: their names, repositories, how you add each, and where to browse their plugins.
 - [Code intelligence plugins](https://code.claude.com/docs/en/plugins/code-intelligence.md): Install a language server plugin so Claude sees type errors after edits and navigates code by symbol, and answer the LSP plugin recommendation dialog.
 - [Plugin security and trust](https://code.claude.com/docs/en/plugins/security.md): Decide whether to trust a plugin before you install it, from what a plugin can do on your machine to how to review one and remove it.
 

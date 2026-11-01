@@ -18,7 +18,7 @@
 - [Commands](https://opencode.ai/v2/docs/commands/)
 - [Plugins](https://opencode.ai/v2/docs/plugins/)
 - [Providers](https://opencode.ai/v2/docs/providers/)
-- [Websearch](https://opencode.ai/v2/docs/websearch/)
+- [Web search](https://opencode.ai/v2/docs/websearch/)
 - [Network](https://opencode.ai/v2/docs/network/)
 - [Snapshots](https://opencode.ai/v2/docs/snapshots/)
 - [Compaction](https://opencode.ai/v2/docs/compaction/)
@@ -52,8 +52,10 @@
 ### Plugins
 
 - [Overview](https://opencode.ai/v2/docs/build/plugins/)
+- [Server](https://opencode.ai/v2/docs/build/plugins/server/)
+- [TUI](https://opencode.ai/v2/docs/build/plugins/cli/)
+- [GUI](https://opencode.ai/v2/docs/build/plugins/gui/)
 - [RPC](https://opencode.ai/v2/docs/build/plugins/rpc/)
-- [CLI](https://opencode.ai/v2/docs/build/plugins/cli/)
 - [Migrate from V1](https://opencode.ai/v2/docs/build/plugins/migrate-v1/)
 
 ### Client
@@ -81,7 +83,7 @@
 - [Intro](https://opencode.ai/v2/docs/console/)
 - [Models](https://opencode.ai/v2/docs/console/models/)
 - [Providers](https://opencode.ai/v2/docs/console/providers/)
-- [Web Search](https://opencode.ai/v2/docs/console/websearch/)
+- [Web search](https://opencode.ai/v2/docs/console/websearch/)
 - [Go](https://opencode.ai/v2/docs/console/go/)
 
 ### Workspace
@@ -98,7 +100,6 @@
 - [Overview](https://opencode.ai/v2/docs/console/api/)
 - [Inference](https://opencode.ai/v2/docs/console/api/inference/)
 - [Providers](https://opencode.ai/v2/docs/console/api/providers/)
-- [Budgets](https://opencode.ai/v2/docs/console/api/budgets/)
 
 ### Harnesses
 

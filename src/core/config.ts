@@ -205,6 +205,15 @@ export function normalizeConfig(raw: unknown): CliConfig {
     // On is the default, so only off is kept.
     if (!value) result.memory = false;
   }
+  if (input.memoryEmbeddings !== undefined) {
+    const value = input.memoryEmbeddings;
+    if (value !== true && value !== false && value !== "true" && value !== "false") throw new CliError("INVALID_CONFIG", "memoryEmbeddings must be true or false.");
+    result.memoryEmbeddings = value === true || value === "true";
+  }
+  if (input.memoryEmbeddingLoading !== undefined) {
+    if (input.memoryEmbeddingLoading !== "keep-loaded" && input.memoryEmbeddingLoading !== "on-demand") throw new CliError("INVALID_CONFIG", "memoryEmbeddingLoading must be keep-loaded or on-demand.");
+    result.memoryEmbeddingLoading = input.memoryEmbeddingLoading;
+  }
   if (input.autoContinueAtUsageLimit !== undefined) {
     // A boolean in the file; `config set` hands it over as text.
     const raw: unknown = input.autoContinueAtUsageLimit;
@@ -361,6 +370,7 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
       "thinkingEffort",
       "moxenTools",
       "orchestration",
+      "memory",
       "moxenSkills",
       "instructions",
       "autoContinueAtUsageLimit",
@@ -377,18 +387,18 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
     if (claude || args || models) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models };
   }
   if (input.codex !== undefined) {
-    const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"]);
+    const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"]);
     const models = handoffModelsOf(input.codex, "providers.codex");
     if (codex || models) result.codex = { ...codex, ...models };
   }
   if (input.opencode !== undefined) {
-    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"]);
+    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"]);
     const models = handoffModelsOf(input.opencode, "providers.opencode");
     if (opencode || models) result.opencode = { ...opencode, ...models };
   }
   if (input.harness !== undefined) {
     const withProfiles = normalizeHarnessConfig(input.harness);
-    const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
+    const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
     const models = handoffModelsOf(input.harness, "providers.harness");
     if (withProfiles || defaults || models) result.harness = { ...defaults, ...withProfiles, ...models };
   }

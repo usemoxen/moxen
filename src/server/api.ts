@@ -29,6 +29,8 @@ import type {
   ShellFrame,
   ThreadFrame,
 } from "./protocol.js";
+export type { ExperienceSnapshot, ReleaseNotes, ReleaseText } from "../core/experience/experience.js";
+export { APP_VERSION } from "../core/version.js";
 
 export type {
   Command,

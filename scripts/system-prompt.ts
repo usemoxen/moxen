@@ -5,6 +5,7 @@
  *   bun scripts/system-prompt.ts --help
  *   bun scripts/system-prompt.ts                        Claude Code (the default provider)
  *   bun scripts/system-prompt.ts --provider harness     Moxen Harness
+ *   bun scripts/system-prompt.ts --provider codex       Codex developer instructions
  *   bun scripts/system-prompt.ts --provider opencode --platform windows
  *   bun scripts/system-prompt.ts --instructions         only Moxen's runtime instructions
  *   bun scripts/system-prompt.ts --json                 prompt and tools as JSON
@@ -30,6 +31,8 @@ import { APP_NAME } from "../src/core/config.js";
 import type { McpServerSpec } from "../src/core/mcp.js";
 import { buildOpencodeSystemPrompt } from "../src/core/providers/opencode/prompt.js";
 import { buildSystemPrompt } from "../src/core/providers/harness/prompt.js";
+import { codexDeveloperInstructions } from "../src/core/providers/codex/instructions.js";
+import { buildCodexSystemPrompt } from "../src/core/providers/codex/prompt.js";
 import { availableShells, type AvailableShells } from "../src/core/providers/harness/tools/shell.js";
 import { SESSION_TOOL_NAMES, builtinTools } from "../src/core/providers/harness/tools/index.js";
 import { buildRuntimeInstructions, harnessName } from "../src/core/threads/instructions.js";
@@ -37,7 +40,7 @@ import { detectShells, type ShellDetection } from "../src/core/threads/shells.js
 import { moxenInstructions } from "../src/server/mcp/stdio.js";
 import { moxenToolsFor } from "../src/server/mcp/tools.js";
 
-const PROVIDERS = ["claude", "opencode", "harness"] as const;
+const PROVIDERS = ["claude", "codex", "opencode", "harness"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const WORKTREE = { mode: "worktree" as const, path: "/path/to/worktree", branch: "moxen/example" };
@@ -56,6 +59,7 @@ Options:
 
 The prompt each provider gets:
   claude              Claude Code's preset prompt, then the runtime instructions appended to it
+  codex               Moxen's Codex base prompt (replacing Codex's own), then the runtime instructions as developer instructions
   opencode            Moxen's OpenCode base prompt, then the runtime instructions as an instruction entry
   harness             the whole Moxen Harness prompt, with the runtime instructions inside it
 
@@ -215,6 +219,7 @@ function harnessShells(): AvailableShells {
 /** The whole prompt for the provider: the base prompt it gets around Moxen's instructions. */
 function promptFor(): string {
   if (provider === "claude") return instructions;
+  if (provider === "codex") return [buildCodexSystemPrompt(), codexDeveloperInstructions(instructions, true)].join("\n\n");
   if (provider === "opencode") return [buildOpencodeSystemPrompt(), instructions].join("\n\n");
   const shells = harnessShells();
   const names = [

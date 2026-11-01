@@ -1,10 +1,12 @@
+import { overflowColumns } from "../../model/textoverflow.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import type { PermissionDecision } from "../../../server/protocol.js";
 import type { PendingPermissionRequest } from "../../model/thread.js";
 
@@ -90,16 +92,12 @@ export function PermissionPanel({
         selectable={false}
       >
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>
-            {truncate(`◈ ${headline(request)}`, inner)}
-          </text>
+          <OverflowText fg={COLOR.warn} bg={SURFACE.raised} selectable={false} width={inner}>{`◈ ${headline(request)}`}</OverflowText>
           <HoverButton label=" × " fg={COLOR.faint} hoverFg={COLOR.danger} bg={SURFACE.raised} onClick={() => onDecide("decline")} />
         </box>
         {request.description === null ? null : (
           <box style={{ flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-            <text fg={COLOR.dim} bg={SURFACE.raised}>
-              {truncate(request.description, inner)}
-            </text>
+            <OverflowText fg={COLOR.dim} bg={SURFACE.raised} width={inner}>{request.description}</OverflowText>
           </box>
         )}
         {request.detail === null ? null : (
@@ -123,6 +121,7 @@ export function PermissionPanel({
         <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
           {rows.map((row, order) => {
             const active = order === highlight;
+            const columns = overflowColumns(`  ${row.label}`, row.meta, inner - 2);
             return (
               <box
                 key={row.key}
@@ -131,13 +130,9 @@ export function PermissionPanel({
                 onMouseDown={() => onDecide(row.key)}
                 onMouseOver={() => setHighlight(order)}
               >
-                <text fg={active ? PICK_FG : COLOR.text} bg={active ? PICK_BG : SURFACE.raised} selectable={false}>
-                  {`${active ? "❯ " : "  "}${truncate(row.label, Math.max(0, inner - (row.meta === undefined ? 4 : row.meta.length + 5)))}`}
-                </text>
+                <OverflowText fg={active ? PICK_FG : COLOR.text} bg={active ? PICK_BG : SURFACE.raised} selectable={false} width={columns.label} prefix={active ? "❯ " : "  "} active={active}>{row.label}</OverflowText>
                 {row.meta === undefined ? null : (
-                  <text fg={active ? PICK_FG : COLOR.faint} bg={active ? PICK_BG : SURFACE.raised} selectable={false}>
-                    {` ${row.meta}`}
-                  </text>
+                  <OverflowText fg={active ? PICK_FG : COLOR.faint} bg={active ? PICK_BG : SURFACE.raised} selectable={false} width={columns.detail} active={active}>{row.meta}</OverflowText>
                 )}
               </box>
             );
@@ -145,7 +140,7 @@ export function PermissionPanel({
         </box>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-        <text fg={COLOR.faint}>{truncate(t("perm.move_13_pick_enter_39e3"), Math.max(0, width))}</text>
+        <OverflowText fg={COLOR.faint} width={Math.max(0, width)}>{t("perm.move_13_pick_enter_39e3")}</OverflowText>
       </box>
     </box>
   );

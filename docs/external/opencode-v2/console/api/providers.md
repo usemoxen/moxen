@@ -14,7 +14,7 @@ curl -X POST "https://opencode.ai/inference/custom/conn_.../chat/completions" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-chat",
+    "model": "deepseek-v4.1-flash",
     "messages": [{ "role": "user", "content": "Say hi" }]
   }'
 ```
@@ -61,7 +61,7 @@ curl -X POST "https://opencode.ai/inference/custom/conn_.../chat/completions" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-chat",
+    "model": "deepseek-v4.1-flash",
     "messages": [{ "role": "user", "content": "Say hi" }]
   }'
 ```
@@ -73,7 +73,7 @@ curl -X POST "https://opencode.ai/inference/custom/conn_.../responses" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5.4",
+    "model": "gpt-6.1-sol",
     "input": "Say hi"
   }'
 ```
@@ -87,7 +87,7 @@ curl -X POST "https://opencode.ai/inference/custom/conn_.../messages" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "max_tokens": 1024,
     "messages": [{ "role": "user", "content": "Say hi" }]
   }'
@@ -99,7 +99,7 @@ The model and method are part of the path. Replace `:generateContent` with `:str
 response.
 
 ```bash
-curl -X POST "https://opencode.ai/inference/custom/conn_.../models/gemini-3.1-pro:generateContent" \
+curl -X POST "https://opencode.ai/inference/custom/conn_.../models/gemini-4-argon:generateContent" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{

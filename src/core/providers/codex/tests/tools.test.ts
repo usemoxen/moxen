@@ -155,4 +155,19 @@ describe("Codex Harness tools over MCP", () => {
     const taskId = driver.backgroundTasks("thread")[0]!.taskId;
     await expect.poll(async () => (await client.call("task_output", { task_id: taskId, wait_ms: 500 }, signal)).text).toContain("exit code 0");
   });
+  it("keeps the to-do list with the Harness todo tool and shows it as a plan update", async () => {
+    const { client, events } = await setup();
+    const result = await client.call("todo", { todos: [{ content: "Read the driver", status: "completed" }, { content: "Edit it", status: "in_progress" }] }, signal);
+    expect(result.isError).toBe(false);
+    expect(events.find((event) => event.type === "turn.plan.updated")).toMatchObject({
+      provider: "codex",
+      raw: { plan: [{ step: "Read the driver", status: "completed" }, { step: "Edit it", status: "inProgress" }] },
+    });
+    expect((await client.call("todo", { todos: [{ content: "a", status: "in_progress" }, { content: "b", status: "in_progress" }] }, signal)).isError).toBe(true);
+  });
+
+  it("offers no todo tool when the to-do list is off", async () => {
+    const { client } = await setup({ checklist: false });
+    expect((await client.call("todo", { todos: [] }, signal)).isError).toBe(true);
+  });
 });

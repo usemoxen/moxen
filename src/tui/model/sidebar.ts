@@ -177,15 +177,15 @@ export function nestDelegated(
   threads: readonly ThreadEnvelope[],
   now?: number,
 ): Array<{ thread: ThreadEnvelope; depth: number; last: boolean; natives: SidebarNative[] }> {
-  const present = new Set(threads.map((thread) => thread.id));
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const rootOf = (thread: ThreadEnvelope): string | null => {
-    let parent = typeof thread.parentThreadId === "string" && present.has(thread.parentThreadId) ? thread.parentThreadId : null;
+    let parent = typeof thread.parentThreadId === "string" && byId.has(thread.parentThreadId) ? thread.parentThreadId : null;
     const seen = new Set([thread.id]);
     // Climb to the top-level ancestor, so the tree stays one level deep.
     while (parent !== null && !seen.has(parent)) {
       seen.add(parent);
-      const up = threads.find((candidate) => candidate.id === parent)?.parentThreadId;
-      if (typeof up !== "string" || !present.has(up)) break;
+      const up = byId.get(parent)?.parentThreadId;
+      if (typeof up !== "string" || !byId.has(up)) break;
       parent = up;
     }
     return parent;
@@ -195,7 +195,11 @@ export function nestDelegated(
   for (const thread of threads) {
     const root = rootOf(thread);
     if (root === null) top.push(thread);
-    else children.set(root, [...(children.get(root) ?? []), thread]);
+    else {
+      const family = children.get(root) ?? [];
+      family.push(thread);
+      children.set(root, family);
+    }
   }
   return top.flatMap((thread) => {
     const kids = [...(children.get(thread.id) ?? [])].sort((left, right) => Date.parse(left.createdAt ?? "") - Date.parse(right.createdAt ?? ""));
@@ -312,14 +316,14 @@ export function buildSidebarSections(state: ShellState, options: SidebarOptions)
   // The Settled section counts and pages families, not threads: a delegated
   // task rides under its settled parent, so a runaway loop of 150 tasks is
   // one row to expand, not 150 to page through.
-  const settledIds = new Set(inProject.map((thread) => thread.id));
+  const settledById = new Map(inProject.map((thread) => [thread.id, thread]));
   const settledTop = (thread: ThreadEnvelope): string => {
     const seen = new Set([thread.id]);
     let top = thread;
-    for (let up = settledIds.has(top.parentThreadId ?? "") ? inProject.find((c) => c.id === top.parentThreadId) : undefined; up !== undefined && !seen.has(up.id); ) {
+    for (let up = settledById.get(top.parentThreadId ?? ""); up !== undefined && !seen.has(up.id); ) {
       seen.add(up.id);
       top = up;
-      up = settledIds.has(top.parentThreadId ?? "") ? inProject.find((c) => c.id === top.parentThreadId) : undefined;
+      up = settledById.get(top.parentThreadId ?? "");
     }
     return top.id;
   };

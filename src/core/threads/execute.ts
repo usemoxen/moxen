@@ -159,6 +159,8 @@ export interface TurnOutcome {
   readonly status: "completed" | "failed" | "interrupted";
   readonly text: string;
   readonly usage: TurnUsage | null;
+  readonly turnOutputTokens?: number;
+  readonly generation?: { readonly characters: number; readonly durationMs: number };
   readonly error: string | null;
 }
 
@@ -1220,6 +1222,8 @@ async function settleTurn(
     await completeTurn(store, threadId, storeTurnId, {
       ...(outcome.text ? { text: outcome.text } : {}),
       ...(outcome.usage ? { usage: outcome.usage } : {}),
+      ...(outcome.turnOutputTokens !== undefined ? { turnOutputTokens: outcome.turnOutputTokens } : {}),
+      ...(outcome.generation !== undefined ? { generation: outcome.generation } : {}),
     });
   } else if (outcome.status === "interrupted") {
     await interruptTurn(store, threadId).catch(() => undefined);

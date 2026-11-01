@@ -1,3 +1,5 @@
+import { overflowColumns, textWidth } from "../../model/textoverflow.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useEffect, useMemo, useState } from "react";
 import { useKeyboard } from "@opentui/react";
@@ -5,14 +7,11 @@ import { useKeyboard } from "@opentui/react";
 import { SearchField } from "../../ui/searchfield.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
-import { marqueeWindow } from "../../model/skills.js";
 import { Slider } from "../../ui/slider.js";
 import { effortTones, sliderLayout } from "../../model/slider.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import { TextAttributes } from "@opentui/core";
 
-/** Marquee tick for the highlighted row's meta text, ms per column — same cadence as the skill popup. */
-const PICKER_MARQUEE_INTERVAL_MS = 350;
 
 export interface PickerRow {
   key: string;
@@ -104,7 +103,6 @@ export function PickerModal({
   onClose: () => void;
 }) {
   const [index, setIndex] = useState(0);
-  const [marqueeTick, setMarqueeTick] = useState(0);
   const sliderWidth = Math.max(10, width - 6);
   /** Sliders need room for every label; narrower than that they are a list like any other picker. */
   const sliding = body.kind === "sliders" && body.sliders.every((slider) => sliderLayout(slider.stops.map((stop) => stop.label), sliderWidth).fits);
@@ -132,13 +130,6 @@ export function PickerModal({
     const current = slider.stops.findIndex((stop) => stop.key === slider.current);
     return Math.max(0, current >= 0 ? current : slider.stops.findIndex((stop) => stop.isDefault === true));
   };
-
-  // The highlighted row's meta text auto-scrolls instead of sitting
-  // truncated or overflowing — ticks only while the modal is mounted.
-  useEffect(() => {
-    const timer = setInterval(() => setMarqueeTick((tick) => tick + 1), PICKER_MARQUEE_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, []);
 
   const visible = useMemo(() => {
     if (listBody.kind !== "list") return [];
@@ -291,20 +282,9 @@ export function PickerModal({
                 const disabled = row.disabled === true;
                 const rowBg = active && !disabled ? PICK_BG : SURFACE.raised;
                 const labelFg = disabled ? COLOR.faint : active ? PICK_FG : row.selected === true ? COLOR.accent : COLOR.text;
-                // The label is the actionable part — it never gets crowded
-                // out by a long meta description. Whatever width survives
-                // goes to the meta; the highlighted row's meta auto-scrolls
-                // through the rest instead of sitting truncated or
-                // overflowing the row.
-                const labelText = truncate(`${row.selected === true ? "● " : "  "}${row.label}`, rowWidth);
-                const badgeText = row.badge === undefined ? "" : `${row.badge}${row.meta === undefined || row.meta.length === 0 ? "" : "  "}`;
-                const metaBudget = rowWidth - labelText.length - 1 - badgeText.length;
-                const metaText =
-                  row.meta === undefined || row.meta.length === 0 || metaBudget < 6
-                    ? null
-                    : active
-                      ? marqueeWindow(row.meta, metaBudget, marqueeTick)
-                      : truncate(row.meta, metaBudget);
+                const labelText = `${row.selected === true ? "● " : "  "}${row.label}`;
+                const badgeText = row.badge === undefined ? "" : `${row.badge}${row.meta ? "  " : ""}`;
+                const columns = overflowColumns(labelText, row.meta, rowWidth - textWidth(badgeText) - (badgeText ? 1 : 0));
                 return (
                   <box
                     key={row.key}
@@ -313,12 +293,10 @@ export function PickerModal({
                     {...(disabled ? {} : { onMouseDown: row.onPick })}
                     onMouseOver={() => setIndex(visible.findIndex((entry) => entry.key === row.key))}
                   >
-                    <text fg={labelFg} bg={rowBg} selectable={false}>
-                      {labelText}
-                    </text>
+                    <OverflowText fg={labelFg} bg={rowBg} selectable={false} width={columns.label} prefix={row.selected === true ? "● " : "  "} active={active}>{row.label}</OverflowText>
                     <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={rowBg}>
                       {badgeText === "" ? null : <text fg={active && !disabled ? PICK_FG : COLOR.accent} bg={rowBg} selectable={false}>{` ${badgeText}`}</text>}
-                      {metaText === null ? null : <text fg={active && !disabled ? PICK_FG : COLOR.faint} bg={rowBg} selectable={false}>{badgeText === "" ? ` ${metaText}` : metaText}</text>}
+                      {!row.meta ? null : <OverflowText fg={active && !disabled ? PICK_FG : COLOR.faint} bg={rowBg} selectable={false} width={columns.detail} active={active}>{row.meta}</OverflowText>}
                     </box>
                   </box>
                 );
@@ -328,7 +306,7 @@ export function PickerModal({
         )}
       </scrollbox>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <text fg={COLOR.faint} bg={SURFACE.raised}>{truncate(hint, inner)}</text>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} width={inner}>{hint}</OverflowText>
       </box>
     </ModalShell>
   );

@@ -36,6 +36,19 @@ export interface CodexRateSnapshot {
   readonly secondary?: unknown;
 }
 
+/** Require both reported windows to retain the reserve for an image turn. */
+export function codexImageUsageAllowed(snapshot: CodexRateSnapshot, now = Date.now()): boolean {
+  if (snapshot.limitId && snapshot.limitId !== "codex") return false;
+  const windows = [snapshot.primary, snapshot.secondary].map(codexRateWindowOf);
+  const session = windows.find((window) => window?.windowDurationMins === SESSION_MINS);
+  const weekly = windows.find((window) => window?.windowDurationMins === WEEK_MINS);
+  return session?.usedPercent != null && weekly?.usedPercent != null &&
+    session.resetsAt != null && session.resetsAt * 1000 > now &&
+    weekly.resetsAt != null && weekly.resetsAt * 1000 > now &&
+    session.usedPercent >= 0 && session.usedPercent <= 97 &&
+    weekly.usedPercent >= 0 && weekly.usedPercent <= 99;
+}
+
 /** Map a rate-limits snapshot to windows (empty when not ours to show). */
 export function codexWindowsOf(snapshot: CodexRateSnapshot): RateLimitWindow[] {
   if (snapshot.limitId && snapshot.limitId !== "codex") return [];

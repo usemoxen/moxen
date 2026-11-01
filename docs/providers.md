@@ -1,6 +1,6 @@
 # Providers
 
-Moxen drives two provider runtimes through their own CLIs, and runs a third
+Moxen drives three provider runtimes through their own CLIs, and runs a fourth
 itself. Each CLI driver is a thin adapter over one runtime: no shared layers,
 no host services, only our own root types plus type-level imports, so drivers
 stay dependency-clean.
@@ -100,8 +100,10 @@ worktree guard also refuses shell redirects into the protected checkout.
 
 Moxen disables native `exec_command`, `write_stdin`, `request_user_input` and
 `request_user_input_async`. The private `moxen_harness` MCP server supplies
-`bash`, `powershell` when installed on Windows, `ask`, `task_output` and
-`task_stop`, using the Harness implementations. This transport also attaches
+`bash`, `powershell` when installed on Windows, `ask`, `task_output`,
+`task_stop` and the `todo` checklist (unless the to-do list is off), using the
+Harness implementations. `todo` updates feed the tasks panel, and Codex's own
+`update_plan` is removed. This transport also attaches
 the tools to existing rollouts without replacing the conversation. Disabling
 Shell in Codex's tool settings removes the replacement shell tools too.
 All MCP servers attached by Moxen, including its own memory/delegation tools and
@@ -134,6 +136,11 @@ no separate Claude-style Skill tool. Moxen’s skill picker reads the native
 `skills/list` inventory and sends explicit `/name` or `$name` selections as
 structured native skill references (name and path). See [native skills](https://developers.openai.com/codex/skills).
 
+Moxen replaces Codex's own base prompt (`baseInstructions`, built in
+`src/core/providers/codex/prompt.ts`) and adds its runtime instructions as developer
+instructions. `bun scripts/system-prompt.ts --provider codex` prints both. Resumed
+threads send the new base prompt too, so their cached prefix is read afresh once.
+
 Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
 with Automatic, Concise and Off also available. Moxen preserves the reported
 sections and renders their markdown; the amount of reasoning exposed remains
@@ -145,6 +152,30 @@ running generation shows a plain status label rather than a guessed
 percentage. The runtime instructions tell models to embed a generated or edited
 image’s absolute saved path in their final reply; a tool result alone does not
 display an image in the answer.
+
+Other providers can use Moxen's `image_gen` tool to run a focused Codex image
+task in the same workspace. It uses the installed `codex app-server`, not an
+internal image API, and does not read or export Codex credentials. Codex
+threads use their native image tool instead; delegated tasks and providers
+with orchestration switched off do not get the bridge.
+
+The bridge is offered only after Codex reports a supported paid ChatGPT plan
+and current usage windows with at least **3% remaining in the five-hour
+window and 1% in the weekly window**. Moxen checks again before starting
+each generation. Either reserve falling below its threshold blocks the call,
+even in an already-running agent. Missing, expired or unreadable limits block
+it too; Moxen never assumes that an old window has reset. Switching off
+Codex's native image-generation tool also switches off the bridge. API-key
+accounts are not eligible for this subscription-only tool.
+
+Pass a prompt and optionally up to five absolute reference-image paths on
+the server machine. The tool returns a task id immediately, then an ordinary
+task notification arrives when Codex settles. Call `image_gen` with that task
+id to read its `images` list, or use `task_cancel` to stop it. Only successful
+native image-generation events supply paths; a final message claiming to have
+saved a file does not count. A settled task with no generated image reports
+an explicit failure. Codex still decides availability and enforces its own
+generation and safety limits.
 
 Gaps and native limits:
 
@@ -162,8 +193,10 @@ Gaps and native limits:
   Codex’s model and setup. Patching is shown as always on because Codex has no
   independent removal switch. Pre-tool hooks can deny it, but session-injected
   hooks need separate exact-hash trust approval; Moxen does not bypass that
-  boundary. Switching the to-do list off instructs the model not to call
-  `update_plan` and suppresses checklist updates; it cannot remove that tool.
+  boundary. Goals (`create_goal`, `get_goal`, `update_goal`) are off by default; setting
+  the list yourself replaces that default, so leave `goals` in it to keep them off. Codex's `update_plan` is always removed (`tools.update_plan.enabled`),
+  since Moxen's `todo` replaces it; switching the to-do list off removes `todo`
+  as well.
 - `/btw` disables inherited MCP servers, apps, plugins, shell, subagents,
   web search, image tools, browser/computer tools, sleep and goals on its read-only fork, and declines approval requests.
   Unlike Claude's empty tool list, Codex may still offer harmless native

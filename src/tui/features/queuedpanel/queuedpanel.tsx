@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -6,7 +7,7 @@ import { useRef } from "react";
 import { useHover } from "../../hooks/useHover.js";
 import { clockTime } from "../../model/turns.js";
 import { queuedLabel, queuedSummary, type QueuedMessage } from "../../model/thread.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 
 /** Rows shown at once; a longer queue scrolls inside the panel, like Tasks. */
 const MAX_QUEUED_ROWS = 6;
@@ -72,7 +73,7 @@ export function QueuedPanel({
     return (
       <box key={item.turnId} style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${index + 1}. `}</text>
-        <text fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel}>{truncate(firstLine || t("queued.image_only_d3ad"), textWidth)}</text>
+        <OverflowText fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel} width={textWidth}>{firstLine || t("queued.image_only_d3ad")}</OverflowText>
         <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{extra}</text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         <text fg={item.reason === "usage-hold" ? COLOR.warn : COLOR.faint} bg={SURFACE.panel} selectable={false}>

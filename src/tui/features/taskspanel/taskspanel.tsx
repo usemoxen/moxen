@@ -1,9 +1,10 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 
-import { COLOR, pulseColor, SURFACE, truncate } from "../../theme.js";
+import { COLOR, pulseColor, SURFACE } from "../../theme.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
 import type { PlanSnapshot } from "../../model/thread.js";
 import { taskCounts, taskWindow } from "../../model/tasks.js";
@@ -64,9 +65,7 @@ export function TasksPanel({
         <text fg={finished ? COLOR.added : active ? activeFg : COLOR.dim} bg={SURFACE.panel}>
           {finished ? "✓ " : active ? "● " : "☐ "}
         </text>
-        <text fg={finished ? COLOR.dim : COLOR.text} bg={SURFACE.panel}>
-          {`#${index + 1} ${truncate(item.content, Math.max(0, rowWidth - 8))}`}
-        </text>
+        <OverflowText fg={finished ? COLOR.dim : COLOR.text} bg={SURFACE.panel} width={Math.max(0, rowWidth - 8) + String(index + 1).length + 2} prefix={`#${index + 1} `} active={active}>{item.content}</OverflowText>
       </box>
     );
   });

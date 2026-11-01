@@ -44,3 +44,6 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Local semantic memory search (production bundle)
+        run: bun scripts/verify-memory-embeddings.ts

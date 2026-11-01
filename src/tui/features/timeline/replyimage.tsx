@@ -1,7 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useId, useMemo, useState } from "react";
 import { useTerminalDimensions } from "@opentui/react";
 
 import { useHover } from "../../hooks/useHover.js";
+import { useImageVisibility } from "../../hooks/useImageVisibility.js";
 import { imageFromDataUrl, thumbnailCells, type LoadedImage } from "../../model/imagethumb.js";
 import { nativeDecoder } from "../../model/imageshrink.js";
 import { blendLoaded, processImage } from "../../model/imageops.js";
@@ -10,7 +11,9 @@ import type { UiImage, UiOp } from "../../../core/threads/uiblock.js";
 import { COLOR } from "../../theme.js";
 import { useModalOpen } from "../../ui/modalopen.js";
 import { loadImage, type AttachmentReader } from "./attachmentrow.js";
-import { openImageViewer } from "./imageviewer.js";
+import { ImageSetContext, openImageViewer } from "./imageviewer.js";
+
+export const ImagePositionContext = createContext("");
 
 /** Reads an image a reply shows, by the path the reply names (`image.read`). Provided by `Timeline`. */
 export const ReplyImageReaderContext = createContext<AttachmentReader | null>(null);
@@ -77,12 +80,26 @@ interface PictureProps {
  * black). A click opens it full screen.
  */
 function ImagePicture({ image, label, maxColumns, fill = false }: PictureProps & { image: LoadedImage }) {
+  const set = useContext(ImageSetContext);
+  const position = useContext(ImagePositionContext);
+  const id = useId();
+  const viewed = useMemo(() => ({ ...image, label, sizeBytes: image.bytes.length }), [image, label]);
+  useEffect(() => {
+    if (set === null) return;
+    const key = position || id;
+    set.set(key, viewed);
+    return () => { set.delete(key); };
+  }, [set, position, id, viewed]);
   const modalOpen = useModalOpen();
   const { width: screenWidth } = useTerminalDimensions();
   const { hovered, handlers } = useHover();
+  const { ref, visible } = useImageVisibility();
   const cells = thumbnailCells(image.size, Math.max(8, maxColumns ?? Math.min(MAX_COLUMNS, screenWidth - SIDE_ROOM)), MAX_ROWS);
+  const mosaic = useMemo(
+    () => visible && modalOpen && cells !== null ? mosaicOf(image, cells.columns, cells.rows) : null,
+    [image, visible, modalOpen, cells?.columns, cells?.rows],
+  );
   if (cells === null) return <text fg={COLOR.dim} selectable={false}>{`▣ ${label}`}</text>;
-  const mosaic = modalOpen ? mosaicOf(image, cells.columns, cells.rows) : null;
   return (
     <box
       style={{
@@ -91,11 +108,11 @@ function ImagePicture({ image, label, maxColumns, fill = false }: PictureProps &
         width: cells.columns,
         ...(fill ? { flexGrow: 1, justifyContent: "space-between" as const } : {}),
       }}
-      onMouseDown={() => openImageViewer({ ...image, label, sizeBytes: image.bytes.length })}
+      onMouseDown={() => openImageViewer(viewed, set === null ? [viewed] : [...set.entries()].sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true })).map(([, value]) => value))}
       {...handlers}
     >
-      <box style={{ height: cells.rows, width: cells.columns, flexShrink: 0 }}>
-        {mosaic === null ? (
+      <box ref={ref} style={{ height: cells.rows, width: cells.columns, flexShrink: 0 }}>
+        {!visible ? null : mosaic === null ? (
           <image source={image.bytes} fit="fit" style={{ width: cells.columns, height: cells.rows }} />
         ) : (
           mosaic.map((runs, row) => (

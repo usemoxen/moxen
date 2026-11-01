@@ -10,7 +10,7 @@
 >
 > Scheduled tasks are in research preview. Behavior, limits, and the API surface may change.
 
-A cloud scheduled task, formerly a routine, is a saved Claude Code configuration: a prompt, one or more repositories, and a set of [connectors](/docs/en/mcp), packaged once and run automatically. Scheduled tasks execute on Anthropic-managed cloud infrastructure, or on your organization's [self-hosted environment](/docs/en/self-hosted-environments) when routed there, so they keep working when your laptop is closed.
+A cloud scheduled task, formerly a routine, is a saved Claude Code configuration: a prompt, one or more repositories, and a set of [connectors](https://code.claude.com/docs/en/mcp.md), packaged once and run automatically. Scheduled tasks execute on Anthropic-managed cloud infrastructure, or on your organization's [self-hosted environment](https://code.claude.com/docs/en/self-hosted-environments) when routed there, so they keep working when your laptop is closed.
 
 Each scheduled task can have one or more triggers attached to it:
 
@@ -25,11 +25,11 @@ A scheduled task doesn't need a schedule:
 * A task with only an API trigger runs when you call its endpoint.
 * A task with only a GitHub trigger runs when a matching repository event occurs.
 
-Scheduled tasks are available on Pro, Max, Team, and Enterprise plans. Create and manage them at [claude.ai/code/routines](https://claude.ai/code/routines), or from the CLI with `/schedule`. The earlier name, routines, [still appears](#where-the-name-routines-still-appears) in the web address, the CLI, and the API.
+Scheduled tasks are available on Pro, Max, Ultra, Team, and Enterprise plans. Create and manage them at [claude.ai/code/routines](https://claude.ai/code/routines), or from the CLI with `/schedule`. The earlier name, routines, [still appears](#where-the-name-routines-still-appears).
 
 > [!NOTE]
 >
-> Two other features schedule work on your machine instead of in the cloud: [Desktop scheduled tasks](/docs/en/desktop-scheduled-tasks) and [`/loop`](/docs/en/scheduled-tasks). To choose among all three, see [Compare scheduling options](/docs/en/scheduled-tasks#compare-scheduling-options).
+> Two other features schedule work on your machine instead of in the cloud: [Desktop scheduled tasks](https://code.claude.com/docs/en/desktop-scheduled-tasks.md) and [`/loop`](https://code.claude.com/docs/en/scheduled-tasks). To choose among all three, see [Compare scheduling options](https://code.claude.com/docs/en/scheduled-tasks.md#compare-scheduling-options).
 
 Team and Enterprise Owners can turn off scheduled tasks for all members with the **Scheduled tasks (Was Routines)** toggle at [**Organization settings > Capabilities > Remote sessions**](https://claude.ai/admin-settings/capabilities). When the toggle is off, existing scheduled tasks stop running and members can't create new ones.
 
@@ -50,12 +50,12 @@ Each example pairs a trigger type with the kind of work scheduled tasks are suit
 
 Create a scheduled task from the web at [claude.ai/code/routines](https://claude.ai/code/routines), from the Desktop app, or from the CLI. All three surfaces write to the same cloud account, so a scheduled task you create in one shows up in the others immediately. In the Desktop app's **Code** tab, click **Scheduled** in the sidebar or in the sidebar's **More** menu, then **New task**, and continue with [Create from the web](#create-from-the-web).
 
-Scheduled tasks run autonomously as full Claude Code cloud sessions. You don't choose a permission mode. The session runs shell commands, uses [skills](/docs/en/skills), and calls any connectors you include, all without stopping for approval apart from some [artifact actions](#when-a-run-publishes-an-artifact-without-asking). Outside a [project](/docs/en/claude-projects#what-threads-pick-up-from-your-repositories)'s threads, those skills include the ones committed to the cloned repository.
+Scheduled tasks run autonomously as full Claude Code cloud sessions. The session runs shell commands, uses [skills](https://code.claude.com/docs/en/skills.md), and calls any connectors you include. Outside a [project](https://code.claude.com/docs/en/claude-projects.md#what-threads-pick-up-from-your-repositories)'s threads, those skills include the ones committed to the cloned repository. You don't choose a permission mode when you create the task: see [Permission prompts during a run](#permission-prompts-during-a-run) for when a run stops to wait for you.
 
 What a scheduled task can reach is determined by:
 
 * The repositories you select
-* The [environment's](/docs/en/cloud-environments) network access and variables
+* The [environment's](https://code.claude.com/docs/en/cloud-environments.md) network access and variables
 * The connectors you include
 
 Scope each of those to what the task needs.
@@ -66,13 +66,18 @@ Scheduled tasks belong to your individual claude.ai account. They are not shared
 
 **1. Open the creation dialog**
 
-Go to [claude.ai/code/routines](https://claude.ai/code/routines) and click **New task**. If a menu opens first, select **Set up manually**. The **New scheduled task** dialog opens. The menu's other option, **Create with Claude**, lets you describe the task in a chat and have Claude create it instead.
+Go to [claude.ai/code/routines](https://claude.ai/code/routines) and click **New task** to open the **New scheduled task** dialog. Check for these screens before you continue:
+
+* If the button reads **New routine** instead of **New task**, click **New routine** and continue with [Full-page form](#full-page-form).
+* In the Desktop app, if a menu with **Local** and **Cloud** opens, go to [Full-page form](#full-page-form).
+* If a menu opens with **Create with Claude** and **Set up manually**, select **Set up manually** to open the dialog. **Create with Claude** lets you describe the task in a chat and have Claude create it instead.
+* If a full page opens in place of the dialog, go to [Full-page form](#full-page-form).
 
 If **Repositories** and **Environment** are already showing when the dialog opens, see [how that dialog differs](#dialog-with-repositories-and-environment-in-the-main-view). Otherwise, this dialog also creates scheduled tasks for claude.ai chat. To make yours what the dialog calls a Claude Code task, select a repository or add a GitHub event or API trigger in the steps that follow. That kind of task runs Claude Code in a cloud session.
 
 **2. Name the task and write the prompt**
 
-Give the scheduled task a descriptive name and write the prompt Claude runs each time. The prompt is the most important part: the task runs autonomously, so the prompt must be self-contained and explicit about what to do and what success looks like. Select a model in the prompt input's model selector. Claude uses it on every run.
+Give the scheduled task a descriptive name and write the prompt Claude runs each time. The prompt is the most important part: the task runs autonomously, so the prompt must be self-contained and explicit about what to do and what success looks like.
 
 When a trigger fires, the session receives the saved prompt as its assignment and carries it out, rather than treating it as untrusted content that arrived mid-conversation. The trigger attests only that the prompt was stored ahead of time by an authorized session on your account. The fired prompt is therefore not live user input and can't act as approval or consent for actions during the run. Content the session fetches during the run keeps its normal handling.
 
@@ -80,17 +85,17 @@ When a trigger fires, the session receives the saved prompt as its assignment an
 
 In the **Trigger** row, choose how the task starts. To combine several triggers, click **+** at the end of the row.
 
-**Schedule**
+> [tab] Schedule
+>
+> Pick a preset frequency for a recurring run. See [Add a schedule trigger](#add-a-schedule-trigger) for timezone handling, late starts, custom cron intervals, and one-off runs.
 
-Pick a preset frequency for a recurring run. See [Add a schedule trigger](#add-a-schedule-trigger) for timezone handling, late starts, custom cron intervals, and one-off runs.
+> [tab] GitHub event
+>
+> Select the repository, the event to react to, and optional filters. See [Add a GitHub trigger](#add-a-github-trigger) for the full list of supported events and filter fields.
 
-**GitHub event**
-
-Select the repository, the event to react to, and optional filters. See [Add a GitHub trigger](#add-a-github-trigger) for the full list of supported events and filter fields.
-
-**API**
-
-Select **API** here. When you click **Create**, the **API token** dialog shows the token once, so copy it before you close the dialog. See [Add an API trigger](#add-an-api-trigger) to copy the URL or generate a new token.
+> [tab] API
+>
+> Select **API** here. When you click **Create**, the **API token** dialog shows the token once, so copy it before you close the dialog. See [Add an API trigger](#add-an-api-trigger) to copy the URL or generate a new token.
 
 **4. Select repositories**
 
@@ -100,21 +105,25 @@ Each repository is cloned at the start of a run. Claude creates `claude/`-prefix
 
 **5. Select an environment**
 
-After you select a repository, **Cloud environment** appears below it. Pick a [cloud environment](/docs/en/cloud-environments) for the task. Environments control what the cloud session has access to:
+After you select a repository, **Cloud environment** appears below it. Pick a [cloud environment](https://code.claude.com/docs/en/cloud-environments.md) for the task. Environments control what the cloud session has access to:
 
 * **Network access**: set the level of internet access available during each run
-* **Environment variables**: provide values Claude can use during each run. They're [visible to anyone who uses the environment](/docs/en/cloud-environments#what-carries-over-from-your-setup), so in an Anthropic-hosted environment, store keys for the APIs Claude calls during a run as [network secrets](/docs/en/cloud-environments#add-network-secrets) instead. That section also lists the requests that never get a secret
-* **Setup script**: install dependencies and tools the task needs. The result is [cached](/docs/en/cloud-environments#environment-caching), so the script doesn't re-run on every session
+* **Environment variables**: provide values Claude can use during each run. They're [visible to anyone who uses the environment](https://code.claude.com/docs/en/cloud-environments.md#what-carries-over-from-your-setup), so in an Anthropic-hosted environment, store keys for the APIs Claude calls during a run as [network secrets](https://code.claude.com/docs/en/cloud-environments.md#add-network-secrets) instead. That section also lists the requests that never get a secret
+* **Setup script**: install dependencies and tools the task needs. The result is [cached](https://code.claude.com/docs/en/cloud-environments.md#environment-caching), so the script doesn't re-run on every session
 
-A **Default** environment is provided with **Trusted** network access, which allows only the [default allowlist](/docs/en/cloud-environments#default-allowed-domains) of package registries, cloud provider APIs, container registries, and common development domains through the session's network. Connectors you add to the task reach their services through Anthropic's servers, so they don't need allowlist changes.
+A **Default** environment is provided with **Trusted** network access, which allows only the [default allowlist](https://code.claude.com/docs/en/cloud-environments.md#default-allowed-domains) of package registries, cloud provider APIs, container registries, and common development domains through the session's network. Connectors you add to the task reach their services through Anthropic's servers, so they don't need allowlist changes.
 
-If your task needs to reach your own services directly, or a domain outside that list, edit the environment's [network access](/docs/en/cloud-environments#network-access) before running. To use a separate environment, [create one](/docs/en/cloud-environments#configure-your-environment) first.
+If your task needs to reach your own services directly, or a domain outside that list, edit the environment's [network access](https://code.claude.com/docs/en/cloud-environments.md#network-access) before running. To use a separate environment, [create one](https://code.claude.com/docs/en/cloud-environments.md#configure-your-environment) first.
 
-**6. Review connectors**
+**6. Select a model and effort level**
 
-Switch to the **Connectors** tab of **Advanced settings**. All of your connected [MCP connectors](/docs/en/mcp) are included by default. Remove any the task doesn't need: Claude can use every tool from an included connector, including writes, without asking for permission during a run.
+Select a model in the prompt input's model selector for Claude to use on every run. For a Claude Code task, if the model offers [effort levels](https://code.claude.com/docs/en/model-config.md#adjust-effort-level), **Effort** in the same selector shows the current level. To change it, select another level. The selector's **Default** option offers no levels.
 
-**7. Create the task**
+**7. Review connectors**
+
+Switch to the **Connectors** tab of **Advanced settings**. All of your connected [MCP connectors](https://code.claude.com/docs/en/mcp.md) are included by default. Remove any the task doesn't need: Claude can use an included connector during a run, including writes. For when a run stops to ask you first, see [Permission prompts during a run](#permission-prompts-during-a-run).
+
+**8. Create the task**
 
 Click **Create**. The dialog closes and the new task's detail page opens. The task runs the next time one of its triggers matches. To start a run immediately, click **Run now** on the detail page.
 
@@ -125,6 +134,17 @@ To see what a run did, click it in the **History** list on the detail page. The 
 Follow the [steps to create from the web](#create-from-the-web), and fill in each field in the dialog's main view rather than under **Advanced settings**. This dialog creates only Claude Code tasks.
 
 Select the repository before you add a GitHub event trigger, because that trigger is unavailable until a repository is selected.
+
+#### Full-page form
+
+In the Desktop app, if a menu with **Local** and **Cloud** opens, select **Cloud**. A page titled **New routine** or **New scheduled task** opens. Fill in its fields:
+
+* **Name**: enter one.
+* **Instructions**: enter the prompt. In the same box, select the model, the effort level if the model offers one, the repositories, and the environment. For what each one controls, see the steps under [Create from the web](#create-from-the-web).
+* **Select a trigger**: select **Schedule**, **GitHub event**, or **API**. For a schedule, see [Add a schedule trigger](#add-a-schedule-trigger). For a [GitHub event](#add-a-github-trigger), select a repository. For an [API trigger](#add-an-api-trigger), copy the token from the **API token** dialog that opens after you click **Create**, because it is shown once. To combine several triggers, click **Add another trigger**.
+* **Connectors**: all of your connected connectors are included by default, so remove the ones the task doesn't need.
+
+If **Create** is unavailable, hover over it to see what the form still needs. Click **Create**, and the task's detail page opens.
 
 ### Create from the CLI
 
@@ -137,7 +157,7 @@ A task you create with `/schedule` has a schedule trigger. You can also add the 
 * **API trigger**: edit the task on the web at [claude.ai/code/routines](https://claude.ai/code/routines)
 * **[GitHub trigger](#add-a-github-trigger)**: edit the task on the web, or ask Claude in the CLI. Adding one from the CLI requires Claude Code v2.1.225 or later
 
-A scheduled task with no schedule trigger, such as one started only by API calls or GitHub events, has no next run time. The CLI shows none when Claude saves or updates it. Before v2.1.211, the CLI reported a next run time in the year 1 for these tasks.
+A scheduled task with no schedule trigger, such as one started only by API calls or GitHub events, has no next run time. The CLI shows none when Claude saves or updates it.
 
 ## Configure triggers
 
@@ -152,6 +172,7 @@ A schedule trigger runs the task on a recurring cadence, or once at a specific f
 * **Runs on the hour**: if you schedule a run exactly on the hour, such as 9:00, it can start several minutes late. To start close to the scheduled time, pick a few minutes past the hour, for example 9:07.
 * **Custom intervals**: for a cadence the presets lack, create the task and select **Custom** in its [edit dialog](#edit-and-control-scheduled-tasks). Then enter a cron expression, such as `0 */2 * * *` for every two hours. To set one from the CLI, run [`/schedule update`](#manage-scheduled-tasks-from-the-cli). Expressions that run more often than once per hour are rejected.
 * **Time zone**: when you pick a preset frequency, enter the time in your local time zone.
+* **Cron expression time zone**: when the expression is five fields alone, write the hours in UTC, so `0 9 * * 1-5` runs at 9:00 AM UTC on weekdays. If the field opens with a `CRON_TZ=` prefix, keep it and write the hours in its zone, or delete it and write them in UTC.
 
 #### Schedule a one-off run
 
@@ -276,12 +297,13 @@ Change the repository if needed, choose an event from the [supported events](#su
 
 #### Supported events
 
-GitHub triggers can subscribe to either of the following event categories. Within each category you can pick a specific action, such as `pull_request.opened`, or react to all actions in the category.
+Choose an event from any of the following categories. Within each category you can pick a specific action, such as `pull_request.opened`, or react to all actions in the category.
 
 | Event | Triggers when |
 | :- | :- |
 | Pull request | A PR is opened, closed, assigned, labeled, synchronized, or otherwise updated |
 | Release | A release is created, published, edited, or deleted |
+| Issue | An issue is opened, edited, closed, reopened, labeled, assigned, or otherwise updated |
 
 #### Filter pull requests
 
@@ -316,9 +338,13 @@ Click a scheduled task in the list to open its detail page. The detail page show
 
 Click any run to open it as a full session. From there you can see what Claude did, review changes, create a pull request, or continue the conversation. Each run session works like any other session: use the dropdown menu next to the session title to rename, archive, or delete it.
 
-> [!NOTE]
->
-> A green status in the run list means the session started and exited without an infrastructure error. It does not mean the work your prompt describes succeeded. Open the run to read the transcript and confirm what Claude actually did. Blocked network requests, missing connector tools, and failures in the work itself all surface there rather than in the status indicator.
+Under **History** on the task's detail page, each finished run's row ends with **Error** if the run failed, **Cancelled** if it was cancelled, and neither word if it succeeded. The **Status** filter names the same three outcomes **Failed**, **Cancelled**, and **Succeeded**. These outcomes say how the session ended, not whether Claude completed the work your prompt describes, so open the run and read its transcript to see what happened.
+
+* **Succeeded**: the session ended without Claude Code reporting a failure. Blocked network requests, missing connector tools, and work Claude couldn't complete appear in the transcript rather than on the row
+* **Failed**: the session didn't finish normally. For example, it stopped unexpectedly, ended on an error, or was archived before the run started
+* **Cancelled**: the run didn't fail, and its session was archived. If you archive the session of a run that succeeded, the run changes to **Cancelled**. Nothing in the task needs to change
+
+If a warning appears under **History**, see ["The last run" warnings](#the-last-run-didnt-start).
 
 ### Edit and control scheduled tasks
 
@@ -341,30 +367,53 @@ Scheduled tasks need GitHub access to clone repositories. When you create a sche
 
 > [!NOTE]
 >
-> See [GitHub authentication options](/docs/en/claude-code-on-the-web#github-authentication-options) for the two ways to grant access. On Team and Enterprise plans, an [Owner](/docs/en/server-managed-settings#access-control) of your Claude organization has to turn on each method before you can use it; see [Connect GitHub](/docs/en/web-quickstart#connect-github).
+> See [GitHub authentication options](https://code.claude.com/docs/en/claude-code-on-the-web.md#github-authentication-options) for the two ways to grant access. On Team and Enterprise plans, an [Owner](https://code.claude.com/docs/en/server-managed-settings.md#access-control) of your Claude organization has to turn on each method before you can use it; see [Connect GitHub](https://code.claude.com/docs/en/web-quickstart.md#connect-github).
 
 If your GitHub connection is missing or expired when a run is due, the scheduled task skips runs until you reconnect, for up to 72 hours. Reconnect GitHub within that window and the task resumes on its own. After 72 hours without a connection, the task turns off, and you turn it back on after reconnecting GitHub.
 
 Each repository you add is cloned on every run. Claude starts from the repository's default branch unless your prompt specifies otherwise. If a [GitHub pull request event](#add-a-github-trigger) triggers the run and the pull request's repository is the task's first repository, that repository starts from the pull request's head commit instead.
 
-Claude pushes its work to a branch prefixed with `claude/` unless your prompt directs it to push to another branch. To control which branches a run can push to, use branch protection rules or rulesets on GitHub. For runs on Anthropic-managed infrastructure, and for self-hosted runs that push through [Anthropic's git proxy](/docs/en/self-hosted-environments-deploy#use-the-anthropic-git-proxy), GitHub applies them to the GitHub access you connected, so a rule that access can bypass doesn't block a run's push. A self-hosted run that pushes with the git credentials your deployment provides is checked against those instead. See [Configure git](/docs/en/self-hosted-environments-deploy#configure-git).
+Claude pushes its work to a branch prefixed with `claude/` unless your prompt directs it to push to another branch. To control which branches a run can push to, use branch protection rules or rulesets on GitHub. For runs on Anthropic-managed infrastructure, and for self-hosted runs that push through [Anthropic's git proxy](https://code.claude.com/docs/en/self-hosted-environments-deploy.md#use-the-anthropic-git-proxy), GitHub applies them to the GitHub access you connected, so a rule that access can bypass doesn't block a run's push. A self-hosted run that pushes with the git credentials your deployment provides is checked against those instead. See [Configure git](https://code.claude.com/docs/en/self-hosted-environments-deploy.md#configure-git).
 
 ### Connectors
 
 Scheduled tasks can use your connected MCP connectors to read from and write to external services during each run. For example, a task that triages support requests might read from a Slack channel and create issues in Linear.
 
-Connectors are the [claude.ai integrations](/docs/en/mcp#use-mcp-servers-from-claude-ai) on your account. MCP servers you added locally in the CLI with `claude mcp add` are stored on your machine rather than your claude.ai account, so they do not appear in the connectors list. To use one of those servers in a scheduled task:
+Connectors are the [claude.ai integrations](https://code.claude.com/docs/en/mcp.md#use-mcp-servers-from-claude-ai) on your account. MCP servers you added locally in the CLI with `claude mcp add` are stored on your machine rather than your claude.ai account, so they do not appear in the connectors list. To use one of those servers in a scheduled task:
 
 * **As a connector**: add it as a connector at [claude.ai/customize/connectors](https://claude.ai/customize/connectors)
-* **In the repository**: for a scheduled task with one repository, you can instead declare the server in a committed [`.mcp.json`](/docs/en/mcp#project-scope), unless the task runs as threads in a [project](/docs/en/claude-projects#what-threads-pick-up-from-your-repositories). If it does, add the server as a connector.
+* **In the repository**: for a scheduled task with one repository, you can instead declare the server in a committed [`.mcp.json`](https://code.claude.com/docs/en/mcp#project-scope), unless the task runs as threads in a [project](https://code.claude.com/docs/en/claude-projects.md#what-threads-pick-up-from-your-repositories). If it does, add the server as a connector.
 
 When you create a scheduled task, all of your currently connected connectors are included by default. Remove any that aren't needed to limit which tools Claude has access to during the run. You can also add connectors directly from the task's creation or edit dialog.
 
 To manage or add connectors outside of that dialog, visit [claude.ai/customize/connectors](https://claude.ai/customize/connectors) or use `/schedule update` in the CLI.
 
+### Permission prompts during a run
+
+> [!NOTE]
+>
+> For a task that runs in your organization's self-hosted environment, see [Permissions and tool approval](https://code.claude.com/docs/en/self-hosted-environments-configuration.md#permissions-and-tool-approval).
+
+When a run starts a new session on Anthropic's cloud, that session begins in [auto mode](https://code.claude.com/docs/en/permission-modes.md#eliminate-prompts-with-auto-mode) unless auto mode is unavailable. In auto mode, a classifier model allows or blocks actions that would otherwise wait for your approval.
+
+A run still stops and waits for an answer in cases such as these:
+
+* **Actions that prompt even in auto mode**: for example, an action that matches an [ask rule](https://code.claude.com/docs/en/permissions.md#manage-permissions). See [How auto mode evaluates actions](https://code.claude.com/docs/en/permission-modes.md#how-auto-mode-evaluates-actions)
+* **Repeated blocks**: one block doesn't end the run. Once blocks reach auto mode's [repeated-block thresholds](https://code.claude.com/docs/en/permission-modes.md#repeated-block-thresholds), a permission prompt appears in the run's session and waits until someone answers it
+
+If auto mode is unavailable, such as when your organization turned it off or the task's model doesn't support it, the run keeps the permission mode it launched in. To answer a waiting prompt, open the run from the task's [detail page](#view-and-interact-with-runs).
+
+In a [project](https://code.claude.com/docs/en/claude-projects.md), a run can continue a thread rather than start a new session. That run keeps whatever permission mode the thread is in at the time. When that thread was made, it started in auto mode unless auto mode was unavailable. To answer a prompt waiting in that thread, see [Unblock a thread waiting on approval](https://code.claude.com/docs/en/claude-projects.md#unblock-a-thread-waiting-on-approval).
+
 ### When a run publishes an artifact without asking
 
-When a scheduled task's schedule or **Run now** starts a run, Claude can publish a new [artifact](/docs/en/artifacts) without asking. The new artifact is visible only to you until you [share it](/docs/en/artifacts#share-an-artifact). If the publish declares runtime capabilities for the page, such as [connector calls](/docs/en/artifacts#pull-live-data-with-mcp-connectors) or [file downloads](/docs/en/artifacts#offer-a-file-download), Claude asks first.
+During a run in [auto mode](#permission-prompts-during-a-run), Claude publishes an [artifact](https://code.claude.com/docs/en/artifacts.md) without asking you once the classifier allows the publish. You're still asked first when, for example, the publish matches an [ask rule](https://code.claude.com/docs/en/permissions.md#manage-permissions). A new artifact is visible only to you until you [share it](https://code.claude.com/docs/en/artifacts.md#share-an-artifact). The [Accept edits rules](#artifacts-in-accept-edits-mode) that follow don't apply in auto mode.
+
+When a scheduled task's job is to keep a page current, give it an artifact you already published.
+
+#### Artifacts in Accept edits mode
+
+When a scheduled task's schedule or **Run now** starts a run, Claude can publish a new [artifact](https://code.claude.com/docs/en/artifacts.md) without asking. The new artifact is visible only to you until you [share it](https://code.claude.com/docs/en/artifacts.md#share-an-artifact). If the publish declares runtime capabilities for the page, such as [connector calls](https://code.claude.com/docs/en/artifacts.md#pull-live-data-with-mcp-connectors) or [file downloads](https://code.claude.com/docs/en/artifacts.md#offer-a-file-download), Claude asks first.
 
 In those runs, Claude republishes an existing artifact without asking only when all of these hold:
 
@@ -374,19 +423,17 @@ In those runs, Claude republishes an existing artifact without asking only when 
 * If the artifact is shared with specific people or your organization, its viewers don't automatically see each new version
 * The publish doesn't force over a newer version
 * The publish doesn't declare runtime capabilities for the page
-* The existing page holds no grant that reaches beyond the page, such as [connector calls](/docs/en/artifacts#pull-live-data-with-mcp-connectors)
+* The existing page holds no grant that reaches beyond the page, such as [connector calls](https://code.claude.com/docs/en/artifacts.md#pull-live-data-with-mcp-connectors)
 
 In every other case, including a run that an API or GitHub trigger starts, Claude asks first.
 
-When a scheduled task's job is to keep a page current, give it an artifact you already published.
-
 ### Environments and network access
 
-Each scheduled task uses a [cloud environment](/docs/en/cloud-environments) that controls network access, environment variables, and setup scripts. The task inherits the environment's network policy on every run.
+Each scheduled task uses a [cloud environment](https://code.claude.com/docs/en/cloud-environments.md) that controls network access, environment variables, and setup scripts. The task inherits the environment's network policy on every run.
 
-The **Default** environment uses **Trusted** network access, which allows only the [default allowlist](/docs/en/cloud-environments#default-allowed-domains) through the session's network. Requests on that path to hosts outside the allowlist fail with `403` and `x-deny-reason: host_not_allowed`. MCP connector traffic is routed through Anthropic's servers rather than that path, so the connectors you add to the task work without adding their hosts to **Allowed domains**. Remove any connectors you don't need under [Connectors](#connectors).
+The **Default** environment uses **Trusted** network access, which allows only the [default allowlist](https://code.claude.com/docs/en/cloud-environments.md#default-allowed-domains) through the session's network. Requests on that path to hosts outside the allowlist fail with `403` and `x-deny-reason: host_not_allowed`. MCP connector traffic is routed through Anthropic's servers rather than that path, so the connectors you add to the task work without adding their hosts to **Allowed domains**. Remove any connectors you don't need under [Connectors](#connectors).
 
-To allow additional domains on one of your own environments, follow these steps. An [organization-shared environment](/docs/en/cloud-environments#organization-shared-environments) opens read-only here, so an Owner changes its network access from the **Cloud environments** page in [admin settings](https://claude.ai/admin-settings) instead.
+To allow additional domains on one of your own environments, follow these steps. An [organization-shared environment](https://code.claude.com/docs/en/cloud-environments.md#organization-shared-environments) opens read-only here, so an Owner changes its network access from the **Cloud environments** page in [admin settings](https://claude.ai/admin-settings) instead.
 
 **1. Open the task for editing**
 
@@ -402,13 +449,13 @@ Hover over the environment in the list and click the settings icon that appears 
 
 **4. Change the network access level**
 
-In the **Edit cloud environment** dialog, change **Network access** to **Custom** and enter your domains in **Allowed domains**. Check **Also include default list of common package managers** to keep the [default allowlist](/docs/en/cloud-environments#default-allowed-domains) alongside your custom domains. Select **Full** instead for unrestricted access.
+In the **Edit cloud environment** dialog, change **Network access** to **Custom** and enter your domains in **Allowed domains**. Check **Also include default list of common package managers** to keep the [default allowlist](https://code.claude.com/docs/en/cloud-environments.md#default-allowed-domains) alongside your custom domains. Select **Full** instead for unrestricted access.
 
 **5. Save**
 
 Click **Save changes** in the **Edit cloud environment** dialog, then close the **Edit scheduled task** dialog behind it. The new policy applies from the next run.
 
-See [Network access](/docs/en/cloud-environments#network-access) for details on access levels and the default allowlist.
+See [Network access](https://code.claude.com/docs/en/cloud-environments.md#network-access) for details on access levels and the default allowlist.
 
 ## Usage and limits
 
@@ -434,6 +481,7 @@ While your subscription is paused, your scheduled tasks are put on hold and don'
 
 Scheduled tasks were previously called routines, and these places keep the earlier name. Each one refers to the same feature:
 
+* **App**: in some accounts the sidebar entry and page title read **Routines**, the button reads **New routine**, and other labels say routine. To create a task there, see [Full-page form](#full-page-form).
 * **Web address**: `claude.ai/code/routines`
 * **CLI**: the `/routines` alias for `/schedule`, the command's description, and Claude's replies while it sets up a task
 * **API**: the `/fire` endpoint path, its beta header, its response `type`, the `<routine-fire-payload>` tag, and the [Trigger a routine through the API](https://platform.claude.com/docs/en/api/claude-code/routines-fire) reference page
@@ -447,24 +495,39 @@ The CLI hides `/schedule` when one of its requirements isn't met: the command me
 
 The cause is usually one of the following:
 
-* You are authenticated with a Console API key, an [Anthropic profile or federation credential](/docs/en/authentication#anthropic-profiles-and-federation-credentials), or a cloud provider such as Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry. `/schedule` requires a claude.ai subscription login. With a Console API key or a profile, and feature-flag fetching enabled, submitting `/schedule` instead shows `/schedule is available with Claude for Enterprise — ask your admin about migrating from API-key access`. With a cloud-provider login, you still see `Unknown command: /schedule`. If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set in your shell, or `apiKeyHelper` is set in `settings.json`, remove it first, since these take precedence over a claude.ai login. A profile or federation credential takes precedence too, so switch that off as well
+* You are authenticated with a Console API key, an [Anthropic profile or federation credential](https://code.claude.com/docs/en/authentication.md#anthropic-profiles-and-federation-credentials), or a cloud provider such as Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry. `/schedule` requires a claude.ai subscription login. With a Console API key or a profile, and feature-flag fetching enabled, submitting `/schedule` instead shows `/schedule is available with Claude for Enterprise — ask your admin about migrating from API-key access`. With a cloud-provider login, you still see `Unknown command: /schedule`. If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set in your shell, or `apiKeyHelper` is set in `settings.json`, remove it first, since these take precedence over a claude.ai login. A profile or federation credential takes precedence too, so switch that off as well
 * You are fully signed out, with no API key or other credential. With feature-flag fetching enabled, submitting `/schedule` shows `/schedule requires a claude.ai subscription. Run /login to sign in with your claude.ai account.` Before v2.1.268, a signed-out session showed the same Claude for Enterprise message as a Console API key
 * You are inside a cloud session, where submitting `/schedule` answers that the command isn't available in that environment. Manage scheduled tasks from the [web UI](https://claude.ai/code/routines) instead
-* Your organization's policy disables [cloud sessions](/docs/en/claude-code-on-the-web), which scheduled tasks require. In this case, submitting `/schedule` answers [`Cloud sessions are disabled by your organization's policy`](/docs/en/errors#cloud-sessions-are-disabled-by-your-organizations-policy) instead. Before v2.1.268, it returned `Unknown command: /schedule`
+* Your organization's policy disables [cloud sessions](https://code.claude.com/docs/en/claude-code-on-the-web.md), which scheduled tasks require. In this case, submitting `/schedule` answers [`Cloud sessions are disabled by your organization's policy`](https://code.claude.com/docs/en/errors#cloud-sessions-are-disabled-by-your-organizations-policy) instead. Before v2.1.268, it returned `Unknown command: /schedule`
 * An Owner [turned off scheduled tasks](#routines-are-disabled-by-your-organizations-policy) for your Team or Enterprise organization. Before v2.1.227, the command still appeared in this case, and claude.ai rejected the task when Claude tried to create or run it
 * Your Enterprise organization manages your access with [custom roles](https://support.claude.com/en/articles/13930452), and none of your roles includes the scheduled tasks permission under **Remote sessions**. Ask an Owner to add it to one of your roles
 
-If the cause is your CLI sign-in or being inside a cloud session, you can still create and manage scheduled tasks at [claude.ai/code/routines](https://claude.ai/code/routines). You need a Pro, Max, Team, or Enterprise account there. If scheduled tasks or cloud sessions are off for your organization or missing from your roles, you can't create them on the web either.
+If the cause is your CLI sign-in or being inside a cloud session, you can still create and manage scheduled tasks at [claude.ai/code/routines](https://claude.ai/code/routines). You need a Pro, Max, Ultra, Team, or Enterprise account there. If scheduled tasks or cloud sessions are off for your organization or missing from your roles, you can't create them on the web either.
 
 ### "Routines are disabled by your organization's policy"
 
 An Owner in your Team or Enterprise organization has likely turned off the **Scheduled tasks (Was Routines)** toggle at [**Organization settings > Capabilities > Remote sessions**](https://claude.ai/admin-settings/capabilities). On Claude Code v2.1.227 or later, the same toggle also hides `/schedule` in the CLI. This is a server-side organization setting, so it cannot be overridden from your local configuration. Ask an Owner to turn scheduled tasks back on for your organization.
 
+### "The last run" warnings
+
+When a warning under **History** begins with "The last run", find it in the first column and do what its row says. The warning clears once a later run starts.
+
+| Warning | What to do |
+| :- | :- |
+| "The last run didn't start because your organization had reached its limit on cloud sessions running at once." | The task needs no change. Click **Run now** later, or wait for the next run |
+| "The last run didn't start because its cloud environment couldn't be found or used." | On the task's detail page, open the menu next to its name, select **Edit**, and find the [cloud environment selector](#environments-and-network-access). If it reads **Unavailable environment**, that environment was archived or is no longer available to your account, so choose another one there and save your changes. Otherwise, retry with **Run now** on the detail page, or pick another environment in the selector and save your changes |
+| "The last run was blocked because it couldn't access something it needs, or your organization's policy doesn't allow it." | Check that your [GitHub access](#repositories-and-branch-permissions) covers the task's repositories. If it does, ask an [Owner](https://code.claude.com/docs/en/server-managed-settings.md#access-control) of your Claude organization whether a policy blocks the task |
+| "The last run didn't start because of a problem that's usually temporary." | Click **Run now** to try again, or wait for the next run |
+| "The last run didn't start because its repository or branch wasn't available." | Check on GitHub that each repository in the task has the [branch the run starts from](#repositories-and-branch-permissions). Also check that your [GitHub access](#repositories-and-branch-permissions) covers each repository, and reconnect GitHub if your connection expired |
+| "The last run didn't start because some of its settings weren't accepted." | On the task's detail page, open the menu next to its name and select **Edit**. The dialog doesn't mark which setting wasn't accepted, so check each one there, including the task's name, prompt, model, repositories, environment, connectors, and triggers |
+| "The last run stopped because a usage limit was reached." | For when the task's runs can start again after a usage limit, see [Usage and limits](#usage-and-limits) |
+| "The last run failed." | Click **Run now** to try again, or wait for the next run. The failed run has no session to open |
+
 ## Related resources
 
-* [`/loop` and in-session scheduling](/docs/en/scheduled-tasks): schedule local tasks within an open CLI session
-* [Desktop scheduled tasks](/docs/en/desktop-scheduled-tasks): local scheduled tasks that run on your machine with access to local files
-* [Cloud environments](/docs/en/cloud-environments): configure network access, environment variables, and setup scripts for cloud sessions
-* [Projects](/docs/en/claude-projects): ongoing work Claude coordinates across parallel cloud sessions; scheduled tasks created from a project appear on its **Scheduled tasks** tab
-* [MCP connectors](/docs/en/mcp): connect external services like Slack, Linear, and Google Drive
-* [GitHub Actions](/docs/en/github-actions): run Claude in your CI pipeline on repository events
+* [`/loop` and in-session scheduling](https://code.claude.com/docs/en/scheduled-tasks): schedule local tasks within an open CLI session
+* [Desktop scheduled tasks](https://code.claude.com/docs/en/desktop-scheduled-tasks.md): local scheduled tasks that run on your machine with access to local files
+* [Cloud environments](https://code.claude.com/docs/en/cloud-environments.md): configure network access, environment variables, and setup scripts for cloud sessions
+* [Projects](https://code.claude.com/docs/en/claude-projects.md): ongoing work Claude coordinates across parallel cloud sessions; scheduled tasks created from a project appear on its **Scheduled tasks** tab
+* [MCP connectors](https://code.claude.com/docs/en/mcp.md): connect external services like Slack, Linear, and Google Drive
+* [GitHub Actions](https://code.claude.com/docs/en/github-actions.md): run Claude in your CI pipeline on repository events

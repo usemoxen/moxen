@@ -99,6 +99,18 @@ describe("model scenes", () => {
     expect(seasonAt(new Date(year, month, 15).getTime() / 1000)).toBe(season);
   });
 
+  it.each(["haiku", "terra", "luna"] as const)("keeps %s reflections and auroras continuous through a horizontal pane split", (scene) => {
+    // Reflections sample artwork above the pane; curtains follow the
+    // globe's limb. Neither may start again at a window's local origin.
+    const field = { fieldWidth: 80, fieldHeight: 24 };
+    const t = Date.UTC(2026, 9, 15, 12) / 1000;
+    const whole = paint(scene, { x: 0, y: 0, width: 80, height: 24, ...field }, t, null);
+    const top = paint(scene, { x: 0, y: 0, width: 80, height: 17, ...field }, t, null);
+    const bottom = paint(scene, { x: 0, y: 17, width: 80, height: 7, ...field }, t, null);
+    expect(top.light).toEqual(whole.light.slice(0, top.light.length));
+    expect(bottom.light).toEqual(whole.light.slice(top.light.length));
+  });
+
   it.each([
     ["Madrid", 40.4, -3.7, 1],
     ["the mid-Atlantic", 30, -40, 0],

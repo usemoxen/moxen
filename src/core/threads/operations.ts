@@ -33,7 +33,7 @@ import {
 import { APP_NAME } from "../config.js";
 import { CliError } from "../errors.js";
 import { storedInteractionMode } from "../interactionmode.js";
-import { disabledNativeToolNames } from "../nativetools.js";
+import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
 import {
@@ -131,7 +131,7 @@ export interface OperationContext {
    * over them by name, so `"moxen": null` there removes them. Delegated
    * threads get none: a subagent does not spawn subagents.
    */
-  readonly builtinMcpServers?: (threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[];
+  readonly builtinMcpServers?: (threadId: string, options?: BuiltinMcpOptions) => readonly McpServerSpec[] | Promise<readonly McpServerSpec[]>;
 }
 
 
@@ -237,12 +237,12 @@ async function sessionSetup(
   // the user turned orchestration off for; `web_fetch` is switched on its own. With both off, the server is left out.
   const reach = moxenToolsOf(providerConfig);
   // Moxen memory: the config's switch and the project's moxen.json (`"memory": false`); a delegated task only reads it.
-  const memoryOn = ctx.config.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
+  const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
   const memory = !memoryOn ? "off" : delegation !== null ? "read" : "write";
   const builtin =
     !reach.orchestration && !reach.webFetch && memory === "off"
       ? []
-      : (ctx.builtinMcpServers?.(thread.id, { delegated: delegation !== null || !reach.orchestration, webFetch: reach.webFetch, memory }) ?? []);
+      : (await ctx.builtinMcpServers?.(thread.id, { delegated: delegation !== null || !reach.orchestration, webFetch: reach.webFetch, memory }) ?? []);
   const base: Record<string, McpServerEntry> = {};
   for (const built of builtin) {
     // Layered by name like any configured server, in the form a config entry has.
@@ -299,7 +299,7 @@ async function sessionSetup(
   return {
     mcpServers,
     disabledMcpTools,
-    disabledNativeTools: disabledNativeToolNames(nativeConfig?.disabledNativeTools),
+    disabledNativeTools: nativeKind === null ? [] : disabledNativeToolNames(effectiveDisabledNativeTools(nativeKind, nativeConfig?.disabledNativeTools)),
     // OpenCode's own base prompt is replaced by Moxen's unless the user switched that off.
     moxenPrompt: nativeKind === "opencode" && ctx.config.providers?.opencode?.moxenPrompt !== false,
     checklist: providerConfig?.todos !== false,

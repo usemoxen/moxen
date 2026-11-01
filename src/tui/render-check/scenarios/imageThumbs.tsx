@@ -60,13 +60,14 @@ export async function runImageThumbs(): Promise<void> {
     );
   }
   const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
-  const settle = (ms: number) =>
-    act(async () => {
-      for (let waited = 0; waited < ms; waited += 25) {
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         await setup.flush();
-      }
-    });
+      });
+    }
+  };
   const rows = () => setup.captureCharFrame().split("\n");
   const imageRows = () => rows().filter((line) => line.includes("█")).length;
   const hasPreviewBorder = () => rows().some((line) => line.includes("╭"));
@@ -159,13 +160,14 @@ async function runComposerHover(png: Buffer): Promise<void> {
     </box>,
     { width, height, exitOnCtrlC: false },
   );
-  const settle = (ms: number) =>
-    act(async () => {
-      for (let waited = 0; waited < ms; waited += 25) {
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         await setup.flush();
-      }
-    });
+      });
+    }
+  };
   const rows = () => setup.captureCharFrame().split("\n");
   await settle(300);
   const tokenRow = rows().findIndex((line) => line.includes("[Image #1]"));
@@ -184,7 +186,7 @@ async function runComposerHover(png: Buffer): Promise<void> {
   if (rows().some((line) => line.includes("█"))) fail("the composer preview stayed after the pointer left the token");
 }
 
-/** Clicking an attachment row opens it full screen with the composer kept below; the close button, a click on the image and Esc close it. */
+/** The viewer keeps the composer below it, consumes its controls and closes from outside. */
 async function runViewer(png: Buffer): Promise<void> {
   resetModalOpen();
   closeImageViewer();
@@ -193,11 +195,12 @@ async function runViewer(png: Buffer): Promise<void> {
   const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
   const reader: AttachmentReader = async () => ({ mimeType: "image/png", dataUrl });
   let opened = 0;
+  let draft = "";
   function Harness() {
     const viewed = useImageViewer();
     return (
       <AttachmentReaderContext.Provider value={reader}>
-        <box style={{ flexDirection: "column", width, height }} backgroundColor={SURFACE.base}>
+        <box style={{ flexDirection: "column", width, height, paddingLeft: 1, paddingRight: 1, paddingTop: 1 }} backgroundColor={SURFACE.base}>
           {viewed === null ? (
             <box style={{ flexGrow: 1 }}>
               <AttachmentRow attachmentId="present" label="clipboard-1.png" sizeBytes={51240} background={SURFACE.base} />
@@ -208,7 +211,7 @@ async function runViewer(png: Buffer): Promise<void> {
           <Composer
             draft=""
             resetKey="k"
-            onInput={() => {}}
+            onInput={(value) => { draft = value; }}
             onSubmit={() => {}}
             onEscape={() => closeImageViewer()}
             onFocus={() => {}}
@@ -229,13 +232,14 @@ async function runViewer(png: Buffer): Promise<void> {
     );
   }
   const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
-  const settle = (ms: number) =>
-    act(async () => {
-      for (let waited = 0; waited < ms; waited += 25) {
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         await setup.flush();
-      }
-    });
+      });
+    }
+  };
   const rows = () => setup.captureCharFrame().split("\n");
   const find = (text: string) => rows().findIndex((line) => line.includes(text));
   await settle(200);
@@ -264,7 +268,28 @@ async function runViewer(png: Buffer): Promise<void> {
   await settle(400);
   await act(async () => setup.mockMouse.click(width / 2, 12));
   await settle(300);
-  if (find("open externally") !== -1) fail("a click on the image left the viewer open");
+  if (find("open externally") === -1) fail("a click on the image closed it before a drag");
+  const draftBeforeControls = draft;
+  const imageArea = () => [...setup.captureCharFrame()].filter((cell) => cell === "█").length;
+  const fittedArea = imageArea();
+  await act(async () => setup.mockInput.pressKey("+"));
+  await settle(100);
+  if (find("125%") === -1) fail("the zoom key did not zoom the image");
+  if (imageArea() <= fittedArea) fail("zoom refitted a crop into the same rectangle instead of expanding across the canvas");
+  await act(async () => setup.mockMouse.scroll(width / 2, 12, "up"));
+  await settle(100);
+  if (find("156%") === -1) fail("the mouse wheel did not zoom the image");
+  await act(async () => setup.mockMouse.drag(40, 12, 48, 14));
+  await settle(100);
+  if (find("156%") === -1) fail("dragging closed or reset the viewer");
+  await act(async () => setup.mockInput.pressKey("0"));
+  await settle(100);
+  if (find("100%") === -1) fail("the fit key did not reset the view");
+  if (imageArea() !== fittedArea) fail("resetting fit did not restore the original drawing size");
+  if (draft !== draftBeforeControls) fail("the viewer's zoom controls were typed into the composer");
+  await act(async () => setup.mockInput.pressEscape());
+  await settle(100);
+  if (find("open externally") !== -1) fail("Esc left the viewer open");
 
   // Outside the pane is dimmed like a modal's backdrop, and a click there closes it.
   await act(async () => setup.mockMouse.click(4, row));
@@ -329,13 +354,14 @@ async function runReplyImage(png: Buffer): Promise<void> {
     );
   }
   const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
-  const settle = (ms: number) =>
-    act(async () => {
-      for (let waited = 0; waited < ms; waited += 25) {
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         await setup.flush();
-      }
-    });
+      });
+    }
+  };
   const frame = () => setup.captureCharFrame();
   await settle(500);
   console.log("--- reply image: drawn in the transcript ---");
@@ -404,13 +430,14 @@ async function runUiBlock(png: Buffer): Promise<void> {
     );
   }
   const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
-  const settle = (ms: number) =>
-    act(async () => {
-      for (let waited = 0; waited < ms; waited += 25) {
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         await setup.flush();
-      }
-    });
+      });
+    }
+  };
   const lines = () => setup.captureCharFrame().split("\n");
   const rowOf = (needle: string) => lines().findIndex((line) => line.includes(needle));
   await settle(600);
@@ -522,12 +549,20 @@ async function runImageOps(): Promise<void> {
   });
   const width = 80;
   const height = 50;
+  function BlockViewerHarness() {
+    const viewed = useImageViewer();
+    return (
+      <ReplyImageReaderContext.Provider value={async () => ({ mimeType: "image/png", dataUrl })}>
+        <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
+          {viewed === null
+            ? <MessageBody entry={{ text: `\`\`\`moxen-ui\n${block}\n\`\`\``, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
+            : <ImageViewer image={viewed} onClose={closeImageViewer} onOpenExternally={() => {}} />}
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
   const setup = await testRender(
-    <ReplyImageReaderContext.Provider value={async () => ({ mimeType: "image/png", dataUrl })}>
-      <box style={{ flexDirection: "column", width: "100%", height: "100%" }} backgroundColor={SURFACE.base}>
-        <MessageBody entry={{ text: `\`\`\`moxen-ui\n${block}\n\`\`\``, streaming: false, message: null } as never} homeDir={undefined} background={SURFACE.base} />
-      </box>
-    </ReplyImageReaderContext.Provider>,
+    <BlockViewerHarness />,
     { width, height, exitOnCtrlC: false },
   );
   await act(async () => {
@@ -541,6 +576,42 @@ async function runImageOps(): Promise<void> {
   console.log(frame);
   for (const caption of ["Cropped", "Marked", "What changed"]) if (!frame.includes(caption)) fail(`the block's "${caption}" picture is not drawn`);
   if (frame.includes("could not be drawn") || frame.includes("not found")) fail("a picture of the block failed to draw");
+  const until = async (predicate: (frame: string) => boolean) => {
+    for (let pass = 0; pass < 100; pass++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await setup.flush();
+      });
+      if (predicate(setup.captureCharFrame())) return;
+    }
+    fail("the block viewer did not reach the expected frame");
+  };
+  const rows = frame.split("\n");
+  const markedRow = rows.findIndex((line) => line.includes("Marked"));
+  await act(async () => {
+    await setup.mockMouse.click(rows[markedRow]!.indexOf("Marked") + 1, markedRow);
+    await setup.flush();
+  });
+  if (!setup.captureCharFrame().includes("▣ Marked") || !setup.captureCharFrame().includes("2/3")) fail("a pair did not open on the picture clicked in its block");
+  await act(async () => { setup.mockInput.pressKey("+"); });
+  await until((frame) => frame.includes("125%"));
+  if (!setup.captureCharFrame().includes("125%")) fail("a block's image did not zoom");
+  await act(async () => { setup.mockInput.pressArrow("left"); });
+  await until((frame) => frame.includes("1/3") && frame.includes("100%"));
+  if (!setup.captureCharFrame().includes("▣ Cropped") || !setup.captureCharFrame().includes("1/3") || !setup.captureCharFrame().includes("100%")) fail("stepping back lost the block's order or did not reset the zoom");
+  await act(async () => { setup.mockInput.pressArrow("left"); await setup.flush(); });
+  if (!setup.captureCharFrame().includes("1/3")) fail("stepping before the first image left the set");
+  await act(async () => { setup.mockInput.pressArrow("right"); });
+  await until((frame) => frame.includes("2/3"));
+  await act(async () => { setup.mockInput.pressArrow("right"); });
+  await until((frame) => frame.includes("3/3"));
+  if (!setup.captureCharFrame().includes("▣ What changed") || !setup.captureCharFrame().includes("3/3")) fail("the blended picture was not part of the block's set");
+  console.log("--- image viewer: a block's third image after stepping ---");
+  console.log(setup.captureCharFrame());
+  await act(async () => { setup.mockInput.pressEscape(); await setup.flush(); });
+  await until((frame) => !frame.includes("open externally"));
+  if (setup.captureCharFrame().includes("open externally")) fail("Esc did not close the block viewer");
+  // The walkthrough keeps its renderers alive; destroying a second one breaks the shared one.
 }
 
 /** A bar chart and a progress row in a block: bars scaled to the largest, values on the right, and the label above the bar in a pane too narrow to share. */

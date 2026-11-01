@@ -6,6 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG, defaultConfigPath, migrateLegacyConfig, normalizeConfig, setConfigValue } from "../config.js";
 
+it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
+  const config = normalizeConfig({ providers: { [kind]: { memory: false } } });
+  expect(config.providers?.[kind]?.memory).toBe(false);
+});
+
 describe("config", () => {
   it("applies documented defaults", () => {
     expect(normalizeConfig({})).toEqual(DEFAULT_CONFIG);

@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useKeyboard } from "@opentui/react";
 
@@ -5,7 +6,7 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
-import { COLOR, markdownSyntaxStyle, SPINNER_FRAMES, SURFACE, truncate } from "../../theme.js";
+import { COLOR, markdownSyntaxStyle, SPINNER_FRAMES, SURFACE } from "../../theme.js";
 import type { SideQuestion } from "./useSideQuestion.js";
 
 /**
@@ -68,14 +69,7 @@ export function SideQuestionModal({
         )}
       </scrollbox>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {truncate(
-            // Short enough to survive beside the copy button: the second
-            // half of a longer line was the part that got cut.
-            entry.withContext ? t("btw.not_added_to_the_ed5d") : t("btw.no_thread_context_nothing_3722"),
-            Math.max(10, inner - 24),
-          )}
-        </text>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(10, inner - 24)}>{entry.withContext ? t("btw.not_added_to_the_ed5d") : t("btw.no_thread_context_nothing_3722")}</OverflowText>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.raised} />
         {entry.answer === null ? null : (
           <HoverButton label={t("btw.c_copy_bf8e")} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopy(entry.answer!)} />

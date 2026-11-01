@@ -6,7 +6,7 @@
 # Hermes
 
 [Hermes Agent](https://hermes-agent.nousresearch.com) includes OpenCode providers for pay-as-you-go and Go. It picks the
-right API for each model, so every Console model works.
+right API for each paid or Go model. Free-tier chat models require OpenCode and return HTTP `403` from Hermes.
 
 | Provider       | Plan          | Key variable           |
 | -------------- | ------------- | ---------------------- |

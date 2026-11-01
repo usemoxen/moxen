@@ -35,6 +35,19 @@ function catalogApi(providers: ProviderSummary[]): ClientApi {
   return { query: async () => ({ providers }) } as unknown as ClientApi;
 }
 
+it.each([false, true])("tells the model about keyword fallback even when results are empty (%s)", async (empty) => {
+  const message = "Using keyword search while the local model is unavailable or busy.";
+  const api = { query: async () => ({
+    semantic: { state: "unavailable", message },
+    total: empty ? 0 : 1,
+    memories: empty ? [] : [{ name: "checks", scope: "project", type: "feedback", description: "Test workflow", excerpt: "Use CI." }],
+  }) } as unknown as ClientApi;
+  const result = await callMoxenTool(api, "parent", "memory_search", { query: "CI" });
+  expect(result.isError).toBe(false);
+  expect(result.text).toContain(message);
+  expect(result.text).toContain(empty ? "No matching memories." : "checks (project, feedback)");
+});
+
 describe("models tool", () => {
   it("lists enabled, installed providers with their visible models and efforts, compactly", async () => {
     const api = catalogApi([provider("claudeAgent"), provider("codex", { enabled: false }), provider("grok", { installed: false })]);

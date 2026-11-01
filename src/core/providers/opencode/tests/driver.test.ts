@@ -1335,6 +1335,8 @@ describe("opencode driver on OpenCode v2", () => {
 
     expect(outcome.status).toBe("completed");
     expect(outcome.text).toBe("The shell command executed successfully and printed `probe-ok`.");
+    expect(outcome.generation?.characters).toBeGreaterThan('{"command": "echo probe-ok"}'.length);
+    expect(outcome.generation?.durationMs).toBeGreaterThan(0);
     const deltas = events.flatMap((event) => (event.type === "message.part.updated" ? [event.text] : []));
     expect(deltas.join("")).toBe(outcome.text);
 

@@ -17,7 +17,7 @@ export function isTerminalVisible(): boolean {
   return visible;
 }
 
-function subscribe(listener: () => void): () => void {
+export function subscribeTerminalVisibility(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
@@ -26,5 +26,5 @@ function subscribe(listener: () => void): () => void {
 
 /** For things that only matter on screen (spinners, clocks): they stop while this is false and start again, current, when it is true. */
 export function useTerminalVisible(): boolean {
-  return useSyncExternalStore(subscribe, isTerminalVisible);
+  return useSyncExternalStore(subscribeTerminalVisibility, isTerminalVisible);
 }

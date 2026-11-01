@@ -1,4 +1,7 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
+import { startPolling } from "../../hooks/poll.js";
+import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { useKeyboard } from "@opentui/react";
 
@@ -15,7 +18,7 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 
 const OUTPUT_POLL_MS = 2000;
@@ -97,25 +100,23 @@ export function BackgroundTasksModal({
   }, [liveDetail]);
 
   const [output, setOutput] = useState<{ taskId: string; lines: readonly string[]; available: boolean } | null>(null);
+  const terminalVisible = useTerminalVisible();
   useEffect(() => {
     if (detailTaskId === null) return;
     let cancelled = false;
-    const fetchOutput = () => {
-      void client
+    const fetchOutput = () =>
+      client
         .query({ type: "thread.background.output", threadId, taskId: detailTaskId })
         .then((result) => {
           if (!cancelled) setOutput({ taskId: detailTaskId, lines: result.lines, available: result.available });
         })
         .catch(() => undefined);
-    };
-    fetchOutput();
-    if (detailFinished) return;
-    const timer = setInterval(fetchOutput, OUTPUT_POLL_MS);
+    const stop = startPolling(fetchOutput, detailFinished || !terminalVisible ? null : OUTPUT_POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
     };
-  }, [client, detailTaskId, detailFinished, threadId]);
+  }, [client, detailTaskId, detailFinished, threadId, terminalVisible]);
 
   // Runtimes tick while anything shown is still running.
   const now = useAnimTick(detailTaskId === null ? ordered.length > 0 : !detailFinished, 1000);
@@ -175,9 +176,7 @@ export function BackgroundTasksModal({
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
             <HoverButton label="← " fg={COLOR.dim} hoverFg={COLOR.bright} onClick={closeDetail} />
             <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{heading}</text>
-            <text fg={COLOR.bright} bg={SURFACE.raised}>
-              {truncate(title, Math.max(4, inner - heading.length - statusLabel.length - 4))}
-            </text>
+            <OverflowText fg={COLOR.bright} bg={SURFACE.raised} width={Math.max(4, inner - heading.length - statusLabel.length - 4)}>{title}</OverflowText>
           </box>
           <text fg={detailFinished ? COLOR.added : COLOR.accent} bg={SURFACE.raised} selectable={false}>{statusLabel}</text>
         </box>
@@ -234,14 +233,14 @@ export function BackgroundTasksModal({
             // Every line scrolls; the view sticks to the newest while it tails.
             <scrollbox style={{ flexGrow: 1 }} stickyScroll stickyStart="bottom">
               {outputLines.map((line, lineIndex) => (
-                <text key={lineIndex} fg={COLOR.text} bg={SURFACE.raised}>{truncate(line, Math.max(0, inner - 5))}</text>
+                <text key={lineIndex} fg={COLOR.text} bg={SURFACE.raised} wrapMode="word">{line}</text>
               ))}
             </scrollbox>
           )}
         </box>
         {liveDetail?.stoppable === false ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("bgm.independentStopUnavailable")}</text> : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
-          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{detailFinished || liveDetail?.stoppable === false ? t("bgm.back_esc_close_d83a") : t("bgm.back_x_stop_esc_be25")}</text>
+          <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 8)}>{detailFinished || liveDetail?.stoppable === false ? t("bgm.back_esc_close_d83a") : t("bgm.back_x_stop_esc_be25")}</OverflowText>
           {detailFinished || liveDetail === null || liveDetail.stoppable === false ? null : (
             <HoverButton label={t("bgm.stop_ec99")} fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => onStop(liveDetail)} />
           )}
@@ -266,9 +265,7 @@ export function BackgroundTasksModal({
       {ordered.length === 0 ? (
         <box style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, justifyContent: "center", alignItems: "center" }}>
           <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.nothing_running_in_the_f068")}</text>
-          <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-            {truncate(t("bgm.shells_monitors_and_background_02e7"), inner)}
-          </text>
+          <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{t("bgm.shells_monitors_and_background_02e7")}</OverflowText>
         </box>
       ) : (
         <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top">
@@ -299,13 +296,13 @@ export function BackgroundTasksModal({
                         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                           <text fg={active ? PICK_FG : COLOR.faint} bg={rowBg} selectable={false}>{active ? "❯ " : "  "}</text>
                           <text fg={COLOR.accent} bg={rowBg} selectable={false}>{"● "}</text>
-                          <text fg={active ? PICK_FG : COLOR.bright} bg={rowBg} selectable={false}>{truncate(title, titleWidth)}</text>
+                          <OverflowText fg={active ? PICK_FG : COLOR.bright} bg={rowBg} selectable={false} width={titleWidth} active={active}>{title}</OverflowText>
                         </box>
                         <text fg={active ? PICK_FG : COLOR.dim} bg={rowBg} selectable={false}>{runtime === null ? t("bgm.running_b3be") : `${runtime} `}</text>
                       </box>
                       {command && command !== title ? (
                         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                          <text fg={active ? PICK_FG : COLOR.dim} bg={rowBg} selectable={false}>{truncate(`    ${command}`, inner - 1)}</text>
+                          <OverflowText fg={active ? PICK_FG : COLOR.dim} bg={rowBg} selectable={false} width={inner - 1} active={active}>{`    ${command}`}</OverflowText>
                         </box>
                       ) : null}
                     </box>
@@ -317,9 +314,7 @@ export function BackgroundTasksModal({
         </scrollbox>
       )}
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
-          {truncate(ordered.length === 0 ? t("bgm.esc_close_dcf7") : t("bgm.select_enter_view_x_2458"), inner)}
-        </text>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{ordered.length === 0 ? t("bgm.esc_close_dcf7") : t("bgm.select_enter_view_x_2458")}</OverflowText>
       </box>
     </>,
   );

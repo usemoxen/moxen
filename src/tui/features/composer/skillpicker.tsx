@@ -1,3 +1,5 @@
+import { OverflowText } from "../../ui/overflowtext.js";
+import { clippedText, textWidth } from "../../model/textoverflow.js";
 import { t as tr } from "../../i18n/index.js";
 import type { RefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -92,9 +94,7 @@ export function SkillPicker({
       </box>
       {matches.length === 0 ? (
         <box style={{ flexDirection: "column", flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-          <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
-            {hasCatalog ? truncate(tr("composer.nothingMatches", { query }), rowWidth) : tr("composer.no_commands_or_skills_b3e6")}
-          </text>
+          <OverflowText fg={COLOR.dim} bg={SURFACE.raised} selectable={false} width={rowWidth}>{hasCatalog ? tr("composer.nothingMatches", { query }) : tr("composer.no_commands_or_skills_b3e6")}</OverflowText>
         </box>
       ) : (
         // Fixed-height scrollbox: a wheel over the popup scrolls the list
@@ -105,9 +105,10 @@ export function SkillPicker({
           {matches.map((skill, index) => {
             const active = index === activeIndex;
             const bg = active ? COLOR.selectionBg : SURFACE.raised;
-            const shown = truncate(labelOf(skill), nameColumn);
+            const nameTick = Math.max(0, marqueeTick - 3);
+            const shown = active ? marqueeWindow(labelOf(skill), nameColumn, nameTick) : clippedText(labelOf(skill), nameColumn);
             // Offsets in the label are one past the name's: the slash leads it.
-            const range = matchRange(skill.displayName ?? skill.name, query);
+            const range = active && nameTick > 0 ? null : matchRange(skill.displayName ?? skill.name, query);
             const from = range === null ? shown.length : Math.min(range[0] + 1, shown.length);
             const to = range === null ? shown.length : Math.min(range[1] + 1, shown.length);
             const description = skill.shortDescription ?? skill.description ?? "";
@@ -121,7 +122,7 @@ export function SkillPicker({
             // nodes shifted the columns by a cell wherever a style changed.
             const name = (value: string) => (active ? bold(fg(COLOR.bright)(value)) : fg(COLOR.text)(value));
             const slash = shown.slice(0, Math.min(1, from));
-            const label = t`${fg(COLOR.accent)(active ? "▸ " : "  ")}${fg(COLOR.command)(slash)}${name(shown.slice(slash.length, from))}${underline(bold(fg(COLOR.accent)(shown.slice(from, to))))}${name(shown.slice(to))}${" ".repeat(Math.max(0, nameColumn - shown.length))}${fg(active ? COLOR.text : COLOR.dim)(text === null ? "" : `${GAP}${text}`)}`;
+            const label = t`${fg(COLOR.accent)(active ? "▸ " : "  ")}${fg(COLOR.command)(slash)}${name(shown.slice(slash.length, from))}${underline(bold(fg(COLOR.accent)(shown.slice(from, to))))}${name(shown.slice(to))}${" ".repeat(Math.max(0, nameColumn - textWidth(shown)))}${fg(active ? COLOR.text : COLOR.dim)(text === null ? "" : `${GAP}${text}`)}`;
             return (
               <box
                 key={skill.name}

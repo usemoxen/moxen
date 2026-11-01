@@ -2,11 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import {
   CodexUsageAccumulator,
+  codexImageUsageAllowed,
   codexWindowsOf,
   rewriteLimitError,
 } from "../usage.js";
 
 describe("codex usage", () => {
+  it("requires both image usage reserves, including at their boundaries", () => {
+    const snapshot = (session: number | null, weekly: number | null) => ({
+      primary: { usedPercent: session, windowDurationMins: 300, resetsAt: 200 },
+      secondary: { usedPercent: weekly, windowDurationMins: 10080, resetsAt: 200 },
+    });
+    expect(codexImageUsageAllowed(snapshot(97, 99), 100_000)).toBe(true);
+    expect(codexImageUsageAllowed(snapshot(97.1, 20), 100_000)).toBe(false);
+    expect(codexImageUsageAllowed(snapshot(20, 99.1), 100_000)).toBe(false);
+    expect(codexImageUsageAllowed(snapshot(null, 20), 100_000)).toBe(false);
+    expect(codexImageUsageAllowed(snapshot(0, 0), 200_000)).toBe(false);
+    expect(codexImageUsageAllowed({ primary: { usedPercent: 0 } }, 100_000)).toBe(false);
+  });
   it("maps primary/secondary windows with duration kinds", () => {
     const windows = codexWindowsOf({
       limitId: "codex",

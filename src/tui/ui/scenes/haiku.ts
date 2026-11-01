@@ -18,8 +18,9 @@ import { hash2, noise, smoothstep, splat, type Frame, type SceneEngine, type Sce
  * - restraint — the pointer leaves one ripple on the water, or a faint
  *   breeze among what is falling. Nothing more.
  *
- * The branch, seal and water are static and drawn once per window; only
- * the few moving things are painted per frame, on a slow 10 fps clock.
+ * The branch and seal are cached; the pond samples that same branch in
+ * wavering strips of reflected ink. Only the water and the few moving
+ * things are painted per frame, on a slow 10 fps clock.
  */
 
 type RGB = readonly [number, number, number];
@@ -135,6 +136,8 @@ interface Still {
   light: Float32Array;
   branch: Branch;
   waterY: number;
+  /** Branch alone over the whole field, sampled by the moving water. */
+  reflection: Float32Array;
 }
 
 /** Branch, blossoms, seal and water — everything that does not move. */
@@ -167,6 +170,38 @@ function paintStill(win: SceneWindow, season: Season): Still {
     splat(frame, win, win.x + px + 0.5, waterY, 0.6, SILVER[0] * 0.035, SILVER[1] * 0.035, SILVER[2] * 0.035);
   }
   const branch = growBranch(fw, fh);
+  paintBranch(frame, win, branch, season);
+  // Cache the source, not a second invented silhouette. Sampling a full
+  // field lets ripples pull light from beyond this pane without a seam.
+  const reflected: Frame = { ...frame, width: fw, height: win.fieldHeight, light: new Float32Array(fw * fh * 3) };
+  paintBranch(reflected, { ...win, x: 0, y: 0, width: fw, height: win.fieldHeight }, branch, season);
+  // The seal (hanko): vermillion, with 山 (mountain) carved out of it.
+  const carving = ["#########", "####.####", "#.#.#.#.#", "#.#.#.#.#", "#.......#", "#########"];
+  const sealX = Math.floor(fw - 13);
+  const sealY = Math.floor(waterY - 10);
+  for (let row = 0; row < carving.length; row++) {
+    for (let col = 0; col < carving[row]!.length; col++) {
+      if (carving[row]![col] !== "#") continue;
+      const px = sealX + col - win.x;
+      const py = sealY + row - win.y * 2;
+      if (px < 0 || py < 0 || px >= win.width || py >= win.height * 2) continue;
+      const o = (py * win.width + px) * 3;
+      frame.light[o]! += SEAL[0] * 0.55;
+      frame.light[o + 1]! += SEAL[1] * 0.55;
+      frame.light[o + 2]! += SEAL[2] * 0.55;
+    }
+  }
+  return {
+    key: `${win.x},${win.y},${win.width},${win.height},${fw},${fh},${season}`,
+    light: frame.light,
+    branch,
+    waterY,
+    reflection: reflected.light,
+  };
+}
+
+/** The source artwork is shared by the branch and its water reflection. */
+function paintBranch(frame: Frame, win: SceneWindow, branch: Branch, season: Season): void {
   for (const brush of branch.strokes) {
     const w = 0.42 * brush.ink;
     splat(frame, win, brush.x, brush.y, Math.max(0.45, brush.w * 0.5), INK[0] * w, INK[1] * w, INK[2] * w);
@@ -194,28 +229,6 @@ function paintStill(win: SceneWindow, season: Season): Still {
       splat(frame, win, brush.x, brush.y - brush.w * 0.55, 0.55, bloom[0] * 0.14, bloom[1] * 0.14, bloom[2] * 0.14);
     }
   }
-  // The seal (hanko): vermillion, with 山 (mountain) carved out of it.
-  const carving = ["#########", "####.####", "#.#.#.#.#", "#.#.#.#.#", "#.......#", "#########"];
-  const sealX = Math.floor(fw - 13);
-  const sealY = Math.floor(waterY - 10);
-  for (let row = 0; row < carving.length; row++) {
-    for (let col = 0; col < carving[row]!.length; col++) {
-      if (carving[row]![col] !== "#") continue;
-      const px = sealX + col - win.x;
-      const py = sealY + row - win.y * 2;
-      if (px < 0 || py < 0 || px >= win.width || py >= win.height * 2) continue;
-      const o = (py * win.width + px) * 3;
-      frame.light[o]! += SEAL[0] * 0.55;
-      frame.light[o + 1]! += SEAL[1] * 0.55;
-      frame.light[o + 2]! += SEAL[2] * 0.55;
-    }
-  }
-  return {
-    key: `${win.x},${win.y},${win.width},${win.height},${fw},${fh},${season}`,
-    light: frame.light,
-    branch,
-    waterY,
-  };
 }
 
 /** Rings on the water: a perspective ellipse, a second ring trailing inside. */
@@ -266,10 +279,21 @@ export function createHaikuScene(): SceneEngine {
       for (let py = Math.max(0, Math.ceil(waterY - win.y * 2)); py < win.height * 2; py++) {
         const y = win.y * 2 + py + 0.5;
         for (let px = 0; px < win.width; px++) {
-          const n = noise((win.x + px) * 0.04 + t * 0.05, y * 0.9);
+          const x = win.x + px + 0.5;
+          const n = noise(x * 0.04 + t * 0.05, y * 0.9);
+          // A glancing view compresses the inverted branch into the pond.
+          // Horizontal wavelets break it into moving strips of gold ink.
+          const depth = (y - waterY) / (fh - waterY);
+          const sx = Math.floor(x + Math.sin(y * 1.7 + t * 0.8) * (0.3 + depth * 1.5));
+          const sy = Math.floor(waterY - depth * waterY);
+          const o = (py * win.width + px) * 3;
+          if (sx >= 0 && sx < fw && sy >= 0 && sy < fh) {
+            const source = (sy * fw + sx) * 3;
+            const shimmer = (0.12 + 0.18 * n) * (0.5 + 0.5 * Math.sin(y * 2.6 + t * 0.65));
+            for (let k = 0; k < 3; k++) frame.light[o + k]! += still.reflection[source + k]! * shimmer;
+          }
           const glint = smoothstep(0.78, 0.95, n) * 0.06;
           if (glint <= 0) continue;
-          const o = (py * win.width + px) * 3;
           frame.light[o]! += SILVER[0] * glint;
           frame.light[o + 1]! += SILVER[1] * glint;
           frame.light[o + 2]! += SILVER[2] * glint;

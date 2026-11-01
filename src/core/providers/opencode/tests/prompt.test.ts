@@ -5,6 +5,7 @@ import { buildOpencodeSystemPrompt } from "../prompt.js";
 describe("Moxen's system prompt for OpenCode", () => {
   it("carries the Harness's working principles and names the tools the way OpenCode does", () => {
     const prompt = buildOpencodeSystemPrompt();
+    expect(prompt).toContain("You are precise, rigorous and candid.");
     expect(prompt).toContain("# Doing the work");
     expect(prompt).toContain("# Checking your work");
     expect(prompt).toContain("# Acting with care");

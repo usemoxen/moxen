@@ -1,10 +1,12 @@
+import { overflowColumns } from "../../model/textoverflow.js";
+import { OverflowText } from "../../ui/overflowtext.js";
 import { t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 
 import { useHover } from "../../hooks/useHover.js";
-import { COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, SURFACE } from "../../theme.js";
 import type { McpAccessEntry } from "../../model/settings.js";
 
 /**
@@ -83,7 +85,7 @@ export function McpAccessEditor({
         ))}
       </scrollbox>
       <box style={{ flexDirection: "row", flexShrink: 0, height: 1, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{truncate(servers.length === 0 ? t("ho.escBack") : t("ma.footer", { on, total: servers.length }), width)}</text>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={width}>{servers.length === 0 ? t("ho.escBack") : t("ma.footer", { on, total: servers.length })}</OverflowText>
       </box>
     </box>
   );
@@ -104,11 +106,11 @@ function Row({ id, server, checked, active, width, onPress }: { id: string; serv
   const locked = server.locked !== null;
   const left = `${active ? "▌ " : "  "}${checked ? "☑" : "☐"} ${server.name}`;
   const right = locked ? `· ${tx(server.locked ?? "")}` : server.summary;
-  const rightWidth = Math.max(0, width - left.length - 4);
+  const rightWidth = overflowColumns(left, right, width - 4).detail;
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
-      <text fg={locked ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>{truncate(left, Math.max(8, width - 4))}</text>
-      {rightWidth < 6 ? null : <text fg={locked ? COLOR.warn : COLOR.dim} bg={bg} selectable={false}>{truncate(right, rightWidth)}</text>}
+      <OverflowText fg={locked ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(0, width - rightWidth - 4)} prefix={`${active ? "▌ " : "  "}${checked ? "☑" : "☐"} `} active={active || hovered}>{server.name}</OverflowText>
+      {rightWidth < 6 ? null : <OverflowText fg={locked ? COLOR.warn : COLOR.dim} bg={bg} selectable={false} width={rightWidth} active={active || hovered}>{right}</OverflowText>}
     </box>
   );
 }

@@ -1,3 +1,15 @@
+import { OverflowText } from "../../ui/overflowtext.js";
+import { act } from "react";
+import type { TestRendererSetup } from "@opentui/core/testing";
+import { ChangelogModal } from "../../features/experience/experiencemodal.js";
+import { OnboardingPage } from "../../features/experience/onboardingpage.js";
+import { ExperienceField } from "../../features/experience/field.js";
+import { SETTINGS_PROVIDERS } from "./settings.js";
+import { client } from "../fixtures.js";
+import { RELEASES } from "../../../core/experience/experience.js";
+import { APP_VERSION } from "../../../core/version.js";
+import { DEFAULT_CONFIG } from "../../../core/config.js";
+import { describeSettings } from "../../../core/configschema.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { LoadingScreen } from "../../ui/loadingscreen.js";
 import { ModalShell } from "../../ui/modalshell.js";
@@ -13,6 +25,13 @@ import { COLOR, SURFACE } from "../../theme.js";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
 const noop = (): void => {};
+const clickExperience = async (setup: TestRendererSetup, label: string) => {
+  const lines = setup.captureCharFrame().split("\n");
+  const y = lines.findIndex((line) => line.includes(label));
+  if (y < 0) throw new Error(`missing experience control: ${label}`);
+  await act(async () => setup.mockMouse.click(lines[y]!.indexOf(label) + 1, y));
+  await setup.flush();
+};
 
 const notice = (key: string, title: string, actions: string[]): Notice => ({
   key,
@@ -24,6 +43,48 @@ const notice = (key: string, title: string, actions: string[]): Notice => ({
 });
 
 export const UI_GALLERY: GalleryEntry[] = [
+  ...Array.from({ length: 6 }, (_, step): GalleryEntry => ({
+    id: `experience-onboarding-${step + 1}`,
+    group: "experience", title: `Getting started: step ${step + 1}`,
+    width: 180, height: 47, settleMs: 180,
+    element: () => <OnboardingPage step={step} onStep={noop}
+      settings={{ snapshot: { path: "config.json", exists: true, settings: describeSettings({ ...DEFAULT_CONFIG, memoryEmbeddings: true }) },
+        saving: null, error: null, set: async () => true, duplicate: noop, run: null, test: noop, testMcp: noop, probe: noop,
+        discover: async () => ({ ok: false, host: null, message: "preview" }), exportProfile: noop, importProfile: noop, notice: null }}
+      providers={SETTINGS_PROVIDERS} selection={{ instanceId: "claudeAgent", model: "claude-opus-5" }} projects={[{ id: "moxen", title: "Moxen", workspaceRoot: "moxen", defaultModelSelection: null }]} projectId="moxen" client={client}
+      error={null} saving={false} motion="static" screenWidth={180} screenHeight={47} onMemory={noop} onModel={noop} onProject={noop}
+      onRefresh={noop} onComplete={noop} onClose={noop}
+    />,
+  })),
+  ...[2, 4].map((step): GalleryEntry => ({
+    id: step === 2 ? "experience-model-server-inline" : "experience-mcp-inline", group: "experience", title: "Inline connection setup", width: 180, height: 47,
+    element: () => UI_GALLERY.find((entry) => entry.id === `experience-onboarding-${step + 1}`)!.element(),
+    drive: async (setup) => {
+      await clickExperience(setup, step === 2 ? "Connect a model server" : "Add an MCP server");
+      await act(async () => setup.mockInput.pressKey("a"));
+      await setup.flush();
+      if (step === 2) { await act(async () => setup.mockInput.pressEnter()); await setup.flush(); }
+    },
+  })),
+  ...[false, true].map((details): GalleryEntry => ({
+    id: details ? "experience-changelog-details" : "experience-changelog", group: "experience", title: details ? "All changes" : "Highlights", width: 180, height: 47, settleMs: 180,
+    element: () => <ChangelogModal snapshot={{ version: APP_VERSION, releases: RELEASES, onboardingCompleted: true, seenReleases: [] }} error={null} saving={false} screenWidth={180} screenHeight={47} onSettings={noop} onRead={noop} onGuide={noop} onClose={noop} />,
+    ...(details ? { drive: async (setup) => { await act(async () => setup.mockInput.pressKey("d")); await setup.flush(); } } : {}),
+  })),
+  { id: "experience-field", group: "experience", title: "Welcome thread field", width: 100, height: 30,
+    element: () => <Stage width={100} height={30}><ExperienceField width={100} height={30} stage={3} motion="static" /></Stage> },
+  {
+    id: "ui-overflow-text", group: "ui", title: "OverflowText", width: 60, height: 7,
+    element: () => <Stage width={60} height={7}>
+      <Caption text="Hover the clipped label to reveal the full text" />
+      <OverflowText width={28} fg={COLOR.text}>{"The quick brown fox jumps over the lazy dog"}</OverflowText>
+      <Caption text="Selected labels scroll; adjacent columns stay put" />
+      <box style={{flexDirection: "row", height: 1}}>
+        <OverflowText width={28} active padToWidth fg={COLOR.accent}>{"The quick brown fox jumps over the lazy dog"}</OverflowText>
+        <text fg={COLOR.dim}>{" | fixed column"}</text>
+      </box>
+    </Stage>,
+  },
   {
     id: "ui-hover-button",
     group: "ui",

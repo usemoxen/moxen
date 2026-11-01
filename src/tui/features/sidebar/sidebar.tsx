@@ -1,3 +1,4 @@
+import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, t } from "../../i18n/index.js";
 import { useHover } from "../../hooks/useHover.js";
 import { MonitoringBackdrop } from "../../ui/backdrop.js";
@@ -7,7 +8,7 @@ import type { ThreadEnvelope } from "../../../core/types.js";
 import type { SidebarMessageHit } from "../../model/sidebarsearch.js";
 import type { SidebarGroup, SidebarMode, SidebarNative, SidebarSections, SidebarThread } from "../../model/sidebar.js";
 import { threadSortTime } from "../../model/shell.js";
-import { COLOR, MARKER, pulseColor, rule, spread, STATUS_COLOR, SURFACE, truncate } from "../../theme.js";
+import { COLOR, MARKER, pulseColor, rule, STATUS_COLOR, SURFACE } from "../../theme.js";
 
 /** Freshness window: sent or finished inside it, a non-open card glows like new activity. */
 const FRESH_MS = 120_000;
@@ -159,11 +160,7 @@ function ActiveCard({
         <text fg={showMarker ? markerFg : COLOR.faint} selectable={false}>{showMarker ? MARKER : " "}</text>
         {nested ? <text fg={COLOR.faint} selectable={false}>{lead.slice(0, 4)}</text> : null}
         {nested ? <text fg={COLOR.diff} selectable={false}>{lead.slice(4)}</text> : null}
-        <text fg={titleFg} selectable={false}>
-          {`${nested ? "" : lead}${truncate(row.title, Math.max(0, body - tail.length - lead.length - 1))}`.padEnd(
-            Math.max(0, body - tail.length - (nested ? lead.length : 0)),
-          )}
-        </text>
+        <OverflowText fg={titleFg} selectable={false} width={Math.max(0, body - tail.length - (nested ? lead.length : 0))} padToWidth prefix={nested ? "" : lead} active={hovered || open}>{row.title}</OverflowText>
         {/* Only texts with content: an empty <text> still takes a cell, and
             two of them pushed the row one column past its width, squeezing
             the marker column out and shifting the whole row left. */}
@@ -191,11 +188,12 @@ function ActiveCard({
         <text fg={showMarker ? markerFg : COLOR.faint} selectable={false}>{showMarker ? MARKER : " "}</text>
         <text fg="#09090b" bg={row.badgeColor} selectable={false}>{` ${row.badge}`}</text>
         <text fg={marked ? COLOR.warn : "#09090b"} bg={row.badgeColor} selectable={false}>{marked ? DRAFT_DOT : " "}</text>
-        <text fg={COLOR.dim} selectable={false}>{spread(` ${row.projectTitle}`, row.age, body - 4)}</text>
+        <OverflowText fg={COLOR.dim} selectable={false} width={Math.max(0, body - 5 - row.age.length)} padToWidth active={hovered || open}>{` ${row.projectTitle}`}</OverflowText>
+        <text fg={COLOR.dim} selectable={false}>{` ${row.age}`}</text>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
         <text fg={showMarker ? markerFg : COLOR.faint} selectable={false}>{showMarker ? MARKER : " "}</text>
-        <text fg={titleFg} selectable={false}>{` ${truncate(row.title, body - 4)}`.padEnd(body - 1 - (row.waiting ? 1 : 0))}</text>
+        <OverflowText fg={titleFg} selectable={false} width={body - 1 - (row.waiting ? 1 : 0)} padToWidth prefix=" " active={hovered || open}>{row.title}</OverflowText>
         <text fg={glyphColor} selectable={false}>{glyph}</text>
         {row.waiting ? <text fg={waitColor} selectable={false}>{WAITING_GLYPH}</text> : null}
       </box>
@@ -229,7 +227,7 @@ function NativeRow({ native, width, now, open, onOpen }: { native: SidebarNative
       <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
       <text fg={COLOR.faint} selectable={false}>{lead}</text>
       <text fg={COLOR.diff} selectable={false}>{"◇ "}</text>
-      <text fg={open ? COLOR.bright : native.running ? COLOR.text : COLOR.dim} selectable={false}>{truncate(native.label, labelWidth).padEnd(labelWidth)}</text>
+      <OverflowText fg={open ? COLOR.bright : native.running ? COLOR.text : COLOR.dim} selectable={false} width={labelWidth} padToWidth active={hovered}>{native.label}</OverflowText>
       {native.age.length > 0 ? <text fg={COLOR.dim} selectable={false}>{`${native.age} `}</text> : null}
       <text fg={glyphColor} selectable={false}>{glyph}</text>
     </box>
@@ -265,9 +263,8 @@ function SettledRow({
       <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
       <text fg={COLOR.faint} selectable={false}>{row.badge}</text>
       <text fg={marked ? COLOR.warn : COLOR.faint} selectable={false}>{marked ? DRAFT_DOT : " "}</text>
-      <text fg={open ? COLOR.text : COLOR.dim} selectable={false}>
-        {spread(`${row.depth > 0 ? (row.last ? "└ " : "├ ") : ""}${row.title}`, row.age, width - 4 - (row.waiting ? 1 : 0))}
-      </text>
+      <OverflowText fg={open ? COLOR.text : COLOR.dim} selectable={false} width={Math.max(0, width - 5 - (row.waiting ? 1 : 0) - row.age.length)} padToWidth active={hovered || open}>{`${row.depth > 0 ? (row.last ? "└ " : "├ ") : ""}${row.title}`}</OverflowText>
+      <text fg={COLOR.dim} selectable={false}>{` ${row.age}`}</text>
       {row.waiting ? <text fg={waitColor} selectable={false}>{WAITING_GLYPH}</text> : null}
     </box>
   );
@@ -374,9 +371,7 @@ function GroupHeaderRow({
     >
       <text fg={COLOR.dim} selectable={false}>{group.collapsed ? "▸ " : "▾ "}</text>
       <text fg="#09090b" bg={group.badgeColor} selectable={false}>{` ${group.badge} `}</text>
-      <text fg={COLOR.text} selectable={false}>
-        {` ${truncate(group.projectTitle, titleBudget)}`.padEnd(titleBudget + 1)}
-      </text>
+      <OverflowText fg={COLOR.text} selectable={false} width={titleBudget + 1} padToWidth active={hovered}>{` ${group.projectTitle}`}</OverflowText>
       <text fg={COLOR.faint} selectable={false}>{group.threads.length}</text>
     </box>
   );
@@ -394,7 +389,7 @@ function SearchTitleRow({ thread, width, open, selected, onOpen }: { thread: Thr
       {...handlers}
     >
       <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
-      <text fg={selected || open ? COLOR.bright : COLOR.text} selectable={false}>{` ${truncate(thread.title, width - 3)}`.padEnd(width - 1)}</text>
+      <OverflowText fg={selected || open ? COLOR.bright : COLOR.text} selectable={false} width={width - 1} padToWidth active={selected || hovered || open}>{` ${thread.title}`}</OverflowText>
     </box>
   );
 }
@@ -407,10 +402,10 @@ function SearchMessageRow({ hit, width, open, selected, onOpen }: { hit: Sidebar
     <box style={{ flexDirection: "column", width, flexShrink: 0 }} onMouseDown={onOpen} selectable={false} backgroundColor={background} {...handlers}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
         <text fg={open ? COLOR.accent : COLOR.faint} selectable={false}>{open ? MARKER : " "}</text>
-        <text fg={selected || open ? COLOR.bright : COLOR.text} selectable={false}>{` ${truncate(hit.title, width - 3)}`.padEnd(width - 1)}</text>
+        <OverflowText fg={selected || open ? COLOR.bright : COLOR.text} selectable={false} width={width - 1} padToWidth active={selected || hovered || open}>{` ${hit.title}`}</OverflowText>
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-        <text fg={COLOR.dim} selectable={false}>{`   ${truncate(hit.snippet.replace(/\s+/gu, " "), width - 4)}`.padEnd(width)}</text>
+        <OverflowText fg={COLOR.dim} selectable={false} width={width} padToWidth active={selected || hovered || open}>{`   ${hit.snippet.replace(/\s+/gu, " ")}`}</OverflowText>
       </box>
     </box>
   );
@@ -649,9 +644,7 @@ export function Sidebar({
             selectable={false}
             {...nextProjectHover.handlers}
           >
-            <text fg={COLOR.accent} selectable={false}>
-              {truncate(sections.projectTitle ?? t("sidebar.unknown_project_c320"), width - 10)}
-            </text>
+            <OverflowText fg={COLOR.accent} selectable={false} width={width - 10}>{sections.projectTitle ?? t("sidebar.unknown_project_c320")}</OverflowText>
           </box>
           <box
             style={{ flexDirection: "row", height: 1, flexShrink: 0 }}

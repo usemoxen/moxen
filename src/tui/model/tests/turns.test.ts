@@ -209,6 +209,15 @@ describe("segmentWork", () => {
 });
 
 describe("groupTurns", () => {
+  it("associates throughput with its own turn and leaves missing readings absent", () => {
+    const groups = groupTurns([
+      entry({ id: "u1", kind: "user", turnId: "one" }),
+      entry({ id: "a1", kind: "assistant", turnId: "one" }),
+      entry({ id: "u2", kind: "user", turnId: "two" }),
+      entry({ id: "a2", kind: "assistant", turnId: "two" }),
+    ], new Map(), { one: 12.5 });
+    expect(groups.map((group) => group.tokensPerSecond)).toEqual([12.5, null]);
+  });
   it("holds streaming text as live output, never as the closing reply", () => {
     const groups = groupTurns([
       entry({ id: "u1", kind: "user", text: "go" }),

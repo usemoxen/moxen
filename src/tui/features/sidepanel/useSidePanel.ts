@@ -6,6 +6,8 @@ import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import type { ContextBreakdown } from "../../model/sidepanel.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { SideTab } from "../../model/sidepanel.js";
+import { startPolling } from "../../hooks/poll.js";
+import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 
 /**
  * The side panel's open tab (null: closed). The Diff tab follows the diff
@@ -48,27 +50,26 @@ export function useContextBreakdown(
   intervalMs: number = CONTEXT_REFRESH_MS,
 ): { breakdown: ContextBreakdown | null; live: boolean } {
   const [state, setState] = useState<{ breakdown: ContextBreakdown | null; live: boolean }>({ breakdown: null, live: false });
+  const visible = useTerminalVisible();
   useEffect(() => {
     setState({ breakdown: null, live: false });
   }, [threadId]);
   useEffect(() => {
     if (!active || threadId === null) return;
     let cancelled = false;
-    const read = (): void => {
-      void client
+    const read = () =>
+      client
         .query({ type: "thread.context", threadId })
         .then((result) => {
           if (!cancelled) setState({ breakdown: result.breakdown, live: result.live });
         })
         .catch(() => undefined);
-    };
-    read();
-    const timer = setInterval(read, intervalMs);
+    const stop = startPolling(read, visible ? intervalMs : null);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
     };
-  }, [client, threadId, active, refreshKey, intervalMs]);
+  }, [client, threadId, active, refreshKey, intervalMs, visible]);
   return state;
 }
 
@@ -87,25 +88,24 @@ export function usePlanUsage(
   onFirstRead?: () => void,
 ): Readonly<Record<string, ProviderUsageLimits>> {
   const [limits, setLimits] = useState<Readonly<Record<string, ProviderUsageLimits>>>({});
+  const visible = useTerminalVisible();
   const firstRead = useRef(onFirstRead);
   firstRead.current = onFirstRead;
   useEffect(() => {
     let cancelled = false;
-    const read = (): void => {
-      void client
+    const read = () =>
+      client
         .query({ type: "usage.limits" })
         .then((result) => {
           if (!cancelled) setLimits(result.providers);
         })
         .catch(() => undefined)
-        .finally(() => firstRead.current?.());
-    };
-    read();
-    const timer = setInterval(read, intervalMs);
+        .finally(() => { if (!cancelled) firstRead.current?.(); });
+    const stop = startPolling(read, visible ? intervalMs : null);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
     };
-  }, [client, refreshKey, intervalMs]);
+  }, [client, refreshKey, intervalMs, visible]);
   return limits;
 }

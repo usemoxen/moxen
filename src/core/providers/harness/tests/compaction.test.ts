@@ -211,9 +211,9 @@ describe("automatic compaction", () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
   // Room for the system prompt and the tool list as they are today; both grow, and the fixtures below are sized against them.
-  const WINDOW_BASE = 27_000;
+  const WINDOW_BASE = 29000;
   const window = (): number => WINDOW_BASE + Math.round(EXTRA * 2.5);
-  const full = (): number => 14_000 + Math.round(EXTRA * 1.25);
+  const full = (): number => 15000 + Math.round(EXTRA * 1.25);
 
   it("compacts after a turn that ends past the threshold, before the thread is free again", async () => {
     const { driver, requests, events } = driverWith([answer(long(3000)), answer(long(3000)), answer(long(3000), full()), summary(), answer("ok")], window());
@@ -247,7 +247,7 @@ describe("automatic compaction", () => {
     const script: Step[] = [
       call("r1", "read", { file_path: file }, 1500),
       call("r2", "read", { file_path: file, offset: 2 }, 3000),
-      call("r3", "read", { file_path: file, offset: 3 }, 9500 + Math.round(EXTRA * 1.25)),
+      call("r3", "read", { file_path: file, offset: 3 }, 10500 + Math.round(EXTRA * 1.25)),
       // What the third reply left, plus its result, is past the threshold: the next thing asked is the summary.
       summary(),
       answer("All read."),

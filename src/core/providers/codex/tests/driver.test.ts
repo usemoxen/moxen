@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
@@ -63,6 +63,36 @@ describe("codex session resume", () => {
 });
 
 describe("codex driver turns", () => {
+  it("measures streamed messages without counting reasoning summaries or tool execution", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const server = transport.sessions[0]!.server;
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      server.notify("item/started", { item: { id: "m1", type: "agentMessage", phase: "commentary", text: "" } });
+      server.notify("item/agentMessage/delta", { itemId: "m1", delta: "Checking." });
+      await vi.waitFor(() => expect(events.some((event) => event.type === "message.part.updated")).toBe(true));
+      now = 1_500;
+      server.notify("item/completed", { item: { id: "m1", type: "agentMessage", phase: "commentary", text: "Checking." } });
+      await vi.waitFor(() => expect(events.some((event) => event.type === "assistant.note")).toBe(true));
+      server.notify("item/reasoning/summaryTextDelta", { itemId: "r1", delta: "A summary" });
+      server.notify("item/started", { item: { id: "c1", type: "commandExecution", command: "echo hi", status: "inProgress" } });
+      now = 20_000;
+      server.notify("item/completed", { item: { id: "c1", type: "commandExecution", command: "echo hi", status: "completed" } });
+      server.notify("turn/completed", { turn: { id: "srv-1", status: "completed" } });
+      const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+      expect(outcome.generation).toEqual({ characters: "Checking.".length, durationMs: 500 });
+    } finally {
+      clock.mockRestore();
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await driver.stopAll();
+    }
+  });
   it("passes an explicitly selected skill as a native skill input without treating a file path as a skill", async () => {
     const transport = new FakeCodexTransport({ skills: [{ skills: [{ name: "imagegen", path: "/skills/imagegen/SKILL.md", enabled: true }, { name: "off", path: "/skills/off/SKILL.md", enabled: false }] }] });
     const driver = new CodexDriver({ transport });
@@ -168,6 +198,7 @@ describe("codex driver turns", () => {
     await Effect.runPromise(driver.startSession({ ...START, instructions: "Report back." }));
     expect(transport.sessions[0]!.server.requestsTo("thread/start")[0]!.params).toMatchObject({
       developerInstructions: expect.stringContaining("Report back."),
+      baseInstructions: expect.stringContaining("# Doing the work"),
     });
   });
 
@@ -677,8 +708,8 @@ describe("Codex lifecycle boundaries", () => {
   it("uses verified tool switches and refuses to pretend patch removal succeeded", async () => {
     const transport = new FakeCodexTransport();
     const driver = new CodexDriver({ transport });
-    await Effect.runPromise(driver.startSession({ ...START, disabledNativeTools: ["shell", "view_image", "image_generation", "apps"] }));
-    expect(transport.sessions[0]!.server.requestsTo("thread/start")[0]!.params).toMatchObject({ config: { "features.shell_tool": false, "features.view_image": false, "features.image_generation": false, "features.apps": false } });
+    await Effect.runPromise(driver.startSession({ ...START, disabledNativeTools: ["shell", "view_image", "image_generation", "apps", "goals"] }));
+    expect(transport.sessions[0]!.server.requestsTo("thread/start")[0]!.params).toMatchObject({ config: { "features.shell_tool": false, "features.view_image": false, "features.image_generation": false, "features.apps": false, "features.goals": false, "tools.update_plan.enabled": false } });
     expect(() => codexDisabledToolConfig(["apply_patch"])).toThrow(/no independent removal control/);
     await Effect.runPromise(driver.stopAll());
   });

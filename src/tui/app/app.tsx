@@ -1,3 +1,4 @@
+import { OverflowText } from "../ui/overflowtext.js";
 import { sessionStatusLabel } from "../i18n/status.js";
 import { applyLanguage, currentLanguage, t, tx } from "../i18n/index.js";
 import os from "node:os";
@@ -16,6 +17,9 @@ import { pickerEntries } from "../model/skills.js";
 import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
 import { SettingsModal } from "../features/settings/settingsmodal.js";
+import { ChangelogModal } from "../features/experience/experiencemodal.js";
+import { OnboardingPage } from "../features/experience/onboardingpage.js";
+import { useExperience } from "../features/experience/useExperience.js";
 import { StatsModal } from "../features/stats/statsmodal.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import type { ActiveServer } from "../features/remote/server.js";
@@ -73,7 +77,7 @@ import { handOffTarget, openRequestPrompt, requestNoun } from "../model/gitpanel
 import { renderMessage } from "../model/message.js";
 import { copiedAttachments, copiedToast, copyPrompt, matchCopy, uniqueName } from "../model/copystash.js";
 
-import { applyTheme, COLOR, MARKER, pulseColor, SPINNER, SURFACE, truncate } from "../theme.js";
+import { applyTheme, COLOR, MARKER, pulseColor, SPINNER, SURFACE } from "../theme.js";
 import { useToasts, type ToastTone } from "../hooks/useToasts.js";
 import { useClipboard } from "../hooks/useClipboard.js";
 import { useTerminalNotify } from "../hooks/useTerminalNotify.js";
@@ -267,10 +271,11 @@ export function App({
     registerCtrlCPress,
   } = useQuitConfirm(setFocus);
   const [picker, setPicker] = useState<PickerName>(null);
+  const experience = useExperience(client);
   // Reads on open and writes through the server; see `useSettings`. The
   // snapshot outlives the page, so once it exists the app draws from it:
   // a `ui.*` edit applies on the spot instead of after a restart.
-  const settings = useSettings(client, picker === "settings" || picker === "model");
+  const settings = useSettings(client, picker === "settings" || picker === "model" || picker === "onboarding");
   // Each provider's install on the settings page, and the updaters behind the palette rows and the page's buttons;
   // the versions are read again whenever an update ends.
   const providerVersions = useProviderVersions(client, picker === "settings");
@@ -394,10 +399,13 @@ export function App({
     });
   });
 
+  const terminalVisible = useTerminalVisible();
   useEffect(() => {
+    if (!terminalVisible) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [terminalVisible]);
 
   useEffect(() => {
     return client.subscribeShell(
@@ -603,7 +611,7 @@ export function App({
   // Waits on the user (questions, permission prompts) come off the raw
   // activities: their closing rows are bookkeeping the transcript hides.
   const turnWaits = useMemo(() => waitSpans(threadState.activities), [threadState.activities]);
-  const groups = useMemo(() => groupTurns(entries, turnWaits), [entries, turnWaits]);
+  const groups = useMemo(() => groupTurns(entries, turnWaits, threadState.thread?.turnThroughput), [entries, turnWaits, threadState.thread?.turnThroughput]);
   const diffPanel = useDiffPanel({
     client,
     width,
@@ -1215,6 +1223,7 @@ export function App({
   const {
     providers,
     providersError,
+    reload: reloadProviders,
     model,
     effort,
     permission,
@@ -1251,7 +1260,6 @@ export function App({
   // A 1s tick while a turn is in flight drives the thinking/working elapsed
   // counter; the 30s tick above is enough for sidebar ages when idle.
   // Not while the terminal is hidden: nothing is painted, and `now` is current again the moment it is not.
-  const terminalVisible = useTerminalVisible();
   useEffect(() => {
     if (!sessionRunning || !terminalVisible) return;
     setNow(Date.now());
@@ -1275,6 +1283,18 @@ export function App({
   // the first frame, so it does not redraw when the answers land. A read that failed counts: the boot screen
   // names the stalled leg rather than hold the app on a server that cannot answer it.
   const providersReady = (providers !== null || providersError !== null) && planUsageRead;
+  useEffect(() => {
+    if (!booted || experience.snapshot === null) return;
+    if (experience.offered.current) return;
+    experience.offered.current = true;
+    if (!experience.snapshot.onboardingCompleted && picker === null) setPicker("onboarding");
+  }, [booted, picker, experience]);
+  useEffect(() => {
+    const snapshot = experience.snapshot;
+    if (!booted || !snapshot?.onboardingCompleted || experience.notified.current || !snapshot.releases.some((release) => !snapshot.seenReleases.includes(release.version))) return;
+    experience.notified.current = true;
+    toasts.push("release-notes", "info", t("guide.newRelease"), 12_000, { label: t("guide.openRelease"), onClick: () => setPicker("changelog") });
+  }, [booted, experience, toasts]);
   useEffect(() => {
     if (!booted && isBootReady(shell, openThreadId, threadState, providersReady)) setBooted(true);
   }, [booted, shell, openThreadId, threadState, providersReady]);
@@ -1737,6 +1757,13 @@ export function App({
         },
         close: () => closePicker(paletteReturnFocus),
       });
+    const helpSection = () => ({
+      header: "Moxen",
+      rows: [
+        { key: "moxen:onboarding", label: t("guide.open"), onPick: () => { experience.setStep(0); setPicker("onboarding"); } },
+        { key: "moxen:changelog", label: t("guide.changelog"), onPick: () => setPicker("changelog") },
+      ],
+    });
     if (picker === "command" && creating) {
       return {
         kind: "list",
@@ -1763,6 +1790,7 @@ export function App({
               },
             ],
           },
+          helpSection(),
           remoteSection(),
         ],
       };
@@ -1911,7 +1939,7 @@ export function App({
                 ...(draft.trim().length === 0
                   ? { meta: t("app.write_it_in_the_589e"), disabled: true, onPick: () => {} }
                   : {
-                      meta: truncate(draft.trim().replace(/\s+/gu, " "), 32),
+                      meta: draft.trim().replace(/\s+/gu, " "),
                       onPick: () => {
                         setPickerFilter("");
                         setPicker("schedule");
@@ -2064,6 +2092,7 @@ export function App({
               },
             ],
           },
+          helpSection(),
           remoteSection(),
           ...(jumpRows.length === 0 ? [] : [{ header: t("app.jump_to_message_b628"), rows: jumpRows }]),
         ],
@@ -2251,7 +2280,7 @@ export function App({
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**
@@ -2486,13 +2515,32 @@ export function App({
    */
   const creatingWidth = Math.min(76, Math.max(40, width - SIDEBAR_WIDTH - 8));
 
+  const renderOnboarding = () => <OnboardingPage
+    step={experience.step} onStep={experience.setStep} settings={settings} providers={providers}
+    selection={effectiveModelSelection ?? null} projects={shell.projects} projectId={effectiveProjectId}
+    client={client} remote={remote} error={experience.error} saving={experience.saving}
+    motion={ui?.backdrop ?? "animated"} screenWidth={width} screenHeight={height}
+    onMemory={(choice) => { void experience.setMemory(choice, settings.set); }}
+    onModel={(selection) => { setCreating(true); pickModel(selection, true); }}
+    onProject={(id) => { setCreating(true); setCreatingProjectId(id); }}
+    onRefresh={reloadProviders}
+    onComplete={() => {
+      void experience.complete().then((ok) => {
+        if (!ok) return;
+        setCreating(true);
+        if (effectiveProjectId === null) setCreatingProjectId(NO_PROJECT);
+        closePicker("composer");
+      });
+    }}
+    onClose={() => closePicker("composer")}
+  />;
   return (
     <box style={{ flexDirection: "column", flexGrow: 1, backgroundColor: SURFACE.base }}>
       {/* Boot gate: sidebar + transcript stay hidden until both snapshots
           land — an empty shell is otherwise indistinguishable from "no
           threads". Toasts, the quit confirm, and pickers below stay mounted
           so boot errors and ctrl+c still surface over the loading screen. */}
-      {bootReady ? (
+      {bootReady && picker === "onboarding" ? renderOnboarding() : bootReady ? (
       <box style={{ flexDirection: "row", flexGrow: 1 }}>
         <Sidebar
           sections={sections}
@@ -2992,9 +3040,7 @@ export function App({
           backgroundColor={SURFACE.raised}
         >
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-            <text fg={TOAST_COLOR[toast.tone]} bg={SURFACE.raised} selectable={false}>
-              {truncate(toast.text, Math.max(10, toastGeometry.width - 8 - (toast.action === null ? 0 : toast.action.label.length + 3)))}
-            </text>
+            <OverflowText fg={TOAST_COLOR[toast.tone]} bg={SURFACE.raised} selectable={false} width={Math.max(10, toastGeometry.width - 8 - (toast.action === null ? 0 : toast.action.label.length + 3))}>{toast.text}</OverflowText>
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
               {toast.action === null ? null : (
                 <text fg={COLOR.accent} bg={SURFACE.raised} selectable={false} onMouseDown={toast.action.onClick}>
@@ -3078,7 +3124,7 @@ export function App({
           onClose={sideQuestion.close}
         />
       ) : null}
-      {picker === null ? null : picker === "rename" ? (
+      {picker === null || picker === "onboarding" ? null : picker === "rename" ? (
         <RenameModal
           initialTitle={selected === null ? "" : String(selected.title ?? "")}
           screenWidth={width}
@@ -3194,8 +3240,25 @@ export function App({
           }}
           onClose={() => closePicker("composer")}
         />
+      ) : picker === "changelog" ? (
+        <ChangelogModal
+          snapshot={experience.snapshot}
+          error={experience.error}
+          saving={experience.saving}
+          screenWidth={width}
+          screenHeight={height}
+          onSettings={(section) => {
+            experience.openSettings(section);
+            setPicker("settings");
+          }}
+          onRead={(version) => { void experience.read(version).then((ok) => { if (ok) closePicker("composer"); }); }}
+          onGuide={() => { experience.setStep(0); setPicker("onboarding"); }}
+          onClose={() => closePicker("composer")}
+        />
       ) : picker === "settings" ? (
         <SettingsModal
+          client={client}
+          initialSection={experience.settingsSection}
           snapshot={settings.snapshot}
           loading={settings.loading}
           saving={settings.saving}
@@ -3333,10 +3396,10 @@ export function App({
           <box style={{ flexDirection: "column", flexGrow: 1 }}>
             <text fg={COLOR.bright} selectable={false}>{t("quit.title")}</text>
             <box style={{ height: 1, flexShrink: 0 }} />
-            <text fg={COLOR.dim} selectable={false}>
+            <text fg={COLOR.dim} wrapMode="word" selectable={false}>
               {selected === null
                 ? t("quit.noThread")
-                : t("quit.openThread", { title: truncate(String(selected.title ?? selected.id), Math.max(10, quitGeometry.width - 4)) })}
+                : t("quit.openThread", { title: String(selected.title ?? selected.id) })}
             </text>
             <text fg={COLOR.dim} selectable={false}>{t("quit.promptCleared")}</text>
             <box style={{ flexGrow: 1 }} />
@@ -3385,8 +3448,10 @@ export function App({
           onMouseDown={() => {}}
         />
       ) : null}
-      <ImageViewerDim screenWidth={width} screenHeight={height} />
-      <ImagePreviewLayer screenWidth={width} screenHeight={height} />
+      {picker === "onboarding" ? null : <>
+        <ImageViewerDim screenWidth={width} screenHeight={height} />
+        <ImagePreviewLayer screenWidth={width} screenHeight={height} />
+      </>}
     </box>
   );
 }

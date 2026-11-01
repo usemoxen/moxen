@@ -51,6 +51,8 @@ moxen tui
 
 Opens the interactive client: sidebar with your threads, the live transcript with per-turn diffs,
 and a composer with model/effort pickers, image attachments, and an external-editor shortcut.
+The first-run guide covers appearance, models, memory and MCP tools. Reopen **Getting started**
+or browse **What's new** from the command palette; see [the guide](docs/getting-started.md).
 Clicking a user prompt opens message actions (copy, revert); clicking a diff-turn header jumps
 the transcript to that turn; the command palette covers copy/thread/jump actions.
 

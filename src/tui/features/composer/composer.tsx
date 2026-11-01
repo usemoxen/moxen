@@ -1,3 +1,6 @@
+import { useScrollingText } from "../../hooks/useScrollingText.js";
+import { OverflowText } from "../../ui/overflowtext.js";
+import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 import { t as tr, tx } from "../../i18n/index.js";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +12,7 @@ import { SyntaxStyle, TextAttributes, bg, decodePasteBytes, fg, italic, stripAns
 import { useHover } from "../../hooks/useHover.js";
 import { useAnimTick } from "../../hooks/useAnimTick.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
-import { COLOR, MODE_COLOR, MODE_PULSE, pulseColor, SURFACE, truncate } from "../../theme.js";
+import { COLOR, MODE_COLOR, MODE_PULSE, pulseColor, SURFACE } from "../../theme.js";
 import { interactionModeLabel } from "../../model/modes.js";
 import type { InteractionMode } from "../../../core/types.js";
 import { thumbGeometry } from "../../model/scrollbar.js";
@@ -57,7 +60,7 @@ function HoverText({
  * (beside an open panel) sheds "to use it" before it cuts deep into the
  * suggestion, and the chip itself only when even that leaves no room.
  */
-function suggestionPlaceholder(suggestion: string, width: number) {
+function suggestionPlaceholder(suggestion: string, width: number, shown: string) {
   // The textarea's own width: the left border, padding 2 + 1, and the
   // scrollbar strip. Budgeting against more wrapped the tail onto a line
   // of its own — a lone "…" with the chip under it.
@@ -66,10 +69,10 @@ function suggestionPlaceholder(suggestion: string, width: number) {
   const chip = bg(SURFACE.border)(fg(COLOR.bright)(" tab "));
   const MIN_TEXT = 24;
   if (inner - 18 >= Math.min(MIN_TEXT, flat.length)) {
-    return t`${fg(COLOR.dim)(italic(truncate(flat, inner - 18)))}   ${chip}${fg(COLOR.faint)(tr("composer.to_use_it_e06b"))}`;
+    return t`${fg(COLOR.dim)(italic(shown))}   ${chip}${fg(COLOR.faint)(tr("composer.to_use_it_e06b"))}`;
   }
-  if (inner - 7 >= Math.min(12, flat.length)) return t`${fg(COLOR.dim)(italic(truncate(flat, inner - 7)))}  ${chip}`;
-  return t`${fg(COLOR.dim)(italic(truncate(flat, inner)))}`;
+  if (inner - 7 >= Math.min(12, flat.length)) return t`${fg(COLOR.dim)(italic(shown))}  ${chip}`;
+  return t`${fg(COLOR.dim)(italic(shown))}`;
 }
 
 /** The account's plan usage in the footer: one short gauge per window, coloured as it fills. */
@@ -589,13 +592,14 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [skillTrigger !== null]);
 
+  const terminalVisible = useTerminalVisible();
   // The highlighted row's description auto-scrolls instead of sitting
   // truncated — ticks only while the picker is actually open.
   useEffect(() => {
-    if (skillTrigger === null) return;
+    if (skillTrigger === null || !terminalVisible) return;
     const timer = setInterval(() => setSkillMarqueeTick((tick) => tick + 1), SKILL_MARQUEE_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [skillTrigger !== null]);
+  }, [skillTrigger !== null, terminalVisible]);
   useEffect(() => {
     setSkillMarqueeTick(0);
   }, [safeSkillIndex]);
@@ -618,6 +622,11 @@ export function Composer({
   // shows its placeholder, which is where the suggestion appears. Anything
   // typed, even a space, is the user's own.
   const offeredSuggestion = suggestion !== undefined && suggestion !== null && draft.length === 0 && !external ? suggestion : null;
+  const flatSuggestion = offeredSuggestion?.replace(/\s+/gu, " ").trim() ?? "";
+  const suggestionInner = Math.max(1, width - 5);
+  const suggestionWidth = suggestionInner - 18 >= Math.min(24, flatSuggestion.length) ? suggestionInner - 18 : suggestionInner - 7 >= Math.min(12, flatSuggestion.length) ? suggestionInner - 7 : suggestionInner;
+  const shownSuggestion = useScrollingText(flatSuggestion, suggestionWidth, focused && offeredSuggestion !== null);
+
 
   // The inventory answers about a second after the composer opens, so a "/"
   // typed in that gap was never offered (the change handler skips detection
@@ -986,7 +995,7 @@ export function Composer({
         <textarea
           ref={areaRef}
           focused={focused && !external}
-          placeholder={offeredSuggestion === null ? placeholder : suggestionPlaceholder(offeredSuggestion, width)}
+          placeholder={offeredSuggestion === null ? placeholder : suggestionPlaceholder(offeredSuggestion, width, shownSuggestion)}
           textColor={COLOR.text}
           backgroundColor={SURFACE.raised}
           focusedBackgroundColor={SURFACE.raised}
@@ -1089,7 +1098,7 @@ export function Composer({
       </box>
       {!hintShown ? null : (
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "flex-end" }}>
-          <text fg={COLOR.faint}>{truncate(statusHint, Math.max(0, hintRoom))}</text>
+          <OverflowText fg={COLOR.faint} width={Math.max(0, hintRoom)}>{statusHint}</OverflowText>
         </box>
       )}
     </box>

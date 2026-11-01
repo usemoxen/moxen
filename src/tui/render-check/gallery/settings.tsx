@@ -6,6 +6,8 @@ import { DEFAULT_CONFIG, setConfigValue } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
 import { SETTINGS, describeSettings, type SettingDescriptor } from "../../../core/configschema.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
+import { SkillsPanel } from "../../features/settings/skillspanel.js";
+import { skillsClient } from "../skillsfixture.js";
 import { Stage, type GalleryEntry } from "./registry.js";
 
 /**
@@ -40,7 +42,7 @@ const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name:
 const page = (label: string): PageRef => ref(label, label, side(label));
 
 /** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Model servers", "MCP servers"].map(page);
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Model servers", "MCP servers", "Skills"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
@@ -150,6 +152,7 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
   return (
     <Stage width={WIDTH} height={height}>
       <SettingsModal
+        client={skillsClient().api}
         snapshot={snapshot}
         loading={false}
         saving={null}
@@ -302,4 +305,11 @@ const editorEntries: GalleryEntry[] = editorKinds().map(({ id, descriptor }) => 
   },
 }));
 
-export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntries];
+export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntries, {
+  id: "skills-management",
+  group: "settings",
+  title: "User skills: shared, provider-specific and linked",
+  width: 90,
+  height: 32,
+  element: () => <Stage width={90} height={32}><SkillsPanel client={skillsClient().api} width={88} /></Stage>,
+}];

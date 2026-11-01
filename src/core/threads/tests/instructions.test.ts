@@ -81,6 +81,7 @@ describe("runtime instructions", () => {
     const delegation = { parentTitle: "P", baseBranch: null };
     const text = buildRuntimeInstructions({ instanceId: CLAUDE, shell: LINUX, env: LOCAL, delegation });
     expect(text).toContain("# Showing images");
+    expect(text).toContain("include the resulting image this way in your final reply without waiting for a second request");
     expect(text).not.toContain("# Layouts, charts and states");
   });
 
