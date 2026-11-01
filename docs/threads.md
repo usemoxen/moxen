@@ -18,6 +18,12 @@ When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.
 
+Internal image-generation tasks are stored as hidden child threads. They run
+and record usage normally, but the server leaves them out of shell snapshots,
+thread lists and search, so they do not appear under the parent in the sidebar.
+Task-id reads, completion notifications and cancellation still work. The hidden
+flag is persisted from creation; ordinary delegated work is not hidden.
+
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds
 them between the calls they narrate. Completed thinking is stored whole;

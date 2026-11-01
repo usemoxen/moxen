@@ -166,6 +166,7 @@ export async function createThread(
   }
   const thread: StoredThread = {
     id,
+    ...(input.hidden === true ? { hidden: true } : {}),
     projectId,
     title,
     ...(input.titleSource ? { titleSource: input.titleSource } : {}),

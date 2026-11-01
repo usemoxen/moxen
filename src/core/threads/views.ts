@@ -25,7 +25,7 @@ const INSPECT_RECENT_MESSAGE_LIMIT = 6;
 const INSPECT_MESSAGE_TEXT_LIMIT = 2_000;
 
 export function isVisibleThread(thread: ThreadEnvelope): boolean {
-  return thread.archivedAt == null && thread.deletedAt == null;
+  return thread.hidden !== true && thread.archivedAt == null && thread.deletedAt == null;
 }
 
 export function isSnoozedThread(thread: ThreadEnvelope, now = Date.now()): boolean {

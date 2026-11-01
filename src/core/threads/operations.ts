@@ -1797,7 +1797,7 @@ function taskOf(child: ThreadEnvelope, taskId = child.id): TaskView {
  *
  * Waiting awaits the run itself; this used to be a 200ms ledger poll.
  */
-export async function delegate(ctx: OperationContext, request: DelegateRequest): Promise<Delegation> {
+export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean } = {}): Promise<Delegation> {
   const parentThreadId = requireThreadId(request.parentThreadId);
   const task = request.task.trim();
   if (!task) throw new CliError("PROMPT_REQUIRED", "A non-empty delegated task is required.", { exitCode: 2 });
@@ -1888,6 +1888,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest):
   try {
     created = await createThread(ctx.store, {
       id: childThreadId,
+      ...(options.hidden === true ? { hidden: true } : {}),
       projectId: parent.projectId,
       title,
       ...(request.title?.trim() ? { titleSource: "user" as const } : {}),

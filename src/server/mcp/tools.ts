@@ -39,7 +39,7 @@ export const MAX_MODELS_PER_PROVIDER = 40;
 
 export const IMAGE_GENERATION_TOOL: McpTool = {
   name: "image_gen",
-  description: "Generate or edit an image through Codex's native image tool using the user's paid ChatGPT subscription. Pass prompt and optionally up to five absolute reference-image paths to start a focused Codex task. Returns at once with taskId; a notification arrives when it settles. Then call image_gen with taskId (and optional waitMs, max 45000) to read the actual generated image paths. Treat an empty images list as failure, regardless of the agent's report. Cancel a running image task with task_cancel. New generations require at least 3% five-hour and 1% weekly Codex usage remaining; Moxen checks this at every invocation.",
+  description: "Generate or edit an image through Codex's native image tool using the user's paid ChatGPT subscription. Pass prompt and optionally up to five absolute reference-image paths to start a focused Codex task using the newest released Luna model and its lowest supported reasoning effort other than none. The child thread is hidden from thread lists, but its results and cancellation remain available by taskId. Returns at once with taskId; a notification arrives when it settles. Then call image_gen with taskId (and optional waitMs, max 45000) to read the actual generated image paths. Treat an empty images list as failure, regardless of the agent's report. Cancel a running image task with task_cancel. New generations require at least 3% five-hour and 1% weekly Codex usage remaining; Moxen checks this at every invocation.",
   inputSchema: {
     type: "object",
     properties: {

@@ -1,6 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JsonRpcPeer } from "../../stdio.js";
-import { imageGenerationAvailability } from "../imagegeneration.js";
+import { imageGenerationAvailability, imageGenerationModel } from "../imagegeneration.js";
+import type { ModelSummary } from "../../../catalog/summary.js";
+
+function model(slug: string, efforts: string[] = ["high", "none", "low"], hidden = false): ModelSummary {
+  return { slug, name: slug, isHidden: hidden, isCustom: false, isDefault: false, efforts: [{ id: "effort", label: "Effort", currentValue: null, choices: efforts.map((id) => ({ id, label: id, isDefault: id === "high" })) }] };
+}
+
+describe("image-generation model selection", () => {
+  it.each([
+    { models: [model("gpt-6-luna")], selected: "gpt-6-luna" },
+    { models: [model("gpt-6-luna"), model("gpt-6.1-luna")], selected: "gpt-6.1-luna" },
+    { models: [model("gpt-6.9-luna"), model("gpt-6.10-luna")], selected: "gpt-6.10-luna" },
+    { models: [model("gpt-6.10-luna"), model("gpt-7-luna")], selected: "gpt-7-luna" },
+    { models: [model("gpt-6-luna-2026-09-01"), model("gpt-6-luna-2026-10-01"), model("gpt-6-luna")], selected: "gpt-6-luna" },
+    { models: [model("gpt-6-luna-2026-09-01"), model("gpt-6-luna-2026-10-01")], selected: "gpt-6-luna-2026-10-01" },
+    { models: [model("gpt-6-luna"), model("gpt-7-luna-preview"), model("gpt-7-luna", ["low"], true), model("gpt-8-astra")], selected: "gpt-6-luna" },
+  ])("automatically picks the newest released Luna, independent of catalog order: $selected", ({ models, selected }) => {
+    expect(imageGenerationModel(models)).toEqual({ model: selected, thinkingEffort: "low" });
+    expect(imageGenerationModel([...models].reverse())).toEqual({ model: selected, thinkingEffort: "low" });
+  });
+
+  it("uses the lowest supported reasoning effort, never none or an invented default", () => {
+    expect(imageGenerationModel([model("gpt-6-luna", ["max", "low", "minimal", "none"])])).toEqual({ model: "gpt-6-luna", thinkingEffort: "minimal" });
+    expect(imageGenerationModel([model("gpt-6-luna", ["high", "medium", "none"])])).toEqual({ model: "gpt-6-luna", thinkingEffort: "medium" });
+    for (const efforts of [[], ["none"], ["unknown"]]) expect(imageGenerationModel([model("gpt-6-luna", efforts)])).toBeNull();
+  });
+
+  it("does not silently fall back to an older Luna or a different family when the newest is unusable", () => {
+    expect(imageGenerationModel([model("gpt-6-luna"), model("gpt-6.1-luna", ["none"])])).toBeNull();
+    expect(imageGenerationModel([model("gpt-5.6-luna"), model("gpt-6-astra")])).toBeNull();
+  });
+});
 
 describe("image-generation eligibility", () => {
   const reset = Math.floor(Date.now() / 1000) + 3600;

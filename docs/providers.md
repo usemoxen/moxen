@@ -159,6 +159,25 @@ internal image API, and does not read or export Codex credentials. Codex
 threads use their native image tool instead; delegated tasks and providers
 with orchestration switched off do not get the bridge.
 
+Each image call resolves the newest released GPT Luna model (GPT-6 or later)
+advertised by Codex's live model catalog. Versions are compared numerically,
+so a future GPT-6.1 Luna or newer Luna release is picked without a config
+edit. A rolling model alias is preferred over dated snapshots of the same
+version; preview and hidden catalog entries are excluded. The task uses that
+model's lowest supported reasoning effort other than `none`, regardless of
+the parent's model or effort. If the latest Luna has no supported reasoning
+effort, or Codex advertises no suitable Luna, generation is unavailable rather
+than silently switching to another model. The catalog is not an entitlement
+guarantee: Codex still validates access when the task starts. This selects the
+model that calls the native image tool, not the underlying image renderer or
+its quality setting.
+
+New image-generation child threads are automatically hidden from the sidebar,
+thread lists and thread search. They are stored normally, not archived or
+deleted, and remain addressable by task id for results, cancellation and
+diagnostics. Hiding survives reconnects and server restarts; ordinary delegated
+tasks remain visible. Their completion notifications still reach the parent.
+
 The bridge is offered only after Codex reports a supported paid ChatGPT plan
 and current usage windows with at least **3% remaining in the five-hour
 window and 1% in the weekly window**. Moxen checks again before starting

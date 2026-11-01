@@ -45,7 +45,7 @@ import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
 import { CodexDriver } from "../core/providers/codex/driver.js";
-import { imageGenerationAvailability, type ImageGenerationAvailability } from "../core/providers/codex/imagegeneration.js";
+import { imageGenerationAvailability, imageGenerationModel, type ImageGenerationModel } from "../core/providers/codex/imagegeneration.js";
 import { isNativeToolDisabled } from "../core/nativetools.js";
 import { moxenToolsOf } from "../core/mcp.js";
 import { mergeProbed, probeSettledSomething, runProbe, testProfile } from "../core/providers/harness/probe.js";
@@ -68,7 +68,7 @@ import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_
 import { startMcpHttpServer, type McpHttpServer } from "./mcp/http.js";
 import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
 import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
-import { noteMessageId } from "../core/threads/views.js";
+import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
@@ -381,10 +381,13 @@ export class DirectConnection implements ClientApi {
     };
   }
 
-  private async imageAvailability(threadId: string): Promise<ImageGenerationAvailability> {
+  private async imageAvailability(threadId: string): Promise<
+    { readonly available: false; readonly reason: string } |
+    { readonly available: true; readonly reason: null; readonly selection: ImageGenerationModel }
+  > {
     const ctx = await this.context();
     const thread = await ctx.store.readThreadRecord(threadId);
-    const unavailable = (reason: string): ImageGenerationAvailability => ({ available: false, reason });
+    const unavailable = (reason: string) => ({ available: false as const, reason });
     if (!thread || thread.modelSelection.instanceId === "codex") return unavailable("Codex threads use their native image-generation tool.");
     const kind = driverKindOfInstance(thread.modelSelection.instanceId);
     if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
@@ -395,7 +398,10 @@ export class DirectConnection implements ClientApi {
       if (!(driver instanceof CodexDriver)) return unavailable("The Codex driver cannot check image-generation eligibility.");
       const provider = (await this.providers()).find((entry) => entry.instanceId === "codex");
       if (!provider?.enabled || !provider.installed) return unavailable("Codex must be installed and enabled for image generation.");
-      return await driver.withPeer(thread.env.path, imageGenerationAvailability);
+      const selection = imageGenerationModel(provider.models);
+      if (!selection) return unavailable("Image generation requires a released Luna model in Codex's catalog with a supported reasoning effort other than none.");
+      const availability = await driver.withPeer(thread.env.path, imageGenerationAvailability);
+      return availability.available ? { available: true, reason: null, selection } : unavailable(availability.reason!);
     }
     catch { return unavailable("Could not verify Codex subscription and usage; check Codex login and try again."); }
   }
@@ -623,7 +629,7 @@ export class DirectConnection implements ClientApi {
             return toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
           }),
         );
-        const visible = rows.filter((row) => row.archivedAt == null && row.deletedAt == null);
+        const visible = rows.filter(isVisibleThread);
         lastFingerprint = fingerprint;
         const hash = JSON.stringify({ projects, threads: visible });
         if (!stopped && !this.closed && hash !== lastHash) {
@@ -952,7 +958,7 @@ export class DirectConnection implements ClientApi {
           ...(references.length ? ["Reference image paths (read these before editing):", ...references.map((file) => JSON.stringify(file))] : []),
           "Image request:", command.prompt,
         ].join("\n\n");
-        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", model: "codex-default", isolation: "shared", wait: false });
+        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
@@ -1638,8 +1644,10 @@ export class DirectConnection implements ClientApi {
         const driver = this.driverFor(query.instanceId);
         return driver.skillInventory ? await driver.skillInventory(query.cwd) : EMPTY_SKILL_INVENTORY;
       }
-      case "image-generation.availability":
-        return await this.imageAvailability(query.threadId);
+      case "image-generation.availability": {
+        const { available, reason } = await this.imageAvailability(query.threadId);
+        return { available, reason };
+      }
       case "skills.manage.list": {
         const roots = await this.skillRoots(query.projectId);
         return { skills: await listManagedSkills(roots), roots };

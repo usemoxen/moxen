@@ -525,6 +525,8 @@ export interface ProposedPlanEnvelope {
 
 export interface ThreadEnvelope {
   id: string;
+  /** Internal tasks are omitted from thread lists, not archived or deleted. */
+  hidden?: boolean;
   projectId: string;
   title: string;
   modelSelection?: ModelSelection;

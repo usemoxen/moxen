@@ -142,6 +142,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
   return {
     id: thread.id,
     projectId: thread.projectId,
+    ...(thread.hidden === true ? { hidden: true } : {}),
     title: thread.title,
     modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,

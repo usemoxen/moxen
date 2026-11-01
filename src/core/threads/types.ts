@@ -35,6 +35,8 @@ export type ThreadTitleSource = "seed" | "provider" | "user";
 
 export interface StoredThread {
   readonly id: string;
+  /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
+  readonly hidden?: boolean;
   readonly projectId: string;
   readonly title: string;
   /** Absent on threads stored before titles were tracked; read as `seed`. */
@@ -260,6 +262,7 @@ export interface StoredDelegation {
 export interface CreateThreadInput {
   /** Client-generated id (the TUI opens the thread before the store confirms); generated when omitted. */
   readonly id?: string;
+  readonly hidden?: boolean;
   readonly projectId: string;
   readonly title: string;
   /** `user` for a title someone chose, which the provider's own title then leaves alone. */
