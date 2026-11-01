@@ -211,8 +211,11 @@ describe("automatic compaction", () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
   // Room for the system prompt and the tool list as they are today; both grow, and the fixtures below are sized against them.
-  const WINDOW_BASE = 29000;
-  const window = (): number => WINDOW_BASE + Math.round(EXTRA * 2.5);
+  // The threshold the fixtures are sized for, and the window that gives it: half the window, until the 16,000 tokens of headroom
+  // bind (past 32,000), where it is the window less that. A platform with more tools (Windows adds powershell) crosses that line.
+  const THRESHOLD_BASE = 14690;
+  const threshold = (): number => THRESHOLD_BASE + Math.round(EXTRA * 1.25);
+  const window = (): number => Math.min(threshold() * 2, threshold() + 16_000);
   const full = (): number => 15000 + Math.round(EXTRA * 1.25);
 
   it("compacts after a turn that ends past the threshold, before the thread is free again", async () => {
