@@ -2452,8 +2452,8 @@ export function App({
    * would swallow them into the draft and keep blinking. Closing restores
    * focus via closePicker's explicit target.
    */
-  const composerFocused =
-    focus === "composer" && picker === null && !quitConfirmOpen && !sideQuestion.open && forgePrompt === null;
+  const modalOwnsInput = picker !== null || quitConfirmOpen || sideQuestion.open || forgePrompt !== null;
+  const composerFocused = focus === "composer" && !modalOwnsInput;
   /**
    * Inline answer panel for the pending agent question, rendered in place
    * of the composer (both slots below). Render-time closures, so picks and
@@ -2466,7 +2466,7 @@ export function App({
           key={activePermission.requestId}
           request={activePermission}
           width={panelWidth}
-          suspended={picker !== null}
+          suspended={modalOwnsInput}
           onDecide={respondToPermission}
         />
       );
@@ -2485,7 +2485,7 @@ export function App({
         position={draft.index}
         total={activeAnswerRequest.questions.length}
         width={panelWidth}
-        suspended={picker === "answer-custom"}
+        suspended={modalOwnsInput}
         pickedValues={draft.selected[question.id] ?? []}
         {...(draft.custom[question.id] === undefined ? {} : { customValue: draft.custom[question.id]! })}
         tabs={activeAnswerRequest.questions.map((entry) => ({

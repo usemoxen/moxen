@@ -57,6 +57,7 @@ import { runServerLink } from "./scenarios/serverLink.js";
 import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
 import { runExperience } from "./scenarios/experience.js";
+import { runModalInput } from "./scenarios/modalInput.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -145,5 +146,6 @@ export async function runWalkthrough(): Promise<void> {
   await runToolRejection();
   await runAsyncQuestions();
   await runExperience();
+  await runModalInput();
 
 }

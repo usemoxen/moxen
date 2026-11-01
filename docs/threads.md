@@ -5,6 +5,10 @@ pause. Moving away or changing the selection restores the beginning. This
 applies to titles, settings, pickers and task labels; adjacent columns stay
 still. Longer descriptions and task output wrap inside their scrollable views.
 
+While Settings or another modal is open, its keyboard input cannot edit or send
+the composer draft, answer a pending agent question, or approve a tool beneath it.
+Closing the modal restores normal input to the underlying view.
+
 ## Lifecycle
 
 A turn goes from queued to running to settled. A running turn records the
