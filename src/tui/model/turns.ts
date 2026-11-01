@@ -395,8 +395,10 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
       case "threads":
         bump(`thread-${view.action}`);
         break;
-      case "tool":
       case "knowledge":
+        bump(`knowledge-${view.action}`);
+        break;
+      case "tool":
         bump("tool");
         break;
       case "todos":
@@ -444,6 +446,10 @@ function summarizePart(key: string, count: number): string {
       return t("summary.thread_search", { count });
     case "thread-read":
       return t("summary.thread_read", { count });
+    case "knowledge-search":
+      return t("summary.knowledgeSearch", { count });
+    case "knowledge-read":
+      return t("summary.knowledgeRead", { count });
     case "memory-read":
       return t("summary.memory_read", { count });
     case "memory-save":

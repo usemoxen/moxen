@@ -8,6 +8,8 @@ The timeline shows the search query and matching-section count, or the page
 and section read. Running calls show the requested IDs until titles arrive.
 An outline-only read is labelled as such; failed calls retain their target
 and show the error instead of appearing as successful reads.
+Collapsed work summaries count knowledge searches and reads separately from
+other tools.
 
 The content covers settings, Harness profiles, MCP servers, providers and
 models, projects, threads, modes, memory, skills, permissions, remote access

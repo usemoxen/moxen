@@ -23,9 +23,14 @@ export async function runKnowledge(): Promise<void> {
     const row = toolActivityRow({ provider: "codex", type: call.output === undefined ? "tool.execute.started" : "tool.execute.completed", threadId: "thread", turnId: "turn", tool: call.tool, raw: { item: { id: `kb-${index}`, type: "mcpToolCall", server: "moxen", tool: call.tool, arguments: call.input, status: call.output === undefined ? "inProgress" : call.failed ? "failed" : "completed", ...(call.output === undefined ? {} : { result: { content: [{ type: "text", text: call.output }], isError: call.failed === true } }) } } })!;
     return { id: `kb-${index}`, at, turnId: "turn", kind: "activity", text: "", streaming: false, tone: "tool", activityKind: row.kind, message: null, activity: { id: `kb-${index}`, turnId: "turn", tone: "tool", kind: row.kind, summary: row.summary, createdAt: at, payload: row.payload }, checkpoint: null, editStats: null, proposedPlan: null };
   });
-  function Host({ width }: { width: number }) {
+  const summaryEntries: TimelineEntry[] = [
+    { ...entries[0]!, id: "intro", kind: "assistant", text: "Consulting the knowledge base.", activity: null, activityKind: null },
+    ...Array.from({ length: 16 }, (_, index) => ({ ...entries[index < 6 ? 0 : 1]!, id: `summary-${index}` })),
+    { ...entries[0]!, id: "reply", kind: "assistant", text: "Knowledge review complete.", activity: null, activityKind: null },
+  ];
+  function Host({ width, summary = false }: { width: number; summary?: boolean }) {
     const scroll = useRef<ScrollBoxRenderable | null>(null);
-    return <Timeline groups={groupTurns(entries)} title="Knowledge" subtitle="" modelForTurn={() => ({ name: "Codex", color: null, provider: "codex" })} modelLabel={(model) => ({ name: model, color: null })} homeDir={undefined} expandedTurn={null} expandedWork={new Map([["turn", true]])} scrollRef={scroll} onFocus={() => {}} onOpenDiff={() => {}} onToggleWork={() => {}} onOpenMessageActions={() => {}} onOpenUrl={() => {}} focused width={width} sessionStatus="running" now={Date.parse(at) + 1000} turnStartedAt={at} turnFileDiffs={new Map()} gitFiles={[]} />;
+    return <Timeline groups={groupTurns(summary ? summaryEntries : entries)} title="Knowledge" subtitle="" modelForTurn={() => ({ name: "Codex", color: null, provider: "codex" })} modelLabel={(model) => ({ name: model, color: null })} homeDir={undefined} expandedTurn={null} expandedWork={new Map([["turn", true]])} scrollRef={scroll} onFocus={() => {}} onOpenDiff={() => {}} onToggleWork={() => {}} onOpenMessageActions={() => {}} onOpenUrl={() => {}} focused width={width} sessionStatus={summary ? "idle" : "running"} now={Date.parse(at) + 1000} turnStartedAt={at} turnFileDiffs={new Map()} gitFiles={[]} />;
   }
   for (const language of ["en", "es-ES"] as const) {
     await act(async () => applyLanguage(language));
@@ -45,6 +50,19 @@ export async function runKnowledge(): Promise<void> {
       } finally {
         await act(async () => setup.renderer.destroy());
       }
+    }
+    const summarySetup = await testRender(<Host width={140} summary />, { width: 140, height: 22, exitOnCtrlC: false });
+    try {
+      await summarySetup.flush();
+      console.log(`--- knowledge summary ${language} ---`);
+      const frame = summarySetup.captureCharFrame();
+      console.log(frame);
+      const expected = language === "en"
+        ? "Read from the knowledge base 10 times, searched the knowledge base 6 times"
+        : "Ha leído la base de conocimiento 10 veces, ha buscado en la base de conocimiento 6 veces";
+      if (!frame.includes(expected) || frame.includes("Used 16 tools")) fail("knowledge calls still use the generic tools summary");
+    } finally {
+      await act(async () => summarySetup.renderer.destroy());
     }
   }
   await act(async () => applyLanguage("en"));

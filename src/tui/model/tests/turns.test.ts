@@ -14,6 +14,7 @@ import {
   thoughtTail,
 } from "../turns.js";
 import type { TimelineEntry } from "../thread.js";
+import { applyLanguage } from "../../i18n/index.js";
 
 function entry(overrides: Partial<TimelineEntry> & { id: string }): TimelineEntry {
   return {
@@ -130,6 +131,24 @@ describe("summarizeWork", () => {
       thread("t3", "thread_read", { id: "y", turns: "1" }),
     ];
     expect(summarizeWork(entries)).toBe("Read 2 threads, searched threads 1 time");
+  });
+
+  it.each([
+    ["en", "Searched the knowledge base 1 time", "Read from the knowledge base 1 time", "Searched the knowledge base 2 times, read from the knowledge base 1 time, used 1 tool"],
+    ["es-ES", "Ha buscado en la base de conocimiento 1 vez", "Ha leído la base de conocimiento 1 vez", "Ha buscado en la base de conocimiento 2 veces, ha leído la base de conocimiento 1 vez, ha usado 1 herramienta"],
+  ])("counts knowledge searches and reads separately from generic tools (%s)", (language, searched, read, mixed) => {
+    const knowledge = (id: string, tool: string) => toolEntry(id, "tool.completed", { itemType: "dynamic_tool_call", status: "completed", data: { tool: `mcp__moxen__${tool}`, state: { input: { query: "profiles", id: "profiles" } } } });
+    applyLanguage(language);
+    try {
+      const search = knowledge("s1", "knowledge_search");
+      const reading = knowledge("r1", "knowledge_read");
+      expect(summarizeWork([search])).toBe(searched);
+      expect(summarizeWork([reading])).toBe(read);
+      const generic = toolEntry("g1", "tool.completed", { itemType: "dynamic_tool_call", status: "completed", data: { tool: "mcp__docs__lookup", state: { input: {} } } });
+      expect(summarizeWork([search, reading, knowledge("s2", "knowledge_search"), generic])).toBe(mixed);
+    } finally {
+      applyLanguage("en");
+    }
   });
 
   it("tells created files apart from updated ones", () => {
