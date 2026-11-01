@@ -190,6 +190,8 @@ describe("automatic compaction", () => {
   // grows by what they take (with the threshold and the target growing by the same amount), and the sizes below keep their meaning.
   const ORIGINAL_TOOLS = new Set(["read", "edit", "write", "glob", "grep", "bash", "todo", "ask", "enter_plan_mode", "exit_plan_mode"]);
   let EXTRA = 0;
+  let PROMPT = 0;
+  const PROMPT_TUNED = 18852;
   beforeAll(async () => {
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "harness-measure-"));
     let tools: ChatRequest["tools"] = [];
@@ -199,6 +201,7 @@ describe("automatic compaction", () => {
       home: scratch,
       transport: (request) => {
         tools = request.tools;
+        PROMPT = String(request.messages[0]!.content).length;
         return (async function* () {
           yield* answer("hi");
         })();
@@ -207,7 +210,9 @@ describe("automatic compaction", () => {
     await run(driver.startSession({ threadId: "m", workingDirectory: scratch, modelSelection: selection }));
     const { turnId } = await run(driver.sendTurn({ threadId: "m", prompt: "hi" }));
     await driver.awaitTurn("m", turnId);
-    EXTRA = Math.ceil(tools.filter((tool) => !ORIGINAL_TOOLS.has(tool.name)).reduce((sum, tool) => sum + JSON.stringify(tool).length / 4, 0)) + 150;
+    // The system prompt is a fixed cost too, and it differs by platform (the shell section) and grows with its guidance: count what it
+    // holds beyond the length the fixtures were last tuned against, so one edit to a sentence does not move a test off its band.
+    EXTRA = Math.ceil((PROMPT - PROMPT_TUNED) / 4) + Math.ceil(tools.filter((tool) => !ORIGINAL_TOOLS.has(tool.name)).reduce((sum, tool) => sum + JSON.stringify(tool).length / 4, 0)) + 150;
     fs.rmSync(scratch, { recursive: true, force: true });
   });
   // Room for the system prompt and the tool list as they are today; both grow, and the fixtures below are sized against them.
