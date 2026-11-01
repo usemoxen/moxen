@@ -396,6 +396,7 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
         bump(`thread-${view.action}`);
         break;
       case "tool":
+      case "knowledge":
         bump("tool");
         break;
       case "todos":

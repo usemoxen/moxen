@@ -17,10 +17,10 @@ export async function buildKnowledge(): Promise<void> {
     for (const section of page.sections) {
       if (sections.has(section.id)) throw new Error(`Duplicate knowledge section: ${page.id}/${section.id}`);
       sections.add(section.id);
-      const read = { version: APP_VERSION, id: page.id, title: page.title, text: `${section.title}\n${section.text}`, sections: [] };
+      const read = { version: APP_VERSION, id: page.id, title: page.title, sectionTitle: section.title, outline: false, text: `${section.title}\n${section.text}`, sections: [] };
       if (JSON.stringify(read).length > KNOWLEDGE_LIMITS.read) throw new Error(`Split oversized knowledge section: ${page.id}/${section.id}`);
     }
-    const outline = { version: APP_VERSION, id: page.id, title: page.title, text: "This page is larger than the read budget. Call knowledge_read with this id and one section ID below.", sections: page.sections.map(({ id, title }) => ({ id, title })) };
+    const outline = { version: APP_VERSION, id: page.id, title: page.title, sectionTitle: null, outline: true, text: "This page is larger than the read budget. Call knowledge_read with this id and one section ID below.", sections: page.sections.map(({ id, title }) => ({ id, title })) };
     if (JSON.stringify(outline).length > KNOWLEDGE_LIMITS.read) throw new Error(`Split oversized knowledge outline: ${page.id}`);
   }
   const target = fileURLToPath(new URL("../src/core/knowledge/generated.json", import.meta.url));

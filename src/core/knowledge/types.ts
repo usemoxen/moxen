@@ -25,6 +25,8 @@ export interface KnowledgeReading {
   readonly version: string;
   readonly id: string;
   readonly title: string;
+  readonly sectionTitle: string | null;
+  readonly outline: boolean;
   readonly text: string;
   readonly sections: readonly { readonly id: string; readonly title: string }[];
 }

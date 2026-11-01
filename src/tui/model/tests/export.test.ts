@@ -105,6 +105,11 @@ const thread = {
 } as unknown as ThreadEnvelope;
 
 describe("exportToolLine", () => {
+  it("retains knowledge queries and page/section targets rather than exporting a bare tool name", () => {
+    const lookup = (tool: string, input: Record<string, unknown>, output: string) => toolEntry("kb", "turn-1", "tool.completed", { itemType: "dynamic_tool_call", status: "completed", data: { tool: `mcp__moxen__${tool}`, state: { input, output } } });
+    expect(exportToolLine(lookup("knowledge_search", { query: "connect a local endpoint" }, '{"matches":[]}'))).toBe("Knowledge search: connect a local endpoint (0 matching sections)");
+    expect(exportToolLine(lookup("knowledge_read", { id: "profiles", section: "setup" }, '{"title":"Connect a model server","sectionTitle":"Create and test a profile"}'))).toBe("Knowledge read: Connect a model server / Create and test a profile");
+  });
   it("collapses a command with output dump to one line with exit status", () => {
     const line = exportToolLine(toolEntry("c1", "turn-1", "tool.completed", commandPayload("bun run check", `${"output line\n".repeat(50)}`)));
     expect(line).toBe("$ bun run check · exit 0");

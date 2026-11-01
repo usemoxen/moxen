@@ -2,6 +2,7 @@ import { runCodexMedia } from "./scenarios/codexMedia.js";
 import { runThroughput } from "./scenarios/throughput.js";
 import { runFileEdits } from "./scenarios/fileEdits.js";
 import { runToolRejection } from "./scenarios/toolRejection.js";
+import { runKnowledge } from "./scenarios/knowledge.js";
 import { runAsyncQuestions } from "./scenarios/asyncQuestions.js";
 import { runOverflowText } from "./scenarios/overflowText.js";
 import { testRender } from "./testrender.js";
@@ -144,6 +145,7 @@ export async function runWalkthrough(): Promise<void> {
   await runThroughput();
   await runFileEdits();
   await runToolRejection();
+  await runKnowledge();
   await runAsyncQuestions();
   await runExperience();
   await runModalInput();

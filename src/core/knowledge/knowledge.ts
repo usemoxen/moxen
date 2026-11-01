@@ -40,12 +40,14 @@ export function readKnowledge(rawId: string, rawSection?: string): KnowledgeRead
   const selected = section ? [section] : page.sections;
   const result: KnowledgeReading = {
     version: KNOWLEDGE.version, id: page.id, title: page.title,
+    sectionTitle: section?.title ?? null, outline: false,
     text: selected.map((entry) => `${entry.title}\n${entry.text}`).join("\n\n"),
     sections: section ? [] : page.sections.map((entry) => ({ id: entry.id, title: entry.title })),
   };
   if (JSON.stringify(result).length <= KNOWLEDGE_LIMITS.read) return result;
   return {
     version: KNOWLEDGE.version, id: page.id, title: page.title,
+    sectionTitle: null, outline: true,
     text: "This page is larger than the read budget. Call knowledge_read with this id and one section ID below.",
     sections: page.sections.map((entry) => ({ id: entry.id, title: entry.title })),
   };

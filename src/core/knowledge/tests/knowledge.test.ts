@@ -37,7 +37,7 @@ describe("shipped knowledge", () => {
     for (const page of KNOWLEDGE.pages) {
       const read = readKnowledge(page.id);
       expect(JSON.stringify(read).length, page.id).toBeLessThanOrEqual(KNOWLEDGE_LIMITS.read);
-      if (read.text.startsWith("This page is larger")) {
+      if (read.outline) {
         outlines += 1;
         expect(read.sections).toEqual(page.sections.map(({ id, title }) => ({ id, title })));
       }
@@ -46,6 +46,7 @@ describe("shipped knowledge", () => {
         const selected = readKnowledge(page.id, section.id);
         expect(JSON.stringify(selected).length, `${page.id}/${section.id}`).toBeLessThanOrEqual(KNOWLEDGE_LIMITS.read);
         expect(selected.text).toContain(section.text);
+        expect(selected).toMatchObject({ sectionTitle: section.title, outline: false });
       }
     }
     expect(outlines).toBeGreaterThan(0);

@@ -146,6 +146,21 @@ export interface ThreadLookupView {
   running: boolean;
 }
 
+export interface KnowledgeView {
+  kind: "knowledge";
+  action: "search" | "read";
+  query: string | null;
+  pageId: string | null;
+  pageTitle: string | null;
+  sectionId: string | null;
+  sectionTitle: string | null;
+  matches: number | null;
+  outline: boolean;
+  failed: boolean;
+  note: string | null;
+  running: boolean;
+}
+
 export interface WebView {
   kind: "web";
   tool: string;
@@ -274,6 +289,7 @@ export type ActivityView =
   | SkillView
   | MemoryView
   | ThreadLookupView
+  | KnowledgeView
   | WebView
   | ImageView
   | ToolView
@@ -665,12 +681,13 @@ function jsonResult(state: Record<string, unknown>, payload: Record<string, unkn
       // The ledger caps details, so a long report arrives cut off and is no
       // longer JSON — but the short fields ahead of it are still readable.
       const fields = Object.fromEntries(
-        ["title", "status", "model"].flatMap((key) => {
+        ["title", "status", "model", "sectionTitle"].flatMap((key) => {
           const match = new RegExp(`"${key}":\\s*"((?:[^"\\\\]|\\\\.)*)"`, "u").exec(text);
           return match?.[1] === undefined ? [] : [[key, match[1]]];
         }),
       );
-      if (Object.keys(fields).length > 0) return fields;
+      const outline = /"outline":\s*(true|false)/u.exec(text)?.[1];
+      if (Object.keys(fields).length > 0) return { ...fields, ...(outline === undefined ? {} : { outline: outline === "true" }) };
     }
   }
   return null;
@@ -698,6 +715,28 @@ export function memoryTitle(view: MemoryView): string {
 }
 
 const THREAD_ACTIONS: Readonly<Record<string, ThreadLookupView["action"]>> = { thread_search: "search", thread_read: "read" };
+
+function knowledgeView(action: KnowledgeView["action"], input: Record<string, unknown>, result: Record<string, unknown> | null, output: string, running: boolean, failed: boolean): KnowledgeView {
+  // Codex stores MCP content blocks; the other providers usually carry their text directly.
+  if (Array.isArray(result?.content)) {
+    failed ||= result.isError === true;
+    output = unwrapToolOutput(result.content.flatMap((block) => {
+      const text = asString(asRecord(block)?.text);
+      return text === null ? [] : [text];
+    }).join("\n"));
+    result = jsonResult({ output }, {});
+  }
+  const rejected = !running && (failed || /^[A-Z][A-Z_]+: /u.test(output));
+  const note = rejected ? asString(result?.message) ?? asString(firstLine(output)) : null;
+  return {
+    kind: "knowledge", action,
+    query: asString(input.query),
+    pageId: asString(input.id), pageTitle: asString(result?.title),
+    sectionId: asString(input.section), sectionTitle: asString(result?.sectionTitle),
+    matches: !running && !rejected && Array.isArray(result?.matches) ? result.matches.length : null,
+    outline: result?.outline === true, failed: rejected, note, running,
+  };
+}
 
 /** A thread tool call: what it asked for, from the call, and what it found, from the answer. */
 function threadLookupView(action: ThreadLookupView["action"], input: Record<string, unknown>, output: string, running: boolean): ThreadLookupView {
@@ -1103,6 +1142,10 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
   if (itemType === "dynamic_tool_call" || itemType === "collab_agent_tool_call") {
     const display = tool ?? "tool";
     const name = display.toLowerCase();
+    const moxenTool = moxenToolName(display);
+    if (moxenTool === "knowledge_search" || moxenTool === "knowledge_read") {
+      return knowledgeView(moxenTool === "knowledge_search" ? "search" : "read", input, jsonResult(state, payload), unwrapToolOutput(asString(state.output) ?? asString(payload.detail) ?? ""), running, payload.status === "failed" || state.status === "failed" || state.status === "error");
+    }
     if (parseMcpToolName(display) !== null && (payload.status === "failed" || state.status === "failed")) {
       const output = unwrapToolOutput(asString(state.output) ?? asString(payload.detail) ?? "");
       let detail = output;
@@ -1114,7 +1157,6 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
       }
       return { kind: "tool", tool: friendlyToolTitle(display), detail, running: false, failed: true };
     }
-    const moxenTool = moxenToolName(display);
     // moxen's checklist (lent to OpenCode, which has none): the tasks panel shows it.
     if (moxenTool === "todos") return { kind: "todos", title, items: decodeTodos(input.todos), running };
     const threadAction = moxenTool === null ? undefined : THREAD_ACTIONS[moxenTool];

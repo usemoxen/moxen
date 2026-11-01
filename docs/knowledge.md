@@ -4,6 +4,10 @@ Models can consult Moxen's bundled reference without a source checkout or a
 network connection. `knowledge_search(query)` returns up to six matching
 sections. Pass a result's `id` and `section` to `knowledge_read`. Small pages
 can be read whole; large pages return an outline instead of truncated text.
+The timeline shows the search query and matching-section count, or the page
+and section read. Running calls show the requested IDs until titles arrive.
+An outline-only read is labelled as such; failed calls retain their target
+and show the error instead of appearing as successful reads.
 
 The content covers settings, Harness profiles, MCP servers, providers and
 models, projects, threads, modes, memory, skills, permissions, remote access

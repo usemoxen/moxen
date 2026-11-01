@@ -120,6 +120,11 @@ export function exportToolLine(entry: TimelineEntry): string | null {
       return view.action === "search"
         ? `Searched threads for "${view.query ?? ""}" (${view.scope === "all" ? "all projects" : "this project"}): ${view.note ?? (view.total === null ? "" : `${view.total} found`)}${view.running ? " · running" : ""}`
         : `Read thread ${view.title ?? view.threadId ?? ""} (${view.part ?? "outline"})${view.note === null ? "" : `: ${view.note}`}${view.running ? " · running" : ""}`;
+    case "knowledge": {
+      const target = view.action === "search" ? view.query ?? "" : [view.pageTitle ?? view.pageId, view.sectionTitle ?? view.sectionId].filter(Boolean).join(" / ");
+      const outcome = view.note ?? (view.failed ? "failed" : view.matches !== null ? `${view.matches} matching sections` : view.outline ? "outline only" : "");
+      return `Knowledge ${view.action}: ${full(target)}${outcome ? ` (${full(outcome)})` : ""}${view.running ? " · running" : ""}`;
+    }
     case "web": {
       const query = full(view.query);
       const tail = view.running ? " · running" : "";

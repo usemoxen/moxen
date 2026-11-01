@@ -37,6 +37,29 @@ function event(partial: Partial<ToolRuntimeEvent> & { provider: ToolRuntimeEvent
 }
 
 describe("toolActivityRow", () => {
+  it.each(["claude", "harness", "codex", "opencode"] as const)("keeps knowledge queries, read targets and outcomes visible for %s", (provider) => {
+    const lookup = (tool: string, input: Record<string, unknown>, output?: string, failed = false) => {
+      const status = output === undefined ? "inProgress" : failed ? "failed" : "completed";
+      const raw = provider === "codex"
+        ? { item: { id: "kb", type: "mcpToolCall", server: "moxen", tool, arguments: input, status, ...(output === undefined ? {} : { result: { content: [{ type: "text", text: output }], isError: failed } }) } }
+        : provider === "opencode"
+          ? { callID: "kb", tool: `moxen_${tool}`, state: { status: status === "failed" ? "error" : status === "inProgress" ? "running" : status, input, output } }
+          : { toolUseId: "kb", input, output, isError: failed };
+      return view(toolActivityRow(event({ provider, type: output === undefined ? "tool.execute.started" : "tool.execute.completed", tool: `mcp__moxen__${tool}`, raw }))!);
+    };
+    expect(lookup("knowledge_search", { query: "local endpoint" })).toMatchObject({ kind: "knowledge", action: "search", query: "local endpoint", matches: null, running: true });
+    expect(lookup("knowledge_search", { query: "local endpoint" }, '{"matches":[{"id":"profiles"},{"id":"settings"}]}')).toMatchObject({ matches: 2, running: false, note: null });
+    expect(lookup("knowledge_search", { query: "notfound" }, '{"matches":[]}')).toMatchObject({ matches: 0 });
+    expect(lookup("knowledge_read", { id: "profiles", section: "setup" })).toMatchObject({ pageId: "profiles", sectionId: "setup", pageTitle: null, running: true });
+    expect(lookup("knowledge_read", { id: "profiles", section: "setup" }, '<untrusted_context source="mcp:moxen/knowledge_read">\n{"title":"Connect a model server","sectionTitle":"Create and test a profile","outline":false,"text":"body"}\n</untrusted_context>')).toMatchObject({ pageTitle: "Connect a model server", sectionTitle: "Create and test a profile", outline: false, running: false });
+    expect(lookup("knowledge_read", { id: "settings-provider:harness" }, '{"title":"Moxen Harness settings","outline":true,"sections":[]}')).toMatchObject({ outline: true });
+    expect(lookup("knowledge_read", { id: "missing", section: "setup" }, "KNOWLEDGE_NOT_FOUND: Unknown knowledge page.", true)).toMatchObject({ pageId: "missing", sectionId: "setup", note: "KNOWLEDGE_NOT_FOUND: Unknown knowledge page.", running: false });
+    expect(lookup("knowledge_read", { id: "profiles" }, "", true)).toMatchObject({ failed: true, note: null, running: false });
+    expect(lookup("knowledge_search", { query: "local endpoint" }, '{"matches":[{"title":"unfinished')).toMatchObject({ query: "local endpoint", matches: null, failed: false });
+    // Long/older ledger results may be cut in the middle of JSON. The request is still usable.
+    expect(lookup("knowledge_read", { id: "profiles", section: "setup" }, JSON.stringify({ title: "Connect a model server", sectionTitle: "Create and test a profile", outline: false, text: "x".repeat(5000) }))).toMatchObject({ pageId: "profiles", sectionId: "setup", running: false });
+  });
+
   it.each([
     ["linear", "list_issues", "Linear · List issues"],
     ["claude_ai_Linear", "get_issue", "Linear · Get issue"],

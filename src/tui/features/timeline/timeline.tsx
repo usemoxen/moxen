@@ -412,6 +412,25 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     );
   }
 
+  if (view.kind === "knowledge") {
+    const failed = view.failed;
+    const title = view.action === "search"
+      ? failed ? tr("timeline.knowledgeSearchFailed") : view.running ? tr("timeline.knowledgeSearching") : tr("timeline.knowledgeSearched")
+      : failed ? tr("timeline.knowledgeReadFailed") : view.running ? tr("timeline.knowledgeReading") : tr("timeline.knowledgeRead");
+    const meta = view.matches !== null ? [tr("timeline.knowledgeMatches", { count: view.matches })] : view.outline ? [tr("timeline.knowledgeOutline")] : [];
+    const inlineMeta = width >= 90;
+    const target = view.action === "search" ? view.query : view.pageTitle ?? view.pageId;
+    const section = view.sectionTitle ?? view.sectionId;
+    return (
+      <ToolChip rail={failed ? COLOR.danger : COLOR.tool} glyph="⌕" title={title} meta={inlineMeta ? meta : []} time={time} running={view.running}>
+        {target === null ? null : <OverflowText fg={COLOR.tool} width={Math.max(12, width - 6)}>{target}</OverflowText>}
+        {view.action !== "read" || section === null ? null : <OverflowText fg={COLOR.dim} width={Math.max(12, width - 8)}>{`└ ${section}`}</OverflowText>}
+        {inlineMeta || meta.length === 0 ? null : <text fg={COLOR.faint}>{`└ ${meta.join(" · ")}`}</text>}
+        {view.note === null ? null : <text fg={COLOR.danger} wrapMode="word">{view.note}</text>}
+      </ToolChip>
+    );
+  }
+
   if (view.kind === "threads") {
     const failed = view.note !== null;
     if (view.action === "search") {
