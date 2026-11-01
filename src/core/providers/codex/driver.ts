@@ -1585,7 +1585,10 @@ function codexDirectMcpConfig(config: unknown, servers: readonly string[]): Reco
       ...codeMode,
       // Codex's non_prefixed_mcp_tool_names feature changes the namespace.
       // Both spellings are exact matches, so neither needs to change that feature.
-      direct_only_tool_namespaces: [...new Set([...namespaces, ...servers.flatMap((name) => [name, `mcp__${name}`])])],
+      direct_only_tool_namespaces: [...new Set([...namespaces, ...servers.flatMap((name) => {
+        const normalized = name.replace(/[^a-zA-Z0-9_]/g, "_");
+        return [normalized, `mcp__${normalized}`];
+      })])],
     },
     // Strict third-party deferral runs after direct-only overrides and would
     // otherwise put these tools back behind exec/tool search.

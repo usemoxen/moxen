@@ -573,6 +573,16 @@ const MCP = [
 ];
 
 describe("codex MCP injection", () => {
+  it("keeps hyphenated server namespaces direct after Codex sanitizes them", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    try {
+      await Effect.runPromise(driver.startSession({ ...START, mcpServers: [{ name: "brave-search", type: "stdio", command: "brave", args: [], env: {} }] }));
+      const params = transport.sessions[0]!.server.requestsTo("thread/start")[0]!.params as { config: Record<string, unknown> };
+      expect(params.config["features.code_mode"]).toEqual({ direct_only_tool_namespaces: ["moxen_harness", "mcp__moxen_harness", "brave_search", "mcp__brave_search"] });
+    } finally { await Effect.runPromise(driver.stopAll()); }
+  });
+
   it.each([
     { mode: undefined, preserved: {} },
     { mode: true, preserved: { enabled: true } },

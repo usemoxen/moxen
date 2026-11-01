@@ -38,6 +38,11 @@ describe("mcpServers config", () => {
     expect(codeOf(() => parseMcpServers({ "a b": { command: "x" } }, "config"))).toBe("INVALID_CONFIG");
   });
 
+  it("normalizes server names to lowercase and rejects case collisions", () => {
+    expect(parseMcpServers({ "Brave-Search": { command: "brave" } }, "config")).toEqual({ "brave-search": { command: "brave" } });
+    expect(codeOf(() => parseMcpServers({ Exa: { command: "x" }, exa: { command: "y" } }, "config"))).toBe("INVALID_CONFIG");
+  });
+
   it("refuses malformed entries", () => {
     expect(codeOf(() => parseMcpServers({ x: { command: "" } }, "config"))).toBe("INVALID_CONFIG");
     expect(codeOf(() => parseMcpServers({ x: { command: "y", args: [1] } }, "config"))).toBe("INVALID_CONFIG");
@@ -78,7 +83,7 @@ describe("resolveMcpServers", () => {
     const root = tempDir("moxen-mcp-");
     await writeFile(
       path.join(root, "moxen.json"),
-      JSON.stringify({ mcpServers: { b: { command: "project-b" }, gone: null } }),
+      JSON.stringify({ mcpServers: { B: { command: "project-b" }, GONE: null } }),
     );
     const servers = await resolveMcpServers(
       { b: { command: "global-b" }, a: { type: "http", url: "https://a" }, gone: { command: "g" } },

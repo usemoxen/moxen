@@ -195,8 +195,9 @@ file directly (`moxen config path`):
 
 A project's `moxen.json` can declare `mcpServers` too: an entry replaces the global one of the
 same name, and `null` removes it for that project. Servers are read when a session starts, so an
-edit applies to the next session. Names may use letters, digits, `-` and `_`. `config show` redacts `env` and `headers`
-values.
+edit applies to the next session. Names may use letters, digits, `-` and `_`; Moxen normalizes
+them to lowercase and rejects names that differ only by case in the same config. `config show`
+redacts `env` and `headers` values.
 
 `env` and `headers` values are secrets: set through `moxen config set` or the settings page, each goes to the
 OS keychain and the file keeps a `keychain:<name>` reference, which is read when a session starts (a value

@@ -222,12 +222,14 @@ export function parseMcpServers(
   const out: Record<string, McpServerEntry | null> = {};
   for (const [name, entry] of Object.entries(raw)) {
     if (!NAME.test(name)) throw invalid(source, `mcpServers name "${name}" may use only letters, digits, - and _.`);
+    const normalized = name.toLowerCase();
+    if (Object.hasOwn(out, normalized)) throw invalid(source, `mcpServers name "${name}" duplicates another name ignoring case.`);
     if (entry === null) {
       if (!options.allowRemoval) throw invalid(source, `mcpServers.${name} must be an object.`);
-      out[name] = null;
+      out[normalized] = null;
       continue;
     }
-    out[name] = parseEntry(name, entry, source);
+    out[normalized] = parseEntry(name, entry, source);
   }
   return out;
 }
@@ -270,7 +272,7 @@ export function routeMcpServers(
 ): { readonly servers: McpServerSpec[]; readonly disabledTools: string[] } {
   const kept: McpServerSpec[] = [];
   const disabledTools: string[] = [];
-  const excluded = new Set(parseNameList(exclude));
+  const excluded = new Set(parseNameList(exclude).map((name) => name.toLowerCase()));
   for (const server of servers) {
     if (server.disabled === true || excluded.has(server.name)) continue;
     if (server.providers !== undefined && server.providers.length > 0 && !server.providers.includes(provider)) continue;
