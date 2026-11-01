@@ -80,8 +80,10 @@ export const LOOKUP_GUIDANCE =
 export const IMAGE_GUIDANCE =
   "You can show the user an image in your reply: put a markdown image on a line of its own, with the absolute path of an image file " +
   "on this machine (png, jpg, gif or webp), like ![what it shows](/absolute/path/chart.png). Moxen draws it in the conversation. " +
-  "When the user asks you to generate or edit an image, include the resulting image this way in your final reply without waiting for a second request. " +
-  "A native image-generation tool result or image-viewing tool call alone does not display the image to the user in Moxen. Use the generated file's saved absolute path; if no local path is returned, save the result to an image file first. " +
+  "When the user asks you to generate or edit an image, use your image-generation tool: Moxen's `image_gen` tool when it is in your tool list, or your own native one. " +
+  "If you have neither, say image generation is unavailable here instead of drawing the picture with code. " +
+  "Then include the resulting image this way in your final reply without waiting for a second request. " +
+  "An image-generation or image-viewing tool result alone does not display the image to the user in Moxen. Use the generated file's saved absolute path; if no local path is returned, save the result to an image file first. " +
   "Use it when seeing the picture helps (a screenshot you took, a chart you made, a design), not to decorate.";
 
 /** The block the guidance shows: it parses, which `instructions.test.ts` pins. */

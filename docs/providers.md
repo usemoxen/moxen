@@ -151,7 +151,9 @@ installed native protocol reports no numerical generation progress, so a
 running generation shows a plain status label rather than a guessed
 percentage. The runtime instructions tell models to embed a generated or edited
 image’s absolute saved path in their final reply; a tool result alone does not
-display an image in the answer.
+display an image in the answer. They also name `image_gen` (when it is in the
+tool list) or the provider’s own tool as the way to generate, and say to report
+image generation as unavailable rather than draw the picture with code.
 
 Other providers can use Moxen's `image_gen` tool to run a focused Codex image
 task in the same workspace. It uses the installed `codex app-server`, not an
