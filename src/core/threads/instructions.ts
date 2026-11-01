@@ -48,6 +48,8 @@ export interface RuntimeInstructionsInput {
   readonly checklist?: boolean;
   /** True when the session has Moxen's delegation tools (not a delegated task itself, and Moxen's tools not switched off for the provider). */
   readonly delegationTools?: boolean;
+  /** True only while the built-in Moxen MCP server reaches this session. */
+  readonly knowledge?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
   readonly web?: WebGuidanceInput;
   /** The shells this machine has, and its platform. Detected when absent; tests and `scripts/system-prompt.ts` pin it. */
@@ -245,6 +247,12 @@ export const NO_REDELEGATION_GUIDANCE =
   `by running ${APP_NAME} commands (\`${APP_NAME} delegate\`, \`${APP_NAME} handover\`, \`${APP_NAME} threads\` and the like): ` +
   "this task already is the delegation, and anything you started would not be tracked.";
 
+export const KNOWLEDGE_GUIDANCE =
+  "When asked how to use or configure Moxen — settings, Harness profiles, MCP servers, models, projects, threads or skills — " +
+  "consult knowledge_search, then knowledge_read for the relevant guidance. It ships with this server's Moxen version and works offline. " +
+  "Reference defaults are not current settings: inspect live state as documented. Reading grants no permission to make changes; " +
+  "follow the user's request and existing approval rules. Never put credentials in tool arguments or files.";
+
 /** "Claude Code", "OpenCode", "Moxen Harness": the harness a provider instance runs in, as its users call it. */
 export function harnessName(instanceId: string): string {
   const key = instanceId.trim().toLowerCase();
@@ -278,6 +286,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   }
   add("Environment", environment.join("\n\n"));
   add("Look it up", LOOKUP_GUIDANCE);
+  if (input.knowledge === true) add("Moxen knowledge base", KNOWLEDGE_GUIDANCE);
   add("Progress notes", PROGRESS_GUIDANCE);
   add("Showing images", IMAGE_GUIDANCE);
   // A subagent's final message is a report another agent reads; a layout is for a person.

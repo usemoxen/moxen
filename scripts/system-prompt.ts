@@ -187,6 +187,7 @@ const instructions = buildRuntimeInstructions({
   userInstructions: ["(Your `instructions` from the config and the project's moxen.json go here.)"],
   checklist: true,
   delegationTools: true,
+  knowledge: true,
   memory: "write",
   shell: detection,
   // The Moxen Harness has its own web tools; Claude and OpenCode get Moxen's, with tips.

@@ -277,6 +277,8 @@ async function sessionSetup(
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: reach.orchestration && builtin.some((server) => server.name === "moxen"),
+    knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
+      !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
     ...(memory !== "off" && builtin.some((server) => server.name === "moxen") ? { memory } : {}),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
   });

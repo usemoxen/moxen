@@ -62,20 +62,21 @@ describe("Moxen's own tools, switched per provider", () => {
   };
 
   it("keeps web_fetch with orchestration off, and the delegation tools with web_fetch off", async () => {
+    const knowledge = ["knowledge_read", "knowledge_search"];
     const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
-    expect(await moxenTools({})).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads, "web_fetch"]);
-    expect(await moxenTools({ orchestration: false })).toEqual([...memory, "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", ...memory, "models", "task_cancel", "task_status", ...threads]);
+    expect(await moxenTools({})).toEqual(["delegate", ...knowledge, ...memory, "models", "task_cancel", "task_status", ...threads, "web_fetch"]);
+    expect(await moxenTools({ orchestration: false })).toEqual([...knowledge, ...memory, "web_fetch"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["delegate", ...knowledge, ...memory, "models", "task_cancel", "task_status", ...threads]);
   });
 
   it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {
     const noMemory = { memory: false };
     expect(await moxenTools({ orchestration: false, webFetch: false }, noMemory)).toBeNull();
     expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
-    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["web_fetch"]);
+    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["knowledge_read", "knowledge_search", "web_fetch"]);
     // Memory alone keeps the server, with its tools only.
-    expect(await moxenTools({ moxenTools: false })).toEqual(["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"]);
+    expect(await moxenTools({ moxenTools: false })).toEqual(["knowledge_read", "knowledge_search", "memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"]);
   });
 });
 
@@ -445,6 +446,7 @@ describe("session setup", () => {
       expect([...instructions.matchAll(/^# (.+)$/gm)].map((match) => match[1])).toEqual([
         "Environment",
         "Look it up",
+        "Moxen knowledge base",
         "Progress notes",
         "Showing images",
         "Layouts, charts and states",

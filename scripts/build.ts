@@ -10,10 +10,13 @@
  */
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { buildKnowledge } from "./build-knowledge.js";
 
 // Absolute paths throughout, so the build does not depend on the caller's cwd.
 const root = join(import.meta.dir, "..");
 const outdir = join(root, "dist");
+
+await buildKnowledge();
 
 // Not emptied first: a moxen already running from `dist/` (a TUI, the
 // server) loads chunks and assets — the syntax worker, the grammars — from

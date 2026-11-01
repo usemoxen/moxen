@@ -145,9 +145,11 @@ has — under one heading per subject, and end with the user's own
 instructions. Every top-level thread also gets the `moxen` MCP server
 (`delegate`, `task_status`, `task_cancel`), so an agent can hand work to a
 subagent thread in a worktree of its own, find and read other threads
-(`thread_search`, `thread_read`), and keep Moxen memory (`memory_*`, see
-[threads.md](threads.md#memory)). Delegated threads get only `web_fetch` and
-`memory_read`; `"moxen": null` in `mcpServers` turns it off.
+(`thread_search`, `thread_read`), consult the shipped [knowledge base](knowledge.md)
+(`knowledge_search`, `knowledge_read`), and keep Moxen memory (`memory_*`, see
+[threads.md](threads.md#memory)). Delegated threads retain knowledge search/read,
+`web_fetch` and memory read/search when enabled, but cannot delegate or write
+memory; `"moxen": null` in project `mcpServers` turns it off.
 
 `thread_read` never floods the caller's context: it returns an outline (one
 line per turn, newest first), then the turns asked for (each tool call one

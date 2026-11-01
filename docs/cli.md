@@ -181,8 +181,9 @@ The settings page files every key under General, Defaults, Sessions, Long thread
 ### MCP servers
 
 MCP servers declared under `mcpServers` are added to every provider session, alongside whatever
-the provider's own config already loads. The shape is the one `.mcp.json` uses; edit the config
-file directly (`moxen config path`):
+the provider's own config already loads. The shape is the one `.mcp.json` uses;
+add entries through Settings or `moxen config set 'mcpServers[<id>]' '<json>'`.
+The following illustrates the stored shape, not a file to write with secrets:
 
 ```json
 {

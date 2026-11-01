@@ -24,6 +24,8 @@ import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
 import { CliError } from "../core/errors.js";
+import type { KnowledgeReading, KnowledgeSearch } from "../core/knowledge/types.js";
+import { knowledgeInput } from "../core/knowledge/input.js";
 import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
@@ -413,6 +415,8 @@ export interface StartedTurnSummary {
  * transport retry one after a dropped connection.
  */
 export type Query =
+  | { readonly type: "knowledge.search"; readonly query: string }
+  | { readonly type: "knowledge.read"; readonly id: string; readonly section?: string }
   | { readonly type: "projects.list" }
   | ({ readonly type: "project.resolve" } & WorkspaceQuery)
   | ({ readonly type: "threads.list" } & ThreadListQuery)
@@ -572,6 +576,8 @@ export type QueryType = Query["type"];
 export type QueryOf<T extends QueryType> = Extract<Query, { readonly type: T }>;
 
 export interface QueryResults {
+  "knowledge.search": KnowledgeSearch;
+  "knowledge.read": KnowledgeReading;
   "projects.list": { readonly projects: readonly StoredProject[] };
   "project.resolve": { readonly workspace: WorkspaceResolution; readonly project: StoredProject | null };
   "threads.list": ThreadList;
@@ -1388,6 +1394,10 @@ export function decodeQuery(value: unknown): Query {
     case "config.read":
     case "provider.latest":
       return { type };
+    case "knowledge.search":
+      return { type, query: knowledgeInput(record.query, "query") };
+    case "knowledge.read":
+      return { type, id: knowledgeInput(record.id, "id"), ...(record.section === undefined ? {} : { section: knowledgeInput(record.section, "section") }) };
     case "harness.profile.export":
       return { type, profileId: requireField(record.profileId, type, "profileId") };
     case "workspace.git": {

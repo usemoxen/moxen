@@ -48,6 +48,7 @@ import { CodexDriver } from "../core/providers/codex/driver.js";
 import { imageGenerationAvailability, imageGenerationModel, type ImageGenerationModel } from "../core/providers/codex/imagegeneration.js";
 import { isNativeToolDisabled } from "../core/nativetools.js";
 import { moxenToolsOf } from "../core/mcp.js";
+import { readKnowledge, searchKnowledge } from "../core/knowledge/knowledge.js";
 import { mergeProbed, probeSettledSomething, runProbe, testProfile } from "../core/providers/harness/probe.js";
 import { readCommitDetail, readCommitDiff, readOverview } from "../core/git/history.js";
 import {
@@ -1445,6 +1446,9 @@ export class DirectConnection implements ClientApi {
   }
 
   private async answer(query: Query): Promise<QueryResult> {
+    // The shipped manual must still work when configuration cannot be loaded.
+    if (query.type === "knowledge.search") return searchKnowledge(query.query);
+    if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":

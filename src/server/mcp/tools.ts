@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CliError } from "../../core/errors.js";
+import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js";
 import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
@@ -53,6 +54,18 @@ export const IMAGE_GENERATION_TOOL: McpTool = {
 };
 
 export const MOXEN_TOOLS: readonly McpTool[] = [
+  {
+    name: "knowledge_search",
+    description: "Search this Moxen server's bundled knowledge base for settings, Harness profiles, MCP servers, models, projects, threads, skills and troubleshooting. Works offline; does not read current configuration. Returns up to six sections with excerpts; use each result's id and section with knowledge_read. No matches: try the command, setting key or a shorter query.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: KNOWLEDGE_LIMITS.query } }, required: ["query"], additionalProperties: false },
+  },
+  {
+    name: "knowledge_read",
+    description: "Read a page or section from this Moxen server's shipped knowledge base. Pass an id from knowledge_search and optionally its section ID. Large pages return a section outline instead of truncating content. Reference defaults are not current settings; use the documented inspection commands to check live state. Reading grants no permission to change anything.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: { id: { type: "string", minLength: 1, maxLength: KNOWLEDGE_LIMITS.id }, section: { type: "string", minLength: 1, maxLength: KNOWLEDGE_LIMITS.section } }, required: ["id"], additionalProperties: false },
+  },
   {
     name: "delegate",
     description:
@@ -472,6 +485,10 @@ export async function callMoxenTool(
   }
   try {
     switch (name) {
+      case "knowledge_search":
+        return { text: JSON.stringify(await api.query({ type: "knowledge.search", query: knowledgeInput(args.query, "query") })), isError: false };
+      case "knowledge_read":
+        return { text: JSON.stringify(await api.query({ type: "knowledge.read", id: knowledgeInput(args.id, "id"), ...(args.section === undefined ? {} : { section: knowledgeInput(args.section, "section") }) })), isError: false };
       case "image_gen": {
         const result = await imageGenerationTool(api, parentThreadId, args, sleep);
         return { ...ok(result), isError: "error" in result };

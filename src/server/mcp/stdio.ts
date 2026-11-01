@@ -45,7 +45,8 @@ export function moxenInstructions(options: { readonly delegated?: boolean; reado
         : MOXEN_MCP_INSTRUCTIONS.replace(/ web_fetch reads a web page as text; it is not part of delegating\.$/, "");
   const memory = options.memory ?? "write";
   const note = memory === "write" ? MOXEN_MEMORY_MCP_INSTRUCTIONS : memory === "read" ? MOXEN_MEMORY_READ_MCP_INSTRUCTIONS : "";
-  return [base, note].filter((part) => part !== "").join(" ");
+  const knowledge = "knowledge_search and knowledge_read consult this server's shipped Moxen knowledge base: settings, profiles, MCP servers, models, projects, threads and skills. Read it before guessing how to operate Moxen; it contains reference guidance, not current configuration or permission to make changes.";
+  return [base, note, knowledge].filter((part) => part !== "").join(" ");
 }
 
 /** How a client asks for the `todos` tool too: the HTTP endpoint's query, the stdio server's flag. */

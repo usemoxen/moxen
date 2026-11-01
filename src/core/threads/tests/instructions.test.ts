@@ -18,6 +18,14 @@ const LINUX = { platform: "linux" as const, shells: ["bash", "sh"] as readonly S
 const SHELL_TEXT = buildShellGuidance({ ...LINUX, harness: "Claude Code" });
 
 describe("runtime instructions", () => {
+  it("points to knowledge only when its tools are present, including in delegated worktrees", () => {
+    const input = { instanceId: CLAUDE, env: WORKTREE, shell: LINUX, delegation: { parentTitle: "Parent", baseBranch: "main" } };
+    expect(buildRuntimeInstructions(input)).not.toContain("# Moxen knowledge base");
+    const text = buildRuntimeInstructions({ ...input, knowledge: true });
+    expect(text).toContain("consult knowledge_search, then knowledge_read");
+    expect(text).toContain("Never put credentials in tool arguments or files");
+    expect(text).toContain("Reference defaults are not current settings");
+  });
   it("tells every session it runs in Moxen, leaves the harness to the provider's own prompt, and names no model", () => {
     const text = buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX });
     expect(text).toBe(

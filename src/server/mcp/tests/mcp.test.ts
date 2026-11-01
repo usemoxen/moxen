@@ -76,6 +76,8 @@ describe("moxen MCP server", () => {
       mcp.notify("notifications/initialized");
       const listed = await mcp.request("tools/list");
       expect((listed.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name)).toEqual([
+        "knowledge_search",
+        "knowledge_read",
         "delegate",
         "task_status",
         "models",
@@ -116,8 +118,8 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
-      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["web_fetch", "memory_read", "memory_search"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "web_fetch", "task_cancel", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "web_fetch", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();
       await connection.close();
@@ -303,6 +305,7 @@ describe("moxen MCP server", () => {
       const other = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Again", wait: true, threadEnvMode: "local" });
       const start = starts.find((input) => input.threadId === other.threadId);
       expect(start).not.toHaveProperty("mcpServers");
+      expect(String(start?.instructions)).not.toContain("# Moxen knowledge base");
     } finally {
       await connection.close();
     }
@@ -350,8 +353,9 @@ describe("moxen MCP server", () => {
       expect(first.mcpServers.find((server) => server.name === "moxen")?.type).toBe("in-process");
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ mcpServers: { moxen: { command: "my-moxen" } } }));
       const other = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Again", wait: true, threadEnvMode: "local" });
-      const start = starts.find((input) => input.threadId === other.threadId) as { mcpServers: Array<Record<string, unknown>> };
+      const start = starts.find((input) => input.threadId === other.threadId) as { instructions: string; mcpServers: Array<Record<string, unknown>> };
       expect(start.mcpServers.find((server) => server.name === "moxen")).toMatchObject({ type: "stdio", command: "my-moxen" });
+      expect(String(start.instructions)).not.toContain("# Moxen knowledge base");
     } finally {
       await connection.close();
     }
@@ -361,11 +365,11 @@ describe("moxen MCP server", () => {
 describe("moxen web_fetch", () => {
   const api = {} as ClientApi;
 
-  it("is the one tool a delegated task keeps from the list, and refuses the delegation tools it is never shown", async () => {
+  it("keeps web fetch, knowledge and memory reads in a delegated task, and refuses delegation tools", async () => {
     const result = await callMoxenTool(api, "t1", "delegate", { task: "x" }, { delegated: true });
     expect(result).toMatchObject({ isError: true });
     expect(result.text).toContain("not available in a delegated task");
-    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["web_fetch", "memory_read", "memory_search", "todos"]);
+    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "web_fetch", "memory_read", "memory_search", "todos"]);
   });
 
   it("gives a delegated task memory to read, and refuses it the memory writes it is never shown", async () => {

@@ -61,7 +61,8 @@ When a plan limit stops a turn, a continue can be scheduled for just after
 the reset: `autoContinueAtUsageLimit`, or `providers.<kind>.autoContinueAtUsageLimit`
 for one provider, at most `usageLimitContinues` (default 2) in a row.
 
-Runtime instructions are headed sections — Environment, Look it up, Progress
+Runtime instructions are headed sections — Environment, Look it up, Moxen
+knowledge base (when its tools are available), Progress
 notes, Showing images, Layouts, charts and states (not for a delegated task,
 whose report another agent reads; OpenCode adds Checklist and Subagents),
 Shell, Messages from Moxen, Memory, Web, and for a delegated task Your task —

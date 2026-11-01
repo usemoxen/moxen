@@ -6,6 +6,7 @@
 - [Providers](providers.md) — the four providers (Claude Code, Codex, OpenCode, Moxen Harness), how they authenticate, defaults, and per-provider gaps.
 - [Managing skills](skills.md) — import, inspect, edit, disable and recover user skill packages, globally or per project.
 - [CLI reference](cli.md) — every command, flag, setting, and output shape.
+- [Knowledge base](knowledge.md) — the shipped reference models consult through search and read tools.
 - [Contributing](contributing.md) — working on Moxen: layout, workflow, conventions, boundaries, tests.
 
 Reference material we check behavior against lives in [external/](external/):
