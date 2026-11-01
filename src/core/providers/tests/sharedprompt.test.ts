@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { careSection } from "../sharedprompt.js";
+import { CHECKING, careSection } from "../sharedprompt.js";
 
 describe("the prose Moxen's own prompts share", () => {
   const care = careSection("A refusal is final.");
+
+  it("does not end unfinished work when checks for one change pass", () => {
+    expect(CHECKING).not.toContain("Once the relevant checks pass, stop;");
+    expect(CHECKING).toContain("stop running checks for that change");
+    expect(CHECKING).toContain("Continue with any remaining requested work.");
+    expect(CHECKING).toContain("Finish your turn only when the whole request is complete or an unresolved blocker requires the user.");
+  });
 
   it("does not hand every change it did not make to the user", () => {
     // A subagent or a sibling thread writes in this checkout too, and nobody is there to answer a question about its work.
