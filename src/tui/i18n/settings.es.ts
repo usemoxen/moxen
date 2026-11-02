@@ -7,6 +7,19 @@
  * has no entry.
  */
 export const settingsEs: Readonly<Record<string, string>> = {
+  "Usage wrap-up": "Cierre por uso",
+  "Choose Moxen's proactive wrap-up or leave stopping to Claude Code's automatic allowance. The allowance depends on account eligibility; this preference cannot enable or disable it at the provider.": "Elige el cierre preventivo de Moxen o deja que Claude Code se detenga con su margen automático. Ese margen depende de los requisitos de la cuenta; esta preferencia no puede activarlo ni desactivarlo en el proveedor.",
+  "Usage protection": "Protección de uso",
+  "Warn before a shared plan allowance runs out, or pause work and request an orderly wrap-up automatically. Only providers reporting quota windows participate; estimates cannot guarantee avoiding a limit.": "Avisa antes de agotar el uso compartido del plan, o pausa el trabajo y solicita un cierre ordenado automáticamente. Solo participan proveedores con datos de cuota; las estimaciones no garantizan evitar el límite.",
+  "Notify": "Avisar",
+  "Usage recovery": "Recuperación del uso",
+  "Resume protected threads together or one at a time after all blocking windows reset. Recovery runs work while nobody is watching.": "Reanuda los hilos protegidos juntos o uno a uno tras restablecerse todas las ventanas que los bloquean. La recuperación ejecuta trabajo sin supervisión.",
+  "All at once": "Todos a la vez",
+  "One at a time": "Uno a uno",
+  "After usage wrap-up": "Tras el cierre por uso",
+  "Continue in the original thread or hand off to a fresh thread with the model's stopping notes and access to the original images.": "Continúa en el hilo original o pasa a uno nuevo con las notas de cierre del modelo y acceso a las imágenes originales.",
+  "Same thread": "Mismo hilo",
+  "New thread": "Hilo nuevo",
   "Memory embeddings": "Embeddings de memoria",
   "Find memories by meaning as well as keywords with a local model. Enabling this downloads the optional runtime and q4 text model (about 207 MB of weights), checks retrieval and speed, and indexes existing memories before activation.": "Busca recuerdos por significado y por palabras clave con un modelo local. Al activarlo se descargan el entorno opcional y el modelo de texto q4 (unos 207 MB de pesos), se comprueban aciertos y velocidad y se indexan los recuerdos existentes antes de activarlo.",
   "Model loading": "Carga del modelo",

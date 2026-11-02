@@ -140,6 +140,8 @@ import type { CheckpointFileStat, StoredCheckpoint, StoredThread, TurnStatus } f
 import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { UsageProtection } from "../core/usage/protection.js";
+import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
@@ -194,6 +196,10 @@ export interface DirectConnectionOptions {
 }
 
 export class DirectConnection implements ClientApi {
+  private readonly usageProtection = new UsageProtection(() => this.context());
+  private usageTimer: ReturnType<typeof setInterval> | null = null;
+  private usageTickRunning = false;
+  private readonly usageSubscriptions: Array<() => void> = [];
   private readonly storeRoot: string;
   private readonly embeddingRuntime: EmbeddingRuntime;
   private readonly semanticMemory: SemanticMemory;
@@ -522,6 +528,16 @@ export class DirectConnection implements ClientApi {
   startScheduling(): void {
     if (this.schedulingStarted || this.closed) return;
     this.schedulingStarted = true;
+    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    const usageTick = async (): Promise<void> => {
+      if (this.closed || this.usageTickRunning) return;
+      this.usageTickRunning = true;
+      try { await this.usageProtection.tick(); }
+      finally { this.usageTickRunning = false; }
+    };
+    this.usageTimer = setInterval(() => { void usageTick().catch(() => undefined); }, 2000);
+    this.usageTimer.unref?.();
+    void usageTick().catch(() => undefined);
     onScheduledTurnDue(this.onDue);
     void this.context()
       .then((ctx) => armPendingScheduledTurns(ctx))
@@ -574,6 +590,7 @@ export class DirectConnection implements ClientApi {
     // The harness reads its profiles on every turn, so it is handed the config this operation saw.
     // Profiles are edited while the server runs; the harness driver reads its config on every use.
     if (driver instanceof HarnessDriver) driver.setConfig(this.lastProviders?.harness, this.lastWeb);
+    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
     this.ownedDrivers.add(driver);
     return driver;
   }
@@ -889,6 +906,12 @@ export class DirectConnection implements ClientApi {
         return await this.turnStart(command);
       case "thread.turn.interrupt":
         await interruptTurn(await this.store(), command.threadId, command.turnId);
+        return accepted;
+      case "usage.wrap":
+        await this.usageProtection.wrap(command.provider);
+        return accepted;
+      case "usage.queue":
+        await this.usageProtection.reorder(command.threadId, command.direction);
         return accepted;
       case "thread.settle":
         await settleThread(await this.store(), command.threadId, command.stop === true ? { stop: true } : {});
@@ -1546,6 +1569,8 @@ export class DirectConnection implements ClientApi {
       }
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "usage.protection":
+        return this.usageProtection.read();
       case "usage.stats":
         return await readUsageStats(await this.store(), query.range ?? "all");
       case "usage.card":
@@ -1692,6 +1717,8 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.usageTimer !== null) clearInterval(this.usageTimer);
+    for (const unsubscribe of this.usageSubscriptions) unsubscribe();
     this.embeddingGeneration++;
     this.semanticMemory.cancel();
     this.embeddingRuntime.close();

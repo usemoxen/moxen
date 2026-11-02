@@ -112,6 +112,7 @@ function stoppedBecause(last: TurnBlock | undefined, activities: readonly Stored
 
 export interface HandoffOptions {
   readonly projectTitle?: string | null;
+  readonly preferModelSummary?: boolean;
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
@@ -142,7 +143,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
   const unsent = turns
-    .filter((turn) => !reached(turn))
+    .filter((turn) => !reached(turn) && !(options.preferModelSummary && turn.scheduledFor))
     .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue"));
 
   // Files the thread changed, summed across every turn's checkpoint.
@@ -176,7 +177,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     "",
     stopped.text,
   ];
-  if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", `> ${oneLine(firstPrompt, 400)}`);
+  if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", options.preferModelSummary ? firstPrompt : `> ${oneLine(firstPrompt, 400)}`);
   if (lastPrompt !== null) head.push("", "The last request, verbatim:", "", lastPrompt);
   if (plan.length > 0) head.push("", "Its checklist when it stopped (`[x]` done, `[~]` in progress, `[ ]` open):", "", ...plan);
   if (unsent.length > 0) {
@@ -189,6 +190,13 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
       head.push(`- ${path} +${stat.additions} −${stat.deletions}`);
     }
   }
+  const images = messages.flatMap((message) => message.attachments ?? []).filter((attachment) => attachment.type === "image");
+  if (images.length > 0) {
+    head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
+  }
+  const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
+  const modelSummary = options.preferModelSummary ? summaryBlock?.replies.at(-1)?.text.trim() : null;
+  if (modelSummary) return [...head, "", "## Model's wrap-up", "", modelSummary, "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
   const tail = [
     "",
     "---",

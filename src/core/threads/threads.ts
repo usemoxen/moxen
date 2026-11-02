@@ -264,7 +264,7 @@ export async function sendTurn(
   const ifBusy = normalizeIfBusy(input.ifBusy);
   const scheduledFor = normalizeScheduledFor(input.scheduledFor);
   // A scheduled message is a queued one that also waits for its time.
-  const delivery = scheduledFor === null ? normalizeDelivery(input.delivery) : "queue";
+  let delivery = scheduledFor === null ? normalizeDelivery(input.delivery) : "queue";
   if (scheduledFor !== null && (input.delivery === "steer" || input.delivery === "restart")) {
     throw new CliError("INVALID_THREAD_OPTION", "A scheduled message cannot steer or restart a turn.", { exitCode: 2 });
   }
@@ -287,6 +287,8 @@ export async function sendTurn(
     const now = store.nowIso();
     let thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "receive a new turn");
+    const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true;
+    if (usageHeld) delivery = "queue";
 
     if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled) {
       throw new CliError(
@@ -390,7 +392,7 @@ export async function sendTurn(
     const waitingOut = scheduledFor === null && !running && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const holdUntil = waitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    const status = holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -732,6 +734,8 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
 }
 
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string): Promise<void> {
+  const pause = (await store.readThreadRecord(threadId))?.usagePause;
+  if (pause && pause.phase !== "resuming") return;
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.

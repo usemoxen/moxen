@@ -10,8 +10,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeDriver } from "../../providers/opencode/driver.js";
 import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
+import { CliError } from "../../errors.js";
 import { openThreadStore } from "../store.js";
-import { adoptProviderTitle, createThread, readThread } from "../threads.js";
+import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn } from "../threads.js";
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
@@ -37,6 +38,29 @@ describe("driverForInstance", () => {
 });
 
 describe("executeTurn", () => {
+  it.each([false, true])("a late interrupted runner never interrupts the replacement wrap-up (throws=%s)", async (throws) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupt-race-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "Race", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, env: { mode: "local", path: root, branch: null } });
+    const original = await sendTurn(store, thread.id, { prompt: "work" });
+    let replacement: string | undefined;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true), startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "original" }),
+      interruptTurn: () => Effect.void, streamEvents: Stream.never,
+      awaitTurn: async () => {
+        await interruptTurn(store, thread.id, original.turn.id);
+        replacement = (await sendTurn(store, thread.id, { prompt: "wrap up" })).turn.id;
+        if (throws) throw new CliError("TURN_ABORTED", "Interrupted");
+        return { status: "interrupted", text: "", usage: null, error: null };
+      },
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: original.turn.id, prompt: "work" });
+    expect(openTurn(await store.readTurns(thread.id))?.id).toBe(replacement);
+    await interruptTurn(store, thread.id, replacement);
+  });
+
   it("converges completion, usage, checkpoints, and events into the ledger", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-execute-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

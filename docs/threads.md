@@ -61,6 +61,74 @@ When a plan limit stops a turn, a continue can be scheduled for just after
 the reset: `autoContinueAtUsageLimit`, or `providers.<kind>.autoContinueAtUsageLimit`
 for one provider, at most `usageLimitContinues` (default 2) in a row.
 
+### Protect work before the allowance runs out
+
+`usageProtection` is opt-in: `off` (the default), `notify`, or `auto`.
+Claude Code and Codex subscription windows feed the shared account forecast.
+Notify shows a notice above the composer with the percentage, estimated working
+time left and reset time; its **Wrap up now** action pauses the account's running
+threads. Automatic uses the same action without waiting for a click. The server
+owns this work, so closing the TUI does not disable it.
+
+Before interrupting any turn, Moxen persists a hold on every affected thread.
+It then asks the model for a safe stopping point and a handoff, one thread at a
+time. Queued messages, including new steer/restart requests, remain held. A
+wrap-up stops at 97% reported usage or after two minutes; threads that cannot
+start one safely wait without spending more. An interruption is not a rollback:
+edits already on disk remain. Provider telemetry can lag or be missing, and
+other clients can spend the same allowance, so this cannot guarantee staying
+below a limit.
+
+The forecast learns active thread-time and dollars per percentage point separately
+for each window; user-input and approval waits are excluded. It budgets cached
+reads, cache writes and 4,096 output tokens for each model's wrap-up, with a 50%
+margin and at least two percentage points of reserve. Before calibration or for
+unknown model prices, it reserves two points per running thread. Claude's reported
+cumulative cost is counted by gains (native child costs are not added again);
+Codex tokens use a dated API-equivalent price table. `usage status --json` labels
+the cost source. These are estimates, not subscription charges or an invoice.
+
+After the recorded reset (with a short grace period), all reported windows must
+have room. `usageRecovery=parallel` resumes all eligible threads;
+`sequential` waits for the preceding thread to stop before starting the next.
+Missing reset times keep work held until the provider supplies one. Queue order,
+phase and holds survive a server restart. Settled and snoozed threads are not
+automatically resumed. Turning protection off stops new automatic holds but does
+not discard an existing queue: use **Cancel recovery** to remove an entry without
+sending its queued messages. A failed pause or recovery stays visible for inspection.
+
+`usageContinuation=same-thread` resumes the original conversation.
+`handoff` creates a fresh thread in the same checkout, preferring the model's
+wrap-up over a generated transcript summary. Original image paths remain in the
+handoff outside transcript trimming; use the server's file/image tools to inspect
+them. Unsent ordinary messages travel in the handoff. Future scheduled messages
+stay on their original thread and are not included in the new prompt. If no model
+summary survived, Moxen falls back to its ledger-based handoff. Automatic
+usage-limit continuation and long-thread compaction do not compete with a held
+wrap-up.
+
+The same controls are available without a TUI:
+
+```sh
+moxen config set usageProtection auto
+moxen usage status --json
+moxen usage wrap --provider codex
+moxen usage queue --thread <id> --move first
+moxen usage queue --thread <id> --move last
+moxen usage queue --thread <id> --move cancel
+```
+
+For Claude, `providers.claude.usageWrapUp=provider` leaves stopping to Claude
+Code's native allowance instead of requesting Moxen wrap-up. In automatic mode,
+Moxen holds and recovers threads that report native wrap-up without interrupting
+that allowance or sending a second wrap-up prompt. Claude applies the allowance
+automatically to eligible accounts; its SDK has no documented enable/disable
+switch. This setting selects who initiates stopping, not account eligibility.
+Even in Moxen mode an already-running native allowance is respected.
+
+See [provider contracts](providers.md#usage-protection-contracts) for supported
+quota sources and the limits of tool-call enforcement.
+
 Runtime instructions are headed sections — Environment, Look it up, Moxen
 knowledge base (when its tools are available), Progress
 notes, Showing images, Layouts, charts and states (not for a delegated task,

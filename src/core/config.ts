@@ -214,6 +214,12 @@ export function normalizeConfig(raw: unknown): CliConfig {
     if (input.memoryEmbeddingLoading !== "keep-loaded" && input.memoryEmbeddingLoading !== "on-demand") throw new CliError("INVALID_CONFIG", "memoryEmbeddingLoading must be keep-loaded or on-demand.");
     result.memoryEmbeddingLoading = input.memoryEmbeddingLoading;
   }
+  for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"] })) {
+    const value = (input as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !choices.includes(value)) throw new CliError("INVALID_CONFIG", `${key} must be one of ${choices.join(", ")}.`);
+    Object.assign(result, { [key]: value });
+  }
   if (input.autoContinueAtUsageLimit !== undefined) {
     // A boolean in the file; `config set` hands it over as text.
     const raw: unknown = input.autoContinueAtUsageLimit;
@@ -351,6 +357,7 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
       "binaryPath",
       "homePath",
       "thinkingDisplay",
+      "usageWrapUp",
       "promptSuggestions",
       "partialMessages",
       "agentSkills",

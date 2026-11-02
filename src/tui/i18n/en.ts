@@ -8,6 +8,21 @@
  * least `.other`.
  */
 export const en = {
+  "protection.forecast": "{provider} · {window} {percent}%",
+  "protection.detail": "~{work} of work left · resets in {reset} · estimate",
+  "protection.unknown": "unknown",
+  "protection.minutes": "{minutes} min",
+  "protection.wrap": "Wrap up all",
+  "protection.pending": "paused",
+  "protection.wrapping": "wrapping up",
+  "protection.waiting": "waiting for usage",
+  "protection.resuming": "resuming",
+  "protection.queued": "{position}. {title} · {phase}",
+  "protection.noReset": "No reset time reported; automatic recovery is held.",
+  "protection.reset": "Resets in {minutes} min · messages wait in this thread's queue",
+  "protection.first": "Move first",
+  "protection.last": "Move last",
+  "protection.cancel": "Cancel recovery",
   "skills.title": "Your skills",
   "skills.description": "Manage skills for your user account or a project. Changes apply to new provider sessions.",
   "skills.global": "Global (user)",

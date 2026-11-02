@@ -14,6 +14,10 @@ export type InteractionMode = "default" | "research" | "orchestrate";
 export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {
+  /** Account quota protection; providers without quota windows are never guessed. */
+  usageProtection?: "off" | "notify" | "auto";
+  usageRecovery?: "parallel" | "sequential";
+  usageContinuation?: "same-thread" | "handoff";
   projectPolicy: ProjectPolicy;
   workspaceMode: WorkspaceMode;
   openMode: OpenMode;
@@ -383,6 +387,8 @@ export interface OpencodeProviderConfig {
 }
 
 export interface ClaudeProviderConfig {
+  /** Prefer Claude's automatic allowance instead of proactive Moxen wrap-up. */
+  usageWrapUp?: "moxen" | "provider";
   memory?: boolean;
   /** Who compacts: Claude Code itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact`, else Moxen asking. */
   compaction?: "provider" | "ask" | "auto" | "off";

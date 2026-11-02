@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot } from "../limits.js";
+import { persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
 
 const NOW = Date.parse("2026-09-25T10:00:00.000Z");
 const IN_2H = new Date(NOW + 2 * 3_600_000).toISOString();
@@ -12,6 +12,14 @@ const IN_2H = new Date(NOW + 2 * 3_600_000).toISOString();
 afterEach(() => resetUsageLimitsForTests());
 
 describe("usage limits registry", () => {
+  it("waits for the last blocking window rather than retrying through a weekly limit", () => {
+    const weekly = new Date(NOW + 24 * 3_600_000).toISOString();
+    recordUsageWindows("codex", [
+      { id: "primary", label: "Session", usedPercent: 100, exhausted: true, resetsAt: IN_2H },
+      { id: "secondary", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: weekly },
+    ], NOW);
+    expect(standingLimit("codex", NOW)).toEqual({ label: "Weekly", resetsAt: weekly });
+  });
   it("keeps the probe's windows and refreshes one from a live event", () => {
     recordUsageWindows(
       "claude",

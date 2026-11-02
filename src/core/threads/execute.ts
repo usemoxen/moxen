@@ -335,6 +335,7 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
         // once per event, whoever (if anyone) watches the thread.
         if (event.type === "rate-limits.updated") recordUsageWindows(event.provider, event.windows);
         trackLiveText(buffers, event);
+        for (const subscriber of subscribers.get("*") ?? []) subscriber(event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) subscriber(event);
       }),
     ),
@@ -351,6 +352,15 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
       }
     });
   return subscribers;
+}
+
+/** Account-level telemetry, with the same single event pump as turn runners. */
+export function subscribeDriverUsage(driver: TurnDriver, onEvent: EventSubscriber): () => void {
+  const subscribers = ensureDriverPump(driver);
+  const listeners = subscribers.get("*") ?? new Set<EventSubscriber>();
+  listeners.add(onEvent);
+  subscribers.set("*", listeners);
+  return () => { listeners.delete(onEvent); };
 }
 
 /**
@@ -1125,7 +1135,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     await settleTurn(store, args, outcome, cwd, pre);
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
-      await interruptTurn(store, threadId).catch(() => undefined);
+      await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
       await settleCheckpoints(store, args, cwd, pre);
       return;
     }
@@ -1226,7 +1236,7 @@ async function settleTurn(
       ...(outcome.generation !== undefined ? { generation: outcome.generation } : {}),
     });
   } else if (outcome.status === "interrupted") {
-    await interruptTurn(store, threadId).catch(() => undefined);
+    await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
   } else {
     await failTurn(store, threadId, storeTurnId, {
       error: outcome.error ?? "Turn failed.",

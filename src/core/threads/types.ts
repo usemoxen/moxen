@@ -34,6 +34,8 @@ export interface ThreadEnv {
 export type ThreadTitleSource = "seed" | "provider" | "user";
 
 export interface StoredThread {
+  /** Durable account-quota queue. Only its coordinator may run while held. */
+  readonly usagePause?: UsagePause | null;
   readonly id: string;
   /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
   readonly hidden?: boolean;
@@ -82,6 +84,20 @@ export interface StoredThread {
   readonly modeState?: Readonly<Record<string, InteractionMode>>;
   /** The provider's own subagents, running and latest finished (`subagents.ts`). Absent until the first. */
   readonly nativeSubagents?: readonly StoredNativeSubagent[];
+}
+
+export interface UsagePause {
+  readonly provider: string;
+  readonly phase: "pending" | "wrapping" | "waiting" | "resuming";
+  readonly resetsAt: string | null;
+  readonly order: number;
+  readonly turnId?: string;
+  /** Claude is already spending its provider-managed wrap-up allowance. */
+  readonly native?: boolean;
+  /** Written before starting a handoff, so recovery cannot create it twice. */
+  readonly continuedThreadId?: string;
+  readonly handoff: boolean;
+  readonly error?: string;
 }
 
 /** One native subagent (Claude's Agent tool) as the thread record keeps it. */
@@ -277,6 +293,8 @@ export type SendIfBusy = "reject" | "inject";
 export type SendDelivery = "auto" | "steer" | "restart" | "queue";
 
 export interface SendTurnInput {
+  /** Internal coordinator input; never accepted from the client protocol. */
+  readonly usageControl?: boolean;
   readonly prompt: string;
   readonly ifBusy?: SendIfBusy;
   readonly delivery?: SendDelivery;

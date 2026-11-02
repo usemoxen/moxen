@@ -68,6 +68,7 @@ import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
 import type { StatsRange, UsageStats } from "../core/usage/stats.js";
 import { type CardPalette, isCardPalette } from "../core/usage/card.js";
 import type { UsageCard } from "../core/usage/statsstore.js";
+import type { UsageProtectionSnapshot } from "../core/usage/protection.js";
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
@@ -163,6 +164,8 @@ export type CommandBody =
     }
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
   | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
+  | { readonly type: "usage.wrap"; readonly provider: string }
+  | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel" }
   /** `stop`: end the family's running work first instead of refusing to settle past it. */
   | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string; readonly stop?: boolean }
   | { readonly type: "thread.unsettle"; readonly threadId: string; readonly reason?: string }
@@ -343,6 +346,8 @@ export interface CommandResults {
   "thread.create": { readonly threadId: string } & Accepted;
   "thread.turn.start": StartedTurnSummary & Accepted;
   "thread.turn.interrupt": Accepted;
+  "usage.wrap": Accepted;
+  "usage.queue": Accepted;
   "thread.settle": Accepted;
   "thread.unsettle": Accepted;
   "thread.snooze": Accepted;
@@ -491,6 +496,7 @@ export type Query =
    * every thread on it. Empty until a session reports.
    */
   | { readonly type: "usage.limits" }
+  | { readonly type: "usage.protection" }
   /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
   | { readonly type: "usage.stats"; readonly range?: StatsRange }
   /** The stats as a shareable PNG card for a range (`all` unless given). Returned, not written: the client saves it where it runs. */
@@ -603,6 +609,7 @@ export interface QueryResults {
   "usage.stats": UsageStats;
   "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
+  "usage.protection": UsageProtectionSnapshot;
   "remote.status": RemoteAccessStatus & { readonly available: boolean };
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
@@ -913,6 +920,10 @@ export function decodeCommand(value: unknown): Command {
         threadId: threadId(),
         ...(asString(record.turnId) ? { turnId: asString(record.turnId) as string } : {}),
       };
+    case "usage.wrap":
+      return { ...meta, type, provider: requireField(record.provider, type, "provider") };
+    case "usage.queue":
+      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const) };
     case "thread.settle":
       return {
         ...meta,
@@ -1387,6 +1398,7 @@ export function decodeQuery(value: unknown): Query {
     case "usage.stats":
       return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
+    case "usage.protection":
     case "remote.status":
     case "remote.devices":
     case "settings.read":

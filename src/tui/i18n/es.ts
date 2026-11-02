@@ -2,6 +2,21 @@ import type { Catalog } from "./en.js";
 
 /** Spanish as spoken in Spain (`es-ES`): tú, not usted, and vosotros where a plural is needed. */
 export const es: Catalog = {
+  "protection.forecast": "{provider} · {window} {percent}%",
+  "protection.detail": "~{work} de trabajo restante · se restablece en {reset} · estimación",
+  "protection.unknown": "desconocido",
+  "protection.minutes": "{minutes} min",
+  "protection.wrap": "Cerrar todos",
+  "protection.pending": "pausado",
+  "protection.wrapping": "cerrando",
+  "protection.waiting": "esperando uso",
+  "protection.resuming": "reanudando",
+  "protection.queued": "{position}. {title} · {phase}",
+  "protection.noReset": "El proveedor no indica cuándo se restablece; la recuperación está en espera.",
+  "protection.reset": "Se restablece en {minutes} min · los mensajes esperan en la cola del hilo",
+  "protection.first": "Mover al inicio",
+  "protection.last": "Mover al final",
+  "protection.cancel": "Cancelar recuperación",
   "skills.title": "Tus habilidades",
   "skills.description": "Gestiona habilidades para tu cuenta de usuario o un proyecto. Los cambios se aplican a sesiones nuevas del proveedor.",
   "skills.global": "Global (usuario)",

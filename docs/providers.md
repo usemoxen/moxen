@@ -478,3 +478,46 @@ sign-in; a bearer token in `headers` works), a rule file edited while the thread
 was closed is not noticed on resume (an edit while it is open reaches the model as a
 patch ahead of its next message), and a resumed session starts with no session
 approvals and an empty checklist.
+
+## Usage protection contracts
+
+The shared [usage protection](threads.md#protect-work-before-the-allowance-runs-out)
+coordinator uses existing driver interruption and turn-start operations. It holds
+queues first, interrupts active work, then starts a dedicated wrap-up turn. This
+works for Codex review/compact turns too, without assuming they accept steer.
+It does not silently install or approve provider hooks.
+
+Contracts checked against current documentation on 2026-11-02 and the installed
+Claude Agent SDK 0.3.292 / OpenCode client 2.0.24:
+
+- [Claude SDK](https://code.claude.com/docs/en/agent-sdk/typescript): usage probes
+  and `rate_limit_event` supply subscription windows; the existing driver maps
+  those to account-wide limits. Result cost is cumulative and includes native
+  tasks. Streaming sessions support interruption and subsequent input.
+- [Claude Wrap-Up Allowance](https://support.claude.com/en/articles/17040437-claude-code-wrap-up-allowance):
+  provider-controlled and automatic for eligible accounts, with no documented SDK
+  switch. Moxen exposes a preference for its own proactive stopping or the native
+  allowance, not a pretend allowance toggle. A native `usage-wrap-up` event wins
+  over a second Moxen prompt. It may pass 100% of the five-hour window because that
+  allowance is explicitly additional usage.
+- [Codex app-server](https://developers.openai.com/codex/app-server):
+  `account/rateLimits/read` and updates expose percentage/reset windows;
+  `turn/interrupt` stops a turn, and `turn/start` resumes work. Input totals include
+  cached tokens; estimates remove them before pricing cache reads/writes, and do
+  not add reasoning output twice. Unknown model prices stay uncalibrated.
+- [OpenCode v2 API](https://opencode.ai/v2/docs/api): ordinary external-provider
+  sessions have no general subscription quota feed. Newer docs do list
+  `experimental.usage.limits`, but it covers OpenCode Go/Console workspace budgets,
+  not arbitrary connected Claude/Codex accounts; the installed client does not
+  expose it. OpenCode remains outside MXN-203's quota-triggered protection scope,
+  rather than inheriting another driver's account limit. It retains its existing
+  per-turn usage, interruption, durable inbox and usage-limit continuation.
+- Moxen Harness API endpoints likewise have no subscription-window contract;
+  token totals alone cannot supply remaining account allowance.
+
+There is no hard cross-provider tool-call cap in this feature. Claude hooks can
+deny calls, but Codex pre-tool hooks require user-approved hashes and OpenCode
+does not expose the same hook contract. Moxen instead bounds its wrap-up by
+reported quota and elapsed time, and instructs the model to use essential tools
+only. It never bypasses hook approval to claim stronger enforcement. A request
+already in flight may still consume usage after the last observation.

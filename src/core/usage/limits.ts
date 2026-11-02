@@ -124,8 +124,8 @@ export function standingLimit(
   if (!entry) return null;
   const spent = entry.windows
     .filter((window) => window.usedPercent >= 100 && window.resetsAt !== null && Date.parse(window.resetsAt) > now)
-    // The soonest reset is the one that frees the account first.
-    .sort((left, right) => Date.parse(left.resetsAt!) - Date.parse(right.resetsAt!));
+    // Every spent window blocks the account; a session reset cannot clear a weekly limit.
+    .sort((left, right) => Date.parse(right.resetsAt!) - Date.parse(left.resetsAt!));
   const first = spent[0];
   return first ? { label: first.label, resetsAt: first.resetsAt! } : null;
 }

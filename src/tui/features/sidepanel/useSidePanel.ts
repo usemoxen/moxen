@@ -5,6 +5,7 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import type { ContextBreakdown } from "../../model/sidepanel.js";
 import type { ClientApi } from "../../../server/api.js";
+import type { QueryResults } from "../../../server/protocol.js";
 import type { SideTab } from "../../model/sidepanel.js";
 import { startPolling } from "../../hooks/poll.js";
 import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
@@ -75,6 +76,26 @@ export function useContextBreakdown(
 
 /** Default for `ui.usageRefreshSeconds` (live events refresh the server's copy; this just picks it up). */
 const USAGE_REFRESH_MS = 20_000;
+
+export function useUsageProtection(client: ClientApi) {
+  const [state, setState] = useState<QueryResults["usage.protection"]>({ forecasts: [], queue: [] });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let stopped = false;
+    const stop = startPolling(async () => {
+      try {
+        const next = await client.query({ type: "usage.protection" });
+        if (!stopped && next?.forecasts && next?.queue) setState(next);
+      } catch { /* A reconnect keeps the last durable queue visible. */ }
+    }, 2000);
+    return () => { stopped = true; stop(); };
+  }, [client]);
+  const act = useCallback((command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel" }) => {
+    setError(null);
+    void client.dispatch(command).then(() => client.query({ type: "usage.protection" })).then(setState).catch((cause: unknown) => setError(String(cause)));
+  }, [client]);
+  return { state, error, act };
+}
 
 /**
  * The account's plan usage per driver kind, as the server last recorded it,

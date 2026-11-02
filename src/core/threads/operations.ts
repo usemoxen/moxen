@@ -451,6 +451,7 @@ export async function scheduleUsageContinue(
 ): Promise<StoredTurn | null> {
   const { store } = ctx;
   if (resetsAt === null || !Number.isFinite(Date.parse(resetsAt))) return null;
+  if ((await store.readThreadRecord(threadId))?.usagePause) return null;
   const turns = await store.readTurns(threadId);
   if (turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset")) return null;
   const stopped = turns.find((turn) => turn.id === storeTurnId);
@@ -502,6 +503,7 @@ function longThreadHook(
   return {
     afterSettle: async () => {
       const resume = compactingMidTurn.delete(threadId);
+      if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return;
       const action = await actOnLongThread(ctx, threadId, { wait: resume });
       if (resume) await resumeAfterCompaction(ctx, threadId, action);
     },
@@ -519,6 +521,7 @@ function longThreadHook(
  * is the loop's guard.
  */
 export async function compactMidTurn(ctx: OperationContext, threadId: string, usage: ContextWindowUsage): Promise<boolean> {
+  if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return false;
   if (compactingMidTurn.has(threadId)) return false;
   const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
   if (snapshot === null || !snapshot.turnRunning) return false;
@@ -670,9 +673,10 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
   const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null });
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: source.usagePause?.handoff === true });
   const title = continuedTitle(source.title);
-  const created = await createThread(store, {
+  const existing = source.usagePause?.continuedThreadId ? await store.readThreadRecord(source.usagePause.continuedThreadId) : null;
+  const created = existing ?? await createThread(store, {
     projectId: source.projectId,
     title,
     modelSelection: source.modelSelection,
@@ -680,7 +684,14 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     interactionMode: source.interactionMode,
     env: source.env,
   });
-  await startTurn(ctx, {
+  if (source.usagePause && !existing) {
+    await store.withThreadLock(source.id, async () => {
+      const current = await store.readThreadRecord(source.id);
+      if (current?.usagePause) await store.writeThreadRecord({ ...current, usagePause: { ...current.usagePause, continuedThreadId: created.id } });
+    });
+    await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
+  }
+  if ((await store.readTurns(created.id)).length === 0) await startTurn(ctx, {
     threadId: created.id,
     prompt: handoff,
     ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),

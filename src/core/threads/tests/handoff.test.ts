@@ -28,6 +28,18 @@ async function thread() {
 }
 
 describe("buildHandoff", () => {
+  it("keeps original image paths outside transcript trimming and uses the model's wrap-up when requested", async () => {
+    const { store, threadId } = await thread();
+    const sent = await sendTurn(store, threadId, { prompt: "Implement the screenshot", attachments: [{ type: "image", mimeType: "image/png", sizeBytes: 8, name: "screen.png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" }] });
+    await completeTurn(store, threadId, sent.turn.id, { text: "The sidebar is done. Next: keyboard navigation and screenshot checks." });
+    const messages = await store.readMessages(threadId);
+    const attachment = messages.flatMap((message) => message.attachments ?? [])[0]!;
+    const doc = await buildHandoff(store, threadId, { preferModelSummary: true });
+    expect(doc).toContain(JSON.stringify(attachment.path));
+    expect(doc).toContain("## Model's wrap-up");
+    expect(doc).toContain("Next: keyboard navigation");
+    expect(doc).not.toContain("### Turn 1");
+  });
   it("leads with where it stopped, then what is on disk, then the conversation", async () => {
     const { store, threadId } = await thread();
     const first = await sendTurn(store, threadId, { prompt: "Audit every route for missing auth checks." });

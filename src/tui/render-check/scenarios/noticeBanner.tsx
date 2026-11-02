@@ -4,6 +4,7 @@ import { testRender } from "../testrender.js";
 import { NoticeBanner, type Notice } from "../../ui/noticebanner.js";
 import { COLOR } from "../../theme.js";
 import { fail } from "../helpers.js";
+import { usageProtectionNotices } from "../../model/usageprotection.js";
 
 /**
  * Two notices over the composer share one slot: the first shows with a
@@ -67,4 +68,31 @@ export async function runNoticeBanner(): Promise<void> {
   if (!tight.includes("Dismiss") || !tight.includes("In a new thread") || !tight.includes("1/2")) fail("a narrow notice banner cut off its actions or pager");
   if (tight.split("\n").some((line) => line.includes("Usage limit reached") && line.includes("Continue at reset"))) fail("a narrow notice banner kept its actions beside the title");
   // No destroy(), as in bootGate: tearing down a second renderer breaks the shared one.
+  const commands: unknown[] = [];
+  const now = Date.parse("2026-11-01T10:00:00Z");
+  const protection = usageProtectionNotices({
+    forecasts: [{ provider: "codex", windowId: "session", label: "Session", usedPercent: 94, resetsAt: "2026-11-01T11:12:00Z", remainingWorkMs: 360_000, reservePercent: 4, shouldWrap: true, running: 2, costSource: "estimated", wrapCostUsd: 0.4 }],
+    queue: [{ provider: "codex", threadId: "held", title: "Finish keyboard navigation", phase: "waiting", order: 1, resetsAt: "2026-11-01T11:12:00Z", handoff: false }],
+  }, (command) => commands.push(command), now);
+  function Protection() {
+    const [index, setIndex] = useState(0);
+    return <NoticeBanner notices={protection} index={index} onPage={setIndex} width={80} />;
+  }
+  const guarded = await testRender(<Protection />, { width: 80, height: 7, exitOnCtrlC: false });
+  await guarded.flush();
+  console.log("--- usage protection: forecast and manual wrap-up ---");
+  const forecast = guarded.captureCharFrame();
+  console.log(forecast);
+  if (!forecast.includes("94%") || !forecast.includes("6 min") || !forecast.includes("72 min")) fail("usage protection forecast lost its estimates");
+  const forecastRows = forecast.split("\n");
+  const actionRow = forecastRows.findIndex((line) => line.includes("Wrap up all"));
+  await act(async () => guarded.mockMouse.click(forecastRows[actionRow]!.indexOf("Wrap up all") + 2, actionRow));
+  if (JSON.stringify(commands[0]) !== JSON.stringify({ type: "usage.wrap", provider: "codex" })) fail("manual wrap-up targets the wrong provider");
+  const pagerRow = forecastRows.findIndex((line) => line.includes("1/2"));
+  await act(async () => guarded.mockMouse.click(forecastRows[pagerRow]!.indexOf("1/2") + 5, pagerRow));
+  await guarded.flush();
+  console.log("--- usage protection: durable recovery queue ---");
+  const held = guarded.captureCharFrame();
+  console.log(held);
+  if (!held.includes("Move first") || !held.includes("Move last") || !held.includes("Cancel recovery")) fail("usage queue controls are clipped");
 }

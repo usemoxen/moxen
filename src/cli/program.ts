@@ -1603,6 +1603,31 @@ function formatUsageSummary(usage: ProviderUsageLimits | null): string {
 }
 
 const providers = program.command("providers").description("List configured provider instances.");
+
+const usage = program.command("usage").description("Inspect shared quota forecasts and manage protected threads.");
+usage.command("status").description("Show forecasts and the durable recovery queue.").action(() => action(async () => {
+  const context = await commandContext();
+  const client = await cliClient(context.config);
+  const result = await client.query({ type: "usage.protection" });
+  writeSuccess(result, context, [
+    ...result.forecasts.map((row) => `${row.provider}\t${row.label}\t${row.usedPercent}%\t${row.remainingWorkMs === null ? "unknown" : `~${Math.ceil(row.remainingWorkMs / 60000)} min`}\treset ${row.resetsAt ?? "unknown"}`),
+    ...result.queue.map((row, index) => `${index + 1}\t${row.threadId}\t${row.phase}\t${row.title}${row.error ? `\t${row.error}` : ""}`),
+  ].join("\n") || "No usage forecasts or protected threads.");
+}));
+usage.command("wrap").description("Pause and wrap up every running thread on a provider account.").requiredOption("--provider <driver>", "The quota owner: claude or codex.").action((options: { provider: string }) => action(async () => {
+  const context = await commandContext();
+  const client = await cliClient(context.config);
+  const result = await client.dispatch({ type: "usage.wrap", provider: options.provider });
+  writeSuccess(result, context, "Threads queued for orderly wrap-up.");
+}));
+usage.command("queue").description("Reorder a protected thread or cancel its automatic recovery.").requiredOption("--thread <id>", "The protected thread.")
+  .addOption(new Option("--move <direction>", "Where to move it, or cancel recovery.").choices(["first", "last", "cancel"]).makeOptionMandatory())
+  .action((options: { thread: string; move: "first" | "last" | "cancel" }) => action(async () => {
+    const context = await commandContext();
+    const client = await cliClient(context.config);
+    const result = await client.dispatch({ type: "usage.queue", threadId: options.thread, direction: options.move });
+    writeSuccess(result, context, "Usage recovery queue updated.");
+  }));
 providers
   .command("list")
   .description("List provider instances with live status.")

@@ -724,6 +724,30 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     appliesAt: "next-session",
   },
   {
+    key: "usageProtection",
+    label: "Usage protection",
+    description: "Warn before a shared plan allowance runs out, or pause work and request an orderly wrap-up automatically. Only providers reporting quota windows participate; estimates cannot guarantee avoiding a limit.",
+    section: "sessions",
+    kind: { type: "enum", choices: [choice("off", "Off"), choice("notify", "Notify"), choice("auto", "Automatic")] },
+    defaultValue: "off",
+  },
+  {
+    key: "usageRecovery",
+    label: "Usage recovery",
+    description: "Resume protected threads together or one at a time after all blocking windows reset. Recovery runs work while nobody is watching.",
+    section: "sessions",
+    kind: { type: "enum", choices: [choice("parallel", "All at once"), choice("sequential", "One at a time")] },
+    defaultValue: "parallel",
+  },
+  {
+    key: "usageContinuation",
+    label: "After usage wrap-up",
+    description: "Continue in the original thread or hand off to a fresh thread with the model's stopping notes and access to the original images.",
+    section: "sessions",
+    kind: { type: "enum", choices: [choice("same-thread", "Same thread"), choice("handoff", "New thread")] },
+    defaultValue: "same-thread",
+  },
+  {
     key: "autoContinueAtUsageLimit",
     label: "Continue after a usage limit",
     description:
@@ -1196,6 +1220,15 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     fallback: { key: "thinkingEffort" },
   },
   ...toolSettings("claude"),
+  {
+    key: "providers.claude.usageWrapUp",
+    label: "Usage wrap-up",
+    description: "Choose Moxen's proactive wrap-up or leave stopping to Claude Code's automatic allowance. The allowance depends on account eligibility; this preference cannot enable or disable it at the provider.",
+    section: "provider:claude",
+    group: "Sessions",
+    kind: { type: "enum", choices: [choice("moxen", "Moxen"), choice("provider", "Claude Code")] },
+    defaultValue: "moxen",
+  },
   {
     key: "providers.claude.binaryPath",
     label: "Claude executable",

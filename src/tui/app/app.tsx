@@ -133,7 +133,8 @@ import { shrinkImage } from "../model/imageshrink.js";
 import { promptWithPaths } from "../model/pathattachments.js";
 import { useFileAttachments } from "../features/composer/useFileAttachments.js";
 import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
-import { useContextBreakdown, usePlanUsage, useSidePanel } from "../features/sidepanel/useSidePanel.js";
+import { useContextBreakdown, usePlanUsage, useSidePanel, useUsageProtection } from "../features/sidepanel/useSidePanel.js";
+import { usageProtectionNotices } from "../model/usageprotection.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
 import { useProviderCatalog } from "../features/pickers/useProviderCatalog.js";
@@ -1279,6 +1280,7 @@ export function App({
     ui?.usageRefreshSeconds === undefined ? undefined : ui.usageRefreshSeconds * 1000,
     () => setPlanUsageRead(true),
   );
+  const usageProtection = useUsageProtection(client);
   // What the composer's footer is drawn from (model names, usage gauges, the layout they pick) is read before
   // the first frame, so it does not redraw when the answers land. A read that failed counts: the boot screen
   // names the stalled leg rather than hold the app on a server that cannot answer it.
@@ -1518,6 +1520,8 @@ export function App({
         };
   /** What waits over the composer, most urgent first; the banner pages between them. */
   const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
+  notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now));
+  if (usageProtection.error) notices.push({ key: "usage-error", glyph: "!", glyphColor: COLOR.danger, title: usageProtection.error, detail: null, actions: [] });
   if (usageBanner.banner !== null) {
     const banner = usageBanner.banner;
     notices.push({
