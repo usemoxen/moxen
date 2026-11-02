@@ -201,7 +201,8 @@ export async function renderPage(url: string, options: RenderOptions): Promise<R
   try {
     const endpoint = await new Promise<string>((resolve, reject) => {
       let log = "";
-      const timer = setTimeout(() => reject(new WebError("The browser did not start.", "network")), Math.min(15_000, left()));
+      // Cold starts on Windows can exceed 15s; readiness shares the request's deadline.
+      const timer = setTimeout(() => reject(new WebError("The browser did not start.", "network")), left());
       child.stderr.on("data", (chunk: Buffer) => {
         log = (log + chunk.toString()).slice(-4000);
         const found = /DevTools listening on (ws:\/\/\S+)/.exec(log);
