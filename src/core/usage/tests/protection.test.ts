@@ -29,6 +29,39 @@ async function world(provider: "claude" | "codex" = "codex") {
 }
 
 describe("usage protection", () => {
+  it.each(["claude", "codex"] as const)("%s lets a manual message override only its thread until the next reset, across restart", async (provider) => {
+    const w = await world(provider);
+    const first = await w.make("override");
+    const second = await w.make("still protected");
+    const reset = new Date(Date.now() + 60_000).toISOString();
+    recordUsageWindows(provider, [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: reset }]);
+    await w.guard.tick();
+    const recovery = (await w.store.readThreadRecord(first))!.usagePause!.recoveryTurnId!;
+    await sendTurn(w.store, first, { prompt: "later", scheduledFor: new Date(Date.now() + 86400_000).toISOString() });
+    await sendTurn(w.store, first, { prompt: "task settled", origin: "task-notification" });
+    expect((await w.store.readThreadRecord(first))?.usagePause).not.toBeNull();
+    await expect(sendTurn(w.store, first, { prompt: "invalid restart", delivery: "restart" })).rejects.toThrow("no active turn");
+    expect((await w.store.readThreadRecord(first))?.usageProtectionOverride).toBeUndefined();
+    const sent = await sendTurn(w.store, first, { prompt: "Continue anyway" });
+    expect(sent.turn.status).toBe("running");
+    expect(sent.thread.usagePause).toBeNull();
+    expect(sent.thread.usageProtectionOverride?.provider).toBe(provider);
+    expect((await w.store.readTurns(first)).find((turn) => turn.id === recovery)).toMatchObject({ status: "interrupted", queue: { removed: true } });
+    const restarted = new UsageProtection(async () => w.ctx);
+    await restarted.tick();
+    expect(openTurn(await w.store.readTurns(first))?.id).toBe(sent.turn.id);
+    expect((await w.store.readThreadRecord(second))?.usagePause).not.toBeNull();
+    // Reset ends the override permanently, not just for the first low report.
+    const nextReset = new Date(Date.parse(reset) + 3600_000).toISOString();
+    recordUsageWindows(provider, [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: nextReset }]);
+    await restarted.tick();
+    expect((await w.store.readThreadRecord(first))?.usageProtectionOverride).toBeNull();
+    recordUsageWindows(provider, [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: nextReset }]);
+    await restarted.tick();
+    expect((await w.store.readThreadRecord(first))?.usagePause).not.toBeNull();
+    expect(openTurn(await w.store.readTurns(first))).toBeNull();
+  });
+
   it("does not interrupt or double-wrap Claude's native allowance, including after restart", async () => {
     const w = await world("claude");
     w.ctx.config.providers = { claude: { usageWrapUp: "provider" } };
@@ -58,7 +91,7 @@ describe("usage protection", () => {
     expect(w.guard.read().forecasts[0]?.shouldWrap).toBe(true);
     expect(openTurn(await w.store.readTurns(id))).not.toBeNull();
     await w.guard.wrap("codex");
-    const queued = await sendTurn(w.store, id, { prompt: "Keep this request", delivery: "restart" });
+    const queued = await sendTurn(w.store, id, { prompt: "Keep this request", delivery: "queue" });
     expect(queued.turn.status).toBe("queued");
     expect(await scheduleUsageContinue(w.ctx, id, queued.turn.id, new Date(Date.now() + 1000).toISOString())).toBeNull();
     await w.guard.reorder(id, "cancel");
@@ -90,7 +123,7 @@ describe("usage protection", () => {
     const reset = Date.now() + 60_000;
     recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(reset).toISOString() }]);
     await w.guard.tick();
-    if (queued) await sendTurn(w.store, id, { prompt: "Preserve this request" });
+    if (queued) await sendTurn(w.store, id, { prompt: "Preserve this request", delivery: "queue" });
     const write = w.store.writeThreadRecord.bind(w.store);
     const crash = vi.spyOn(w.store, "writeThreadRecord").mockImplementation(async (thread) => {
       await write(thread);
@@ -138,7 +171,7 @@ describe("usage protection", () => {
     await flushTurnRunners(1000);
     expect(w.sent).toEqual([first]);
     expect((await w.store.readThreadRecord(second))?.usagePause?.phase).toBe("pending");
-    const queued = await sendTurn(w.store, first, { prompt: "Also test the edge case", delivery: "steer" });
+    const queued = await sendTurn(w.store, first, { prompt: "Also test the edge case", delivery: "queue" });
     expect(queued.turn.status).toBe("queued");
     expect(openTurn(await w.store.readTurns(first))).toBeNull();
     const restarted = new UsageProtection(async () => w.ctx);
@@ -181,7 +214,7 @@ describe("usage protection", () => {
     expect(openTurn(await w.store.readTurns(id))).not.toBeNull();
     expect(w.guard.read().forecasts).toEqual([]);
     await w.guard.wrap("codex");
-    const queued = await sendTurn(w.store, id, { prompt: "queued" });
+    const queued = await sendTurn(w.store, id, { prompt: "queued", delivery: "queue" });
     expect(queued.turn.status).toBe("queued");
     await w.guard.tick();
     await flushTurnRunners(1000);

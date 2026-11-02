@@ -10,7 +10,7 @@ import { decodeCommand, decodeQuery } from "../protocol.js";
 
 afterEach(resetUsageLimitsForTests);
 
-it("holds client input across reconnection and never accepts the coordinator bypass over the wire", async () => {
+it("holds explicitly queued client input across reconnection and never accepts the coordinator bypass over the wire", async () => {
   const w = await testHarness();
   const thread = await createThread(w.store, { projectId: "p", title: "Protected", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, env: { mode: "local", path: w.work, branch: null } });
   await sendTurn(w.store, thread.id, { prompt: "Finish the work" });
@@ -22,7 +22,7 @@ it("holds client input across reconnection and never accepts the coordinator byp
   } finally { await first.close(); }
   const second = new DirectConnection({ storeRoot: w.root, drivers: w.drivers });
   try {
-    await second.dispatch(decodeCommand({ type: "thread.turn.start", threadId: thread.id, message: { text: "Additional request" }, delivery: "restart", usageControl: true }));
+    await second.dispatch(decodeCommand({ type: "thread.turn.start", threadId: thread.id, message: { text: "Additional request" }, delivery: "queue", usageControl: true }));
     expect(openTurn(await w.store.readTurns(thread.id))).toBeNull();
     expect((await w.store.readTurns(thread.id)).at(-1)?.status).toBe("queued");
     await second.dispatch(decodeCommand({ type: "usage.queue", threadId: thread.id, direction: "first" }));

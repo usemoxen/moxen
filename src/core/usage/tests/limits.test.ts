@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
+import { captureUsageProtectionOverride, usageProtectionOverrideActive, persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
 
 const NOW = Date.parse("2026-09-25T10:00:00.000Z");
 const IN_2H = new Date(NOW + 2 * 3_600_000).toISOString();
@@ -12,6 +12,18 @@ const IN_2H = new Date(NOW + 2 * 3_600_000).toISOString();
 afterEach(() => resetUsageLimitsForTests());
 
 describe("usage limits registry", () => {
+  it.each([false, true])("expires a thread override at the first known or observed reset (unknown reset: %s)", (unknown) => {
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: unknown ? null : IN_2H },
+      { id: "weekly", label: "Weekly", usedPercent: 98, exhausted: false, resetsAt: new Date(NOW + 86400_000).toISOString() },
+    ], NOW);
+    const override = captureUsageProtectionOverride("codex", NOW);
+    expect(usageProtectionOverrideActive(override, "claude", NOW)).toBe(false);
+    expect(usageProtectionOverrideActive(override, "codex", NOW + 1000)).toBe(true);
+    if (unknown) recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: null }], NOW + 2000);
+    expect(usageProtectionOverrideActive(override, "codex", unknown ? NOW + 2000 : NOW + 2 * 3600_000)).toBe(false);
+  });
+
   it("waits for the last blocking window rather than retrying through a weekly limit", () => {
     const weekly = new Date(NOW + 24 * 3_600_000).toISOString();
     recordUsageWindows("codex", [

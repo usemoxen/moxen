@@ -11,6 +11,7 @@ import os from "node:os";
 
 import { imageSetError } from "../attachments.js";
 import { CliError } from "../errors.js";
+import { captureUsageProtectionOverride, usageProtectionOverrideActive } from "../usage/limits.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -287,7 +288,11 @@ export async function sendTurn(
     const now = store.nowIso();
     let thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "receive a new turn");
-    const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true;
+    if ((origin === "usage-protection" || origin === "usage-continue" && input.queue?.requestId?.startsWith("usage:")) && thread.usageProtectionOverride && usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, Date.parse(now))) {
+      throw new CliError("USAGE_PROTECTION_OVERRIDDEN", "Usage protection is paused for this thread until the next allowance reset.");
+    }
+    const manualContinuation = thread.usagePause != null && thread.usagePause.phase !== "resuming" && origin === undefined && input.usageControl !== true && scheduledFor === null && !input.queue && delivery !== "queue";
+    const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
     if (usageHeld) delivery = "queue";
 
     if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled) {
@@ -309,7 +314,7 @@ export async function sendTurn(
       store.emit(threadId, "unsettle");
     }
 
-    const turns = await store.readTurns(threadId);
+    let turns = await store.readTurns(threadId);
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
       if (existing) return { thread, turn: existing, messageId: existing.messageId, delivery: existing.delivery };
@@ -331,6 +336,19 @@ export async function sendTurn(
         `Thread ${threadId} has no active turn to ${delivery}. Send without delivery or with queue.`,
         { exitCode: 4, details: { threadId, delivery } },
       );
+    }
+
+    if (manualContinuation) {
+      const pause = thread.usagePause!;
+      const recovery = turns.find((turn) => (turn.id === pause.recoveryTurnId || turn.queue?.requestId === `usage:${pause.order}`) && turn.status === "queued");
+      if (recovery) {
+        await interruptTurnLocked(store, thread, recovery, now);
+        if (recovery.queue) await store.updateTurn(threadId, recovery.id, { queue: { ...recovery.queue, removed: true } });
+        turns = await store.readTurns(threadId);
+      }
+      thread = { ...thread, usagePause: null, usageProtectionOverride: captureUsageProtectionOverride(pause.provider, Date.parse(now)), updatedAt: now };
+      await store.writeThreadRecord(thread);
+      store.emit(threadId, "usage-protection-overridden");
     }
 
     const runtimeMode: RuntimeMode = input.runtimeMode ?? thread.runtimeMode;
@@ -746,7 +764,7 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
 
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
   const pause = (await store.readThreadRecord(threadId))?.usagePause;
-  if (pause && pause.phase !== "resuming" && pause.recoveryTurnId !== admittedId && !summary) return;
+  if (pause && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId) && !summary) return;
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.

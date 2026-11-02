@@ -32,6 +32,27 @@ interface RecordedProvider {
   windows: RecordedWindow[];
 }
 
+export interface UsageProtectionOverride {
+  readonly provider: string;
+  readonly since: string;
+  readonly windows: readonly RecordedWindow[];
+}
+
+export function captureUsageProtectionOverride(provider: string, now: number): UsageProtectionOverride {
+  return { provider, since: new Date(now).toISOString(), windows: (recorded.get(provider)?.windows ?? []).map((window) => ({ ...window })) };
+}
+
+/** A manual continuation opts out only until the next reported or timed reset. */
+export function usageProtectionOverrideActive(override: UsageProtectionOverride | null | undefined, provider: string, now = Date.now()): boolean {
+  if (!override || override.provider !== provider) return false;
+  const current = recorded.get(provider)?.windows ?? [];
+  if ([...override.windows, ...current].some((window) => window.resetsAt !== null && Date.parse(window.resetsAt) > Date.parse(override.since) && Date.parse(window.resetsAt) <= now)) return false;
+  return !current.some((window) => {
+    const before = override.windows.find((previous) => previous.id === window.id);
+    return before && window.usedPercent < before.usedPercent && (before.resetsAt === null || before.resetsAt !== window.resetsAt);
+  });
+}
+
 const FILE_NAME = "usage-limits.json";
 
 let recorded = new Map<string, RecordedProvider>();

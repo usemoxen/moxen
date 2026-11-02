@@ -75,8 +75,13 @@ It then asks the model for a safe stopping point, one thread at a time, without
 requesting a full summary. The transcript marks this request with a **Usage
 protection** notification card, distinct from the later recovery notice.
 Continuation is in the same conversation unless the
-user explicitly chooses a new thread in Work queue. Queued messages, including
-new steer/restart requests, remain held. A
+user explicitly chooses a new thread in Work queue. Sending an immediate user
+message after protection releases that thread's hold, cancels its automatic
+recovery entry, and disables protection for that thread until the provider's
+next allowance reset. Other threads remain protected. The override survives a
+server restart; protection re-enables automatically at a known reset time or
+when telemetry reports a reset. Scheduled/explicitly queued messages and internal
+notifications do not disable protection. A
 wrap-up stops at 97% reported usage or after two minutes; threads that cannot
 start one safely wait without spending more. An interruption is not a rollback:
 edits already on disk remain. Provider telemetry can lag or be missing, and

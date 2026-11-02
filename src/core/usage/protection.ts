@@ -6,7 +6,7 @@ import { startTurn, editWorkQueue, recoverOrphanedTurn, runWorkQueue, type Opera
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
-import { recordUsageProtection, usageLimitsSnapshot } from "./limits.js";
+import { recordUsageProtection, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
 
 export const WRAP_UP_PROMPT = "The provider's shared usage allowance is nearly exhausted. Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. You will resume in this same conversation automatically. Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.";
@@ -80,21 +80,29 @@ export class UsageProtection {
     });
   }
 
-  private async rows(ctx: OperationContext, heldOnly = false): Promise<Row[]> {
+  private async rows(ctx: OperationContext, heldOnly = false, now = Date.now()): Promise<Row[]> {
     const rows: Row[] = [];
     for (const id of await ctx.store.listThreadIds()) {
-      const thread = await ctx.store.readThreadRecord(id);
+      let thread = await ctx.store.readThreadRecord(id);
       if (!thread || thread.archivedAt || thread.deletedAt) continue;
+      if (thread.usageProtectionOverride && !usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, now)) {
+        await ctx.store.withThreadLock(id, async () => {
+          const current = await ctx.store.readThreadRecord(id);
+          if (current?.usageProtectionOverride && !usageProtectionOverrideActive(current.usageProtectionOverride, current.usageProtectionOverride.provider, now)) await ctx.store.writeThreadRecord({ ...current, usageProtectionOverride: null });
+        });
+        thread = (await ctx.store.readThreadRecord(id))!;
+      }
       if (thread.usagePause) await recoverOrphanedTurn(ctx, id);
       rows.push({ thread, turns: !heldOnly || thread.usagePause ? await ctx.store.readTurns(id) : [] });
     }
     return rows.sort((left, right) => left.thread.createdAt.localeCompare(right.thread.createdAt) || left.thread.id.localeCompare(right.thread.id));
   }
 
-  private async pause(ctx: OperationContext, id: string, usagePause: UsagePause | null): Promise<void> {
+  private async pause(ctx: OperationContext, id: string, usagePause: UsagePause | null, now = Date.now()): Promise<void> {
     await ctx.store.withThreadLock(id, async () => {
       const thread = await ctx.store.readThreadRecord(id);
       if (!thread) return;
+      if (usagePause && usageProtectionOverrideActive(thread.usageProtectionOverride, usagePause.provider, now)) return;
       await ctx.store.writeThreadRecord({ ...thread, usagePause, updatedAt: ctx.store.nowIso() });
       ctx.store.emit(id, "usage-protection");
     });
@@ -109,6 +117,7 @@ export class UsageProtection {
   }
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
+    if (!(await ctx.store.readThreadRecord(threadId))?.usagePause) return;
     if (pause.recoveryTurnId || pause.error) return;
     const windows = usageLimitsSnapshot()[pause.provider]?.windows ?? [];
     const recovery = await sendTurn(ctx.store, threadId, {
@@ -117,25 +126,30 @@ export class UsageProtection {
         { type: "usage", provider: pause.provider, window: "all", minimum: 0 },
         ...(pause.resetsAt ? [{ type: "at", at: new Date(Date.parse(pause.resetsAt) + QUEUE_RESET_GRACE_MS).toISOString() }] : [{ type: "reset", provider: pause.provider, window: windows.some((w) => w.kind === "session") ? "session" : windows.some((w) => w.kind === "weekly") ? "weekly" : "all", resetsAt: null }]),
       ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }), automatic: true, requestId: `usage:${pause.order}` },
+    }).catch((cause: unknown) => {
+      if (cause instanceof CliError && cause.code === "USAGE_PROTECTION_OVERRIDDEN") return null;
+      throw cause;
     });
+    if (!recovery) return;
     await this.pause(ctx, threadId, { ...pause, recoveryTurnId: recovery.turn.id });
   }
 
-  private async begin(ctx: OperationContext, rows: Row[], provider: string): Promise<void> {
+  private async begin(ctx: OperationContext, rows: Row[], provider: string, now = Date.now()): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
     const relevant = windows.filter((window) => window.usedPercent >= 90);
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
-    const eligible = rows.filter(({ thread, turns }) => !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming") && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider && (openTurn(turns) || this.nativeWrap.has(thread.id))
+    const eligible = rows.filter(({ thread, turns }) => !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now) && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming") && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider && (openTurn(turns) || this.nativeWrap.has(thread.id))
       && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
     if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
     for (const [index, row] of eligible.entries()) await this.pause(ctx, row.thread.id, {
       provider, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
       ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
-    });
+    }, now);
     for (const row of eligible) {
       if (this.nativeWrap.has(row.thread.id)) continue;
+      if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
       catch {
         await this.pause(ctx, row.thread.id, { provider, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
@@ -149,7 +163,7 @@ export class UsageProtection {
 
   private async refresh(ctx: OperationContext, now: number): Promise<Row[]> {
     this.enabled = ctx.config.usageProtection === "notify" || ctx.config.usageProtection === "auto";
-    const rows = await this.rows(ctx, !this.enabled);
+    const rows = await this.rows(ctx, !this.enabled, now);
     const elapsed = this.lastAt === null ? 0 : Math.max(0, Math.min(now - this.lastAt, 10_000));
     this.lastAt = now;
     const forecasts: UsageForecast[] = [];
@@ -209,8 +223,8 @@ export class UsageProtection {
     const ctx = await this.context();
     let rows = await this.refresh(ctx, now);
     if (ctx.config.usageProtection === "auto") {
-      for (const provider of new Set(this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider);
-      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, await this.rows(ctx), "claude");
+      for (const provider of new Set(this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now);
+      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, await this.rows(ctx), "claude", now);
       rows = await this.rows(ctx);
     }
     this.nativeWrap.clear();

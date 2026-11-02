@@ -10,6 +10,7 @@
 import type { ImageAttachmentUpload } from "../attachments.js";
 import type { TaskNotification } from "./notify.js";
 import type { QueuePolicy } from "./queue.js";
+import type { UsageProtectionOverride } from "../usage/limits.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -37,6 +38,7 @@ export type ThreadTitleSource = "seed" | "provider" | "user";
 export interface StoredThread {
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
+  readonly usageProtectionOverride?: UsageProtectionOverride | null;
   readonly id: string;
   /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
   readonly hidden?: boolean;
