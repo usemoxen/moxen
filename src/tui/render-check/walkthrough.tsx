@@ -59,6 +59,7 @@ import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
 import { runExperience } from "./scenarios/experience.js";
 import { runModalInput } from "./scenarios/modalInput.js";
+import { runWorkQueueModal } from "./scenarios/workQueue.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -149,5 +150,6 @@ export async function runWalkthrough(): Promise<void> {
   await runAsyncQuestions();
   await runExperience();
   await runModalInput();
+  await runWorkQueueModal();
 
 }

@@ -69,6 +69,7 @@ import type { StatsRange, UsageStats } from "../core/usage/stats.js";
 import { type CardPalette, isCardPalette } from "../core/usage/card.js";
 import type { UsageCard } from "../core/usage/statsstore.js";
 import type { UsageProtectionSnapshot } from "../core/usage/protection.js";
+import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core/threads/queue.js";
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
@@ -144,6 +145,7 @@ export type CommandBody =
     }
   | {
       readonly type: "thread.turn.start";
+      readonly queue?: QueuePolicy;
       readonly threadId: string;
       readonly message: ThreadMessageInput;
       readonly modelSelection?: ModelSelection;
@@ -165,6 +167,8 @@ export type CommandBody =
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
   | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
   | { readonly type: "usage.wrap"; readonly provider: string }
+  | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy }
+  | { readonly type: "handoff.submit"; readonly threadId: string; readonly requestId: string; readonly summary: string }
   | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel" }
   /** `stop`: end the family's running work first instead of refusing to settle past it. */
   | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string; readonly stop?: boolean }
@@ -347,6 +351,8 @@ export interface CommandResults {
   "thread.turn.start": StartedTurnSummary & Accepted;
   "thread.turn.interrupt": Accepted;
   "usage.wrap": Accepted;
+  "queue.edit": Accepted;
+  "handoff.submit": Accepted;
   "usage.queue": Accepted;
   "thread.settle": Accepted;
   "thread.unsettle": Accepted;
@@ -497,6 +503,8 @@ export type Query =
    */
   | { readonly type: "usage.limits" }
   | { readonly type: "usage.protection" }
+  | { readonly type: "queue.read" }
+  | { readonly type: "handoff.pending"; readonly threadId: string }
   /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
   | { readonly type: "usage.stats"; readonly range?: StatsRange }
   /** The stats as a shareable PNG card for a range (`all` unless given). Returned, not written: the client saves it where it runs. */
@@ -610,6 +618,8 @@ export interface QueryResults {
   "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "usage.protection": UsageProtectionSnapshot;
+  "queue.read": { readonly entries: readonly WorkQueueEntry[] };
+  "handoff.pending": { readonly requestId: string | null };
   "remote.status": RemoteAccessStatus & { readonly available: boolean };
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
@@ -902,6 +912,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         message: decodeMessage(record.message),
+        ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue) } : {}),
         ...(selection ? { modelSelection: selection } : {}),
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
@@ -922,6 +933,10 @@ export function decodeCommand(value: unknown): Command {
       };
     case "usage.wrap":
       return { ...meta, type, provider: requireField(record.provider, type, "provider") };
+    case "queue.edit":
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}) };
+    case "handoff.submit":
+      return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
       return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const) };
     case "thread.settle":
@@ -1399,6 +1414,7 @@ export function decodeQuery(value: unknown): Query {
       return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
     case "usage.protection":
+    case "queue.read":
     case "remote.status":
     case "remote.devices":
     case "settings.read":
@@ -1406,6 +1422,8 @@ export function decodeQuery(value: unknown): Query {
     case "config.read":
     case "provider.latest":
       return { type };
+    case "handoff.pending":
+      return { type, threadId: requireField(record.threadId, type, "threadId") };
     case "knowledge.search":
       return { type, query: knowledgeInput(record.query, "query") };
     case "knowledge.read":

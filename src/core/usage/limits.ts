@@ -12,6 +12,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { renameReplacing } from "../infra/atomic.js";
 
 import type { ProviderUsageLimits, ProviderUsageWindow } from "../catalog/summary.js";
 import type { RateLimitWindow } from "../providers/spi.js";
@@ -24,6 +26,8 @@ interface RecordedWindow {
 }
 
 interface RecordedProvider {
+  exhaustedAt?: string;
+  protectedAt?: string;
   checkedAt: string;
   windows: RecordedWindow[];
 }
@@ -32,6 +36,30 @@ const FILE_NAME = "usage-limits.json";
 
 let recorded = new Map<string, RecordedProvider>();
 let persistFile: string | null = null;
+let persistence: Promise<unknown> = Promise.resolve();
+
+function persistRecorded(): void {
+  const file = persistFile;
+  if (file === null) return;
+  const payload = JSON.stringify(Object.fromEntries(recorded), null, 2);
+  persistence = persistence.catch(() => undefined).then(async () => {
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${randomUUID()}.tmp`;
+    await fs.promises.writeFile(tmp, payload);
+    await renameReplacing(tmp, file);
+  }).catch(() => undefined);
+}
+
+export function usageSignal(provider: string, state: "exhausted" | "protected"): string | null {
+  return recorded.get(provider)?.[state === "exhausted" ? "exhaustedAt" : "protectedAt"] ?? null;
+}
+
+export function recordUsageProtection(provider: string, at = Date.now()): void {
+  const previous = recorded.get(provider);
+  if (!previous) return;
+  recorded.set(provider, { ...previous, protectedAt: new Date(at).toISOString() });
+  persistRecorded();
+}
 
 /** Where the registry persists, and loads what an earlier process left. */
 export function persistUsageLimits(storeRoot: string): void {
@@ -67,12 +95,8 @@ export function recordUsageWindows(provider: string, windows: ReadonlyArray<Rate
     changed = true;
   }
   if (!changed) return;
-  recorded.set(provider, { checkedAt: new Date(at).toISOString(), windows: [...merged.values()] });
-  if (persistFile !== null) {
-    const file = persistFile;
-    const payload = JSON.stringify(Object.fromEntries(recorded), null, 2);
-    void fs.promises.mkdir(path.dirname(file), { recursive: true }).then(() => fs.promises.writeFile(file, payload)).catch(() => undefined);
-  }
+  recorded.set(provider, { ...recorded.get(provider), checkedAt: new Date(at).toISOString(), windows: [...merged.values()], ...(windows.some((window) => window.exhausted || (window.usedPercent ?? 0) >= 100) ? { exhaustedAt: new Date(at).toISOString() } : {}) });
+  persistRecorded();
 }
 
 /** Drivers label windows "Session", "Weekly", "Weekly – Opus", "Monthly"; the kind follows. */

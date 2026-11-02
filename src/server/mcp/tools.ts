@@ -37,6 +37,11 @@ export interface McpTool {
 
 /** Models listed per provider before the rest are only counted: a catalog can run to hundreds. */
 export const MAX_MODELS_PER_PROVIDER = 40;
+export const SUBMIT_HANDOFF_TOOL: McpTool = {
+  name: "submit_handoff",
+  description: "Submit the handoff summary requested by Moxen. Send only the summary here, using the requestId in the summary request. Acceptance stores it durably; no final-response summary is needed. Moxen owns scheduling and creating the new thread. Unrequested or stale submissions are refused.",
+  inputSchema: { type: "object", properties: { requestId: { type: "string" }, summary: { type: "string", minLength: 1, maxLength: 64000 } }, required: ["requestId", "summary"], additionalProperties: false },
+};
 
 export const IMAGE_GENERATION_TOOL: McpTool = {
   name: "image_gen",
@@ -335,6 +340,7 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
 const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_edit", "memory_append", "memory_delete"]);
 
 export interface MoxenToolOptions {
+  readonly handoff?: boolean;
   readonly imageGeneration?: boolean;
   readonly checklist?: boolean;
   readonly delegated?: boolean;
@@ -356,12 +362,14 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
   if (options.imageGeneration === true && options.delegated !== true) tools.push(IMAGE_GENERATION_TOOL);
+  if (options.handoff === true) tools.push(SUBMIT_HANDOFF_TOOL);
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
 export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
-  return moxenToolsFor({ ...options, imageGeneration });
+  const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
+  return moxenToolsFor({ ...options, imageGeneration, handoff });
 }
 
 /**
@@ -485,6 +493,8 @@ export async function callMoxenTool(
   }
   try {
     switch (name) {
+      case "submit_handoff":
+        return ok(await api.dispatch({ type: "handoff.submit", threadId: parentThreadId, requestId: argString(args, "requestId", true)!, summary: argString(args, "summary", true)! }));
       case "knowledge_search":
         return { text: JSON.stringify(await api.query({ type: "knowledge.search", query: knowledgeInput(args.query, "query") })), isError: false };
       case "knowledge_read":

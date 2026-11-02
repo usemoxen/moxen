@@ -264,7 +264,7 @@ export async function sendTurn(
   const ifBusy = normalizeIfBusy(input.ifBusy);
   const scheduledFor = normalizeScheduledFor(input.scheduledFor);
   // A scheduled message is a queued one that also waits for its time.
-  let delivery = scheduledFor === null ? normalizeDelivery(input.delivery) : "queue";
+  let delivery = scheduledFor === null && !input.queue ? normalizeDelivery(input.delivery) : "queue";
   if (scheduledFor !== null && (input.delivery === "steer" || input.delivery === "restart")) {
     throw new CliError("INVALID_THREAD_OPTION", "A scheduled message cannot steer or restart a turn.", { exitCode: 2 });
   }
@@ -310,6 +310,10 @@ export async function sendTurn(
     }
 
     const turns = await store.readTurns(threadId);
+    if (input.queue?.requestId) {
+      const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
+      if (existing) return { thread, turn: existing, messageId: existing.messageId, delivery: existing.delivery };
+    }
     const running = openTurn(turns);
     // A message sent to a running turn does not carry a mode of its own (`/research` is for a prompt that starts one).
     if (running && input.interactionMode !== undefined) throw modeLocked(threadId);
@@ -392,11 +396,12 @@ export async function sendTurn(
     const waitingOut = scheduledFor === null && !running && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const holdUntil = waitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    const status = usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = input.queue || usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
       status,
+      ...(input.queue ? { queue: input.queue } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
         delivery === "queue" || waitingOut !== null ? (status === "queued" ? "queued" : "started")
@@ -413,7 +418,10 @@ export async function sendTurn(
             scheduleReason,
             ...(input.continueAttempt !== undefined ? { continueAttempt: input.continueAttempt } : {}),
           }
-        : {}),
+        : input.scheduleReason === "usage-reset" ? {
+            scheduleReason: "usage-reset",
+            ...(input.continueAttempt !== undefined ? { continueAttempt: input.continueAttempt } : {}),
+          } : {}),
       error: null,
       usage: null,
       createdAt: now,
@@ -693,10 +701,13 @@ function sameModel(left: StoredTurn, right: StoredTurn): boolean {
  * still waiting for a later time, keeps its own turn.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string): Promise<void> {
+  if (next.queue) return;
   const batch = turns.filter(
     (turn) =>
       turn.id !== next.id &&
       turn.status === "queued" &&
+      !turn.queue &&
+      (turn.scheduleReason !== "usage-hold" || next.scheduleReason === "usage-reset" || next.scheduleReason === "usage-hold") &&
       !isHeldTurn(turn, Date.parse(now)) &&
       turn.scheduleReason !== "usage-reset" &&
       sameModel(turn, next),
@@ -733,14 +744,18 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
   };
 }
 
-async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string): Promise<void> {
+async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
   const pause = (await store.readThreadRecord(threadId))?.usagePause;
-  if (pause && pause.phase !== "resuming") return;
+  if (pause && pause.phase !== "resuming" && pause.recoveryTurnId !== admittedId && !summary) return;
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
-  const next = turns.find((turn) => turn.status === "queued" && !isHeldTurn(turn, Date.parse(now)));
+  const next = turns.find((turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold") && !isHeldTurn(turn, Date.parse(now)));
   if (!next) return;
+  if (pause && pause.recoveryTurnId === next.id) {
+    const thread = await store.readThreadRecord(threadId);
+    if (thread) await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
+  }
   await batchQueuedLocked(store, threadId, next, turns, now);
   await store.updateTurn(threadId, next.id, { status: "running", owner: currentTurnOwner(), startedAt: now, updatedAt: now });
   await store.appendLedger(threadId, "activity", {
@@ -760,17 +775,17 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
  * to run. Null when nothing is due, or a turn is already running — that
  * turn's settle promotes it instead.
  */
-export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string): Promise<StoredTurn | null> {
+export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string, admittedId?: string, summary = false): Promise<StoredTurn | null> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const turns = await store.readTurns(threadId);
     if (openTurn(turns)) return null;
     const due = turns.find(
-      (turn) => turn.status === "queued" && typeof turn.scheduledFor === "string" && !isHeldTurn(turn, Date.parse(now)),
+      (turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : typeof turn.scheduledFor === "string") && !isHeldTurn(turn, Date.parse(now)),
     );
     if (!due) return null;
-    await promoteQueuedLocked(store, threadId, now);
+    await promoteQueuedLocked(store, threadId, now, admittedId ?? due.id, summary);
     return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
   });
 }

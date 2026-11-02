@@ -31,6 +31,8 @@ import { linkNoticeText } from "../features/remote/linkNotice.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../features/remote/codemodal.js";
 import { SubagentBar } from "../features/subagentview/subagentbar.js";
 import { describeScheduled } from "../model/schedule.js";
+import { WorkQueueModal } from "../features/queue/queuemodal.js";
+import type { QueuePolicy } from "../features/queue/useWorkQueue.js";
 import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
 import { useGitPanel } from "../features/gitpanel/useGitPanel.js";
 import { useProviderVersions } from "../features/settings/useProviderVersions.js";
@@ -766,7 +768,7 @@ export function App({
    * Claude's `next` priority) or queues behind it (runs once it ends — its
    * `later`). Idle, it simply starts a turn.
    */
-  const dispatchTurn = (prompt: string, attachments: ImageAttachmentUpload[], busyDelivery: "steer" | "queue", scheduledFor?: Date) => {
+  const dispatchTurn = (prompt: string, attachments: ImageAttachmentUpload[], busyDelivery: "steer" | "queue", scheduledFor?: Date, queue?: QueuePolicy) => {
     if (selected === null) return;
     // A message sent while a turn runs is a steer or a queued send: it carries no mode, and an armed one waits for the next prompt.
     const oneOff = sessionRunningRef.current ? undefined : interaction.takeOneOff();
@@ -775,6 +777,7 @@ export function App({
         type: "thread.turn.start",
         threadId: selected.id,
         message: { text: prompt, attachments },
+        ...(queue ? { queue } : {}),
         // `/research` for this prompt only: the thread's own mode is not touched.
         ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
         // A scheduled message waits in the queue for its time (it cannot steer).
@@ -803,7 +806,7 @@ export function App({
    * with anything pasted off the clipboard. The draft stays put when a file
    * cannot be read so the prompt is never eaten by a failed attach.
    */
-  const send = (text: string, busyDelivery: "steer" | "queue" = "steer", scheduledFor?: Date) => {
+  const send = (text: string, busyDelivery: "steer" | "queue" = "steer", scheduledFor?: Date, queue?: QueuePolicy) => {
     const trimmed = text.trim();
     if (trimmed.length === 0 || selected === null) return;
     // `/btw` never reaches the thread: it is answered on a copy of the
@@ -828,7 +831,7 @@ export function App({
         .dispatch({ type: "thread.unsettle", threadId: id, reason: "user" as const })
         .then(() => {
           toasts.push("thread-unsettled", "info", t("ops.unsettled"), COPY_TOAST_MS);
-          send(text, busyDelivery, scheduledFor);
+          send(text, busyDelivery, scheduledFor, queue);
         })
         .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
       return;
@@ -842,7 +845,7 @@ export function App({
     };
     if (parsed.paths.length === 0 && pending.length === 0) {
       finish();
-      dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor);
+      dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue);
       return;
     }
     void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
@@ -861,7 +864,7 @@ export function App({
       }
       finish();
       writePending(sourceId, []);
-      dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor);
+        dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor, queue);
     });
   };
 
@@ -1768,6 +1771,11 @@ export function App({
         { key: "moxen:changelog", label: t("guide.changelog"), onPick: () => setPicker("changelog") },
       ],
     });
+    const queueRows = [
+      { key: "queue:open", label: t("queue.title"), onPick: () => setPicker("work-queue") },
+      { key: "queue:schedule", label: t("queue.schedule"), disabled: !draft.trim(), onPick: () => { if (draft.trim()) setPicker("queue-schedule"); } },
+      { key: "queue:time", label: t("app.schedule_message_cbae"), disabled: !draft.trim(), onPick: () => { if (draft.trim()) setPicker("schedule"); } },
+    ];
     if (picker === "command" && creating) {
       return {
         kind: "list",
@@ -1775,6 +1783,7 @@ export function App({
           {
             header: t("palette.newThread"),
             rows: [
+              ...queueRows,
               {
                 key: "thread:search",
                 label: t("app.search_threads_c202"),
@@ -1852,6 +1861,7 @@ export function App({
           {
             header: t("palette.thread"),
             rows: [
+              ...queueRows.filter((row) => row.key !== "queue:time"),
               {
                 key: "thread:search",
                 label: t("app.search_threads_c202"),
@@ -2407,8 +2417,13 @@ export function App({
     };
   }, [width, height, pickerBody]);
 
-  const submitComposer = () => {
+  const submitComposerWithSchedule = (schedule?: { queue?: QueuePolicy; at?: Date }) => {
     if (editingExternallyRef.current) return;
+    if (schedule && parseSideQuestion(draft) !== null) { setError(t("queue.noSideQuestion")); return; }
+    const submit = (text: string) => {
+      if (creating) createThread(text, { ...(schedule?.queue ? { queue: schedule.queue } : {}), ...(schedule?.at ? { scheduledFor: schedule.at.toISOString() } : {}) });
+      else send(text, schedule ? "queue" : "steer", schedule?.at, schedule?.queue);
+    };
     // `/research`, `/orchestrate`: this prompt runs in that mode and the thread keeps its own; alone, the mode is held for the next prompt.
     if (interaction.isModeCommand(draft)) {
       // While a turn runs the mode is fixed, and the draft stays as it was rather than go out as text.
@@ -2417,13 +2432,12 @@ export function App({
       resetDraft(openThreadId ?? "__creating__");
       const rest = interaction.takeCommand(draft);
       if (rest === null || rest.length === 0) return;
-      if (creating) createThread(rest);
-      else send(rest);
+      submit(rest);
       return;
     }
-    if (creating) createThread(draft);
-    else send(draft);
+    submit(draft);
   };
+  const submitComposer = () => submitComposerWithSchedule();
   const escapeComposer = () => {
     // The full-screen image is the top layer: Esc closes it before anything else.
     if (closeImageViewer()) return;
@@ -3230,6 +3244,10 @@ export function App({
             closePicker(paletteReturnFocus);
           }}
         />
+      ) : picker === "work-queue" || picker === "queue-schedule" ? (
+        <WorkQueueModal client={client} threads={visibleThreads(shell).map((thread) => ({ id: thread.id, title: thread.title }))} screenWidth={width} screenHeight={height} onClose={() => closePicker("composer")}
+          {...(picker === "queue-schedule" ? { onSchedule: (queue: QueuePolicy) => { closePicker("composer"); submitComposerWithSchedule({ queue }); } } : {})}
+        />
       ) : picker === "schedule" ? (
         <DateTimeModal
           screenWidth={width}
@@ -3240,7 +3258,7 @@ export function App({
           height={SCHEDULE_PANEL_HEIGHT}
           onSubmit={(at) => {
             closePicker("composer");
-            send(draft, "queue", at);
+            submitComposerWithSchedule({ at });
           }}
           onClose={() => closePicker("composer")}
         />

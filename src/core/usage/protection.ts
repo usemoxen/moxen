@@ -2,13 +2,14 @@ import * as Effect from "effect/Effect";
 import { CliError } from "../errors.js";
 import { driverKindOfInstance } from "../types.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
-import { startTurn, continueThread, recoverOrphanedTurn, type OperationContext } from "../threads/operations.js";
-import { interruptTurn, openTurn } from "../threads/threads.js";
+import { startTurn, editWorkQueue, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
+import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
+import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
-import { usageLimitsSnapshot } from "./limits.js";
+import { recordUsageProtection, usageLimitsSnapshot } from "./limits.js";
 import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
 
-export const WRAP_UP_PROMPT = "The provider's shared usage allowance is nearly exhausted. Stop expanding the task. Use only the essential tools needed to leave current work safe and resumable; do not commit or publish unless already authorized. Finish with a concise handoff: goal, completed work, changed files, checks and failures, exact next steps, outstanding user requests, and important image references. Do not claim the task is finished. Moxen will pause here and resume after the allowance resets.";
+export const WRAP_UP_PROMPT = "The provider's shared usage allowance is nearly exhausted. Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. You will resume in this same conversation automatically. Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.";
 const RESUME_PROMPT = "The usage allowance has reset. Resume the unfinished task from your wrap-up, preserving the user's instructions. Check the working tree before continuing; do not redo completed work.";
 
 export interface UsageQueueEntry extends UsagePause { readonly threadId: string; readonly title: string }
@@ -68,8 +69,10 @@ export class UsageProtection {
       if (direction === "cancel") {
         // Cancellation removes automatic recovery, not a request to start work now.
         if (row.thread.usagePause.phase === "wrapping") await this.stop(ctx, row);
+        if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, "remove");
         await this.pause(ctx, threadId, null);
       } else {
+        if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, direction);
         const orders = rows.flatMap((row) => row.thread.usagePause ? [row.thread.usagePause.order] : []);
         await this.pause(ctx, threadId, { ...row.thread.usagePause, order: direction === "first" ? Math.min(...orders) - 1 : Math.max(...orders) + 1 });
       }
@@ -105,16 +108,30 @@ export class UsageProtection {
     await interruptTurn(ctx.store, row.thread.id, turn.id);
   }
 
+  private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
+    if (pause.recoveryTurnId || pause.error) return;
+    const windows = usageLimitsSnapshot()[pause.provider]?.windows ?? [];
+    const recovery = await sendTurn(ctx.store, threadId, {
+      prompt: RESUME_PROMPT, origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [
+        { type: "usage", provider: pause.provider, window: "all", minimum: 0 },
+        ...(pause.resetsAt ? [{ type: "at", at: new Date(Date.parse(pause.resetsAt) + QUEUE_RESET_GRACE_MS).toISOString() }] : [{ type: "reset", provider: pause.provider, window: windows.some((w) => w.kind === "session") ? "session" : windows.some((w) => w.kind === "weekly") ? "weekly" : "all", resetsAt: null }]),
+      ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }), automatic: true, requestId: `usage:${pause.order}` },
+    });
+    await this.pause(ctx, threadId, { ...pause, recoveryTurnId: recovery.turn.id });
+  }
+
   private async begin(ctx: OperationContext, rows: Row[], provider: string): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
     const relevant = windows.filter((window) => window.usedPercent >= 90);
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
-    const eligible = rows.filter(({ thread, turns }) => (!thread.usagePause || thread.usagePause.phase === "resuming") && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider && (openTurn(turns) || this.nativeWrap.has(thread.id))
+    const eligible = rows.filter(({ thread, turns }) => !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming") && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider && (openTurn(turns) || this.nativeWrap.has(thread.id))
       && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
+    if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
     for (const [index, row] of eligible.entries()) await this.pause(ctx, row.thread.id, {
-      provider, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: ctx.config.usageContinuation === "handoff",
+      provider, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
       ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
     });
     for (const row of eligible) {
@@ -123,6 +140,10 @@ export class UsageProtection {
       catch {
         await this.pause(ctx, row.thread.id, { provider, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
       }
+    }
+    for (const row of eligible) {
+      const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
+      if (pause) await this.ensureRecovery(ctx, row.thread.id, pause);
     }
   }
 
@@ -230,7 +251,7 @@ export class UsageProtection {
         // Persist before admission: a crash never repeats a partially delivered wrap-up.
         await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping" });
         try {
-          const sent = await startTurn(ctx, { threadId: row.thread.id, prompt: WRAP_UP_PROMPT, usageControl: true, origin: "usage-continue" });
+          const sent = await startTurn(ctx, { threadId: row.thread.id, prompt: WRAP_UP_PROMPT, usageControl: true, origin: "usage-protection" });
           await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping", turnId: sent.turn.id });
           busy.add(pause.provider);
         } catch {
@@ -238,31 +259,17 @@ export class UsageProtection {
         }
       }
       if (pause.phase !== "waiting" || pause.error) continue;
+      let waiting = pause;
       if (pause.resetsAt === null) {
         const resets = windows.filter((window) => window.usedPercent >= 90).map((window) => window.resetsAt);
-        if (resets.length && resets.every((reset) => reset !== null)) await this.pause(ctx, row.thread.id, { ...pause, resetsAt: resets.sort().at(-1)! });
-        continue;
+        if (resets.length && resets.every((reset) => reset !== null)) {
+          waiting = { ...waiting, resetsAt: resets.sort().at(-1)! };
+          await this.pause(ctx, row.thread.id, waiting);
+        }
       }
-      if (Date.parse(pause.resetsAt) + 5000 > now) continue;
-      // All windows must have room; a five-hour reset cannot release a weekly block.
-      if (!windows.length || windows.some((window) => window.usedPercent >= 90)) continue;
-      if (ctx.config.usageRecovery === "sequential" && busy.has(pause.provider)) continue;
-      if (!pause.handoff) {
-        const previousTurn = (await ctx.store.readTurns(row.thread.id)).at(-1);
-        await this.pause(ctx, row.thread.id, { ...pause, phase: "resuming", ...(previousTurn ? { turnId: previousTurn.id } : {}) });
-      }
-      try {
-        if (pause.handoff) {
-          const continued = await continueThread(ctx, { threadId: row.thread.id, automatic: true });
-          await this.pause(ctx, continued.threadId, { provider: pause.provider, resetsAt: pause.resetsAt, order: pause.order, phase: "resuming", handoff: false });
-          for (const turn of await ctx.store.readTurns(row.thread.id)) if (turn.status === "queued" && !turn.scheduledFor) await interruptTurn(ctx.store, row.thread.id, turn.id);
-          await this.pause(ctx, row.thread.id, null);
-        } else await startTurn(ctx, { threadId: row.thread.id, prompt: RESUME_PROMPT, usageControl: true, origin: "usage-continue" });
-        busy.add(pause.provider);
-      } catch {
-        await this.pause(ctx, row.thread.id, { ...pause, error: "Recovery failed. Inspect the thread before continuing." });
-      }
+      await this.ensureRecovery(ctx, row.thread.id, waiting);
     }
+    await runWorkQueue(ctx, now);
     await this.refresh(ctx, now);
   }
 }

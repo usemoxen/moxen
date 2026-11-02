@@ -6,6 +6,7 @@ import { dispatchErrorMessage } from "../../../core/errors.js";
 import type { InteractionMode, ModelSelection, RuntimeMode, ProjectEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import type { ImageAttachmentUpload } from "../../../core/attachments.js";
 import type { ClientApi } from "../../../server/api.js";
+import type { CommandOf } from "../../../server/protocol.js";
 import type { PickerName } from "../../features/pickers/pickerTypes.js";
 import { threadTitle } from "../utils.js";
 
@@ -85,7 +86,7 @@ export function useThreadCreation(params: {
    * client-generated so the thread can open immediately; the subscription
    * fills it in once the server projects both commands.
    */
-  const createThread = (text: string) => {
+  const createThread = (text: string, schedule: Pick<CommandOf<"thread.turn.start">, "queue" | "scheduledFor"> = {}) => {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
     // Zero threads (fresh install): no source to inherit from — the picked
@@ -133,6 +134,7 @@ export function useThreadCreation(params: {
         type: "thread.turn.start",
         threadId,
         message: { text: parsed.text, attachments: [...pending, ...built.attachments] },
+        ...schedule,
         ...(modelSelection === undefined ? {} : { modelSelection }),
         ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
       } as const;

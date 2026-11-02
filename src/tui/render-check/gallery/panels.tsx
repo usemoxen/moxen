@@ -4,7 +4,7 @@ import type { ProjectEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import { DiffPanel } from "../../features/diffpanel/diffpanel.js";
 import { GitTab } from "../../features/gitpanel/gitpanel.js";
 import { Sidebar } from "../../features/sidebar/sidebar.js";
-import { Timeline } from "../../features/timeline/timeline.js";
+import { Timeline, UsageProtectionNotice } from "../../features/timeline/timeline.js";
 import { buildSidebarSections } from "../../model/sidebar.js";
 import type { PatchFile } from "../../model/patch.js";
 import type { TimelineEntry } from "../../model/thread.js";
@@ -206,6 +206,14 @@ const ENTRIES: TimelineEntry[] = [
 ];
 
 export const PANEL_GALLERY: GalleryEntry[] = [
+  {
+    id: "usage-protection-notice",
+    group: "timeline",
+    title: "Usage protection, safe stopping notification",
+    width: 90,
+    height: 10,
+    element: () => <Stage width={90} height={10}><UsageProtectionNotice entry={entry("protection", "user", "", MIN)} now={NOW} /></Stage>,
+  },
   {
     id: "diff-panel",
     group: "diffpanel",

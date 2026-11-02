@@ -84,6 +84,7 @@ import {
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
+import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -362,8 +363,12 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
     driver = ctx.driverFor(selection.instanceId);
+    // Codex and Harness fix MCP definitions at session creation. Resume the
+    // same provider conversation with the request-scoped submission tool.
+    if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
     setup = await sessionSetup(ctx, turnThread, selection.instanceId);
     await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+    await driver.updateMcpServers?.(threadId, setup.mcpServers);
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
     await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
@@ -382,8 +387,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     ...(images.length > 0 ? { images } : {}),
     modelSelection: selection,
     workingDirectory: thread.env.path,
-    ...usageLimitHook(ctx, threadId, selection.instanceId),
-    ...longThreadHook(ctx, threadId),
+    ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
+    ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
   })
     // A delegated task resumed after a usage limit (or recovered after a crash)
     // still owes its parent the report when it finally ends.
@@ -398,12 +403,232 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
  * Called by the schedule timer and by the shell poll; safe to call any time
  * — nothing happens when nothing is due or a turn is already running.
  */
-export async function runDueScheduledTurn(ctx: OperationContext, threadId: string): Promise<boolean> {
+export async function runDueScheduledTurn(ctx: OperationContext, threadId: string, now = Date.now()): Promise<boolean> {
+  return ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => admitQueuedTurn(ctx, threadId, await queueRows(ctx), now));
+}
+
+async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
   await recoverOrphanedTurn(ctx, threadId);
-  const turn = await promoteDueScheduledTurn(ctx.store, threadId).catch(() => null);
-  if (!turn) return false;
-  await runRecoveredTurn(ctx, threadId, turn).catch(() => undefined);
-  return true;
+  const thread = await ctx.store.readThreadRecord(threadId);
+  const index = rows.findIndex((r) => r.thread.id === threadId);
+  if (thread && index >= 0) rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+  const row = rows.find((r) => r.thread.id === threadId);
+  if (!row) return false;
+  for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
+    if (candidate.status !== "queued" || !candidate.queue && !candidate.scheduledFor) continue;
+    const pause = row.thread.usagePause;
+    if (candidate.queue?.continuation && candidate.queue.continuation !== "same-thread") continue;
+    const summary = candidate.queue?.summaryFor && row.turns.find((t) => t.id === candidate.queue!.summaryFor && t.handoff?.summaryTurnId === candidate.id && t.status === "queued");
+    if (candidate.queue?.summaryFor && !summary) continue;
+    if (pause && pause.phase !== "resuming" && !summary && (pause.phase !== "waiting" || pause.error || pause.recoveryTurnId !== candidate.id)) continue;
+    const admission = queueAdmission(row, candidate, rows, ctx.config, now);
+    if (candidate.queue && (JSON.stringify(admission.latched) !== JSON.stringify(candidate.queue.latched ?? []) || JSON.stringify(admission.conditions) !== JSON.stringify(candidate.queue.conditions))) await ctx.store.withThreadLock(threadId, () => ctx.store.updateTurn(threadId, candidate.id, { queue: { ...candidate.queue!, latched: admission.latched, conditions: admission.conditions } }));
+    if (admission.blocked.length) continue;
+    const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary);
+    if (!turn) return false;
+    await runRecoveredTurn(ctx, threadId, turn);
+    rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
+    return true;
+  }
+  return false;
+}
+
+async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
+  const rows: QueueRow[] = [];
+  for (const id of await ctx.store.listThreadIds()) {
+    const thread = await ctx.store.readThreadRecord(id);
+    if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+  }
+  return rows;
+}
+
+export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly QueueRow[]): Promise<WorkQueueEntry[]> {
+  const rows = snapshot ?? await queueRows(ctx);
+  const entries: WorkQueueEntry[] = [];
+  for (const row of rows) {
+    if (!row.turns.some((turn) => turn.status === "queued" || turn.queue && turn.status !== "completed")) continue;
+    const messages = await ctx.store.readMessages(row.thread.id);
+    for (const turn of row.turns) {
+      if (turn.queue?.summaryFor || turn.status !== "queued" && !(turn.queue && turn.status !== "completed")) continue;
+      const stopped = turn.status === "failed" || turn.status === "interrupted";
+      const policy = turn.queue ? { ...turn.queue, ...(stopped ? { removed: true } : {}) } : parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
+      const blocked = queueAdmission(row, turn, rows, ctx.config).blocked;
+      if (stopped && !turn.queue?.removed) blocked.unshift(turn.error ?? "Stopped before completion; add back held to retry");
+      if (policy.continuation !== "same-thread") blocked.unshift(turn.handoff?.fallback ? "Using stored handoff: model summary unavailable" : turn.handoff?.summary ? "Model handoff received" : policy.continuation === "model" ? "Preparing model handoff" : "Preparing stored handoff");
+      if (row.thread.usagePause && row.thread.usagePause.phase !== "resuming") blocked.unshift("Waiting for usage protection");
+      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: messages.find((m) => m.id === turn.messageId)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null });
+    }
+  }
+  return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
+}
+
+export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy): Promise<void> {
+  await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
+    const allEntries = await readWorkQueue(ctx);
+    const selected = allEntries.find((entry) => entry.threadId === threadId && entry.turnId === turnId);
+    if (!selected || selected.status !== "queued" && !selected.policy.removed) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+    const entries = allEntries.filter((entry) => !!entry.policy.removed === !!selected.policy.removed);
+    let movedOrder: number | undefined;
+    if (action === "up" || action === "down") {
+      const at = entries.findIndex((entry) => entry.turnId === turnId && entry.threadId === threadId);
+      const destination = at + (action === "up" ? -1 : 1);
+      if (at >= 0 && destination >= 0 && destination < entries.length) {
+        for (const [index, entry] of entries.entries()) await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { queue: { ...entry.policy, order: index * 2 } }));
+        movedOrder = destination * 2 + (action === "up" ? -1 : 1);
+      }
+    }
+    let summaryToStop: StoredTurn | undefined;
+    let cancelProtection = false;
+    const rows = policy ? await queueRows(ctx) : [];
+    await ctx.store.withThreadLock(threadId, async () => {
+      const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
+      if (!turn || turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+      if (turn.handoff && (await ctx.store.readTurns(turn.handoff.destinationThreadId)).length) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
+      const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
+      const row = rows.find((candidate) => candidate.thread.id === threadId);
+      const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
+      let next: QueuePolicy = policy ? { ...existing, ...parseQueuePolicy(policy), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(policy.conditions[index])) } : existing;
+      if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
+      if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
+      if (movedOrder !== undefined) next = { ...next, order: movedOrder };
+      if (action === "hold" || action === "release") next = { ...next, held: action === "hold" };
+      if (action === "remove" || action === "restore") next = { ...next, removed: action === "remove", held: action === "restore" ? true : next.held };
+      if (action === "restore") {
+        const thread = await ctx.store.readThreadRecord(threadId);
+        if (thread?.usagePause?.recoveryTurnId === turnId) {
+          const { error, ...pause } = thread.usagePause;
+          if (error !== undefined || pause.phase !== "waiting") await ctx.store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "waiting" } });
+        }
+      }
+      if (action === "remove" || action === "hold" || next.continuation !== "model") summaryToStop = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.handoff?.summaryTurnId && (candidate.status === "queued" || candidate.status === "running"));
+      if (action === "remove" && (await ctx.store.readThreadRecord(threadId))?.usagePause?.recoveryTurnId === turnId) {
+        cancelProtection = true;
+        summaryToStop = openTurn(await ctx.store.readTurns(threadId)) ?? summaryToStop;
+      }
+      await ctx.store.updateTurn(threadId, turnId, { queue: next, ...(action === "remove" ? { status: "interrupted", completedAt: ctx.store.nowIso() } : action === "restore" ? { status: "queued", completedAt: null } : {}) });
+      ctx.store.emit(threadId, "queue-edited");
+    });
+    if (summaryToStop) {
+      const thread = await ctx.store.readThreadRecord(threadId);
+      if (thread && summaryToStop.status === "running") await Effect.runPromise(ctx.driverFor((summaryToStop.modelSelection ?? thread.modelSelection).instanceId).interruptTurn(threadId));
+      await interruptTurn(ctx.store, threadId, summaryToStop.id);
+    }
+    if (cancelProtection) await ctx.store.withThreadLock(threadId, async () => {
+      const thread = await ctx.store.readThreadRecord(threadId);
+      if (thread?.usagePause?.recoveryTurnId === turnId) await ctx.store.writeThreadRecord({ ...thread, usagePause: null });
+    });
+  });
+}
+
+export async function runWorkQueue(ctx: OperationContext, now = Date.now()): Promise<void> {
+  await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
+    const rows = await queueRows(ctx);
+    for (const row of rows) for (const turn of row.turns) {
+      if (turn.status !== "queued" || !turn.queue) continue;
+      const admission = queueAdmission(row, turn, rows, ctx.config, now);
+      if (JSON.stringify(admission.latched) === JSON.stringify(turn.queue.latched ?? []) && JSON.stringify(admission.conditions) === JSON.stringify(turn.queue.conditions)) continue;
+      await ctx.store.withThreadLock(row.thread.id, () => ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...turn.queue!, latched: admission.latched, conditions: admission.conditions } }));
+    }
+    const entries = await readWorkQueue(ctx, rows);
+    for (const entry of entries) if (entry.status === "queued" && !entry.policy.removed) {
+      if (!entry.policy.held && entry.policy.continuation !== "same-thread") {
+        try { await prepareQueuedHandoff(ctx, entry.threadId, entry.turnId, now); }
+        catch (cause) {
+          await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
+          ctx.store.emit(entry.threadId, "handoff-failed");
+          continue;
+        }
+        const handoff = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId)?.handoff;
+        const destination = handoff ? await ctx.store.readThreadRecord(handoff.destinationThreadId) : null;
+        if (destination) {
+          const row = { thread: destination, turns: await ctx.store.readTurns(destination.id) };
+          const index = rows.findIndex((candidate) => candidate.thread.id === destination.id);
+          if (index < 0) rows.push(row); else rows[index] = row;
+        }
+      }
+      await admitQueuedTurn(ctx, entry.threadId, rows, now);
+    }
+  });
+}
+
+export async function pendingHandoff(ctx: OperationContext, threadId: string): Promise<string | null> {
+  const turns = await ctx.store.readTurns(threadId);
+  const running = openTurn(turns);
+  if (!running) return null;
+  return turns.find((turn) => turn.status === "queued" && turn.queue?.continuation === "model" && turn.handoff?.summaryTurnId === running?.id)?.handoff?.requestId ?? null;
+}
+
+export async function submitHandoff(ctx: OperationContext, threadId: string, requestId: string, summary: string): Promise<void> {
+  if (!summary.trim() || summary.length > 64_000) throw new CliError("INVALID_HANDOFF", "Submit a non-empty handoff of at most 64000 characters.");
+  await ctx.store.withThreadLock(threadId, async () => {
+    const turns = await ctx.store.readTurns(threadId);
+    const target = turns.find((turn) => turn.handoff?.requestId === requestId);
+    if (target?.handoff?.summary === summary.trim()) return;
+    if (!target?.handoff || target.status !== "queued" || target.queue?.continuation !== "model" || target.handoff.summaryTurnId !== openTurn(turns)?.id) throw new CliError("HANDOFF_NOT_ACTIVE", "This handoff request is not active for this thread.");
+    if (target.handoff.summary) throw new CliError("HANDOFF_ALREADY_SUBMITTED", "The handoff has already been accepted.");
+    await ctx.store.updateTurn(threadId, target.id, { handoff: { ...target.handoff, summary: summary.trim() } });
+    ctx.store.emit(threadId, "handoff-submitted");
+  });
+}
+
+const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
+
+async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
+  const store = ctx.store;
+  const source = await store.readThreadRecord(threadId);
+  let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
+  if (!source || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
+  if (!turn.handoff) {
+    const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
+    await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
+    turn = { ...turn, handoff };
+  }
+  let handoff = turn.handoff!;
+  if (handoff.summary && handoff.summaryTurnId) {
+    const summaryTurn = (await store.readTurns(threadId)).find((candidate) => candidate.id === handoff.summaryTurnId);
+    if (summaryTurn?.status === "running") {
+      await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
+      await interruptTurn(store, threadId, summaryTurn.id);
+    }
+  }
+  if (turn.queue!.continuation === "model" && !handoff.summary && !handoff.fallback) {
+    const summaryProvider = driverKindOfInstance(source.modelSelection.instanceId);
+    const exhausted = summaryProvider !== null && providerExhausted(summaryProvider, now);
+    if (!handoff.summaryTurnId && !exhausted) {
+      if (openTurn(await store.readTurns(threadId))) return;
+      const sent = await sendTurn(store, threadId, {
+        prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
+        origin: "handoff-summary", usageControl: true,
+        queue: { ...parseQueuePolicy({ conditions: [], order: turn.queue!.order - 0.5, sequential: false }), requestId: `summary:${handoff.requestId}`, summaryFor: turnId },
+      });
+      handoff = { ...handoff, summaryTurnId: sent.turn.id };
+      await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
+      return;
+    }
+    const summaryTurn = (await store.readTurns(threadId)).find((t) => t.id === handoff.summaryTurnId);
+    if (summaryTurn?.status === "queued" && !exhausted) return;
+    if (summaryTurn?.status === "running") {
+      if (now - Date.parse(summaryTurn.startedAt ?? summaryTurn.createdAt) < HANDOFF_SUMMARY_BUDGET_MS && !exhausted) return;
+      await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
+      await interruptTurn(store, threadId, summaryTurn.id);
+    }
+    if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id);
+    await store.withThreadLock(threadId, async () => {
+      const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+      handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
+      await store.updateTurn(threadId, turnId, { handoff });
+    });
+  }
+  if (openTurn(await store.readTurns(threadId))) return;
+  const policy: QueuePolicy = { ...turn.queue!, continuation: "same-thread", requestId: `handoff:${handoff.requestId}`, eventAfter: turn.queue!.eventAfter ?? turn.createdAt };
+  await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}) });
+  await store.withThreadLock(threadId, async () => {
+    const current = await store.readThreadRecord(threadId);
+    await store.updateTurn(threadId, turnId, { status: "completed", completedAt: store.nowIso() });
+    if (current?.usagePause?.recoveryTurnId === turnId) await store.writeThreadRecord({ ...current, usagePause: null });
+    await store.appendLedger(threadId, "activity", { id: store.newId(), threadId, turnId, kind: "handoff.prepared", summary: handoff.fallback ? "Model summary unavailable; used stored handoff" : handoff.summary ? "Model handoff accepted" : "Stored handoff prepared", payload: { destinationThreadId: handoff.destinationThreadId, fallback: handoff.fallback === true }, createdAt: store.nowIso() });
+    store.emit(threadId, "handoff-prepared");
+  });
 }
 
 /** Arm timers for every pending scheduled turn on disk (a starting owner process calls this once). */
@@ -473,6 +698,7 @@ export async function scheduleUsageContinue(
   const at = new Date(Date.parse(resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString();
   const sent = await sendTurn(store, threadId, {
     prompt: USAGE_CONTINUE_PROMPT,
+    queue: { ...parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" }), automatic: true },
     scheduledFor: at,
     scheduleReason: "usage-reset",
     continueAttempt: attempt,
@@ -649,6 +875,13 @@ export async function readLongThreadSnapshot(store: ThreadStore, threadId: strin
 }
 
 export interface ContinueThreadRequest {
+  readonly modelSelection?: ModelSelection;
+  readonly runtimeMode?: RuntimeMode;
+  readonly interactionMode?: InteractionMode;
+  readonly destinationThreadId?: string;
+  readonly queue?: QueuePolicy;
+  readonly modelSummary?: string;
+  readonly queuedTurnIds?: readonly string[];
   readonly threadId: string;
   /** Start the new thread's first turn at this time rather than now (after a usage limit resets). */
   readonly scheduledFor?: string;
@@ -673,18 +906,20 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
   const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: source.usagePause?.handoff === true });
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
   const title = continuedTitle(source.title);
-  const existing = source.usagePause?.continuedThreadId ? await store.readThreadRecord(source.usagePause.continuedThreadId) : null;
+  const destinationId = request.destinationThreadId ?? source.usagePause?.continuedThreadId;
+  const existing = destinationId ? await store.readThreadRecord(destinationId) : null;
   const created = existing ?? await createThread(store, {
+    ...(destinationId ? { id: destinationId } : {}),
     projectId: source.projectId,
     title,
-    modelSelection: source.modelSelection,
-    runtimeMode: source.runtimeMode,
-    interactionMode: source.interactionMode,
+    modelSelection: request.modelSelection ?? source.modelSelection,
+    runtimeMode: request.runtimeMode ?? source.runtimeMode,
+    interactionMode: request.interactionMode ?? source.interactionMode,
     env: source.env,
   });
-  if (source.usagePause && !existing) {
+  if (source.usagePause && !existing && !request.destinationThreadId) {
     await store.withThreadLock(source.id, async () => {
       const current = await store.readThreadRecord(source.id);
       if (current?.usagePause) await store.writeThreadRecord({ ...current, usagePause: { ...current.usagePause, continuedThreadId: created.id } });
@@ -694,6 +929,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   if ((await store.readTurns(created.id)).length === 0) await startTurn(ctx, {
     threadId: created.id,
     prompt: handoff,
+    ...(request.queue ? { queue: request.queue } : {}),
     ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
     // Noop subscriber: the driver's shared pump exists before any client subscribes.
     onEvent: () => undefined,
@@ -779,7 +1015,8 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // without recording a turn.
   const driver = ctx.driverFor((input.modelSelection ?? thread.modelSelection).instanceId);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
-  const sent = await sendTurn(store, thread.id, send);
+  const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(input.queue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : undefined;
+  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) });
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.

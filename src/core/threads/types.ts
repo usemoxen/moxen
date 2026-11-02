@@ -9,6 +9,7 @@
  */
 import type { ImageAttachmentUpload } from "../attachments.js";
 import type { TaskNotification } from "./notify.js";
+import type { QueuePolicy } from "./queue.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -87,6 +88,7 @@ export interface StoredThread {
 }
 
 export interface UsagePause {
+  readonly recoveryTurnId?: string;
   readonly provider: string;
   readonly phase: "pending" | "wrapping" | "waiting" | "resuming";
   readonly resetsAt: string | null;
@@ -118,6 +120,14 @@ export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "f
 export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "injected" | "background";
 
 export interface StoredTurn {
+  readonly queue?: QueuePolicy;
+  readonly handoff?: {
+    readonly requestId: string;
+    readonly destinationThreadId: string;
+    readonly summaryTurnId?: string;
+    readonly summary?: string;
+    readonly fallback?: boolean;
+  };
   readonly id: string;
   readonly threadId: string;
   readonly status: TurnStatus;
@@ -212,7 +222,7 @@ export interface StoredMessage {
 }
 
 /** Internal inputs: task results, usage reset continuations, and answer-panel replies. */
-export type MessageOrigin = "task-notification" | "usage-continue" | "question-answer";
+export type MessageOrigin = "task-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer";
 
 export interface StoredActivity {
   readonly id: string;
@@ -293,6 +303,7 @@ export type SendIfBusy = "reject" | "inject";
 export type SendDelivery = "auto" | "steer" | "restart" | "queue";
 
 export interface SendTurnInput {
+  readonly queue?: QueuePolicy;
   /** Internal coordinator input; never accepted from the client protocol. */
   readonly usageControl?: boolean;
   readonly prompt: string;

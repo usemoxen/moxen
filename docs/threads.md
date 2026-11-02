@@ -71,8 +71,12 @@ threads. Automatic uses the same action without waiting for a click. The server
 owns this work, so closing the TUI does not disable it.
 
 Before interrupting any turn, Moxen persists a hold on every affected thread.
-It then asks the model for a safe stopping point and a handoff, one thread at a
-time. Queued messages, including new steer/restart requests, remain held. A
+It then asks the model for a safe stopping point, one thread at a time, without
+requesting a full summary. The transcript marks this request with a **Usage
+protection** notification card, distinct from the later recovery notice.
+Continuation is in the same conversation unless the
+user explicitly chooses a new thread in Work queue. Queued messages, including
+new steer/restart requests, remain held. A
 wrap-up stops at 97% reported usage or after two minutes; threads that cannot
 start one safely wait without spending more. An interruption is not a rollback:
 edits already on disk remain. Provider telemetry can lag or be missing, and
@@ -89,23 +93,60 @@ Codex tokens use a dated API-equivalent price table. `usage status --json` label
 the cost source. These are estimates, not subscription charges or an invoice.
 
 After the recorded reset (with a short grace period), all reported windows must
-have room. `usageRecovery=parallel` resumes all eligible threads;
-`sequential` waits for the preceding thread to stop before starting the next.
+have room. `usageRecovery` supplies the initial concurrency for recovery entries:
+`parallel` admits eligible work together; `sequential` admits one entry at a time
+per provider. The queue exposes the order and lets each entry change this choice.
+Automatic continuation also requires `usageMinimumSession` (3% by default) and
+`usageMinimumWeekly` (5%) remaining. Zero removes that discretionary reserve,
+never a provider's actual limit. An entry may require a larger minimum.
 Missing reset times keep work held until the provider supplies one. Queue order,
 phase and holds survive a server restart. Settled and snoozed threads are not
 automatically resumed. Turning protection off stops new automatic holds but does
 not discard an existing queue: use **Cancel recovery** to remove an entry without
 sending its queued messages. A failed pause or recovery stays visible for inspection.
 
-`usageContinuation=same-thread` resumes the original conversation.
-`handoff` creates a fresh thread in the same checkout, preferring the model's
-wrap-up over a generated transcript summary. Original image paths remain in the
-handoff outside transcript trimming; use the server's file/image tools to inspect
-them. Unsent ordinary messages travel in the handoff. Future scheduled messages
-stay on their original thread and are not included in the new prompt. If no model
-summary survived, Moxen falls back to its ledger-based handoff. Automatic
-usage-limit continuation and long-thread compaction do not compete with a held
-wrap-up.
+Same-thread continuation is the default and does not spend allowance on a full
+summary. A queue entry can instead choose a new thread with a **stored handoff**
+(no model usage) or a **model handoff** (spends remaining allowance). The latter
+runs a focused summary turn: the model submits the payload through
+`submit_handoff`, scoped to that pending request. Successful durable submission,
+not final-response prose, is the acceptance boundary. A later usage failure does
+not discard an accepted payload. If no payload is submitted, Moxen uses the stored
+handoff. Summary generation uses current allowance before the destination's start
+conditions are met, and is stopped after two minutes of running or a reported
+hard limit. It does not silently retry summary generation. Both paths keep original
+image paths outside transcript trimming and carry the selected entry's unsent
+request. Other queued/scheduled requests stay on the source thread. Destination
+identity is persisted before creation to avoid duplicate handoffs after restart.
+The older `usageContinuation` config key remains readable but is hidden; new
+protection entries default to continuing here. Automatic usage-limit continuation
+and long-thread compaction do not compete with a held wrap-up.
+
+### Work queue and conditional scheduling
+
+Open **Work queue** from the Command Palette, including from the new-thread
+view. **Schedule work** queues the composer draft (or the first message of a new
+thread) with conditions. **Schedule message** keeps the existing date/time picker.
+The server owns admission, so closing the TUI does not cancel queued work.
+
+Each entry can wait for a date/time, the next reported session/weekly reset,
+a minimum remaining allowance, a provider running out or entering protection,
+or a thread/queue entry finishing. All of its conditions must hold. An **After**
+provider event is latched once observed; **While** checks the current state.
+Missing quota/reset data blocks explicit usage conditions rather than guessing.
+Conditions may refer to a different provider from the one that will run the work.
+Blocked entries do not prevent unrelated eligible provider lanes from proceeding.
+Finishing dependencies include completed, failed and interrupted work; a thread
+dependency waits until none of that thread's turns are running or queued.
+An entry dependency follows a handoff to its destination instead of treating
+summary preparation as completion of the queued work.
+
+Use Move up/down or Move first/last to order work, Hold/Release to control
+admission, and Remove/Add back held to withdraw or restore an entry without
+deleting its stored message or thread. Space selects entries; changes to concurrency,
+continuation and conditions apply to the selection. Failed/interrupted managed
+entries remain visible for inspection and an explicit retry. A restarted server
+never blindly replays a provider request whose acceptance is uncertain.
 
 The same controls are available without a TUI:
 

@@ -19,6 +19,8 @@ export type PickerName =
   | "changelog"
   | "stats"
   | "schedule"
+  | "work-queue"
+  | "queue-schedule"
   | "search"
   | "remote-servers"
   | "remote-devices"

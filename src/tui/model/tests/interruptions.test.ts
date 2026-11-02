@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
-import { applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
+import { applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
 function activity(id: string, kind: string, payload: Record<string, unknown>, turnId = "turn-1"): ActivityEnvelope {
   return { id, tone: "info", kind, summary: kind, turnId, createdAt: `2026-09-25T10:00:0${id.length % 10}.000Z`, payload } as unknown as ActivityEnvelope;
@@ -284,6 +284,15 @@ describe("continuing after a usage limit", () => {
     expect(isUsageContinue(prompt("a", "t", "anything", "usage-continue"))).toBe(true);
     expect(isUsageContinue(prompt("b", "t", USAGE_CONTINUE_PROMPT))).toBe(true);
     expect(isUsageContinue(prompt("c", "t", "Continue the task"))).toBe(false);
+    for (const protection of [prompt("p", "t", "private stopping instructions", "usage-protection"), prompt("p", "t", "The provider's shared usage allowance is nearly exhausted. Stop expanding the task.", "usage-continue")]) {
+      expect(isUsageProtection(protection)).toBe(true);
+      expect(isUsageContinue(protection)).toBe(false);
+      expect(queuedMessages(state({ messages: [protection], thread: thread([{ turnId: "t", messageId: "p" }]) }))).toEqual([]);
+    }
+    expect(isUsageProtection(null)).toBe(false);
+    expect(isUsageProtection(prompt("u", "t", "The provider's shared usage allowance is nearly exhausted."))).toBe(false);
+    expect(isUsageContinue(prompt("h", "t", "private summary instructions", "handoff-summary"))).toBe(false);
+    expect(queuedMessages(state({ messages: [prompt("h", "summary", "private summary instructions", "handoff-summary")], thread: { id: "t", queuedTurns: [{ turnId: "summary", messageId: "h", scheduledFor: null, scheduleReason: null }] } as unknown as ThreadState["thread"] }))).toEqual([]);
     expect(isUsageContinue(null)).toBe(false);
     // The bare /compact command, and nothing that merely starts with it.
     expect(isCompactPrompt(prompt("c", "t", "/compact"))).toBe(true);

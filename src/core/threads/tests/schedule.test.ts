@@ -211,11 +211,11 @@ describe("continue after a usage limit", () => {
     });
   });
 
-  it("stops at the configured cap, and says how many it tried", async () => {
+  it.each([-120_000, 3_600_000])("stops at the configured cap even when the reported reset is past (%i ms)", async (offset) => {
     const { store, thread, root } = await setup();
     const ctx = context(store, root, { usageLimitContinues: 1 });
     const stopped = await sendTurn(store, thread.id, { prompt: "big task" });
-    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const resetsAt = new Date(Date.now() + offset).toISOString();
     const first = await scheduleUsageContinue(ctx, thread.id, stopped.turn.id, resetsAt);
     await store.updateTurn(thread.id, first!.id, { status: "failed", scheduledFor: null });
     expect(await scheduleUsageContinue(ctx, thread.id, first!.id, resetsAt)).toBeNull();

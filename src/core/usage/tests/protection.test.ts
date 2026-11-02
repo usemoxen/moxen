@@ -147,7 +147,7 @@ describe("usage protection", () => {
     expect(w.sent).toEqual([first, second]);
     await restarted.tick();
     expect(restarted.read().queue.every((entry) => entry.phase === "waiting")).toBe(true);
-    expect((await w.store.readMessages(first)).some((message) => message.text === WRAP_UP_PROMPT)).toBe(true);
+    expect((await w.store.readMessages(first)).find((message) => message.text === WRAP_UP_PROMPT)?.origin).toBe("usage-protection");
     await restarted.reorder(second, "first");
     expect(restarted.read().queue[0]?.threadId).toBe(second);
     await restarted.tick(Date.parse(reset) + 6000);

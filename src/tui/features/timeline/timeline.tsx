@@ -21,7 +21,7 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import { describeActivity, fileRowCounts, formatMs, memoryLabel, memoryTitle, readRangeLabel, webToolSource } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { renderMessage } from "../../model/message.js";
-import { isCompactPrompt, isUsageContinue, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
+import { isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
 import { readOpenRequestPrompt, requestNoun, type OpenRequestAsk } from "../../model/gitpanel.js";
@@ -858,16 +858,22 @@ function OpenRequestBlock({ entry, ask, now }: { entry: TimelineEntry; ask: Open
   );
 }
 
-/**
- * The continue moxen sent after a usage limit reset: one quiet line where a
- * "you" prompt would be — the agent reads the full instruction, the user
- * only needs to know why the thread picked up again.
- */
+export function UsageProtectionNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
+  return (
+    <box border={["left"]} borderStyle="heavy" borderColor={COLOR.warn} backgroundColor={SURFACE.panel}
+      style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}>
+      <SpeakerHeader label={tr("timeline.usageProtection")} time={clockTime(entry.at, now)} color={COLOR.warn} background={SURFACE.panel} />
+      <text fg={COLOR.dim} bg={SURFACE.panel}>{tr("timeline.usageProtectionDetail")}</text>
+    </box>
+  );
+}
+
+/** Recovery reads as a quiet line; the model's maintenance instructions stay private. */
 function ContinueNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, paddingLeft: 1 }}>
       <text fg={COLOR.warn}>{"↻ "}</text>
-      <text fg={COLOR.dim}>{tr("timeline.continued")}</text>
+      <text fg={COLOR.dim}>{tr(entry.message?.origin === "handoff-summary" ? "timeline.preparingHandoff" : "timeline.continued")}</text>
       <text fg={COLOR.faint}>{`  ·  ${clockTime(entry.at, now)}`}</text>
     </box>
   );
@@ -1335,7 +1341,8 @@ function TurnBlock({  group,
     return first;
   }, [group]);
   const renderPrompt = (entry: TimelineEntry) => {
-    if (isUsageContinue(entry.message)) return <ContinueNotice key={entry.id} entry={entry} now={now} />;
+    if (isUsageProtection(entry.message)) return <UsageProtectionNotice key={entry.id} entry={entry} now={now} />;
+    if (isUsageContinue(entry.message) || entry.message?.origin === "handoff-summary") return <ContinueNotice key={entry.id} entry={entry} now={now} />;
     const ask = entry.message?.role === "user" ? readOpenRequestPrompt(entry.message.text) : null;
     if (ask !== null) return <OpenRequestBlock key={entry.id} entry={entry} ask={ask} now={now} />;
     const tasks = taskNotifications(entry.message);

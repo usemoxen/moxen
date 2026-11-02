@@ -110,6 +110,10 @@ import {
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
 import {
   armPendingScheduledTurns,
+  readWorkQueue,
+  editWorkQueue,
+  pendingHandoff,
+  submitHandoff,
   cancelTask,
   continueThread,
   delegate,
@@ -355,6 +359,7 @@ export class DirectConnection implements ClientApi {
    */
   private async moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): Promise<McpServerSpec> {
     const imageGeneration = !delegated && (await this.imageAvailability(threadId)).available;
+    const handoff = await pendingHandoff(await this.context(), threadId);
     // Hosted in this process: Claude calls the tools in-process, the other
     // providers over loopback HTTP served here — so a delegation always runs
     // in the process that owns its parent's session. Until the HTTP server
@@ -379,7 +384,7 @@ export class DirectConnection implements ClientApi {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
-      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration }),
+      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
@@ -910,6 +915,12 @@ export class DirectConnection implements ClientApi {
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
+      case "queue.edit":
+        await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy);
+        return accepted;
+      case "handoff.submit":
+        await submitHandoff(await this.context(), command.threadId, command.requestId, command.summary);
+        return accepted;
       case "usage.queue":
         await this.usageProtection.reorder(command.threadId, command.direction);
         return accepted;
@@ -1273,6 +1284,7 @@ export class DirectConnection implements ClientApi {
     const started = await startTurn(await this.context(), {
       threadId,
       prompt: message.text,
+      ...(command.queue ? { queue: command.queue } : {}),
       // Saved with the message and sent to the provider as images.
       ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       ...(command.modelSelection ? { modelSelection: command.modelSelection } : {}),
@@ -1571,6 +1583,10 @@ export class DirectConnection implements ClientApi {
         return { providers: usageLimitsSnapshot() };
       case "usage.protection":
         return this.usageProtection.read();
+      case "queue.read":
+        return { entries: await readWorkQueue(await this.context()) };
+      case "handoff.pending":
+        return { requestId: await pendingHandoff(await this.context(), query.threadId) };
       case "usage.stats":
         return await readUsageStats(await this.store(), query.range ?? "all");
       case "usage.card":

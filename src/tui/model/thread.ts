@@ -1122,7 +1122,12 @@ function unstartedTurnIds(state: ThreadState): Set<string> {
  */
 export function isUsageContinue(message: MessageEnvelope | null): boolean {
   if (message === null) return false;
-  return message.origin === "usage-continue" || (message.role === "user" && message.text === USAGE_CONTINUE_PROMPT);
+  return !isUsageProtection(message) && (message.origin === "usage-continue" || (message.role === "user" && message.text === USAGE_CONTINUE_PROMPT));
+}
+
+/** Earlier protection prompts shared the recovery tag; do not label them as a reset. */
+export function isUsageProtection(message: MessageEnvelope | null): boolean {
+  return message !== null && (message.origin === "usage-protection" || (message.origin === "usage-continue" && message.text.startsWith("The provider's shared usage allowance is nearly exhausted.")));
 }
 
 /**
@@ -1168,7 +1173,7 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
   const byId = new Map(state.messages.map((message) => [message.id, message] as const));
   const items = (state.thread?.queuedTurns ?? []).flatMap((queued): QueuedMessage[] => {
     const message = byId.get(queued.messageId);
-    if (message === undefined || queued.scheduleReason === "usage-reset" || isUsageContinue(message)) return [];
+    if (message === undefined || queued.scheduleReason === "usage-reset" || isUsageContinue(message) || isUsageProtection(message) || message.origin === "handoff-summary") return [];
     const attachments = Array.isArray(message.attachments) ? message.attachments.length : 0;
     const tasks = taskNotifications(message);
     return [

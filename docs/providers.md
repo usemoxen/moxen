@@ -487,6 +487,16 @@ queues first, interrupts active work, then starts a dedicated wrap-up turn. This
 works for Codex review/compact turns too, without assuming they accept steer.
 It does not silently install or approve provider hooks.
 
+Conditional messages, new threads and usage recovery share server-owned queue
+admission. Explicit usage conditions require a real quota feed; OpenCode and
+Harness work can still use time, dependencies, and another provider's quota
+conditions. Automatic recovery checks the session and weekly reserves immediately
+before admission. Model-written handoffs use a dedicated summary turn and the
+request-scoped `submit_handoff` tool, not final-response parsing. Providers whose
+MCP definitions are fixed at session creation reopen the same conversation from
+its saved cursor to make that tool available. Missing or disabled tools fall back
+to the stored handoff rather than claiming a model summary was delivered.
+
 Contracts checked against current documentation on 2026-11-02 and the installed
 Claude Agent SDK 0.3.292 / OpenCode client 2.0.24:
 

@@ -220,6 +220,12 @@ export function normalizeConfig(raw: unknown): CliConfig {
     if (typeof value !== "string" || !choices.includes(value)) throw new CliError("INVALID_CONFIG", `${key} must be one of ${choices.join(", ")}.`);
     Object.assign(result, { [key]: value });
   }
+  for (const key of ["usageMinimumSession", "usageMinimumWeekly"] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new CliError("INVALID_CONFIG", `${key} must be a percentage from 0 to 100.`);
+    result[key] = value;
+  }
   if (input.autoContinueAtUsageLimit !== undefined) {
     // A boolean in the file; `config set` hands it over as text.
     const raw: unknown = input.autoContinueAtUsageLimit;

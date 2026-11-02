@@ -113,6 +113,8 @@ function stoppedBecause(last: TurnBlock | undefined, activities: readonly Stored
 export interface HandoffOptions {
   readonly projectTitle?: string | null;
   readonly preferModelSummary?: boolean;
+  readonly modelSummary?: string;
+  readonly queuedTurnIds?: readonly string[];
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
@@ -135,7 +137,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   ]);
   const terminal = (turn: StoredTurn): boolean => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted";
   const reached = (turn: StoredTurn): boolean => terminal(turn) || produced.has(turn.id);
-  const sent = turns.filter(reached);
+  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor);
   const blocks: TurnBlock[] = sent.map((turn) => ({
     turn,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
@@ -143,8 +145,8 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
   const unsent = turns
-    .filter((turn) => !reached(turn) && !(options.preferModelSummary && turn.scheduledFor))
-    .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue"));
+    .filter((turn) => !reached(turn) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
+    .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();
@@ -155,8 +157,9 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     }
   }
 
-  const firstPrompt = blocks.find((block) => block.prompts.length > 0)?.prompts[0]?.text.trim() ?? null;
-  const lastPrompt = [...blocks].reverse().find((block) => block.prompts.length > 0)?.prompts.at(-1)?.text.trim() ?? null;
+  const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin);
+  const firstPrompt = userPrompts[0]?.text.trim() ?? null;
+  const lastPrompt = userPrompts.at(-1)?.text.trim() ?? null;
   const plan = openPlan(activities);
   const stopped = stoppedBecause(blocks.at(-1), activities);
   // Only a last turn that ran to completion, with nothing queued and no open checklist step, may be a finished task.
@@ -177,7 +180,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     "",
     stopped.text,
   ];
-  if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", options.preferModelSummary ? firstPrompt : `> ${oneLine(firstPrompt, 400)}`);
+  if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", options.preferModelSummary || options.modelSummary ? firstPrompt : `> ${oneLine(firstPrompt, 400)}`);
   if (lastPrompt !== null) head.push("", "The last request, verbatim:", "", lastPrompt);
   if (plan.length > 0) head.push("", "Its checklist when it stopped (`[x]` done, `[~]` in progress, `[ ]` open):", "", ...plan);
   if (unsent.length > 0) {
@@ -195,7 +198,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
   }
   const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
-  const modelSummary = options.preferModelSummary ? summaryBlock?.replies.at(-1)?.text.trim() : null;
+  const modelSummary = options.modelSummary ?? (options.preferModelSummary ? summaryBlock?.replies.at(-1)?.text.trim() : null);
   if (modelSummary) return [...head, "", "## Model's wrap-up", "", modelSummary, "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
   const tail = [
     "",
