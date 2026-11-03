@@ -60,6 +60,7 @@ export function ModalShell({
         }}
       />
       <box
+        id="modal-panel"
         style={{
           position: "absolute",
           left,

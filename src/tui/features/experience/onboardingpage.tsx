@@ -270,21 +270,20 @@ export function OnboardingPage({
   </>;
 
   const content = listView && list !== null ? <>
-    <box style={{ flexDirection: "row", height: 1, marginBottom: 1, flexShrink: 0 }}>
-      <HoverButton label={t("guide.backToStep")} fg={COLOR.accent} onClick={closeList} />
-    </box>
     <ListEditor key={list} descriptor={listView.descriptor} items={listView.items ?? []} screen={screen} onScreen={setScreen}
       heading={heading} onHeading={setHeading} saving={settings.saving} onSet={settings.set}
       onDuplicate={(id, newId) => settings.duplicate(list, id, newId)} run={settings.run}
       onTest={(id, model) => list === "mcpServers" ? settings.testMcp(id) : settings.test(id, model)} onProbe={settings.probe}
       onDiscover={settings.discover} onExport={settings.exportProfile} onImport={settings.importProfile} notice={settings.notice}
-      width={inner} onExit={closeList} canLeave={false} mcpRunner={(value("mcpRunner") ?? "npx") as "npx" | "bunx" | "pnpm" | "yarn"} />
+      width={inner} onExit={closeList} exitLabel={t("guide.backToStep")} mcpRunner={(value("mcpRunner") ?? "npx") as "npx" | "bunx" | "pnpm" | "yarn"} />
   </> : step === 2 ? (panned
     ? <box ref={bodyRef} style={{ flexGrow: 1, flexDirection: "column", overflow: "hidden" }}>{stepTwo}</box>
     : <scrollbox ref={scroll} style={{ flexGrow: 1 }} contentOptions={{ paddingRight: 1 }}
       verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>{stepTwo}</scrollbox>)
   : <scrollbox ref={scroll} style={{ flexGrow: 1 }} contentOptions={{ paddingRight: 1 }}
-    verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
+    // Memory setup arrives asynchronously. Reserve its gutter from the first
+    // layout so a newly visible native thumb cannot paint at the body origin.
+    verticalScrollbarOptions={{ ...(step === 3 ? { visible: true } : {}), showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
     <text fg={COLOR.dim} style={{ marginTop: 1, marginBottom: 1, flexShrink: 0 }}>{t(DESCRIPTIONS[step]!)}</text>
     {step === 0 ? <>
       <text fg={COLOR.text} style={{ marginBottom: 2 }}>{t("guide.welcomeDetail")}</text>
@@ -301,7 +300,7 @@ export function OnboardingPage({
       {memoryLabels.map((label, index) => {
         const at = controls.push({ run: () => { if (!disabled) onMemory(memoryValues[index]!); } }) - 1;
         return <GuideChoice key={label} id={`guide-control-${at}`} label={label} detail={memoryBodies[index]}
-          choice chosen={memory === index} active={focus === at} tone={memoryTones[index] ?? COLOR.accent} width={inner}
+          choice chosen={memory === index} active={focus === at} tone={memoryTones[index] ?? COLOR.accent} width={inner - 1} detailRows={2} inset={0}
           onPick={() => { setFocus(at); if (!disabled) onMemory(memoryValues[index]!); }} />;
       })}
       {showMemorySetup ? <box id="guide-memory-setup" style={{ flexDirection: "column", flexShrink: 0 }}><MemoryRuntimePanel status={memoryStatus} saving={settings.saving === "memoryEmbeddings"}
@@ -359,26 +358,26 @@ export function OnboardingPage({
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0, marginTop: 1 }}>
         <HoverButton label={t("guide.later")} fg={focus === laterIndex ? COLOR.accent : COLOR.dim} {...(focus === laterIndex ? { bg: SURFACE.hover } : {})} onClick={() => { if (!disabled) onClose(); }} />
         {list === null && showKeys ? <text fg={COLOR.dim}>{t("guide.pageKeys")}</text> : <box />}
-        {list === null ? <box style={{ flexDirection: "row", gap: 3 }}>
+        <box style={{ flexDirection: "row", gap: 3 }}>
           {step > 0 ? <HoverButton label={t("guide.back")} fg={focus === backIndex ? COLOR.accent : COLOR.dim} {...(focus === backIndex ? { bg: SURFACE.hover } : {})} onClick={() => changeStep(step - 1)} /> : null}
           <HoverButton label={` ${footerLabel}  → `} fg={SURFACE.base} bg={focus === nextIndex ? COLOR.bright : COLOR.accent} hoverBg={COLOR.bright} onClick={() => { if (!disabled) next(); }} />
-        </box> : null}
+        </box>
       </box>
     </box>
   </box>;
 }
 
-function GuideChoice({ id, label, detail, tag, active, choice, chosen, tone, width, onPick }: { id: string; label: string; detail: string | undefined; tag?: string | undefined; active: boolean; choice: boolean; chosen: boolean; tone: string; width: number; onPick: () => void }) {
+function GuideChoice({ id, label, detail, tag, active, choice, chosen, tone, width, detailRows, inset = 1, onPick }: { id: string; label: string; detail: string | undefined; tag?: string | undefined; active: boolean; choice: boolean; chosen: boolean; tone: string; width: number; detailRows?: number; inset?: number; onPick: () => void }) {
   const { hovered, handlers } = useHover();
   const bg = active || hovered ? SURFACE.hover : chosen ? SURFACE.raised : SURFACE.panel;
-  return <box id={id} style={{ flexDirection: "column", width, paddingLeft: 1, paddingRight: 1, flexShrink: 0, overflow: "hidden", border: ["left"], marginBottom: detail ? 1 : 0 }}
-    borderColor={active ? COLOR.accent : chosen ? SURFACE.raised : SURFACE.panel}
+  return <box id={id} style={{ flexDirection: "column", width, marginLeft: 1 - inset, paddingLeft: inset, paddingRight: 1, flexShrink: 0, overflow: "hidden", border: ["left"], marginBottom: detail ? 1 : 0 }}
+    borderColor={active ? COLOR.accent : chosen ? inset === 0 ? tone : SURFACE.raised : SURFACE.panel}
     backgroundColor={bg} onMouseDown={onPick} selectable={false} {...handlers}>
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
       <text fg={chosen ? tone : active || hovered ? COLOR.bright : COLOR.text} bg={bg} wrapMode="none" selectable={false}
         attributes={active ? TextAttributes.BOLD : TextAttributes.NONE}>{`${choice ? chosen ? "●" : "○" : "›"}  ${label}`}</text>
       {tag === undefined ? null : <text fg={COLOR.dim} bg={bg} wrapMode="none" selectable={false}>{`  ·  ${tag}`}</text>}
     </box>
-    {detail ? <text fg={COLOR.dim} bg={bg} selectable={false} style={{ paddingLeft: 3, maxHeight: 2 }}>{detail}</text> : null}
+    {detail ? <text fg={COLOR.dim} bg={bg} selectable={false} style={{ paddingLeft: 3, maxHeight: 2, ...(detailRows === undefined ? {} : { minHeight: detailRows }) }}>{detail}</text> : null}
   </box>;
 }

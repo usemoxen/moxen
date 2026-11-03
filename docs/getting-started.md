@@ -56,6 +56,8 @@ it. Left/Right adjust the focused choice; on the memory slider they preview
 the choice, and Enter applies it. Click a slider label to apply it directly.
 Use Continue/Back, the step list, or `[` / `]` to change pages. The guide's own
 background follows Animated / Static / Off, and it supports English and Spanish.
+The step list and Back/Continue stay visible while an inline editor is open;
+its own back link returns one level within setup, then to the guide step.
 
 ## What's new
 
@@ -68,6 +70,7 @@ the detailed change list without feature highlights. Left/Right browse
 versions, `d` switches views, and Page Up/Down scroll the content. **Mark read and
 close** acknowledges only the displayed release; closing with Escape or
 Later leaves it unread.
+The unread-release notice hides while the viewer is open and returns after Later.
 
 Release notes are bundled and work offline. No update check, download or
 installation is performed here; the in-app updater is a separate feature

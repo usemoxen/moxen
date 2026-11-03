@@ -1,5 +1,6 @@
 import { act, useState } from "react";
 import type { BaseRenderable } from "@opentui/core";
+import type { TestRendererSetup } from "@opentui/core/testing";
 import type { ClientApi, Command, ExperienceSnapshot, Query, QueryResult } from "../../../server/api.js";
 import { DEFAULT_CONFIG, setConfigValue } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
@@ -7,11 +8,13 @@ import { describeSettings } from "../../../core/configschema.js";
 import { RELEASES } from "../../../core/experience/experience.js";
 import { APP_VERSION } from "../../../core/version.js";
 import { applyLanguage } from "../../i18n/index.js";
+import { THEMES } from "../../themes.js";
 import { OnboardingPage } from "../../features/experience/onboardingpage.js";
+import { ChangelogModal } from "../../features/experience/experiencemodal.js";
 import { useSettings } from "../../features/settings/useSettings.js";
 import { ExperienceField } from "../../features/experience/field.js";
 import { setTerminalVisible } from "../../hooks/useTerminalVisible.js";
-import { App, client as fixtureClient } from "../fixtures.js";
+import { App, client as fixtureClient, harnessTheme } from "../fixtures.js";
 import { fail } from "../helpers.js";
 import { testRender } from "../testrender.js";
 
@@ -53,26 +56,53 @@ export async function runExperience(): Promise<void> {
   const until = async (check: () => boolean, message: string) => {
     const deadline = Date.now() + 4000;
     while (!check()) {
-      if (Date.now() > deadline) fail(`${message}\n${setup.captureCharFrame()}`);
+      if (Date.now() > deadline) fail(`${message}\n${readFrame()}`);
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); await setup.flush(); });
     }
   };
-  const visible = (text: string) => setup.captureCharFrame().includes(text);
+  // Polling must not export intermediate animation frames under the last
+  // intentional capture's label. Spans read the same frame without publishing it.
+  const readFrame = () => setup.captureSpans().lines.map((line) => line.spans.map((span) => span.text).join("")).join("\n");
+  const visible = (text: string) => readFrame().includes(text);
   const see = (text: string) => until(() => visible(text), `missing ${text}`);
   const click = async (text: string) => {
     await see(text);
-    const lines = setup.captureCharFrame().split("\n");
+    const lines = readFrame().split("\n");
     const y = lines.findIndex((line) => line.includes(text));
     await act(async () => setup.mockMouse.click(lines[y]!.indexOf(text) + 1, y));
     await setup.flush();
   };
   const next = async () => click("Continue");
+  const inlineNavigation = () => {
+    const frame = readFrame();
+    if ((frame.match(/← /g) ?? []).length !== 1 || !frame.includes("Back") || !frame.includes("Continue") || !frame.includes("YOUR WORKSPACE")) fail(`inline setup lost its navigation or duplicated its back link\n${frame}`);
+  };
+  const settledModal = async (target: TestRendererSetup = setup) => {
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (target.renderer.root.findDescendantById("modal-panel")?.opacity !== 1) return;
+        clearTimeout(deadline);
+        target.renderer.off("frame", check);
+        resolve();
+      };
+      const deadline = setTimeout(() => fail("release viewer did not finish fading in"), 4000);
+      target.renderer.on("frame", check);
+      check();
+    });
+    await target.flush();
+  };
   await see("Welcome to Moxen");
   await next();
   await see("Make it yours");
   if (visible("Threads ─")) fail("onboarding was drawn over the working view");
   await click("Catppuccin Latte");
   await until(() => config.ui?.theme === "catppuccin-latte", "appearance was not persisted");
+  // The persistence check changes the live palette, too. Restore the visual
+  // harness's requested theme before capturing the rest of the guide.
+  if (harnessTheme.current && harnessTheme.current !== "catppuccin-latte") {
+    await click(THEMES[harnessTheme.current as keyof typeof THEMES].label);
+    await until(() => config.ui?.theme === harnessTheme.current, "the requested frame theme was not restored");
+  }
   // The backdrop mounts after the guide and used to paint over it (MXN-198).
   await click("Animated");
   await until(() => config.ui?.backdrop === "animated", "the animated backdrop was not enabled");
@@ -89,8 +119,10 @@ export async function runExperience(): Promise<void> {
   await act(async () => setup.mockInput.pressKey("a"));
   await see("Ollama");
   if (!visible("Choose who you work with")) fail("model server setup left onboarding");
+  inlineNavigation();
   console.log("--- onboarding, inline model server setup ---");
   console.log(setup.captureCharFrame());
+  await click("← back");
   await click("Back to this step");
   await next();
   await see("What should Moxen remember?");
@@ -105,6 +137,14 @@ export async function runExperience(): Promise<void> {
   await click("With embeddings");
   await see("Installing the optional runtime");
   await see("Cancel setup (c)");
+  if (/\[\s*Cancel setup/.test(readFrame())) fail("memory setup still uses bracketed buttons");
+  const memoryRows = readFrame().split("\n");
+  const choices = ["○  Memory off", "○  Memory ", "●  With embeddings"].map((label) => memoryRows.findIndex((line) => line.includes(label) && (label !== "○  Memory " || !line.includes("Memory off"))));
+  const modelRow = memoryRows.find((line) => line.includes("Memory model"));
+  if (choices.some((row) => row < 0) || choices[1]! - choices[0]! !== choices[2]! - choices[1]!) fail("memory choices have uneven spacing");
+  if (modelRow?.indexOf("Memory model") !== memoryRows[choices[2]!]!.indexOf("●")) fail("memory setup is not aligned with the choices");
+  console.log("--- onboarding, memory setup pending ---");
+  console.log(setup.captureCharFrame());
   if (embeddingsOn()) fail("semantic memory was enabled before validation");
   await click("Continue");
   if (!visible("What should Moxen remember?")) fail("onboarding proceeded while memory setup was pending");
@@ -129,8 +169,10 @@ export async function runExperience(): Promise<void> {
   await act(async () => setup.mockInput.pressKey("a"));
   await see("Brave Search");
   if (!visible("Bring your tools")) fail("MCP preset selection left onboarding");
+  inlineNavigation();
   console.log("--- onboarding, inline MCP setup ---");
   console.log(setup.captureCharFrame());
+  await click("← back");
   await click("Back to this step");
   await see("Bring your tools");
   await next();
@@ -144,13 +186,26 @@ export async function runExperience(): Promise<void> {
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await click("What’s new");
   await see("Make yourself at home");
+  await settledModal();
+  const releasePanel = setup.renderer.root.findDescendantById("modal-panel");
+  if (visible("There’s something new in Moxen")) fail("release notice remained above the open viewer");
+  console.log("--- changelog, highlights ---");
+  console.log(setup.captureCharFrame());
   await click("All changes");
   await see("The CLI and release viewer report the same package version.");
   await see("RELEASE HISTORY");
+  if (setup.renderer.root.findDescendantById("modal-panel") !== releasePanel || releasePanel?.opacity !== 1) fail("changing release tabs restarted the modal fade");
   console.log("--- changelog, detailed changes ---");
+  console.log(setup.captureCharFrame());
+  await click("Highlights");
+  await act(async () => setup.mockInput.pressKey("\x1b[6~"));
+  await setup.flush();
+  await see("one in the guide or Settings");
+  console.log("--- changelog, inline tools copy ---");
   console.log(setup.captureCharFrame());
   await click("Later");
   if (state.seenReleases.length) fail("closing release notes marked them read");
+  await see("There’s something new in Moxen");
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await click("What’s new");
   await act(async () => setup.mockInput.pressArrow("right"));
@@ -175,11 +230,36 @@ export async function runExperience(): Promise<void> {
   }
   const spanish = await testRender(<SpanishGuide />, { width: 180, height: 47, exitOnCtrlC: false });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 180)); await spanish.flush(); });
+  console.log("--- onboarding, Spanish memory ---");
   const frame = spanish.captureCharFrame();
   if (!frame.includes("Con embeddings") || !frame.includes("207 MB")) fail(`Spanish semantic memory setup guidance is missing\n${frame}`);
-  console.log("--- onboarding, Spanish memory ---");
+  const titleRow = frame.split("\n").findIndex((line) => line.includes("¿Qué debería recordar Moxen?"));
+  const titleColumn = frame.split("\n")[titleRow]?.indexOf("¿Qué debería recordar Moxen?") ?? -1;
+  if (titleColumn < 0 || /[█▀▄▌▐]/.test(frame.split("\n")[titleRow + 1]?.slice(titleColumn, titleColumn + 2) ?? "")) fail(`a stray cursor remains below the Spanish step title\n${frame}`);
   console.log(frame);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const rows = spanish.captureSpans().lines.map((line) => line.spans.map((span) => span.text).join(""));
+    if (rows.some((line) => line.includes("Comprobar (r)"))) break;
+    const row = rows.findIndex((line) => line.includes("Con embeddings"));
+    if (row < 0) fail("Spanish memory choice disappeared before its setup actions were reachable");
+    await act(async () => spanish.mockMouse.scroll(rows[row]!.indexOf("Con embeddings"), row, "down"));
+    await spanish.flush();
+  }
+  console.log("--- onboarding, Spanish memory setup ---");
+  const setupFrame = spanish.captureCharFrame();
+  if (!setupFrame.includes("Comprobar (r)") || /\[\s*Comprobar/.test(setupFrame)) fail(`Spanish memory setup actions are missing or still bracketed\n${setupFrame}`);
+  console.log(setupFrame);
   spanish.renderer.destroy();
+  const spanishRelease = await testRender(<ChangelogModal snapshot={state} error={null} saving={false} screenWidth={180} screenHeight={47}
+    onSettings={() => {}} onRead={() => {}} onGuide={() => {}} onClose={() => {}} />, { width: 180, height: 47, exitOnCtrlC: false });
+  await settledModal(spanishRelease);
+  await act(async () => spanishRelease.mockInput.pressKey("\x1b[6~"));
+  await spanishRelease.flush();
+  console.log("--- changelog, Spanish inline tools copy ---");
+  const releaseFrame = spanishRelease.captureCharFrame();
+  if (!releaseFrame.includes("desde la guía o Ajustes")) fail(`Spanish release copy lost inline MCP setup\n${releaseFrame}`);
+  console.log(releaseFrame);
+  spanishRelease.renderer.destroy();
   applyLanguage("en");
   await runExperienceField();
 }

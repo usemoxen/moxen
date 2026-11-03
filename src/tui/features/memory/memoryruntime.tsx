@@ -46,21 +46,21 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
     if (busy && key.name === "c") { key.preventDefault(); onCancel(); }
     else if (!busy && key.name === "r") { key.preventDefault(); onSetup(); }
   });
-  return <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1 }} backgroundColor={SURFACE.panel} selectable={false}>
+  return <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 2, paddingRight: 1 }} backgroundColor={SURFACE.panel} selectable={false}>
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.panel}>
       <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>{t("memory.title")}</text>
         {status?.device ? <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`  ${status.device}`}</text> : null}
       </box>
-      <HoverButton label={`[ ${t(busy ? "memory.cancel" : status?.validation ? "memory.recheck" : "memory.setup")} ]`}
-        fg={COLOR.accent} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={busy ? onCancel : onSetup} />
+      <HoverButton label={` ${t(busy ? "memory.cancel" : status?.validation ? "memory.recheck" : "memory.setup")} `}
+        fg={SURFACE.base} hoverBg={COLOR.bright} bg={COLOR.accent} onClick={busy ? onCancel : onSetup} />
     </box>
     <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line}</text>
     {busy && status?.file ? <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>{`${status.file}${status.percent === null ? "" : ` · ${Math.round(status.percent)}%`}`}</text> : null}
     {status?.validation ? <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>{t("memory.measurements", { device: status.validation.device, correct: status.validation.correct, total: status.validation.total, ms: Math.round(status.validation.queryP95Ms) })}</text> : null}
     {failed && status?.message ? <text fg={COLOR.removed} bg={SURFACE.panel} wrapMode="word" selectable={false}>{tx(status.message)}</text> : null}
     {busy ? null : <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.panel}>
-      <HoverButton label={`[ ${t("memory.keyword")} ]`} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onKeyword} />
+      <HoverButton label={t("memory.keyword")} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onKeyword} />
     </box>}
   </box>;
 }

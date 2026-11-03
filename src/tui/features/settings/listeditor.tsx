@@ -64,6 +64,7 @@ export function ListEditor({
   width,
   onExit,
   canLeave,
+  exitLabel,
   mcpRunner,
 }: {
   descriptor: SettingDescriptor;
@@ -88,6 +89,7 @@ export function ListEditor({
   onExit: (viaEscape?: boolean) => void;
   /** False when the list is its page's whole content: there is nowhere to go back to, so no back button (esc still closes the settings). */
   canLeave?: boolean;
+  exitLabel?: string;
   /** What starts an npm package for a well-known MCP server (`mcpRunner`). */
   mcpRunner?: McpRunner;
 }) {
@@ -561,7 +563,7 @@ export function ListEditor({
   return (
     <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-        {canLeave === false && profile === undefined && overlay === null && confirm === null ? <text bg={SURFACE.raised}>{" "}</text> : <Chip label={`← ${model !== undefined ? profile?.title ?? t("le.back") : profile !== undefined ? descriptor.label : t("le.back")}`} onPress={() => back()} accent />}
+        {canLeave === false && profile === undefined && overlay === null && confirm === null ? <text bg={SURFACE.raised}>{" "}</text> : <Chip label={profile === undefined && overlay === null && confirm === null && exitLabel ? exitLabel : `← ${model !== undefined ? profile?.title ?? t("le.back") : profile !== undefined ? descriptor.label : t("le.back")}`} onPress={() => back()} accent />}
         <text fg={saving !== null ? COLOR.faint : COLOR.dim} bg={SURFACE.raised} selectable={false}>{saving !== null ? t("le.saving") : ""}</text>
       </box>
       <box style={{ flexDirection: "column", flexShrink: 0, paddingTop: 1 }} backgroundColor={SURFACE.raised}>

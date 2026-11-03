@@ -1296,10 +1296,13 @@ export function App({
   }, [booted, picker, experience]);
   useEffect(() => {
     const snapshot = experience.snapshot;
+    // Re-offer unread notes after Later, even if the original toast timed out
+    // while the viewer was open.
+    if (picker === "changelog") { experience.notified.current = false; return; }
     if (!booted || !snapshot?.onboardingCompleted || experience.notified.current || !snapshot.releases.some((release) => !snapshot.seenReleases.includes(release.version))) return;
     experience.notified.current = true;
     toasts.push("release-notes", "info", t("guide.newRelease"), 12_000, { label: t("guide.openRelease"), onClick: () => setPicker("changelog") });
-  }, [booted, experience, toasts]);
+  }, [booted, experience, picker, toasts]);
   useEffect(() => {
     if (!booted && isBootReady(shell, openThreadId, threadState, providersReady)) setBooted(true);
   }, [booted, shell, openThreadId, threadState, providersReady]);
@@ -3028,7 +3031,9 @@ export function App({
       ) : (
         <LoadingScreen stage={bootLoadingStage(shell, providersReady)} />
       )}
-      {toasts.toasts.map((toast, index) => (
+      {toasts.toasts.filter((toast) => toast.id !== "release-notes" || (
+        picker !== "changelog" && experience.snapshot?.releases.some((release) => !experience.snapshot?.seenReleases.includes(release.version))
+      )).map((toast, index) => (
         <box
           key={toast.id}
           style={{

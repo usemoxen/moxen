@@ -53,7 +53,7 @@ export const RELEASES: readonly ReleaseNotes[] = [{
     },
     {
       title: { en: "Bring your tools", es: "Conecta tus herramientas" },
-      body: { en: "MCP servers give agents access to tools and services you use. Add one from Settings, choose which providers get it, and test the connection there.", es: "Los servidores MCP dan a los agentes acceso a las herramientas y servicios que usas. Añade uno en Ajustes, elige qué proveedores lo reciben y prueba la conexión allí." },
+      body: { en: "MCP servers give agents access to tools and services you use. Add one in the guide or Settings, choose which providers get it, and test the connection inline.", es: "Los servidores MCP dan a los agentes acceso a las herramientas y servicios que usas. Añade uno desde la guía o Ajustes, elige qué proveedores lo reciben y prueba la conexión sin salir." },
       action: "mcp",
     },
   ],
