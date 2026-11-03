@@ -104,7 +104,9 @@ cumulative cost is counted by gains (native child costs are not added again);
 Codex tokens use a dated API-equivalent price table. `usage status --json` labels
 the cost source. These are estimates, not subscription charges or an invoice.
 
-After the recorded reset (with a short grace period), all reported windows must
+Recovery waits for the reset of the window that triggered protection or ran out,
+with a short grace period. If several windows triggered it, recovery waits for
+all of their resets. After that, all reported windows must
 have room. `usageRecovery` supplies the initial concurrency for recovery entries:
 `parallel` admits eligible work together; `sequential` admits one entry at a time
 per provider. The queue exposes the order and lets each entry change this choice.

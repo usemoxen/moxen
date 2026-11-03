@@ -284,6 +284,54 @@ describe("usage protection", () => {
     expect(restarted.read().queue[0]?.phase).toBe("waiting");
   });
 
+  it("does not interrupt Claude's native allowance when it starts during a Moxen wrap-up", async () => {
+    const w = await world("claude");
+    const id = await w.make("Moxen wrap-up");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    const resetsAt = new Date(Date.now() + 3600_000).toISOString();
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: {
+      provider: "claude", phase: "wrapping", resetsAt, order: 1, handoff: false, turnId: turn.id,
+    } });
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: false, resetsAt }]);
+    const stop = vi.spyOn(w.ctx.driverFor("claudeAgent"), "interruptTurn");
+    w.guard.observe({ type: "thread.state.changed", provider: "claude", threadId: id, state: "usage-wrap-up" });
+    await w.guard.tick();
+    expect(stop).not.toHaveBeenCalled();
+    expect(openTurn(await w.store.readTurns(id))?.id).toBe(turn.id);
+    expect((await w.store.readThreadRecord(id))?.usagePause).toMatchObject({ phase: "wrapping", native: true, turnId: turn.id, order: 1 });
+    expect(w.sent).toEqual([]);
+    await completeTurn(w.store, id, turn.id, { text: "safe stopping point" });
+    await w.guard.tick();
+    expect(w.guard.read().queue[0]?.phase).toBe("waiting");
+    w.guard.close();
+  });
+
+  it("does not wait for a weekly reset when the session reserve triggers below 90 percent", async () => {
+    const w = await world();
+    const ids = [];
+    for (let index = 0; index < 4; index++) ids.push(await w.make(`work ${index}`));
+    const now = Date.now();
+    const session = new Date(now + 3600_000).toISOString();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 89, exhausted: false, resetsAt: session },
+      { id: "weekly", label: "Weekly", usedPercent: 20, exhausted: false, resetsAt: new Date(now + 6 * 86400_000).toISOString() },
+    ]);
+    await w.guard.tick(now);
+    expect(w.guard.read().queue).toHaveLength(4);
+    expect(w.guard.read().queue.map((entry) => entry.resetsAt)).toEqual(ids.map(() => session));
+    for (const id of ids) {
+      await settleStartedTurns(w, id);
+      await w.guard.tick(now);
+    }
+    const restarted = new UsageProtection(async () => w.ctx);
+    await restarted.tick(Date.parse(session) + 6000);
+    await flushTurnRunners();
+    expect(w.sent).toHaveLength(5);
+    restarted.close();
+    w.guard.close();
+  });
+
   it("does not lose native wrap-up when its turn settles before the next scheduler tick", async () => {
     const w = await world("claude");
     w.ctx.config.providers = { claude: { usageWrapUp: "provider" } };

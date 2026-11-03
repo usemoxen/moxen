@@ -71,7 +71,8 @@ export class UsageProtection {
       const rows = await this.rows(ctx);
       if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
       if (!usageLimitsSnapshot()[provider]?.windows.length) throw new CliError("USAGE_UNAVAILABLE", "This provider has not reported usage windows.");
-      await this.begin(ctx, rows, provider);
+      const triggering = this.snapshot.forecasts.filter((forecast) => forecast.provider === provider && forecast.shouldWrap);
+      await this.begin(ctx, rows, provider, Date.now(), triggering.length ? triggering : undefined);
       await this.refresh(ctx, Date.now(), await this.rows(ctx, Date.now(), true));
     });
   }
@@ -213,9 +214,10 @@ export class UsageProtection {
     await this.pause(ctx, threadId, { ...pause, recoveryTurnId: recovery.turn.id });
   }
 
-  private async begin(ctx: OperationContext, rows: Row[], provider: string, now = Date.now()): Promise<void> {
+  private async begin(ctx: OperationContext, rows: Row[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
-    const relevant = windows.filter((window) => window.usedPercent >= 90);
+    const relevant = triggering === undefined ? windows.filter((window) => window.usedPercent >= 90)
+      : [...triggering, ...windows.filter((window) => window.usedPercent >= 100)];
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
     const eligible = rows.filter(({ thread, turns }) =>
@@ -327,11 +329,17 @@ export class UsageProtection {
     let rows = await this.rows(ctx, now);
     await this.refresh(ctx, now, rows);
     let changed = false;
-    if (ctx.config.usageProtection === "auto") {
-      for (const provider of new Set(this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now);
-      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now);
-      if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
+    for (const { thread } of rows) {
+      if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && thread.usagePause.provider === "claude" && this.nativeWrap.has(thread.id)) {
+        await this.pause(ctx, thread.id, { ...thread.usagePause, native: true }, now);
+      }
     }
+    if (ctx.config.usageProtection === "auto") {
+      const triggering = this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap);
+      for (const provider of new Set(triggering.map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
+      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now, triggering.filter((forecast) => forecast.provider === "claude"));
+    }
+    if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
     this.nativeWrap.clear();
     const queue = rows.filter((row) => !row.thread.archivedAt && row.thread.usagePause)
       .sort((a, b) => a.thread.usagePause!.order - b.thread.usagePause!.order);
