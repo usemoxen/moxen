@@ -8,6 +8,7 @@ import { SETTINGS, describeSettings, type SettingDescriptor } from "../../../cor
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { SkillsPanel } from "../../features/settings/skillspanel.js";
 import { skillsClient } from "../skillsfixture.js";
+import { tx } from "../../i18n/index.js";
 import { Stage, type GalleryEntry } from "./registry.js";
 
 /**
@@ -305,7 +306,29 @@ const editorEntries: GalleryEntry[] = editorKinds().map(({ id, descriptor }) => 
   },
 }));
 
-export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntries, {
+/** The Skills page with a skill chosen (the restricted one, `review`) and, optionally, its provider choice open. */
+const skillsEntry = (id: string, title: string, providers: boolean): GalleryEntry => ({
+  id,
+  group: "settings",
+  title,
+  width: WIDTH,
+  height: PAGE_HEIGHT,
+  settleMs: 250,
+  squeeze: true,
+  element: () => settingsPage(PAGE_HEIGHT, CONFIGURED),
+  drive: async (setup) => {
+    await openPage(setup, tx("Skills"));
+    await settle();
+    await act(async () => setup.mockInput.pressArrow("down"));
+    await settle();
+    if (providers) {
+      await act(async () => setup.mockInput.pressKey("p"));
+      await settle();
+    }
+  },
+});
+
+export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntries, skillsEntry("settings-page-skills-restricted", "Settings: Skills, a skill offered to some providers", false), skillsEntry("settings-page-skills-providers", "Settings: Skills, the provider choice open", true), {
   id: "skills-management",
   group: "settings",
   title: "User skills: shared, provider-specific and linked",

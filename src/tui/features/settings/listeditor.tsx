@@ -7,6 +7,7 @@ import { useKeyboard } from "@opentui/react";
 
 import { TextField } from "./textfield.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
+import { Chip } from "../../ui/chip.js";
 import { useHover } from "../../hooks/useHover.js";
 import { t, tx } from "../../i18n/index.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -657,19 +658,6 @@ export function ListEditor({
   );
 }
 
-/** A clickable label in the header: the way back, or an action on the open entry. */
-function Chip({ label, keyHint, onPress, accent, danger, disabled }: { label: string; keyHint?: string; onPress: () => void; accent?: boolean; danger?: boolean; disabled?: boolean }) {
-  const { hovered, handlers } = useHover();
-  const bg = hovered && disabled !== true ? SURFACE.hover : SURFACE.raised;
-  const fg = disabled === true ? COLOR.faint : danger ? COLOR.danger : accent ? COLOR.accent : COLOR.text;
-  return (
-    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginRight: 1, paddingRight: 1 }} backgroundColor={bg} onMouseDown={() => disabled !== true && onPress()} selectable={false} {...handlers}>
-      <text fg={fg} bg={bg} selectable={false}>{label}</text>
-      {keyHint === undefined ? null : <text fg={COLOR.faint} bg={bg} selectable={false}>{` ${keyHint}`}</text>}
-    </box>
-  );
-}
-
 function MultiPick({ overlay, width, move, toggle }: { overlay: Extract<Overlay, { type: "multi" }>; width: number; move: (index: number) => void; toggle: (id: string) => void }) {
   const shown = filterEntries(overlay.entries, overlay.filter);
   const index = Math.min(overlay.index, Math.max(0, shown.length - 1));
@@ -727,7 +715,7 @@ function SliderPick({
 }
 
 
-function Line({
+export function Line({
   id,
   left,
   right,

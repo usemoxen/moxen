@@ -40,6 +40,6 @@ Changes apply to new provider sessions. A running session may retain the
 inventory it started with; start a new session before relying on an edit or
 disable. **Refresh** rereads the files on the management page.
 
-Keyboard: **↑/↓** select, **e** edit, **space** enable/disable, **a** add,
+Keyboard: **↑/↓** select, **e** edit, **p** choose the providers that get the skill (a checklist, applied at once; a skill needs at least one), **space** enable/disable, **a** add,
 **s** choose scope, **d** remove, **r** refresh, **tab** another settings
 page, **esc** back. A removal confirmation accepts **y** or **n**.

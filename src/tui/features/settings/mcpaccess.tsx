@@ -104,12 +104,12 @@ function Row({ id, server, checked, active, width, onPress }: { id: string; serv
   const { hovered, handlers } = useHover();
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   const locked = server.locked !== null;
-  const left = `${active ? "▌ " : "  "}${checked ? "☑" : "☐"} ${server.name}`;
+  const left = `${active ? "▌ " : "  "}${checked ? "☑" : "☐"} ${server.label ?? server.name}`;
   const right = locked ? `· ${tx(server.locked ?? "")}` : server.summary;
   const rightWidth = overflowColumns(left, right, width - 4).detail;
   return (
     <box id={id} style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1, paddingRight: 1, justifyContent: "space-between" }} backgroundColor={bg} onMouseDown={onPress} selectable={false} {...handlers}>
-      <OverflowText fg={locked ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(0, width - rightWidth - 4)} prefix={`${active ? "▌ " : "  "}${checked ? "☑" : "☐"} `} active={active || hovered}>{server.name}</OverflowText>
+      <OverflowText fg={locked ? COLOR.faint : active ? COLOR.bright : COLOR.text} bg={bg} selectable={false} width={Math.max(0, width - rightWidth - 4)} prefix={`${active ? "▌ " : "  "}${checked ? "☑" : "☐"} `} active={active || hovered}>{server.label ?? server.name}</OverflowText>
       {rightWidth < 6 ? null : <OverflowText fg={locked ? COLOR.warn : COLOR.dim} bg={bg} selectable={false} width={rightWidth} active={active || hovered}>{right}</OverflowText>}
     </box>
   );

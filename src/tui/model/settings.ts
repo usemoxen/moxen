@@ -210,6 +210,8 @@ export function webOrderRows(entries: readonly { readonly id: string; readonly l
 /** One MCP server as a provider's checklist shows it. */
 export interface McpAccessEntry {
   readonly name: string;
+  /** What the row says in place of the name, when the name is an id (a provider's kind). */
+  readonly label?: string;
   readonly summary: string;
   /** Why this provider gets it no matter what is ticked here, or null. */
   readonly locked: string | null;

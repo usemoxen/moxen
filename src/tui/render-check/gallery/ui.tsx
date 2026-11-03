@@ -10,6 +10,8 @@ import { RELEASES } from "../../../core/experience/experience.js";
 import { APP_VERSION } from "../../../core/version.js";
 import { DEFAULT_CONFIG } from "../../../core/config.js";
 import { describeSettings } from "../../../core/configschema.js";
+import { Chip } from "../../ui/chip.js";
+import { Line } from "../../features/settings/listeditor.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { LoadingScreen } from "../../ui/loadingscreen.js";
 import { ModalShell } from "../../ui/modalshell.js";
@@ -51,6 +53,16 @@ const protectionBanner = (phase: "waiting" | "resuming", resetsInMs: number | nu
 }, noop, PROTECTION_NOW);
 
 export const UI_GALLERY: GalleryEntry[] = [
+  {
+    id: "chip-and-line", group: "ui", title: "Chip actions and a Line row (the settings pages' buttons and list rows)", width: 80, height: 8,
+    element: () => (
+      <Stage width={80} height={8}>
+        <box style={{ flexDirection: "row" }}><Chip label="Edit" keyHint="e" onPress={noop} accent /><Chip label="Disable" keyHint="space" onPress={noop} /><Chip label="Remove" keyHint="d" onPress={noop} danger /><Chip label="Busy" onPress={noop} disabled /></box>
+        <Line id="line-active" left="▌ review" right="claude · disabled · Claude Code, Codex" active width={78} onPress={noop} />
+        <Line id="line-idle" left="  diagrams" right="agents · enabled" active={false} width={78} onPress={noop} />
+      </Stage>
+    ),
+  },
   ...Array.from({ length: 6 }, (_, step): GalleryEntry => ({
     id: `experience-onboarding-${step + 1}`,
     group: "experience", title: `Getting started: step ${step + 1}`,
