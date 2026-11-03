@@ -537,6 +537,11 @@ export interface ProposedPlanEnvelope {
   [key: string]: unknown;
 }
 
+export interface TurnInteractionMode {
+  mode: InteractionMode;
+  oneOff?: true;
+}
+
 export interface ThreadEnvelope {
   id: string;
   /** Internal tasks are omitted from thread lists, not archived or deleted. */
@@ -571,6 +576,14 @@ export interface ThreadEnvelope {
    * were stored are absent; read those as the thread's selection.
    */
   turnModelSelections?: Record<string, ModelSelection>;
+  /**
+   * The mode each turn ran in, by turn id, for turns that ran in Research or
+   * Orchestrate (MXN-236). `oneOff` marks a mode asked for that one message
+   * (`/research`, `--interaction-mode`) rather than the thread's own. Absent
+   * when no turn qualifies, and for a turn that ran in Build or has not
+   * started (a queued message takes the thread's mode when it starts).
+   */
+  turnInteractionModes?: Record<string, TurnInteractionMode>;
   /** Completed turns' output tokens per wall-clock second, supplied in thread subscriptions. */
   turnThroughput?: Record<string, number>;
   /**

@@ -1102,6 +1102,7 @@ export const es: Catalog = {
   "timeline.compacted": "Conversación compactada",
   "timeline.compactNoSummary": "La compactación ha terminado sin resumen",
   "timeline.askedByAgent": "lo ha pedido el agente",
+  "timeline.modeOnce": "una vez",
   "timeline.you": "tú",
   "timeline.workingFor": "Trabajando durante {time}",
   "timeline.workedFor": "Ha trabajado durante {time}",

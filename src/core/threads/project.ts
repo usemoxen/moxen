@@ -24,6 +24,7 @@ import type {
   SessionEnvelope,
   ThreadEnvelope,
   ActivityEnvelope,
+  TurnInteractionMode,
 } from "../types.js";
 import type {
   StoredActivity,
@@ -139,6 +140,12 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
       scheduledFor: turn.scheduledFor ?? null,
       scheduleReason: turn.scheduleReason ?? null,
     }));
+  const turnModes: Record<string, TurnInteractionMode> = {};
+  for (const turn of turns) {
+    // A queued message that follows the thread takes its mode when it starts (MXN-223): until then it has none to show.
+    if (turn.interactionMode === "default" || (turn.status === "queued" && turn.interactionModeExplicit !== true)) continue;
+    turnModes[turn.id] = { mode: turn.interactionMode, ...(turn.interactionModeExplicit ? { oneOff: true as const } : {}) };
+  }
   return {
     id: thread.id,
     projectId: thread.projectId,
@@ -172,6 +179,8 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     turnModelSelections: Object.fromEntries(
       turns.flatMap((turn) => (turn.modelSelection ? [[turn.id, turn.modelSelection] as const] : [])),
     ),
+    // Only when a turn ran in Research or Orchestrate, so older envelopes stay byte-for-byte as they were.
+    ...(Object.keys(turnModes).length > 0 ? { turnInteractionModes: turnModes } : {}),
     // Only when there are any, so envelopes of threads without a queue stay byte-for-byte as they were.
     ...(queued.length > 0 ? { queuedTurns: queued } : {}),
     // Likewise: only threads that ever ran a native subagent carry the list.

@@ -1108,6 +1108,7 @@ export const en = {
   "timeline.compacted": "Conversation compacted",
   "timeline.compactNoSummary": "Compaction ended without a summary",
   "timeline.askedByAgent": "asked by the agent",
+  "timeline.modeOnce": "once",
   "timeline.you": "you",
   "timeline.workingFor": "Working for {time}",
   "timeline.workedFor": "Worked for {time}",

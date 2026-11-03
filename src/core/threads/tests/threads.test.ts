@@ -415,3 +415,35 @@ describe("per-turn model", () => {
     });
   });
 });
+
+/** MXN-236: a client labels each message with the mode it ran in, and says when that was for one message only. */
+describe("per-turn interaction mode", () => {
+  it("reports the mode each turn ran in, and which were one-off", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const build = await sendTurn(store, thread.id, { prompt: "plain" });
+    await completeTurn(store, thread.id, build.turn.id, { text: "done" });
+    const once = await sendTurn(store, thread.id, { prompt: "look into it", interactionMode: "research" });
+    await completeTurn(store, thread.id, once.turn.id, { text: "done" });
+    await updateThreadMeta(store, thread.id, { interactionMode: "orchestrate" });
+    const sticky = await sendTurn(store, thread.id, { prompt: "split it" });
+    await completeTurn(store, thread.id, sticky.turn.id, { text: "done" });
+    await updateThreadMeta(store, thread.id, { interactionMode: "default" });
+    const back = await sendTurn(store, thread.id, { prompt: "back" });
+    await completeTurn(store, thread.id, back.turn.id, { text: "done" });
+
+    const envelope = toThreadEnvelope((await store.readThreadRecord(thread.id))!, await store.readTurns(thread.id));
+    expect(envelope.turnInteractionModes).toEqual({
+      [once.turn.id]: { mode: "research", oneOff: true },
+      [sticky.turn.id]: { mode: "orchestrate" },
+    });
+  });
+
+  it("leaves the field out of a thread that never left Build", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    await sendTurn(store, thread.id, { prompt: "plain" });
+    const envelope = toThreadEnvelope((await store.readThreadRecord(thread.id))!, await store.readTurns(thread.id));
+    expect("turnInteractionModes" in envelope).toBe(false);
+  });
+});

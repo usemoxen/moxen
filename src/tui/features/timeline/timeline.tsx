@@ -25,7 +25,9 @@ import { isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications,
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
 import { readOpenRequestPrompt, requestNoun, type OpenRequestAsk } from "../../model/gitpanel.js";
-import { COLOR, DIFF_BG, MARKER, pulseColor, SPINNER_FRAMES, SURFACE, markdownSyntaxStyle } from "../../theme.js";
+import { interactionModeLabel } from "../../../core/interactionmode.js";
+import type { TurnInteractionMode } from "../../../core/types.js";
+import { COLOR, DIFF_BG, MARKER, MODE_COLOR, pulseColor, SPINNER_FRAMES, SURFACE, markdownSyntaxStyle } from "../../theme.js";
 
 const syntaxStyle = markdownSyntaxStyle;
 
@@ -702,11 +704,14 @@ function SpeakerHeader({
   time,
   extra,
   extraColor,
+  mode,
   color,
   background,
 }: {
   label: string;
   time: string;
+  /** The mode the message ran in, named beside the time: Research or Orchestrate, and "once" for a one-off. */
+  mode?: TurnInteractionMode | undefined;
   /** Trailing segment after the time — the turn's total duration, for a
       finished reply's header only. */
   extra?: string | undefined;
@@ -719,6 +724,9 @@ function SpeakerHeader({
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
       <text fg={color} bg={background}>{label}</text>
       <text fg={COLOR.faint} bg={background}>{time.length === 0 ? "" : `  ·  ${time}`}</text>
+      {mode === undefined ? null : (
+        <text fg={MODE_COLOR[mode.mode]} bg={background}>{`  ·  ${tx(interactionModeLabel(mode.mode))}${mode.oneOff ? ` ${tr("timeline.modeOnce")}` : ""}`}</text>
+      )}
       {extra === undefined || extra.length === 0 ? null : (
         <text fg={extraColor ?? COLOR.faint} bg={background}>{`  ·  ${extra}`}</text>
       )}
@@ -988,11 +996,14 @@ function PromptBlock({
   entry,
   homeDir,
   now,
+  mode,
   onOpenActions,
 }: {
   entry: TimelineEntry;
   homeDir: string | undefined;
   now: number;
+  /** The mode the message ran in (Research or Orchestrate); absent for Build. */
+  mode?: TurnInteractionMode | undefined;
   /** Opens the message-actions modal — on mouse *up* (not down), so a
       text-selection drag ending on the prompt doesn't trigger it; the app
       additionally ignores the gesture when a live selection exists. */
@@ -1006,7 +1017,7 @@ function PromptBlock({
     <box
       border={["left"]}
       borderStyle="heavy"
-      borderColor={hovered ? COLOR.bright : COLOR.user}
+      borderColor={hovered ? COLOR.bright : mode === undefined ? COLOR.user : MODE_COLOR[mode.mode]}
       style={{
         flexDirection: "column",
         flexGrow: 1,
@@ -1030,6 +1041,7 @@ function PromptBlock({
         // A native subagent's prompt came from the agent that spawned it.
         label={entry.message?.origin === "subagent-prompt" ? tr("timeline.askedByAgent") : tr("timeline.you")}
         time={clockTime(entry.at, now)}
+        mode={mode}
         color={hovered ? COLOR.bright : COLOR.user}
         background={SURFACE.user}
       />
@@ -1046,9 +1058,12 @@ function ReplyBlock({
   homeDir,
   duration,
   now,
+  mode,
   onOpenActions,
 }: {
   entry: TimelineEntry;
+  /** The mode the turn ran in (Research or Orchestrate); the rail takes its colour. Absent for Build. */
+  mode?: TurnInteractionMode | undefined;
   model: string;
   modelColor?: string | null | undefined;
   homeDir: string | undefined;
@@ -1065,11 +1080,12 @@ function ReplyBlock({
   onOpenActions?: () => void;
 }) {
   const { hovered, handlers } = useHover();
+  const railColor = mode === undefined ? COLOR.agent : MODE_COLOR[mode.mode];
   return (
     <box
       border={["left"]}
       borderStyle="heavy"
-      borderColor={onOpenActions === undefined ? COLOR.agent : hovered ? COLOR.bright : COLOR.agent}
+      borderColor={onOpenActions === undefined ? railColor : hovered ? COLOR.bright : railColor}
       style={{
         flexDirection: "column",
         flexGrow: 1,
@@ -1276,6 +1292,7 @@ function WorkSegment({
 }
 
 function TurnBlock({  group,
+  mode,
   model,
   modelColor,
   modelLabel,
@@ -1292,6 +1309,8 @@ function TurnBlock({  group,
   width,
 }: {
   group: TurnGroup;
+  /** The mode this turn ran in (Research or Orchestrate); absent for Build. */
+  mode?: TurnInteractionMode | undefined;
   model: string;
   modelColor?: string | null | undefined;
   /** Names an `instance/model` reference, for delegated-task notices. */
@@ -1347,7 +1366,7 @@ function TurnBlock({  group,
     if (ask !== null) return <OpenRequestBlock key={entry.id} entry={entry} ask={ask} now={now} />;
     const tasks = taskNotifications(entry.message);
     return tasks === null ? (
-      <PromptBlock key={entry.id} entry={entry} homeDir={homeDir} now={now} onOpenActions={() => onOpenMessageActions(entry)} />
+      <PromptBlock key={entry.id} entry={entry} homeDir={homeDir} now={now} mode={mode} onOpenActions={() => onOpenMessageActions(entry)} />
     ) : (
       <TaskNotificationBlock key={entry.id} entry={entry} tasks={tasks} now={now} modelLabel={modelLabel} width={width} />
     );
@@ -1493,6 +1512,7 @@ function TurnBlock({  group,
       {closing === null ? null : (
         <ReplyBlock
           entry={closing}
+          mode={mode}
           model={model}
           modelColor={modelColor}
           homeDir={homeDir}
@@ -1589,6 +1609,7 @@ export function Timeline({
   title,
   subtitle,
   modelForTurn,
+  modeForTurn,
   modelLabel,
   homeDir,
   readAttachment,
@@ -1615,6 +1636,8 @@ export function Timeline({
   /** The model that ran a given turn — each turn keeps its own, so a
       mid-thread model switch never relabels earlier replies. */
   modelForTurn: (turnId: string | null) => { name: string; color: string | null; provider?: string };
+  /** The mode a given turn ran in (Research or Orchestrate, and whether for that message only); undefined for Build. */
+  modeForTurn?: (turnId: string) => TurnInteractionMode | undefined;
   /** Names an `instance/model` reference (a delegated task's model). */
   modelLabel: (model: string) => { name: string; color: string | null };
   homeDir: string | undefined;
@@ -1744,6 +1767,7 @@ export function Timeline({
             <RuntimeProvider.Provider key={group.id} value={turnModel.provider}>
             <TurnBlock
               group={group}
+              mode={group.turnId === null ? undefined : modeForTurn?.(group.turnId)}
               model={turnModel.name}
               modelColor={turnModel.color}
               modelLabel={modelLabel}

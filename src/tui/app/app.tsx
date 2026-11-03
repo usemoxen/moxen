@@ -2790,6 +2790,7 @@ export function App({
               );
               return { ...labelFor(selection), ...(subagentView.target === null && selection ? { provider: selection.instanceId } : {}) };
             }}
+            modeForTurn={(turnId) => (threadState.thread?.turnInteractionModes ?? selected?.turnInteractionModes)?.[turnId]}
             modelLabel={modelLabelOf}
             homeDir={homeDir}
             readAttachment={readAttachment}

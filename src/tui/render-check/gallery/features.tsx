@@ -11,7 +11,11 @@ import { UiBlockView } from "../../features/timeline/uiblockview.js";
 import { ChartView, KeyValueView, ProgressView, StatusView } from "../../features/timeline/uidataview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
 import { encodeRgbaPng } from "../../model/imageshrink.js";
-import { MessageBody } from "../../features/timeline/timeline.js";
+import { MessageBody, Timeline } from "../../features/timeline/timeline.js";
+import { groupTurns } from "../../model/turns.js";
+import type { TimelineEntry } from "../../model/thread.js";
+import type { TurnInteractionMode } from "../../../core/types.js";
+import { useRef } from "react";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
 import { solidPng } from "../png.js";
@@ -38,6 +42,52 @@ import { act } from "react";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
 const noop = (): void => {};
+
+/** One thread across modes (MXN-236): a plain Build message, a one-off Research one, a sticky switch to Orchestrate, and back to Build. */
+const MODE_TURNS: ReadonlyArray<{ id: string; ask: string; reply: string; mode?: TurnInteractionMode }> = [
+  { id: "m1", ask: "Where is the retry logic?", reply: "In core/threads/execute.ts, around the turn runner." },
+  { id: "m2", ask: "How do other tools compare their retries?", reply: "Three of them back off exponentially; one retries at once.", mode: { mode: "research", oneOff: true } },
+  { id: "m3", ask: "Split the retry work into tasks.", reply: "Two tasks: the backoff, and the tests.", mode: { mode: "orchestrate" } },
+  { id: "m4", ask: "Review the second task.", reply: "It covers the cases.", mode: { mode: "orchestrate" } },
+  { id: "m5", ask: "Thanks, now fix the typo in the README.", reply: "Fixed." },
+];
+const MODE_ENTRIES: TimelineEntry[] = MODE_TURNS.flatMap((turn, index): TimelineEntry[] => {
+  const at = (minute: number) => new Date(Date.UTC(2026, 10, 3, 17, index * 3 + minute)).toISOString();
+  const base = { turnId: turn.id, streaming: false, tone: null, activityKind: null, message: null, activity: null, checkpoint: null, editStats: null, proposedPlan: null } as const;
+  return [
+    { ...base, id: `${turn.id}-u`, at: at(0), kind: "user", text: turn.ask },
+    { ...base, id: `${turn.id}-a`, at: at(1), kind: "assistant", text: turn.reply },
+  ];
+});
+function ModeTimeline({ width, height }: { width: number; height: number }) {
+  const scrollRef = useRef(null);
+  return (
+    <Timeline
+      groups={groupTurns(MODE_ENTRIES)}
+      title="Retry logic"
+      subtitle="idle"
+      modelForTurn={() => ({ name: "Claude Opus 5", color: null })}
+      modeForTurn={(turnId) => MODE_TURNS.find((turn) => turn.id === turnId)?.mode}
+      modelLabel={(model) => ({ name: model, color: null })}
+      homeDir={undefined}
+      expandedTurn={null}
+      expandedWork={new Map()}
+      scrollRef={scrollRef}
+      onFocus={noop}
+      onOpenDiff={noop}
+      onToggleWork={noop}
+      onOpenMessageActions={noop}
+      onOpenUrl={noop}
+      focused
+      width={width}
+      sessionStatus="idle"
+      now={Date.UTC(2026, 10, 3, 18, 0)}
+      turnStartedAt={null}
+      turnFileDiffs={new Map()}
+      gitFiles={[]}
+    />
+  );
+}
 const QUEUE_CLIENT = queueFixture().client;
 const QUEUE_ONE_CLIENT = queueFixture([QUEUE_ENTRIES[0]!, QUEUE_ENTRIES[2]!]).client;
 const QUEUE_RUNNING_CLIENT = queueFixture([RECOVERY_ENTRY]).client;
@@ -773,6 +823,18 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     element: () => (
       <Stage width={30} height={16}>
         <UiBlockView block={UI_DATA} />
+      </Stage>
+    ),
+  },
+  {
+    id: "timeline-modes",
+    group: "timeline",
+    title: "Messages by mode: Build, one-off Research, sticky Orchestrate, back to Build",
+    width: 90,
+    height: 62,
+    element: () => (
+      <Stage width={90} height={62}>
+        <ModeTimeline width={90} height={62} />
       </Stage>
     ),
   },

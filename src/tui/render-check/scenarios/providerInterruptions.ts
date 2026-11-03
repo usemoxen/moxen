@@ -99,7 +99,7 @@ export async function runProviderInterruptions(setup: TestRendererSetup): Promis
   console.log(limited);
   if (!limited.includes("Usage limit reached")) fail("usage limit card did not render");
   if (!limited.includes("Session limit")) fail("usage limit card did not name the window that ran out");
-  if (!/resets \d{2}:\d{2} \(in 1h 1[23]m\)/.test(limited)) fail("usage limit card did not show the reset time and the wait");
+  if (!/resets (?:\w{3}, )?\d{2}:\d{2} \(in 1h 1[23]m\)/.test(limited)) fail("usage limit card did not show the reset time and the wait");
 
   // Reasoning: "Thinking…" while it runs, then a collapsed "Thought for Ns"
   // that expands to the summary on click.

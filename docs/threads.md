@@ -295,6 +295,14 @@ budget, memory, a model per task and isolation.
   tasks.
 - A waiting message runs in the thread's mode when it starts, unless it was
   sent with its own mode.
+- **In the transcript:** the command stays hidden, and each message shows
+  the mode it ran in: its rail (and its reply's) takes the mode's colour,
+  and Research or Orchestrate is named beside the time, with "once" when
+  the mode was for that message only. Build looks as it always did. The
+  envelope's `turnInteractionModes` (by turn id) carries it, only for turns
+  that ran in Research or Orchestrate. A queued or scheduled message shows
+  nothing until it starts, because it takes the thread's mode then (unless
+  it was sent with its own).
 - **Fixed while a turn runs:** the mode cannot change while a turn is
   running, by Shift+Tab, `/research`, `/orchestrate` or
   `thread.interaction-mode.set`, and a steer, an inject or a queued send
