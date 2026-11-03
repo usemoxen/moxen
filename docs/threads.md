@@ -9,6 +9,23 @@ While Settings or another modal is open, its keyboard input cannot edit or send
 the composer draft, answer a pending agent question, or approve a tool beneath it.
 Closing the modal restores normal input to the underlying view.
 
+## Improve a draft
+
+Click **improve** in the composer (under **more** in a narrow window) to clarify
+an unsent prompt before sending it. The result stays editable and **undo improve**
+restores the original while the improved draft is unchanged. It never sends the
+prompt or creates a thread. You can keep typing; a response for an older draft
+or destination is discarded rather than overwriting your work.
+
+The improver uses Claude Haiku 5.5 through your Claude Code login, regardless of
+the coding model selected for the draft. It requires access to that model and sends
+only the draft, ancestor `AGENTS.md` rules (`CLAUDE.md` where there is no
+`AGENTS.md`), and global, destination-provider, project `moxen.json` and Harness
+profile custom instructions. Reference context is bounded to 48,000 characters.
+The improver has no tools and sees no conversation history or attachment contents;
+attachment markers are preserved. Its instructions ask it to retain your language,
+wording and intent without inventing requirements. Errors leave the draft intact.
+
 ## Lifecycle
 
 A turn goes from queued to running to settled. A running turn records the

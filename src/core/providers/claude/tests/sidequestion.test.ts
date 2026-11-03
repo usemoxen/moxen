@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ClaudeDriver } from "../driver.js";
-import { assistantText, errorResult, FakeTransport, successResult } from "./fakes.js";
+import { assistantText, errorResult, FakeTransport, permissionCallbackOptions, successResult } from "./fakes.js";
 
 /**
  * `/btw` on Claude: a one-shot answer on a copy of the thread's session.
@@ -10,6 +10,18 @@ import { assistantText, errorResult, FakeTransport, successResult } from "./fake
  * would let it act on the repository.
  */
 describe("Claude side questions", () => {
+  it("completes fresh text with only the editing prompt, no tools, inherited MCP, hooks, or persisted session", async () => {
+    const transport = new FakeTransport([[successResult(" Improved draft. ")]]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(driver.completeText({ workingDirectory: "/work", model: "claude-haiku-5-5", prompt: "Draft", instructions: "Edit only." })).resolves.toBe(" Improved draft. ");
+    const query = transport.created[0]!;
+    expect(query.options).toMatchObject({ tools: [], mcpServers: {}, strictMcpConfig: true, settingSources: [], settings: { disableAllHooks: true, autoMemoryEnabled: false }, systemPrompt: "Edit only.", model: "claude-haiku-5-5", persistSession: false, maxTurns: 1 });
+    expect(query.options.resume).toBeUndefined();
+    expect(query.options.forkSession).toBeUndefined();
+    expect(await query.options.canUseTool!("Read", {}, permissionCallbackOptions("read"))).toMatchObject({ behavior: "deny" });
+    expect(query.prompts).toEqual(["Draft"]);
+    expect(query.closed).toBe(true);
+  });
   it("asks on a tool-less, unpersisted copy of the session and returns its text", async () => {
     const transport = new FakeTransport([[assistantText("It is using JWTs in auth.ts."), successResult("It is using JWTs in auth.ts.")]]);
     const driver = new ClaudeDriver({ transport });
@@ -32,7 +44,7 @@ describe("Claude side questions", () => {
       model: "claude-opus-5",
     });
     // Told it has no tools, so it answers rather than writing fake tool calls.
-    expect(query.options.systemPrompt?.append).toMatch(/no tools/i);
+    expect(query.options.systemPrompt).toMatchObject({ append: expect.stringMatching(/no tools/i) });
     expect(query.prompts).toEqual(["Which auth scheme did we settle on?"]);
     expect(query.closed).toBe(true);
   });

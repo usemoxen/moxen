@@ -2,6 +2,11 @@ import type { Catalog } from "./en.js";
 
 /** Spanish as spoken in Spain (`es-ES`): tú, not usted, and vosotros where a plural is needed. */
 export const es: Catalog = {
+  "composer.improve": "mejorar",
+  "composer.improving": "mejorando…",
+  "composer.undoImprove": "deshacer mejora",
+  "composer.improvementStale": "El borrador o el destino ha cambiado durante la mejora. Se ha conservado el borrador actual; vuelve a intentarlo.",
+  "composer.improvementFailed": "No se ha podido mejorar el prompt: {why}",
   "timeline.preparingHandoff": "Preparando el traspaso",
   "timeline.usageProtection": "Protección de uso",
   "timeline.usageProtectionDetail": "El uso compartido está casi agotado. Cerrando el trabajo de forma segura antes de esperar la recuperación.",

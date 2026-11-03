@@ -42,6 +42,7 @@ import type {
   ProviderUserInputAnswers,
   SideAnswer,
   SideQuestionInput,
+  TextCompletionInput,
   SubagentHistoryItem,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
@@ -151,6 +152,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * it, and OpenCode answers through `session.generate`).
    */
   sideQuestion?(input: SideQuestionInput): Promise<SideAnswer>;
+  completeText?(input: TextCompletionInput): Promise<string>;
 }
 
 export type { SideAnswer, SideQuestionInput } from "../providers/spi.js";

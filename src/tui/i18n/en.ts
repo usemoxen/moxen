@@ -8,6 +8,11 @@
  * least `.other`.
  */
 export const en = {
+  "composer.improve": "improve",
+  "composer.improving": "improving…",
+  "composer.undoImprove": "undo improve",
+  "composer.improvementStale": "The draft or destination changed while improving. Your current draft was kept; try again.",
+  "composer.improvementFailed": "Could not improve the prompt: {why}",
   "timeline.preparingHandoff": "Preparing a handoff",
   "timeline.usageProtection": "Usage protection",
   "timeline.usageProtectionDetail": "Shared usage is nearly exhausted. Wrapping up safely before waiting for recovery.",

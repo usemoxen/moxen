@@ -213,6 +213,9 @@ export function Composer({
   onStopClick,
   onCopyClick,
   onExternalEditClick,
+  onImproveClick,
+  onUndoImproveClick,
+  improving = false,
   onAttachClick,
   pathAttachments,
   onPathRemoved,
@@ -277,6 +280,9 @@ export function Composer({
   onCopyClick?: () => void;
   /** Opens the draft in `$EDITOR`; omitted hides the segment. Alt+E also triggers it. */
   onExternalEditClick?: () => void;
+  onImproveClick?: () => void;
+  onUndoImproveClick?: (() => void) | undefined;
+  improving?: boolean;
   /** Opens the OS dialog to attach files and folders: their paths go in the prompt. First control of the bottom row. */
   onAttachClick?: () => void;
   /**
@@ -714,6 +720,15 @@ export function Composer({
       drop: 1,
       group: "metric",
       render: (surface) => <HoverText text={backgroundSummary} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onBackgroundClick ?? (() => undefined)} surface={surface} />,
+    });
+  }
+  if (onImproveClick !== undefined) {
+    const label = improving ? tr("composer.improving") : onUndoImproveClick ? tr("composer.undoImprove") : tr("composer.improve");
+    candidates.push({
+      key: "improve", width: label.length, drop: 2, group: "action",
+      render: (surface) => improving
+        ? <text fg={COLOR.dim} bg={surface ?? SURFACE.raised} selectable={false}>{label}</text>
+        : <HoverText text={label} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onUndoImproveClick ?? onImproveClick} surface={surface} />,
     });
   }
   if (onCopyClick !== undefined) {

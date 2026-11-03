@@ -131,6 +131,7 @@ export type PermissionDecision = "accept" | "accept-session" | "decline";
 export type UserInputAnswers = Readonly<Record<string, string | readonly string[]>>;
 
 export type CommandBody =
+  | { readonly type: "prompt.improve"; readonly directory: string; readonly prompt: string; readonly modelSelection?: ModelSelection; readonly protectedText?: readonly string[] }
   | { readonly type: "project.create"; readonly workspaceRoot: string; readonly projectId?: string; readonly title?: string }
   | {
       readonly type: "thread.create";
@@ -349,6 +350,7 @@ interface Accepted {
 export type WorkspaceGitCall = "changed" | "status" | "diff";
 
 export interface CommandResults {
+  "prompt.improve": { readonly text: string; readonly provider: string; readonly model: string };
   "project.create": { readonly projectId: string; readonly created: boolean };
   "thread.create": { readonly threadId: string } & Accepted;
   "thread.turn.start": StartedTurnSummary & Accepted;
@@ -880,6 +882,12 @@ export function decodeCommand(value: unknown): Command {
   const threadId = (): string => requireThreadId(record.threadId);
 
   switch (type) {
+    case "prompt.improve": {
+      const selection = asModelSelection(record.modelSelection);
+      if (record.modelSelection !== undefined && selection === null) throw new CliError("INVALID_COMMAND", "prompt.improve requires a valid modelSelection.", { exitCode: 2 });
+      if (record.protectedText !== undefined && (!Array.isArray(record.protectedText) || !record.protectedText.every((text: unknown) => typeof text === "string"))) throw new CliError("INVALID_COMMAND", "prompt.improve protectedText must be strings.", { exitCode: 2 });
+      return { ...meta, type, directory: requireField(record.directory, type, "directory"), prompt: requireField(record.prompt, type, "prompt"), ...(selection ? { modelSelection: selection } : {}), ...(record.protectedText === undefined ? {} : { protectedText: record.protectedText as string[] }) };
+    }
     case "project.create":
       return {
         ...meta,

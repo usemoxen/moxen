@@ -41,6 +41,7 @@ import { runPathChips } from "./scenarios/pathChips.js";
 import { runTerminalVisibility } from "./scenarios/terminalVisibility.js";
 import { runImageTokens } from "./scenarios/imageTokens.js";
 import { runComposerSlots } from "./scenarios/composerSlots.js";
+import { runPromptImprover } from "./scenarios/promptImprover.js";
 import { runInteractionModes } from "./scenarios/interactionModes.js";
 import { runSettingsCoverage } from "./scenarios/settingsCoverage.js";
 import { runSettingsAndGit } from "./scenarios/settingsAndGit.js";
@@ -134,6 +135,7 @@ export async function runWalkthrough(): Promise<void> {
   await runPathChips();
   await runInteractionModes();
   await runComposerSlots();
+  await runPromptImprover();
   await runSidebarTree();
   await runSidebarSearch();
   await runRemoteAccess();

@@ -261,6 +261,7 @@ const composer = (width: number, mode: InteractionMode, draft: string, running: 
     width={width}
     mode={mode}
     onCycleMode={noop}
+    onImproveClick={noop}
   />
 );
 

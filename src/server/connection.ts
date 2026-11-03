@@ -81,6 +81,7 @@ import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMe
 import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
 import { SemanticMemory } from "../core/memory/semantic.js";
 import { projectMemorySetting } from "../core/threads/instructions.js";
+import { improvePrompt } from "../core/threads/promptimprover.js";
 import { resolveClaudeHomePath } from "../core/providers/claude/config.js";
 import { readAttachment, readImageFile, workspaceGit, workspaceRead } from "./workspace.js";
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
@@ -1083,6 +1084,12 @@ export class DirectConnection implements ClientApi {
         return await this.continueThread(command);
       case "thread.side-question":
         return await this.sideQuestion(command);
+      case "prompt.improve":
+        return await improvePrompt(await this.loadConfig(), command, async (input) => {
+          const driver = this.driverFor("claude");
+          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", "Prompt improvement requires Claude Code with access to Haiku 5.5.");
+          return await driver.completeText(input);
+        });
       case "remote.pairing.start":
         return this.requireRemoteAccess().startPairing();
       case "remote.pairing.cancel":

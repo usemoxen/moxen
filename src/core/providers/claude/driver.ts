@@ -40,6 +40,7 @@ import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalo
 import type { InteractionMode, RuntimeMode } from "../../types.js";
 import type {
   ApprovalRequestId,
+  TextCompletionInput,
   BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
@@ -675,19 +676,23 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     }
   };
 
-  /**
-   * `/btw`: one answer on a copy of the thread's session. `forkSession`
-   * copies the conversation under a new id so the real session is never
-   * written to; `persistSession: false` keeps the copy off disk; `tools: []`
-   * and a small `maxTurns` make it a tool-less reply. Its own process,
-   * so it runs while the thread's turn does.
-   */
-  readonly sideQuestion = async (input: SideQuestionInput): Promise<SideAnswer> => {
+  /** Fresh editing request: no session, filesystem settings, hooks, or MCP tools. */
+  readonly completeText = async (input: TextCompletionInput): Promise<string> => {
+    const answer = await this.askOnce({ cursor: null, workingDirectory: input.workingDirectory, question: input.prompt, model: input.model, ...(input.signal ? { signal: input.signal } : {}) }, input.instructions);
+    return answer.text;
+  };
+
+  /** `/btw` answers on a tool-less, unpersisted copy, without changing the real session. */
+  readonly sideQuestion = (input: SideQuestionInput): Promise<SideAnswer> => this.askOnce(input);
+
+  private async askOnce(input: SideQuestionInput, instructions?: string): Promise<SideAnswer> {
+    input.signal?.throwIfAborted();
+    const failureCode = instructions === undefined ? "SIDE_QUESTION_FAILED" : "TEXT_COMPLETION_FAILED";
+    const label = instructions === undefined ? "The side question" : "Text completion";
     const stringEnv: Record<string, string> = {};
     for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    input.signal?.addEventListener("abort", abort, { once: true });
     const prompt: AsyncIterable<SDKUserMessage> = {
       [Symbol.asyncIterator]: () => {
         let sent = false;
@@ -709,11 +714,17 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       persistSession: false,
       tools: [],
       // One reply, but a model that reaches for a tool it does not have spends a turn on the refusal.
-      maxTurns: 3,
+      maxTurns: instructions === undefined ? 3 : 1,
       ...(input.model ? { model: input.model } : {}),
-      systemPrompt: { type: "preset", preset: "claude_code", append: SIDE_QUESTION_INSTRUCTIONS },
+      systemPrompt: instructions ?? { type: "preset", preset: "claude_code", append: SIDE_QUESTION_INSTRUCTIONS },
+      ...(instructions === undefined ? {} : {
+        settingSources: [] as [], strictMcpConfig: true, mcpServers: {},
+        settings: { disableAllHooks: true, autoMemoryEnabled: false },
+        canUseTool: async () => ({ behavior: "deny" as const, message: "Text completion cannot use tools." }),
+      }),
       abortController: controller,
     });
+    input.signal?.addEventListener("abort", abort, { once: true });
     const parts: string[] = [];
     let result: string | null = null;
     try {
@@ -725,7 +736,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         } else if (message.type === "result") {
           if (message.subtype === "success" && typeof message.result === "string") result = message.result;
           else if (message.subtype !== "success" && !(message.subtype === "error_max_turns" && parts.length > 0)) {
-            throw new CliError("SIDE_QUESTION_FAILED", `The side question did not get an answer (${message.subtype}).`);
+            throw new CliError(failureCode, `${label} did not get an answer (${message.subtype}).`);
           }
           break;
         }
@@ -734,10 +745,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       input.signal?.removeEventListener("abort", abort);
       query.close?.();
     }
-    const text = (parts.join("\n\n").trim() || result?.trim()) ?? "";
-    if (!text) throw new CliError("SIDE_QUESTION_FAILED", "The side question came back empty.");
-    return { text, withContext: input.cursor !== null };
-  };
+    const text = parts.join("\n\n") || result || "";
+    if (!text.trim()) throw new CliError(failureCode, `${label} came back empty.`);
+    // Padded file chips are part of the draft: editing replies must keep their outer spaces.
+    return { text: instructions === undefined ? text.trim() : text, withContext: input.cursor !== null };
+  }
 
   readonly sessionTitle = async (cursor: string, workingDirectory: string): Promise<string | null> =>
     await this.sessionApi.sessionTitle(cursor, workingDirectory);

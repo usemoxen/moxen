@@ -122,6 +122,7 @@ import { NoticeBanner, Pager, type Notice } from "../ui/noticebanner.js";
 import { QueuedPanel } from "../features/queuedpanel/queuedpanel.js";
 import { SideQuestionModal } from "../features/btw/sidequestionmodal.js";
 import { parseSideQuestion, useSideQuestion } from "../features/btw/useSideQuestion.js";
+import { usePromptImprover } from "../features/composer/usePromptImprover.js";
 import { useQueuedPanel } from "../features/queuedpanel/useQueuedPanel.js";
 import { useThreadNotifications } from "./hooks/useThreadNotifications.js";
 import { useAnswerFlow } from "../features/answerpanel/useAnswerFlow.js";
@@ -494,6 +495,16 @@ export function App({
   });
   const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
   const pickerSkills = useMemo(() => pickerEntries(skillInventory), [skillInventory]);
+  const promptDirectory = skillDirectory ?? (remote ? null : cwd);
+  const promptImprover = usePromptImprover({
+    client, draft, resetKey: `${composerResetKey}:${creating}:${effectiveProjectId}`, directory: promptDirectory ?? "",
+    modelSelection: effectiveModelSelection,
+    protectedText: filePaths.items.map((item) => item.label),
+    disabled: editingExternally || !promptDirectory,
+    onInput: setDraft,
+    restore: (text) => restoreDraft(openThreadId ?? "__creating__", text),
+    setError,
+  });
 
   /** One palette copy action: missing data toasts instead of dispatching. */
   const copyPaletteText = (text: string | null, emptyMessage: string) => {
@@ -2689,7 +2700,7 @@ export function App({
               <Composer
                 draft={draft}
                 resetKey={composerResetKey}
-                onInput={setDraft}
+                onInput={promptImprover.onInput}
                 onSubmit={submitComposer}
                 onEscape={escapeComposer}
                 onFocus={() => setFocus("composer")}
@@ -2729,6 +2740,9 @@ export function App({
                 onPermissionClick={openPermissionPicker}
             onCopyClick={copyDraft}
                 onExternalEditClick={editDraftExternally}
+                onImproveClick={() => { void promptImprover.improve(); }}
+                onUndoImproveClick={promptImprover.undoImprovement}
+                improving={promptImprover.improving}
                 editingExternally={editingExternally}
                 skills={pickerSkills}
                 onSkillsOpen={refreshSkills}
@@ -2844,7 +2858,7 @@ export function App({
           <Composer
             draft={draft}
             resetKey={composerResetKey}
-            onInput={setDraft}
+            onInput={promptImprover.onInput}
             onSubmit={submitComposer}
             onEscape={escapeComposer}
             onFocus={() => setFocus("composer")}
@@ -2875,6 +2889,9 @@ export function App({
             onPathRemoved={filePaths.remove}
             onCopyClick={copyDraft}
             onExternalEditClick={editDraftExternally}
+            onImproveClick={() => { void promptImprover.improve(); }}
+            onUndoImproveClick={promptImprover.undoImprovement}
+            improving={promptImprover.improving}
             editingExternally={editingExternally}
             skills={pickerSkills}
             onSkillsOpen={refreshSkills}

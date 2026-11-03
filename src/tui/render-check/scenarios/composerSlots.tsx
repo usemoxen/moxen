@@ -35,6 +35,7 @@ export async function runComposerSlots(): Promise<void> {
         onPermissionClick={() => {}}
         onCopyClick={() => {}}
         onExternalEditClick={() => {}}
+        onImproveClick={() => {}}
         onStopClick={() => {}}
         {...(withStatus
           ? {
@@ -69,14 +70,14 @@ export async function runComposerSlots(): Promise<void> {
     if (!(at("Full access") > at("Alright"))) fail(`${label}: the permission is not under the draft`);
     // Narrow, what does not fit is behind "more"; wide, every control is on screen in its slot.
     const narrow = width < 80;
-    for (const needle of ["copy", "external"]) {
+    for (const needle of ["improve", "copy", "external"]) {
       if (at(needle) === -1 && !(narrow && at("⋯ more") !== -1)) fail(`${label}: "${needle}" is not on screen`);
     }
     if (!narrow) {
       const top = lines.find((line) => line.includes("Build")) ?? "";
       if (!top.includes("5h 14%") || !top.includes("181k/1m") || top.indexOf("5h 14%") < top.indexOf("Medium")) fail(`${label}: usage and context are not on the right of the selectors' row`);
       const bottom = lines.find((line) => line.includes("Full access")) ?? "";
-      const order = ["Full access", "1 shell", "copy", "external"].map((needle) => bottom.indexOf(needle));
+      const order = ["Full access", "1 shell", "improve", "copy", "external"].map((needle) => bottom.indexOf(needle));
       if (order.some((column) => column === -1) || order.some((column, index) => index > 0 && column < order[index - 1]!)) fail(`${label}: the bottom row is not permission, background, then the actions`);
     }
   }

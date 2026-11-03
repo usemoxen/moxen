@@ -42,8 +42,11 @@ export interface ClaudeQueryOptions {
   readonly skills?: string[];
   /** Local plugins to load for this session (the `agent-skills` mod). */
   readonly plugins?: Array<{ type: "local"; path: string }>;
-  /** Claude Code's own prompt with moxen's runtime instructions appended. */
-  readonly systemPrompt?: { readonly type: "preset"; readonly preset: "claude_code"; readonly append?: string };
+  /** Claude Code's preset for agent sessions, or a focused custom prompt for text completion. */
+  readonly systemPrompt?: string | { readonly type: "preset"; readonly preset: "claude_code"; readonly append?: string };
+  /** Empty sources and strict MCP isolate tool-free text requests from local automation. */
+  readonly settingSources?: [];
+  readonly strictMcpConfig?: boolean;
   readonly env?: Record<string, string>;
   readonly pathToClaudeCodeExecutable?: string;
   readonly canUseTool?: CanUseTool;

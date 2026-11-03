@@ -522,6 +522,8 @@ export interface ProviderSessionTitles {
 export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles {
   readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
+  /** A fresh tool-free completion, where the native runtime can enforce an empty tool set. */
+  readonly completeText?: (input: TextCompletionInput) => Promise<string>;
 
   readonly startSession: (
     input: ProviderSessionStartInput,
@@ -615,4 +617,13 @@ export interface SideAnswer {
   readonly text: string;
   /** False when there was no session to copy, so the answer had no thread context. */
   readonly withContext: boolean;
+}
+
+/** A fresh, tool-free text request, independent of any thread or provider session. */
+export interface TextCompletionInput {
+  readonly workingDirectory: string;
+  readonly model: string;
+  readonly prompt: string;
+  readonly instructions: string;
+  readonly signal?: AbortSignal;
 }
