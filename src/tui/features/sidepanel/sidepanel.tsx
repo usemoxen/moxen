@@ -664,7 +664,8 @@ export function BackgroundTab({
   tasks: readonly BackgroundTaskRow[];
   width: number;
   now: number;
-  onOpen: () => void;
+  /** Opens the background browser on this task's details. */
+  onOpen: (taskId: string) => void;
   onStop: (taskId: string) => void;
 }) {
   const inner = Math.max(10, width - 4);
@@ -677,7 +678,7 @@ export function BackgroundTab({
         tasks.map((task) => {
           const started = task.startedAt === null ? null : formatDuration(Math.max(1000, now - Date.parse(task.startedAt)));
           return (
-            <Row key={task.taskId} onClick={onOpen}>
+            <Row key={task.taskId} onClick={() => onOpen(task.taskId)}>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
                 <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
                   <text fg={COLOR.warn}>{"● "}</text>

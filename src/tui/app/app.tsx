@@ -274,6 +274,8 @@ export function App({
     registerCtrlCPress,
   } = useQuitConfirm(setFocus);
   const [picker, setPicker] = useState<PickerName>(null);
+  /** The task the background browser opens on, when a side-panel row was clicked; the list otherwise. */
+  const [backgroundTaskId, setBackgroundTaskId] = useState<string | undefined>(undefined);
   const experience = useExperience(client);
   // Reads on open and writes through the server; see `useSettings`. The
   // snapshot outlives the page, so once it exists the app draws from it:
@@ -1977,7 +1979,7 @@ export function App({
                       key: "background:browse",
                       label: t("app.view_background_tasks_ca11"),
                       meta: t("bg.runningCount", { count: background.length }),
-                      onPick: () => setPicker("background-tasks"),
+                      onPick: () => (setBackgroundTaskId(undefined), setPicker("background-tasks")),
                     },
                   ]),
               // One row per background task running in the session.
@@ -2944,7 +2946,7 @@ export function App({
                   ) : sidePanel.tab === "background" ? (
                     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
                       <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("bg.running", { count: background.length })}</text>
-                      <ActionText label={t("app.view_all_0b4d")} onClick={() => setPicker("background-tasks")} />
+                      <ActionText label={t("app.view_all_0b4d")} onClick={() => (setBackgroundTaskId(undefined), setPicker("background-tasks"))} />
                     </box>
                   ) : sidePanel.tab === "diff" && diffTurns.length > 0 ? (
                     <text fg={COLOR.dim} selectable={false}>{t("diff.turnsWithChanges", { count: diffTurns.length })}</text>
@@ -3016,7 +3018,7 @@ export function App({
                     tasks={background}
                     width={diffPanel.diffWidth}
                     now={now}
-                    onOpen={() => setPicker("background-tasks")}
+                    onOpen={(taskId) => (setBackgroundTaskId(taskId), setPicker("background-tasks"))}
                     onStop={(taskId) => {
                       const task = background.find((row) => row.taskId === taskId);
                       if (task !== undefined) stopBackgroundTask(task);
@@ -3337,6 +3339,7 @@ export function App({
           top={backgroundGeometry.top}
           width={backgroundGeometry.width}
           height={backgroundGeometry.height}
+          {...(backgroundTaskId === undefined ? {} : { initialTaskId: backgroundTaskId })}
           onClose={() => setPicker(null)}
           onStop={stopBackgroundTask}
         />

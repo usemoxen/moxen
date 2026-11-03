@@ -63,10 +63,13 @@ export function BackgroundTasksModal({
   top,
   width,
   height,
+  initialTaskId,
   onClose,
   onStop,
 }: {
   tasks: readonly BackgroundTaskRow[];
+  /** Opens straight on this task's details (a task clicked in the side panel), not the list. */
+  initialTaskId?: string;
   client: Pick<ClientApi, "query">;
   threadId: string;
   screenWidth: number;
@@ -80,11 +83,12 @@ export function BackgroundTasksModal({
 }) {
   // Grouped order is the navigation order, so ↑/↓ walks rows as drawn.
   const ordered = KIND_ORDER.flatMap((kind) => tasks.filter((task) => backgroundTaskKind(task) === kind));
-  const [index, setIndex] = useState(0);
-  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const initial = initialTaskId === undefined ? null : (ordered.find((task) => task.taskId === initialTaskId) ?? null);
+  const [index, setIndex] = useState(initial === null ? 0 : ordered.indexOf(initial));
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(initial?.taskId ?? null);
   // Remembered so a task that finishes while its details are open keeps its
   // name and command instead of the view going blank.
-  const [detailSnapshot, setDetailSnapshot] = useState<BackgroundTaskRow | null>(null);
+  const [detailSnapshot, setDetailSnapshot] = useState<BackgroundTaskRow | null>(initial);
   const safeIndex = ordered.length === 0 ? -1 : Math.min(index, ordered.length - 1);
   const liveDetail = detailTaskId === null ? null : (ordered.find((task) => task.taskId === detailTaskId) ?? null);
   const detailTask = liveDetail ?? detailSnapshot;
