@@ -10,6 +10,7 @@
  * See docs/providers.md.
  */
 import { opencodeDisabledToolConfig } from "../../nativetools.js";
+import { summaryBrief } from "../../compaction/summaryprompt.js";
 import { buildOpencodeSystemPrompt } from "./prompt.js";
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -91,6 +92,8 @@ export function buildServerConfigContent(
   moxenPrompt = false,
   /** Local V2 plugin directory; external servers keep their own configuration. */
   compactionMod: string | null = null,
+  /** What the plugin is told (`compactionPluginOptions`); with it, Moxen writes the summaries and OpenCode's own trigger is off. */
+  compactionOptions: Record<string, unknown> | null = null,
 ): string {
   let parsed: Record<string, unknown> = {};
   if (existing && existing.trim().length > 0) {
@@ -105,18 +108,25 @@ export function buildServerConfigContent(
   }
   // Only what Moxen's settings name overrides the user's own `compaction`; the rest of it stays.
   const own = parsed.compaction !== null && typeof parsed.compaction === "object" && !Array.isArray(parsed.compaction) ? (parsed.compaction as Record<string, unknown>) : {};
-  const set = { ...(compaction.auto != null ? { auto: compaction.auto } : {}), ...(compaction.buffer != null ? { buffer: compaction.buffer } : {}) };
+  // With Moxen's plugin loaded, Moxen decides when to compact: OpenCode's own trigger and overflow recovery stay off, whatever the user's config says.
+  const moxenRuns = compactionMod !== null && compactionOptions !== null;
+  const set = {
+    ...(compaction.auto != null ? { auto: compaction.auto } : {}),
+    ...(compaction.buffer != null ? { buffer: compaction.buffer } : {}),
+    ...(moxenRuns ? { auto: false } : {}),
+  };
   const merged = { ...own, ...set };
   const off = opencodeDisabledToolConfig(disabledNativeTools);
   const agents = moxenPrompt ? withMoxenSystem(parsed.agents, buildOpencodeSystemPrompt(disabledNativeTools)) : parsed.agents;
   const ownRules = Array.isArray(parsed.permissions) ? (parsed.permissions as unknown[]) : [];
   const plugin = compactionMod ? pathToFileURL(compactionMod).href : null;
-  const plugins = Array.isArray(parsed.plugins) ? parsed.plugins : [];
+  const isOurs = (entry: unknown): boolean => entry === plugin || (entry !== null && typeof entry === "object" && (entry as { package?: unknown }).package === plugin);
+  const plugins = Array.isArray(parsed.plugins) ? parsed.plugins.filter((entry) => !isOurs(entry)) : [];
   return JSON.stringify({
     ...parsed,
     ...(Object.keys(merged).length > 0 ? { compaction: merged } : {}),
     ...(agents !== undefined ? { agents } : {}),
-    ...(plugin ? { plugins: plugins.includes(plugin) ? plugins : [...plugins, plugin] } : {}),
+    ...(plugin ? { plugins: [...plugins, compactionOptions ? { package: plugin, options: compactionOptions } : plugin] } : {}),
     ...(off.websearch === false ? { websearch: false } : {}),
     ...(off.permissions ? { permissions: [...ownRules, ...off.permissions] } : {}),
     share: "disabled",
@@ -126,6 +136,16 @@ export function buildServerConfigContent(
 
 export function locateCompactionMod(): string | null {
   return locateBundledMod("opencode-compaction", "index.js");
+}
+
+/**
+ * What Moxen tells its compaction plugin: the summary prompt and checks it
+ * shares with the Harness (`brief`), whether the plugin starts compactions at
+ * OpenCode's own line (`trigger`: Moxen's "provider" compaction; off when Moxen
+ * compacts from outside, or not at all), and that line's buffer.
+ */
+export function compactionPluginOptions(settings: Pick<OpencodeSettings, "autoCompact" | "compactBuffer">): Record<string, unknown> {
+  return { brief: summaryBrief(), trigger: settings.autoCompact !== false, buffer: settings.compactBuffer };
 }
 
 /** The user's `agents`, with Moxen's prompt as the `system` of `build` unless they set one. */
@@ -149,6 +169,22 @@ const AUTH_ERROR_PATTERNS: ReadonlyArray<RegExp> = [
   /invalid api key/i,
   /authentication required/i,
 ];
+
+/** What providers say when a request does not fit the model's window (OpenCode reports it as an invalid request with the provider's own words). */
+const CONTEXT_OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
+  /context[_ ]length[_ ]exceeded/i,
+  /maximum context length/i,
+  /prompt is too long/i,
+  /input is too long/i,
+  /exceeds? the (?:model'?s? )?context (?:window|limit|length)/i,
+  /context window (?:is )?(?:exceeded|full)/i,
+  /request_too_large/i,
+  /too many (?:input )?tokens/i,
+];
+
+export function isContextOverflowText(text: string): boolean {
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 export function isOpencodeAuthErrorText(text: string): boolean {
   return AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(text));

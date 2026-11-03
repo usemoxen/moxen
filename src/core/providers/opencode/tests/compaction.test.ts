@@ -3,6 +3,7 @@ import { Message, Media } from "@opencode/ai";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { locateCompactionMod } from "../config.js";
+import { summaryBrief } from "../../../compaction/summaryprompt.js";
 
 const model = { providerID: "openai", id: "test" };
 const image = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIUlEQVR4nGP8z0AaYCJRPcOoBmIAE1GqkMCoBmIAyaEEAEAuAR9UPEsJAAAAAElFTkSuQmCC";
@@ -121,5 +122,88 @@ describe("OpenCode compaction retention", () => {
     expect(next.messages.map((message) => message.id)).toEqual(["msg_100", "msg_003", "msg_004", undefined, "msg_006", "msg_007"]);
     expect(JSON.stringify(next.messages)).not.toContain("model-bound");
     expect(next.messages[1]!.content.find((part) => part.type === "media")).toBeDefined();
+  });
+});
+
+describe("Moxen-run OpenCode compaction", () => {
+  const brief = summaryBrief();
+  const goodReply = "<analysis>scratch</analysis>\n## Objective\nShip it.\n\n## Work state\n- Active: tests\n\n## Next step\nRun the check.";
+
+  async function moxen(replies: string[], limit = { context: 100_000, input: 100_000 }) {
+    const values = new Map<string, unknown>();
+    const asked: Array<{ prompt: string; tools: string[] }> = [];
+    const compacted: unknown[] = [];
+    const hooks = new Map<string, (event: any) => Promise<void>>();
+    let native: Array<Record<string, unknown>> = [];
+    const ctx = {
+      options: { brief, trigger: true, buffer: 10_000 },
+      storage: { get: async (key: string) => structuredClone(values.get(key)), set: async (key: string, value: unknown) => { values.set(key, JSON.parse(JSON.stringify(value))); } },
+      model: { list: async () => [{ providerID: "openai", id: "test", limit }] },
+      session: {
+        context: async () => ({ data: native }),
+        compact: async (input: unknown) => { compacted.push(input); },
+        hook: async (name: string, fn: (event: any) => Promise<void>) => { hooks.set(name, fn); },
+        // What OpenCode does for `session.generate`: the request goes through the `generate` hook, then to the model.
+        generate: async ({ sessionID, prompt }: { sessionID: string; prompt: string }) => {
+          const event = { sessionID, model, messages: [], system: [], options: {}, tools: { read: {}, bash: {} } as Record<string, unknown> };
+          await hooks.get("generate")!(event);
+          asked.push({ prompt, tools: Object.keys(event.tools) });
+          return { text: replies.shift() ?? "" };
+        },
+      },
+    };
+    const plugin = (await import(pathToFileURL(path.join(locateCompactionMod()!, "index.js")).href)).default;
+    await plugin.setup(ctx);
+    const fire = async (kind: string, messages: Message[]) => {
+      const event: any = { sessionID: "session", model, messages, system: [], options: {} };
+      await hooks.get(kind)!(event);
+      return event;
+    };
+    return { asked, compacted, fire, setNative: (items: Array<Record<string, unknown>>) => { native = items; } };
+  }
+
+  it("writes the summary itself with no tools offered, drops the scratchpad, and records it as the compaction", async () => {
+    const h = await moxen([goodReply]);
+    const event = await h.fire("compaction", window());
+    expect(h.asked).toEqual([{ prompt: brief.first, tools: [] }]);
+    expect(event.result.summary).toBe("## Objective\nShip it.\n\n## Work state\n- Active: tests\n\n## Next step\nRun the check.");
+    expect(event.system).toHaveLength(0); // no second prompt beside Moxen's
+  });
+
+  it("asks to update when the history starts from an earlier checkpoint", async () => {
+    const h = await moxen([goodReply]);
+    await h.fire("compaction", [summary(), user("msg_101", "More work")]);
+    expect(h.asked[0]!.prompt).toBe(brief.update);
+  });
+
+  it("asks again once, with the missing headings named, and fails the compaction when the second reply still lacks them", async () => {
+    const retried = await moxen(["Here is a summary without headings.", goodReply]);
+    expect((await retried.fire("compaction", window())).result.summary).toContain("## Objective");
+    expect(retried.asked).toHaveLength(2);
+    expect(retried.asked[1]!.prompt).toContain(brief.nudge);
+    expect(retried.asked[1]!.prompt).toContain("Missing: Objective, Work state, Next step");
+    expect(retried.asked.every((request) => request.tools.length === 0)).toBe(true);
+
+    const failing = await moxen(["nope", "## Objective\nOnly one."]);
+    await expect(failing.fire("compaction", window())).rejects.toThrow(/did not follow the required format \(missing Work state, Next step\)/);
+    expect(failing.asked).toHaveLength(2); // never a third, and no result for OpenCode's own summary to replace
+  });
+
+  it("leaves other requests their tools", async () => {
+    const h = await moxen([]);
+    const event = await h.fire("generate", window());
+    expect(event.tools).toBeUndefined();
+  });
+
+  it("starts a compaction once when the thread crosses the line, not before and not again for the same reading", async () => {
+    const h = await moxen([]);
+    const assistant = (id: string, input: number) => ({ id, type: "assistant", tokens: { input, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } });
+    h.setNative([assistant("a1", 50_000)]);
+    await h.fire("context", [user("u1", "go")]);
+    expect(h.compacted).toEqual([]);
+    h.setNative([assistant("a2", 95_000)]); // 100k window less the 10k buffer
+    await h.fire("context", [user("u1", "go")]);
+    await h.fire("context", [user("u1", "go")]);
+    expect(h.compacted).toEqual([{ sessionID: "session" }]);
   });
 });

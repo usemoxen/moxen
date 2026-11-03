@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   buildServerConfigContent,
+  compactionPluginOptions,
   locateCompactionMod,
   compareSemver,
   isOpencodeAuthErrorText,
@@ -115,7 +116,7 @@ describe("opencode config", () => {
     expect(JSON.parse(first).plugins).toEqual(plugins);
     expect(JSON.parse(buildServerConfigContent(first, {}, undefined, false, mod)).plugins).toEqual(plugins);
     // Import the shipped artifact rather than a copy of its callback. Only
-    // Compaction requests receive guidance without replacing native generation.
+    // Compaction requests are left to OpenCode when no brief was given.
     const plugin = (await import(pathToFileURL(path.join(mod!, "index.js")).href)).default;
     const hooks = new Map<string, (event: unknown) => void>();
     await plugin.setup({ storage: { get: async () => undefined, set: async () => {} }, session: { hook: async (name: string, callback: (event: unknown) => void) => { hooks.set(name, callback); } } });
@@ -124,10 +125,26 @@ describe("opencode config", () => {
     const event = { sessionID: "session", system: [{ type: "text", text: "Original system" }], messages: history, options: { maxTokens: 8192 } };
     await hooks.get("compaction")!(event);
     expect(event.system[0]).toEqual({ type: "text", text: "Original system" });
-    expect(event.system[1]?.text).toContain("including paths inside the working directory");
+    // Without Moxen's brief (a plugin on a server Moxen did not set up) only retention runs: OpenCode keeps writing its own summary.
+    expect(event.system).toHaveLength(1);
     expect(event.messages).toEqual(history);
     expect(event.options).toEqual({ maxTokens: 8192 });
     expect(event).not.toHaveProperty("result");
+  });
+
+  it("hands Moxen's compaction to the plugin: OpenCode's own trigger is off whatever the user's config says, and the brief travels as plugin options", () => {
+    const mod = locateCompactionMod()!;
+    const options = compactionPluginOptions({ autoCompact: true, compactBuffer: 20_000 });
+    const content = JSON.parse(buildServerConfigContent(JSON.stringify({ compaction: { auto: true, prune: true } }), { buffer: 20_000 }, undefined, false, mod, options));
+    expect(content.compaction).toEqual({ auto: false, prune: true, buffer: 20_000 });
+    expect(content.plugins).toEqual([{ package: pathToFileURL(mod).href, options }]);
+    expect(options).toMatchObject({ trigger: true, buffer: 20_000, brief: { first: expect.stringContaining("<analysis>"), update: expect.stringContaining("earlier summary"), required: expect.any(Array) } });
+    // The plugin is not listed twice when the config is built again from its own output.
+    expect(JSON.parse(buildServerConfigContent(JSON.stringify(content), {}, undefined, false, mod, options)).plugins).toHaveLength(1);
+    // Moxen's "provider" switch off: the plugin never starts a compaction.
+    expect(compactionPluginOptions({ autoCompact: false, compactBuffer: null }).trigger).toBe(false);
+    // Without Moxen's plugin the user's own compaction settings stand.
+    expect(JSON.parse(buildServerConfigContent(JSON.stringify({ compaction: { auto: true } }), {}, undefined, false, null)).compaction).toEqual({ auto: true });
   });
 
   it("compares semver with unparseable reading as too old", () => {

@@ -255,12 +255,31 @@ config, so a change to it waits until nothing runs on that server, then restarts
 Moxen does not use OpenCode's free models any way but through OpenCode itself: those are served to OpenCode's own client,
 and Moxen does not imitate it.
 
-Servers Moxen starts also load the bundled `moxen.compaction` plugin. Its
-compaction hook adds guidance to preserve pending user requests, decisions and
-constraints, actionable file paths (including files inside the working directory),
-validation results, failed approaches and unfinished work. OpenCode still writes
-and installs the summary in its native format, including its normal retry,
-overflow recovery, background-summary and usage-accounting behavior.
+Servers Moxen starts also load the bundled `moxen.compaction` plugin, and with it Moxen runs OpenCode's
+compaction itself, with the same summary prompt and checks as the Moxen Harness (`src/core/compaction/summaryprompt.ts`;
+the plugin gets them as its `brief` option, so there is one wording). Moxen sets OpenCode's own `compaction.auto` to
+`false` on those servers, whatever your config says. Then:
+
+- **Writing the summary.** In OpenCode's `compaction` hook (for `/compact`, an automatic compaction and an overflow
+  rescue alike) the plugin asks the session's own model, in the thread, for the summary: a private `<analysis>` pass
+  that is thrown away, then the sections Objective, Requirements and corrections, Decisions, Errors and fixes, Ruled
+  out, Work state (completed, active, blocked), Current work, Next step, Relevant files, Facts that are hard to
+  rediscover and Workflow state. When the conversation already begins with a checkpoint, it is updated into one
+  consolidated summary where newer history wins. The reply must have the Objective, Work state and Next step headings;
+  if not, it is asked for once more with a short correction, and then the compaction fails with an error you see.
+  OpenCode's own summary prompt is never the fallback.
+- **No tools in that turn.** The summary request is a `session.generate` call made from the plugin; the plugin's
+  `generate` hook empties the request's tool list for it, so the model is offered no tools. (Checked against a real
+  OpenCode server: the request reaching the model had no `tools`.)
+- **Recording it.** The plugin hands the text back as the hook's `result`, which OpenCode records as the session's own
+  compaction (so its session state, `compacted` events and later turns are consistent) and skips its own summary
+  request. The checkpoint is then OpenCode's, in OpenCode's storage, and survives a restart like any compaction.
+- **When.** Moxen's "provider" compaction setting (`autoCompact`, `compactBuffer`) now decides: before a model request
+  the plugin compares the last measured usage with the window the model can be given less the buffer (a tenth of it,
+  at least 16k on windows of 32k and up, unless set), and asks for a compaction at the next step boundary, so the turn
+  goes on afterwards. If a request is still rejected as too long, the driver compacts once and tells the model to
+  carry on; a second rejection ends the turn with the provider's error. Moxen's own long-thread settings (compaction by
+  Moxen, hand-off) work as before.
 
 The plugin also keeps a durable cache of recent whole exchanges. The retained
 tail is bounded to 12,000 estimated tokens and 16 MiB. After summary compaction it restores those
@@ -274,12 +293,11 @@ restored messages. The cache survives OpenCode server restarts and repeated
 compaction; reverted checkpoints do not gain future messages. Native replay
 proof is removed when restoring onto a different model.
 
-This applies to manual and automatic summary compaction, independently of
-`moxenPrompt`. Native provider
-compaction uses the provider's own checkpoint instead. External OpenCode servers
-keep their own plugin configuration; they can load `mods/opencode-compaction`
-from the Moxen installation through their `plugins` list. A running server loads
-the bundled hook when it next starts.
+Retention applies to every compaction, independently of `moxenPrompt`. Native provider
+compaction uses the provider's own checkpoint instead. External OpenCode servers Moxen did not start keep their own
+settings and their own compaction: Moxen does not turn off their `compaction.auto`, and the plugin writes summaries only
+when it is loaded through the `plugins` list with Moxen's `brief` option (without it, only the retention above runs and
+OpenCode summarises in its own format). A running server loads the bundled hook when it next starts.
 
 Without a login, the pickers offer OpenCode's own provider's free tier only: models models.dev lists at no cost that
 OpenCode's inference endpoint (`https://opencode.ai/inference/v1/models`) still serves, so retired free models are

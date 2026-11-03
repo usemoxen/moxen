@@ -411,6 +411,41 @@ describe("opencode driver", () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
   });
 
+  it("compacts and carries the task on when a request is rejected as too long, once per turn", async () => {
+    // OpenCode's own recovery is off (Moxen runs the compaction), so the rejection is Moxen's to rescue.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go on" }));
+    const server = transport.servers[0]!;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    const tooLong = { type: "session.error", properties: { sessionID: "opencode-session-1", error: { name: "provider.invalid-request", message: "This model's maximum context length is 100000 tokens." } } };
+    await server.push(tooLong);
+    await waitFor("the compaction", () => server.callsTo("session.compact").length === 1);
+    // The idle of the failed run, and the wait for the summary, do not end the turn.
+    await server.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+    expect(server.callsTo("session.prompt")).toHaveLength(1);
+    await server.pushRaw({ type: "session.compaction.ended", data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." } });
+    await waitFor("the task carried on", () => server.callsTo("session.prompt").length === 2);
+    expect(server.callsTo("session.prompt")[1]).toMatchObject({ args: { text: expect.stringContaining("compacted it") } });
+    // Rejected again: no second rescue, the turn fails with the provider's words.
+    await server.push(tooLong);
+    await expect(outcome).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("maximum context length") });
+    expect(server.callsTo("session.compact")).toHaveLength(1);
+  });
+
+  it("fails the turn when the compaction that was to make room fails", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go on" }));
+    const server = transport.servers[0]!;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await server.push({ type: "session.error", properties: { sessionID: "opencode-session-1", error: { message: "prompt is too long: 250000 tokens" } } });
+    await waitFor("the compaction", () => server.callsTo("session.compact").length === 1);
+    await server.push({ type: "session.error", properties: { sessionID: "opencode-session-1", error: { message: "Moxen could not compact this conversation: the model's summary did not follow the required format (missing Objective)." } } });
+    await expect(outcome).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("could not compact") });
+    expect(server.callsTo("session.prompt")).toHaveLength(1);
+  });
+
   it("fails a /compact turn when the server's compaction fails", async () => {
     const { transport, driver } = start();
     await startSession(driver);

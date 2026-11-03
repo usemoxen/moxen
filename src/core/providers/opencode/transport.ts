@@ -23,6 +23,7 @@ import { CliError } from "../../errors.js";
 import { killProcessGroup, killProcessTree } from "../../infra/process.js";
 import {
   buildServerConfigContent,
+  compactionPluginOptions,
   locateCompactionMod,
   compareSemver,
   OPENCODE_DEFAULT_HOSTNAME,
@@ -499,10 +500,14 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
     const entries = await this.client.config.get({ location: this.location }).catch(() => []);
     // `config.get` is not merged: a list of documents, lowest priority first.
     let autoCompact = true;
+    let moxenTrigger: boolean | null = null;
     let buffer: number | null = null;
     for (const entry of Array.isArray(entries) ? entries : []) {
       const record = asRecord(entry);
       if (record?.type !== "document") continue;
+      // Moxen's compaction plugin (`config.ts`) runs the compaction on a server Moxen set up, and its `trigger` says whether it starts one at OpenCode's line: that, not the server's own switch (always off there), is "compacts automatically".
+      const moxen = (Array.isArray(asRecord(record.info)?.plugins) ? (asRecord(record.info)!.plugins as unknown[]) : []).map((entry) => asRecord(asRecord(entry)?.options)).find((options) => asRecord(options?.brief) !== null);
+      if (moxen) moxenTrigger = moxen.trigger === true;
       const compaction = asRecord(asRecord(record.info)?.compaction);
       if (!compaction) continue;
       if (typeof compaction.auto === "boolean") autoCompact = compaction.auto;
@@ -510,7 +515,7 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
       const size = typeof compaction.buffer === "number" ? compaction.buffer : compaction.reserved;
       if (typeof size === "number") buffer = size;
     }
-    return { limits, autoCompact, buffer };
+    return { limits, autoCompact: moxenTrigger ?? autoCompact, buffer };
   }
 
   async prompt(input: {
@@ -762,9 +767,10 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
     // Always a password: v2 authenticates every call, and would otherwise
     // invent one and print it. Never logged (see `waitForServerReady`).
     const password = resolveSpawnedServerPassword(settings, baseEnv);
+    const compactionMod = locateCompactionMod();
     const childEnv: NodeJS.ProcessEnv = {
       ...baseEnv,
-      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, { auto: settings.autoCompact, buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true, locateCompactionMod()),
+      OPENCODE_CONFIG_CONTENT: buildServerConfigContent(baseEnv.OPENCODE_CONFIG_CONTENT, { buffer: settings.compactBuffer }, input.disabledNativeTools, input.moxenPrompt === true, compactionMod, compactionMod ? compactionPluginOptions(settings) : null),
       OPENCODE_PASSWORD: password,
       OPENCODE_SERVER_PASSWORD: password,
       OPENCODE_DISABLE_AUTOUPDATE: "1",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { compact, chooseCut, isContextOverflow, SHRINK_STEPS, type CompactInput, type Summarise } from "../compact.js";
 import { autoCompactThreshold, DEFAULT_COMPACTION } from "../compactsettings.js";
+import { summaryInstruction } from "../compactprompt.js";
 import { messagesTokens } from "../context.js";
 import { ChatHttpError } from "../transport/chat.js";
 import type { TranscriptMessage } from "../types.js";
@@ -178,8 +179,8 @@ describe("compact", () => {
   });
 
   it("retries a summary request the server rejects as too long on 0.7, 0.5 and 0.35 of the size first rejected", async () => {
-    // A fake model whose window holds 1,200 tokens; the conversation is about 3,000.
-    const limit = 1200;
+    // A fake model whose window holds 1,200 tokens beside the instruction; the conversation is about 3,000.
+    const limit = 1200 + messagesTokens([user(summaryInstruction({ hasPriorSummary: false }))]);
     const messages: TranscriptMessage[] = [sys, ...[1, 2, 3, 4, 5, 6].flatMap((n): TranscriptMessage[] => [user(`request ${n}`), say(filler(480))])];
     const sizes: number[] = [];
     const model: Summarise = async (sent) => {

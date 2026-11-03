@@ -29,6 +29,7 @@ import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolati
 import { modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../../threads/modes.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
 import type { InteractionMode, ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../types.js";
+import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
 import { isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
@@ -55,6 +56,7 @@ import type {
 import { mcpSignature, outOfProcess, outOfProcessWithChecklist, type McpServerSpec } from "../../mcp.js";
 import { opencodeContextBreakdown } from "./context.js";
 import {
+  isContextOverflowText,
   isOpencodeAuthErrorText,
   normalizeOpencodeSettings,
   opencodeSignedOutMessage,
@@ -142,6 +144,10 @@ interface OpenCodeTurn {
   interruptAck: (() => void) | null;
   /** A `/compact` turn: it asks the server to compact instead of prompting, and ends when the compaction does. */
   compacting?: boolean;
+  /** The server rejected a request as too long and Moxen compacted to make room: once per turn. */
+  overflowRescued?: boolean;
+  /** That compaction is under way: the turn stays open, and the server's idle in between is not its end. */
+  rescuing?: boolean;
 }
 
 function generationOf(turn: OpenCodeTurn): { characters: number; durationMs: number } | undefined {
@@ -1531,6 +1537,41 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       detail: summary,
     });
     if (open?.compacting) this.settleOpenTurn(session, "completed", "");
+    else if (open?.rescuing) void this.continueAfterOverflow(session, open);
+  }
+
+  /**
+   * A request was rejected as too long. OpenCode's own recovery is off (Moxen
+   * runs the compaction), so Moxen compacts and carries the task on, once per
+   * turn: a second rejection, or a compaction that fails, ends the turn with
+   * the error.
+   */
+  private rescueOverflow(session: OpenCodeSession, message: string): boolean {
+    const turn = this.openTurn(session);
+    if (!turn || turn.overflowRescued || turn.compacting || !isContextOverflowText(message)) return false;
+    turn.overflowRescued = true;
+    turn.rescuing = true;
+    void this.connectionFor(session)
+      .then((connection) => connection.summarizeSession(session.nativeSessionId))
+      .catch((cause: unknown) => {
+        turn.rescuing = false;
+        this.settleOpenTurn(session, "failed", `${message.slice(0, 300)} (compacting to make room failed: ${cause instanceof Error ? cause.message : String(cause)})`.slice(0, 500));
+      });
+    return true;
+  }
+
+  private async continueAfterOverflow(session: OpenCodeSession, turn: OpenCodeTurn): Promise<void> {
+    turn.rescuing = false;
+    const messageID = newOpencodeMessageId();
+    // Registered before the send so no echoed part is read as answer text.
+    turn.steerMessageIds.add(messageID);
+    try {
+      const connection = await this.connectionFor(session);
+      await connection.prompt({ sessionID: session.nativeSessionId, messageID, text: CONTINUE_AFTER_OVERFLOW });
+    } catch (cause) {
+      turn.steerMessageIds.delete(messageID);
+      this.settleOpenTurn(session, "failed", `The conversation was compacted, but the task could not be continued: ${cause instanceof Error ? cause.message : String(cause)}`.slice(0, 500));
+    }
   }
 
   /**
@@ -1978,6 +2019,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private onSessionInterrupted(session: OpenCodeSession, event: OpencodeSubscribedEvent): void {
     const turn = this.openTurn(session);
     if (!turn) return;
+    if (turn.rescuing) return;
     if (turn.interrupting) {
       turn.interruptAcked = true;
       turn.interruptAck?.();
@@ -2001,6 +2043,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private onSessionIdle(session: OpenCodeSession): void {
     const turn = this.openTurn(session);
     if (!turn) return;
+    // The failed run's idle, while the compaction that makes room is under way, is not the end of the turn.
+    if (turn.rescuing) return;
     if (turn.interrupting) {
       turn.interruptAcked = true;
       turn.interruptAck?.();
@@ -2088,6 +2132,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     if (isOpencodeAuthErrorText(message)) {
       this.settleOpenTurn(session, "failed", opencodeSignedOutMessage({ cwd: session.workingDirectory }));
       return;
+    }
+    const rescuing = this.openTurn(session)?.rescuing === true;
+    if (!rescuing && this.rescueOverflow(session, message)) return;
+    if (rescuing) {
+      // The compaction that was to make room failed (or the request was refused again): the turn ends with it.
+      const open = this.openTurn(session);
+      if (open) open.rescuing = false;
     }
     // A provider that never loaded reads as a missing model, which tells
     // the user nothing about the key they actually need.
