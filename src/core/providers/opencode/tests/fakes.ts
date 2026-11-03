@@ -63,6 +63,8 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
   private markClosed: () => void = () => undefined;
   /** Replaces the scripted `session.messages` answer mid-test. */
   messages: FakeOpencodeScript["messages"] | null = null;
+  /** While set, `prompt` is recorded but does not return until it resolves: a send still in flight. */
+  promptGate: Promise<void> | null = null;
   /** Fork counter, so each fork gets its own id. */
   private forks = 0;
   /** The real v2 → internal translation, for `pushRaw`. */
@@ -212,6 +214,7 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
   }): Promise<{ messageID: string }> {
     this.failChecked("session.prompt");
     this.calls.push({ method: "session.prompt", args: input });
+    if (this.promptGate) await this.promptGate;
     // Like the real endpoint, the id is caller-assigned.
     return { messageID: input.messageID ?? "opencode-message-1" };
   }

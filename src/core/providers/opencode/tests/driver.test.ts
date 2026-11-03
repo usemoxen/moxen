@@ -433,6 +433,32 @@ describe("opencode driver", () => {
     expect(server.callsTo("session.compact")).toHaveLength(1);
   });
 
+  it("keeps the rescued turn open through an idle that lands while the continue prompt is still being sent", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go on" }));
+    const server = transport.servers[0]!;
+    let settled = false;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId).then((result) => {
+      settled = true;
+      return result;
+    });
+    await server.push({ type: "session.error", properties: { sessionID: "opencode-session-1", error: { name: "provider.invalid-request", message: "This model's maximum context length is 100000 tokens." } } });
+    await waitFor("the compaction", () => server.callsTo("session.compact").length === 1);
+    let release!: () => void;
+    server.promptGate = new Promise<void>((resolve) => (release = resolve));
+    await server.pushRaw({ type: "session.compaction.ended", data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." } });
+    await waitFor("the continue prompt in flight", () => server.callsTo("session.prompt").length === 2);
+    // The compaction run's own idle, before the server has taken the continue prompt.
+    await server.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    server.promptGate = null;
+    release();
+    await server.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+    await expect(outcome).resolves.toMatchObject({ status: "completed" });
+  });
+
   it("fails the turn when the compaction that was to make room fails", async () => {
     const { transport, driver } = start();
     await startSession(driver);

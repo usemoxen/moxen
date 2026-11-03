@@ -1561,14 +1561,17 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   }
 
   private async continueAfterOverflow(session: OpenCodeSession, turn: OpenCodeTurn): Promise<void> {
-    turn.rescuing = false;
     const messageID = newOpencodeMessageId();
     // Registered before the send so no echoed part is read as answer text.
     turn.steerMessageIds.add(messageID);
     try {
       const connection = await this.connectionFor(session);
       await connection.prompt({ sessionID: session.nativeSessionId, messageID, text: CONTINUE_AFTER_OVERFLOW });
+      // Only now: an idle from the compaction itself, arriving before the server
+      // took the continue prompt, would otherwise read the turn as answered.
+      turn.rescuing = false;
     } catch (cause) {
+      turn.rescuing = false;
       turn.steerMessageIds.delete(messageID);
       this.settleOpenTurn(session, "failed", `The conversation was compacted, but the task could not be continued: ${cause instanceof Error ? cause.message : String(cause)}`.slice(0, 500));
     }
