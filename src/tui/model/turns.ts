@@ -266,7 +266,7 @@ export function formatDuration(durationMs: number, precision: "seconds" | "minut
   const rest = seconds % 60;
   if (minutes < 60) return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
   const hours = Math.floor(minutes / 60);
-  if (precision === "minutes") return t("time.hoursMinutes", { h: hours, m: minutes % 60 });
+  if (precision === "minutes") return minutes % 60 === 0 ? t("time.hours", { h: hours }) : t("time.hoursMinutes", { h: hours, m: minutes % 60 });
   return `${hours}h ${minutes % 60}m`;
 }
 

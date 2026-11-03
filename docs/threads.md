@@ -188,10 +188,14 @@ dependency waits until none of that thread's turns are running or queued.
 An entry dependency follows a handoff to its destination instead of treating
 summary preparation as completion of the queued work.
 
-Use Move up/down or Move first/last to order work, Hold/Release to control
-admission, and Remove/Add back held to withdraw or restore an entry without
-deleting its stored message or thread. Space selects entries; changes to concurrency,
-continuation and conditions apply to the selection. Failed/interrupted managed
+The work queue modal names what runs next, then lists the live entries; removed and
+stopped ones sit below behind "Removed or stopped". The focused entry shows only the
+controls that apply to it: Move up/down or Move first/last to order work,
+Hold/Release to control admission, and Remove/Add back held to withdraw or restore
+an entry without deleting its stored message or thread. With more than one live
+entry, space selects entries; changes to concurrency, continuation and conditions
+apply to the selection. A condition can wait on any provider that reports usage, in
+each window it reports (session, weekly) or all of them. Failed/interrupted managed
 entries remain visible for inspection and an explicit retry. A restarted server
 never blindly replays a provider request whose acceptance is uncertain.
 

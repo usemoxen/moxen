@@ -4,7 +4,7 @@ import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
-import { queueFixture } from "../queueFixture.js";
+import { QUEUE_ENTRIES, RECOVERY_ENTRY, queueFixture } from "../queueFixture.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
@@ -39,6 +39,8 @@ import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
 const noop = (): void => {};
 const QUEUE_CLIENT = queueFixture().client;
+const QUEUE_ONE_CLIENT = queueFixture([QUEUE_ENTRIES[0]!, QUEUE_ENTRIES[2]!]).client;
+const QUEUE_RUNNING_CLIENT = queueFixture([RECOVERY_ENTRY]).client;
 const GALLERY_PNG = solidPng(240, 120, [64, 140, 220, 255]);
 const GALLERY_IMAGE_READER: AttachmentReader = async () => ({ mimeType: "image/png", dataUrl: `data:image/png;base64,${GALLERY_PNG.toString("base64")}` });
 const uiBlock = (root: unknown): UiBlock => {
@@ -266,7 +268,10 @@ const composer = (width: number, mode: InteractionMode, draft: string, running: 
 );
 
 export const FEATURE_GALLERY: GalleryEntry[] = [
-  { id: "work-queue", group: "queue", title: "Conditional work queue", width: 116, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={116} screenHeight={34} onClose={noop} /> },
+  { id: "work-queue", group: "queue", title: "Work queue, several entries", width: 116, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={116} screenHeight={34} onClose={noop} /> },
+  { id: "work-queue-one", group: "queue", title: "Work queue, one entry and one stopped", width: 116, height: 30, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_ONE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={116} screenHeight={30} onClose={noop} /> },
+  { id: "work-queue-running", group: "queue", title: "Work queue, recovery running", width: 116, height: 26, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_RUNNING_CLIENT} threads={[]} screenWidth={116} screenHeight={26} onClose={noop} /> },
+  { id: "work-queue-narrow", group: "queue", title: "Work queue, narrow terminal", width: 70, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={70} screenHeight={34} onClose={noop} /> },
   { id: "work-queue-schedule", group: "queue", title: "Schedule a message or new thread", width: 84, height: 28, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[]} screenWidth={84} screenHeight={28} onClose={noop} onSchedule={noop} /> },
   {
     id: "memory-runtime",

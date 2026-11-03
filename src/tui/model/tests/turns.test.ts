@@ -448,6 +448,8 @@ describe("formatDuration", () => {
     expect(formatDuration(4_320_000, "minutes")).toBe("1 h 12 min");
     expect(formatDuration(359_001, "minutes")).toBe("6 min");
     expect(formatDuration(-1000, "minutes")).toBe("0 min");
+    expect(formatDuration(3_600_000, "minutes")).toBe("1 h");
+    expect(formatDuration(7_200_000 - 1000, "minutes")).toBe("2 h");
   });
 });
 

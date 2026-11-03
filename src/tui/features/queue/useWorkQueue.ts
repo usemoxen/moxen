@@ -11,9 +11,16 @@ export function useWorkQueue(client: ClientApi) {
   const [entries, setEntries] = useState<readonly QueueEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [limits, setLimits] = useState<QueryResults["usage.limits"]["providers"] | null>(null);
   const refresh = useCallback(async () => {
     const result = await client.query({ type: "queue.read" });
     setEntries(result?.entries ?? []);
+  }, [client]);
+  // Which providers report usage, and in which windows, decides what a condition can wait for.
+  useEffect(() => {
+    let stopped = false;
+    client.query({ type: "usage.limits" }).then((result) => { if (!stopped && result?.providers) setLimits(result.providers); }, () => {});
+    return () => { stopped = true; };
   }, [client]);
   useEffect(() => {
     let stopped = false;
@@ -39,5 +46,5 @@ export function useWorkQueue(client: ClientApi) {
       await refresh();
     } catch (cause) { setError(String(cause)); }
   }, [client, refresh]);
-  return { entries, error, saving, edit, add };
+  return { entries, error, saving, limits, edit, add };
 }
