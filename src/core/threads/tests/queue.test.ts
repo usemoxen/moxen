@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
@@ -235,13 +235,38 @@ describe("explicit handoff submissions", () => {
 
   it("does not release a dependent entry just because its prerequisite was handed off", async () => {
     const w = await world(); const source = await w.make(); const dependent = await w.make("claudeAgent"); const now = Date.now();
+    let releaseCompletion!: () => void;
+    let completionStarted!: () => void;
+    const completionGate = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+    const pendingCompletion = new Promise<void>((resolve) => { completionStarted = resolve; });
+    const updateTurn = w.store.updateTurn.bind(w.store);
+    vi.spyOn(w.store, "updateTurn").mockImplementation(async (threadId, turnId, patch) => {
+      if (threadId !== source.id && threadId !== dependent.id && patch.status === "completed") {
+        // Hold the completion write across a scheduler tick, as a slow filesystem can.
+        completionStarted();
+        await completionGate;
+      }
+      return updateTurn(threadId, turnId, patch);
+    });
     const entry = await sendTurn(w.store, source.id, { prompt: "prerequisite", queue: parseQueuePolicy({ conditions: [{ type: "at", at: new Date(now + 60_000).toISOString() }], continuation: "stored", order: 1 }) });
     await sendTurn(w.store, dependent.id, { prompt: "after the real work", queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: source.id, turnId: entry.turn.id }], order: 2 }) });
     await runWorkQueue(w.ctx, now);
     expect(w.sent).toEqual([]);
-    await runWorkQueue(w.ctx, now + 61_000); await flushTurnRunners(1000);
-    expect(w.sent.length).toBeGreaterThan(0);
-    expect(w.sent[0]?.threadId).not.toBe(dependent.id);
+    const destinationId = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.turn.id)!.handoff!.destinationThreadId;
+    try {
+      await runWorkQueue(w.ctx, now + 61_000);
+      await pendingCompletion;
+      expect(w.sent.map((turn) => turn.threadId)).toEqual([destinationId]);
+      await runWorkQueue(w.ctx, now + 62_000);
+      expect((await readWorkQueue(w.ctx)).find((entry) => entry.threadId === dependent.id)?.blocked).toContain(`Waiting for ${source.title}`);
+      expect(w.sent.map((turn) => turn.threadId)).toEqual([destinationId]);
+    } finally {
+      releaseCompletion();
+    }
+    // A bounded runner flush can return before persistence finishes; wait for the dependency itself.
+    await vi.waitFor(async () => {
+      expect((await w.store.readTurns(destinationId))[0]?.status).toBe("completed");
+    }, { timeout: 5000 });
     await runWorkQueue(w.ctx, now + 62_000); await flushTurnRunners(1000);
     expect(w.sent.at(-1)?.threadId).toBe(dependent.id);
   });
