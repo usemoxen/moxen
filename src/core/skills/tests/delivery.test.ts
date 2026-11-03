@@ -10,6 +10,7 @@ import { FakeCodexTransport } from "../../providers/codex/tests/fakes.js";
 import { OpenCodeDriver } from "../../providers/opencode/driver.js";
 import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
 import { discoverSkills } from "../../providers/harness/skills.js";
+import { excludedSkills } from "../discovery.js";
 import { SKILL_ROUTING_FILE } from "../routing.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("delivers a skill limited to %s only to that provider's sessions, leaving unrestricted skills alone", async (provider) => {
@@ -56,6 +57,21 @@ it.each(["claude", "codex", "opencode", "harness"] as const)("delivers a skill l
     await Effect.runPromise(claude.stopSession(input.threadId));
     await Effect.runPromise(codex.stopSession(input.threadId));
     await Effect.runPromise(opencode.stopSession(input.threadId));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("starts sessions when one skill's routing file is unreadable, offering that skill as if unrestricted", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "moxen-skill-routing-broken-"));
+  try {
+    const dir = path.join(root, ".agents", "skills", "broken");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "SKILL.md"), "---\nname: broken\ndescription: A procedure.\n---\nRead the guide.");
+    await writeFile(path.join(dir, SKILL_ROUTING_FILE), "{ not json");
+    expect(excludedSkills(root, "claude", root)).toEqual([]);
+    await writeFile(path.join(dir, SKILL_ROUTING_FILE), JSON.stringify({ providers: ["nobody"] }));
+    expect(excludedSkills(root, "codex", root)).toEqual([]);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

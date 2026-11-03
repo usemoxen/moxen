@@ -24,7 +24,13 @@ export function skillProviders(dir: string): readonly McpProviderKind[] {
   return parseSkillProviders((value as { providers?: unknown }).providers);
 }
 
+/** For session start and listings: one unreadable routing file must not stop every session, so it reads as no choice. */
+export function readableSkillProviders(dir: string): readonly McpProviderKind[] {
+  try { return skillProviders(dir); }
+  catch { return []; }
+}
+
 export function skillOfferedTo(dir: string, provider: McpProviderKind): boolean {
-  const providers = skillProviders(dir);
+  const providers = readableSkillProviders(dir);
   return providers.length === 0 || providers.includes(provider);
 }

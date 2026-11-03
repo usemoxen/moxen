@@ -6,7 +6,7 @@ import { CliError } from "../errors.js";
 import { parseSkillFile } from "../providers/harness/skills.js";
 import { writeAtomic } from "../infra/atomic.js";
 import type { McpProviderKind } from "../mcp.js";
-import { parseSkillProviders, skillProviders, SKILL_ROUTING_FILE } from "./routing.js";
+import { parseSkillProviders, readableSkillProviders, skillProviders, SKILL_ROUTING_FILE } from "./routing.js";
 
 export const SKILL_SOURCES = ["agents", "claude"] as const;
 export type SkillSource = (typeof SKILL_SOURCES)[number];
@@ -75,7 +75,7 @@ export async function listManagedSkills(roots: SkillRoots): Promise<ManagedSkill
       catch (error) { if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) continue; throw error; }
       const { fields } = parseSkillFile(text);
       const info = await lstat(file);
-      const providers = skillProviders(dir);
+      const providers = readableSkillProviders(dir);
       skills.push({ source, folder: entry.name, name: fields.name || entry.name, description: fields.description || "", path: file, enabled, editable: !entry.isSymbolicLink() && info.isFile() && !info.isSymbolicLink() && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(entry.name), ...(providers.length > 0 ? { providers } : {}) });
     }
   }
