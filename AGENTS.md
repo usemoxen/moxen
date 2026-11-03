@@ -60,6 +60,11 @@ All work has a Linear issue (team Moxen, `MXN-n`, project Moxen Agent).
 - Set the issue In Progress when you start and In Review when the work is done
   and checked. Never set Done yourself: the user moves issues to Done, and may
   ask you to do it for them.
+- Every issue says which model works on it, by name and effort:
+  - When you set it In Progress, comment `<model> (<effort>) is picking up
+    this work.`, for example `GPT-6.1-Sol (Medium) is picking up this work.`
+  - When you set it In Review, end your progress comment with a footer line of
+    its own: `Work done by <model> (<effort>).`
 - Follow the format the team already uses:
   - Title: `<area>: <what it does>`, lowercase after the colon, for example
     `tui: image viewer pan, zoom and stepping through a set`, or
