@@ -9,7 +9,7 @@ import { MAX_USAGE_CONTINUES, autoContinuesAt, scheduleUsageContinue, type Opera
 import { toThreadEnvelope } from "../project.js";
 import { armScheduledTurn, armedScheduleCount, onScheduledTurnDue } from "../schedule.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, holdPromotedTurn, interruptTurn, isHeldTurn, promoteDueScheduledTurn, sendTurn, turnPrompt } from "../threads.js";
+import { completeTurn, createThread, holdPromotedTurn, interruptTurn, isHeldTurn, promoteDueScheduledTurn, sendTurn, turnPrompt, updateThreadMeta } from "../threads.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 const MODEL = { instanceId: "claudeAgent", model: "claude-fable-5-1" };
@@ -53,6 +53,24 @@ describe("scheduled messages", () => {
     // Its clock starts when it ran, not when it was scheduled.
     const envelope = toThreadEnvelope((await store.readThreadRecord(thread.id)) as never, await store.readTurns(thread.id));
     expect(envelope.latestTurn).toMatchObject({ requestedAt: "2026-09-25T10:00:00.000Z", startedAt: "2026-09-25T12:00:01.000Z" });
+  });
+
+  it("does not batch a waiting one-off Build message into messages following the thread's new Research mode", async () => {
+    let now = Date.parse("2026-09-25T10:00:00.000Z");
+    const { store, thread } = await setup(() => now);
+    const scheduledFor = "2026-09-25T12:00:00.000Z";
+    const inherited = await sendTurn(store, thread.id, { prompt: "follow the thread", scheduledFor });
+    const explicit = await sendTurn(store, thread.id, { prompt: "stay in Build", scheduledFor, interactionMode: "default" });
+    await sendTurn(store, thread.id, { prompt: "also Research", scheduledFor, interactionMode: "research" });
+    await updateThreadMeta(store, thread.id, { interactionMode: "research" });
+
+    now = Date.parse(scheduledFor);
+    const started = await promoteDueScheduledTurn(store, thread.id);
+    expect(started).toMatchObject({ id: inherited.turn.id, interactionMode: "research" });
+    expect(turnPrompt(await store.readMessages(thread.id), started!)?.text).toBe("follow the thread\n\nalso Research");
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === explicit.turn.id)?.status).toBe("queued");
+    await completeTurn(store, thread.id, inherited.turn.id, { text: "done" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === explicit.turn.id)).toMatchObject({ status: "running", interactionMode: "default" });
   });
 
   it("keep one continue after a usage limit, however many times it is asked for", async () => {

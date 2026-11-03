@@ -11,6 +11,8 @@ import { describe, expect, it } from "vitest";
 
 import { runProcess } from "../../core/infra/process.js";
 import { testHarness } from "../../core/testing/harness.js";
+import { driverForInstance, flushTurnRunners } from "../../core/threads/execute.js";
+import { runDueScheduledTurn } from "../../core/threads/operations.js";
 import { DirectConnection } from "../connection.js";
 
 async function connected(config: Record<string, unknown> = {}) {
@@ -264,6 +266,61 @@ describe("Research and Orchestrate modes", () => {
     connection.dispatch({ type: "thread.turn.start", threadId, message: { text }, wait: true });
   const setMode = (connection: DirectConnection, threadId: string, interactionMode: "default" | "research" | "orchestrate") =>
     connection.dispatch({ type: "thread.interaction-mode.set", threadId, interactionMode });
+  async function runScheduled(harness: Awaited<ReturnType<typeof world>>["harness"], threadId: string, turnId: string) {
+    await harness.store.updateTurn(threadId, turnId, { scheduledFor: new Date(0).toISOString() });
+    const owner = {};
+    expect(await runDueScheduledTurn({
+      store: harness.store,
+      storeRoot: harness.root,
+      config: harness.config,
+      driverFor: (instanceId) => driverForInstance(owner, instanceId, harness.drivers),
+    }, threadId)).toBe(true);
+    await flushTurnRunners(2000);
+    return (await harness.store.readTurns(threadId)).find((turn) => turn.id === turnId)!;
+  }
+
+  it("runs a scheduled Build message in Research when the thread switches before it starts", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const { threadId } = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const scheduled = await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "later" }, scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+      await setMode(connection, threadId, "research");
+      const turn = await runScheduled(harness, threadId, scheduled.turnId);
+      expect(prompts.at(-1)).toContain('<moxen-mode key="moxen-research">');
+      expect(turn).toMatchObject({ status: "completed", interactionMode: "research" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("turns Research off for a scheduled message when the thread switches to Build before it starts", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const { threadId } = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", interactionMode: "research", ...CLAUDE });
+      const scheduled = await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "later" }, scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+      await setMode(connection, threadId, "default");
+      const turn = await runScheduled(harness, threadId, scheduled.turnId);
+      expect(prompts.at(-1)).toContain("Research mode is off");
+      expect(turn).toMatchObject({ status: "completed", interactionMode: "default" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps a scheduled one-off mode when the thread switches without changing the thread's mode", async () => {
+    const { harness, prompts, connection } = await world();
+    try {
+      const { threadId } = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", ...CLAUDE });
+      const scheduled = await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "later" }, interactionMode: "research", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+      await setMode(connection, threadId, "orchestrate");
+      const turn = await runScheduled(harness, threadId, scheduled.turnId);
+      expect(prompts.at(-1)).toContain('<moxen-mode key="moxen-research">');
+      expect(turn).toMatchObject({ status: "completed", interactionMode: "research" });
+      expect((await harness.store.readThreadRecord(threadId))?.interactionMode).toBe("orchestrate");
+    } finally {
+      await connection.close();
+    }
+  });
 
   it("tells the conversation of each switch once, ahead of the next prompt, and that a mode is off on the way back to Build", async () => {
     const { harness, prompts, connection } = await world();

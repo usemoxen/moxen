@@ -137,6 +137,8 @@ export interface StoredTurn {
   readonly messageId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: InteractionMode;
+  /** An explicit one-off mode; otherwise a waiting turn follows its thread at promotion. */
+  readonly interactionModeExplicit?: true;
   /**
    * The model the turn ran on. Always set on new turns; `null` only on
    * turns written before the turn recorded it (read those as unknown).

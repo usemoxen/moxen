@@ -247,6 +247,8 @@ budget, memory, a model per task and isolation.
   off. On the wire it is `interactionMode` on `thread.turn.start`. There
   are no trigger words: a false trigger would spend usage on delegated
   tasks.
+- A waiting message runs in the thread's mode when it starts, unless it was
+  sent with its own mode.
 - **Fixed while a turn runs:** the mode cannot change while a turn is
   running, by Shift+Tab, `/research`, `/orchestrate` or
   `thread.interaction-mode.set`, and a steer, an inject or a queued send

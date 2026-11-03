@@ -428,6 +428,7 @@ export async function sendTurn(
       messageId: store.newId(),
       runtimeMode,
       interactionMode,
+      ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -710,15 +711,19 @@ function sameModel(left: StoredTurn, right: StoredTurn): boolean {
   return left.modelSelection?.instanceId === right.modelSelection?.instanceId && left.modelSelection?.model === right.modelSelection?.model;
 }
 
+function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): InteractionMode {
+  return turn.interactionModeExplicit ? turn.interactionMode : threadMode;
+}
+
 /**
  * Fold every other queued message that could go now into `next`: queued
  * behind the same turn, or held for the same reset, they are sent together
  * as one turn — not one turn each, with the agent working through the first
  * before it even sees the second. Their turns never ran, so they are dropped
- * and their messages move onto `next`. A message for another model, or one
+ * and their messages move onto `next`. A message for another model or mode, or one
  * still waiting for a later time, keeps its own turn.
  */
-async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string): Promise<void> {
+async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
   if (next.queue) return;
   const batch = turns.filter(
     (turn) =>
@@ -728,6 +733,7 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       (turn.scheduleReason !== "usage-hold" || next.scheduleReason === "usage-reset" || next.scheduleReason === "usage-hold") &&
       !isHeldTurn(turn, Date.parse(now)) &&
       turn.scheduleReason !== "usage-reset" &&
+      waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
   if (batch.length === 0) return;
@@ -763,7 +769,8 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
 }
 
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
-  const pause = (await store.readThreadRecord(threadId))?.usagePause;
+  const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+  const pause = thread.usagePause;
   if (pause && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId) && !summary) return;
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
@@ -771,11 +778,10 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   const next = turns.find((turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold") && !isHeldTurn(turn, Date.parse(now)));
   if (!next) return;
   if (pause && pause.recoveryTurnId === next.id) {
-    const thread = await store.readThreadRecord(threadId);
-    if (thread) await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
+    await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
   }
-  await batchQueuedLocked(store, threadId, next, turns, now);
-  await store.updateTurn(threadId, next.id, { status: "running", owner: currentTurnOwner(), startedAt: now, updatedAt: now });
+  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode);
+  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
     threadId,
