@@ -10,7 +10,8 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
 import { applyTheme, SURFACE } from "../theme.js";
 import { THEME_NAMES } from "../themes.js";
-import { App, client, harnessTheme } from "./fixtures.js";
+import { App, client, harnessLanguage, harnessTheme } from "./fixtures.js";
+import { applyLanguage } from "../i18n/index.js";
 import { frameSink, listenForLabels, testRender } from "./testrender.js";
 import { GALLERY } from "./gallery/index.js";
 import { runWalkthrough } from "./walkthrough.js";
@@ -92,6 +93,7 @@ rmSync(target, { recursive: true, force: true });
 
 for (const theme of themes) {
   applyTheme(theme);
+  applyLanguage(harnessLanguage.current);
   harnessTheme.current = theme;
   if (mode === "gallery") {
     for (const entry of GALLERY) {
@@ -144,6 +146,7 @@ for (const theme of themes) {
 }
 harnessTheme.current = undefined;
 applyTheme("moxen");
+applyLanguage("en");
 
 // Paint with Pillow; `python3` is `python` on Windows.
 const painter = fileURLToPath(new URL("../../../scripts/render-shots.py", import.meta.url));

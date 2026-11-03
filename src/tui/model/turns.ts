@@ -324,18 +324,18 @@ function startOfDay(ms: number): number {
 }
 
 /**
- * Same calendar day as `now`: hour only. Within the last 6 days: weekday +
- * time. Older (or same-day clock skew that lands `value` in the future):
- * date + time — spelled out since a bare weekday alone is ambiguous past a
- * week.
+ * Same calendar day as `now`: hour only. Within 6 days either side: weekday +
+ * time. Further away: date + time — spelled out since a bare weekday alone is
+ * ambiguous past a week.
  */
 export function clockTime(value: string, now: number): string {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return "";
   const date = new Date(parsed);
   const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  const dayDiff = Math.round((startOfDay(now) - startOfDay(parsed)) / 86_400_000);
-  if (dayDiff <= 0) return time;
+  // A time on another day, past or still to come, names the day; only today is a bare clock.
+  const dayDiff = Math.abs(Math.round((startOfDay(now) - startOfDay(parsed)) / 86_400_000));
+  if (dayDiff === 0) return time;
   if (dayDiff < 7) return `${weekdayLabel(date.getDay())}, ${time}`;
   return `${String(date.getDate()).padStart(2, "0")} ${monthLabel(date.getMonth())}, ${time}`;
 }

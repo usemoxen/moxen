@@ -136,7 +136,10 @@ Missing reset times keep work held until the provider supplies one. Queue order,
 phase and holds survive a server restart. Settled and snoozed threads are not
 automatically resumed. Turning protection off stops new automatic holds but does
 not discard an existing queue: use **Cancel recovery** to remove an entry without
-sending its queued messages. A failed pause or recovery stays visible for inspection.
+sending its queued messages. Once the recovery turn is running the banner and the
+work queue both say the work **resumed**, with no countdown and nothing to cancel;
+the entry leaves when that turn ends. A failed pause or recovery stays visible for
+inspection.
 
 Same-thread continuation is the default and does not spend allowance on a full
 summary. A queue entry can instead choose a new thread with a **stored handoff**

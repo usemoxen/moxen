@@ -22,6 +22,7 @@ import { MonitoringBackdrop } from "../../ui/backdrop.js";
 import { TextField } from "../../features/settings/textfield.js";
 import { SideTabBar } from "../../features/sidepanel/sidepanel.js";
 import { COLOR, SURFACE } from "../../theme.js";
+import { usageProtectionNotices } from "../../model/usageprotection.js";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
 const noop = (): void => {};
@@ -41,6 +42,13 @@ const notice = (key: string, title: string, actions: string[]): Notice => ({
   detail: <text fg={COLOR.dim}>{`  about ${key}`}</text>,
   actions: actions.map((label, index) => ({ label, fg: index === actions.length - 1 && actions.length > 2 ? COLOR.dim : COLOR.accent, onClick: noop })),
 });
+
+const PROTECTION_NOW = Date.parse("2026-11-03T16:50:50");
+/** One usage-protection banner per state of the same thread, so the three read side by side. */
+const protectionBanner = (phase: "waiting" | "resuming", resetsInMs: number | null) => usageProtectionNotices({
+  forecasts: [],
+  queue: [{ provider: "codex", threadId: "t", title: "review unreviewed commits", phase, order: 1, handoff: false, resetsAt: resetsInMs === null ? null : new Date(PROTECTION_NOW + resetsInMs).toISOString() }],
+}, noop, PROTECTION_NOW);
 
 export const UI_GALLERY: GalleryEntry[] = [
   ...Array.from({ length: 6 }, (_, step): GalleryEntry => ({
@@ -162,6 +170,23 @@ export const UI_GALLERY: GalleryEntry[] = [
         <box style={{ width: 60, height: 6 }}>
           <NoticeBanner notices={[notice("usage", "Usage limit reached", ["Continue at reset", "In a new thread", "Dismiss"])]} index={0} onPage={noop} width={60} />
         </box>
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-usage-protection-banner",
+    group: "ui",
+    title: "Usage protection banner: waiting, reset passed, running again",
+    width: 100,
+    height: 25,
+    element: () => (
+      <Stage width={100} height={25}>
+        <Caption text="waiting for the reset" />
+        <NoticeBanner notices={protectionBanner("waiting", 72 * 60_000)} index={0} onPage={noop} width={100} />
+        <Caption text="the reset has passed, recovery about to start" />
+        <NoticeBanner notices={protectionBanner("waiting", -30_000)} index={0} onPage={noop} width={100} />
+        <Caption text="the recovery turn is running" />
+        <NoticeBanner notices={protectionBanner("resuming", -30_000)} index={0} onPage={noop} width={100} />
       </Stage>
     ),
   },

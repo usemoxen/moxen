@@ -100,4 +100,20 @@ export async function runNoticeBanner(): Promise<void> {
   const held = guarded.captureCharFrame();
   console.log(held);
   if (!held.includes("Move first") || !held.includes("Move last") || !held.includes("Cancel recovery")) fail("usage queue controls are clipped");
+  // The recovery turn is running: the banner says the work resumed and offers nothing to cancel.
+  const resumedNotices = usageProtectionNotices({
+    forecasts: [],
+    queue: [{ provider: "codex", threadId: "held", title: "Finish keyboard navigation", phase: "resuming", order: 1, resetsAt: "2026-11-01T09:58:00Z", handoff: false }],
+  }, (command) => commands.push(command), now);
+  function Resumed() {
+    const [index, setIndex] = useState(0);
+    return <NoticeBanner notices={resumedNotices} index={index} onPage={setIndex} width={80} />;
+  }
+  const resumed = await testRender(<Resumed />, { width: 80, height: 4, exitOnCtrlC: false });
+  await resumed.flush();
+  console.log("--- usage protection: recovery turn running ---");
+  const running = resumed.captureCharFrame();
+  console.log(running);
+  if (!running.includes("Finish keyboard navigation · resumed")) fail("a running recovery turn is not called resumed");
+  if (running.includes("Resets in") || running.includes("messages wait") || running.includes("Cancel recovery") || running.includes("Move first")) fail("a running recovery turn still shows its countdown or recovery controls");
 }

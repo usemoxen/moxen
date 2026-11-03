@@ -6,6 +6,27 @@ import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { driverKindOfInstance } from "../../core/types.js";
 import { formatDuration } from "./turns.js";
 
+type UsageQueueEntry = QueryResults["usage.protection"]["queue"][number];
+export type UsageQueueAction = "first" | "last" | "cancel";
+
+/**
+ * What one recovering thread says about itself. `resuming` is written when the
+ * recovery turn is promoted to running and cleared when it settles, so it is
+ * the whole time the work is running again: no countdown, no waiting line, and
+ * no Move/Cancel (cancelling would interrupt the turn the thread is running).
+ * A reset time already passed is never counted down.
+ */
+export function usageQueueStatus(entry: UsageQueueEntry, now: number): { phase: string; detail: string; running: boolean; actions: readonly UsageQueueAction[] } {
+  const running = entry.phase === "resuming" && !entry.error;
+  const phase = entry.phase === "pending" ? t("protection.pending") : entry.phase === "wrapping" ? t("protection.wrapping")
+    : entry.phase === "waiting" ? t("protection.waiting") : running ? t("protection.resumed") : t("protection.resuming");
+  if (running) return { phase, detail: t("protection.resumedDetail"), running, actions: [] };
+  const resetsAt = entry.resetsAt === null ? null : Date.parse(entry.resetsAt);
+  const detail = entry.error ?? (resetsAt === null || Number.isNaN(resetsAt) ? t("protection.noReset")
+    : resetsAt <= now ? t("protection.resetDone") : t("protection.reset", { time: formatDuration(resetsAt - now, "minutes") }));
+  return { phase, detail, running, actions: ["first", "last", "cancel"] };
+}
+
 export function usageProtectionNotices(
   state: QueryResults["usage.protection"],
   act: (command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel" }) => void,
@@ -26,17 +47,17 @@ export function usageProtectionNotices(
     actions: [{ label: t("protection.wrap"), fg: COLOR.accent, onClick: () => act({ type: "usage.wrap", provider: forecast.provider }) }],
   }));
   for (const [index, entry] of state.queue.entries()) {
-    const phase = entry.phase === "pending" ? t("protection.pending") : entry.phase === "wrapping" ? t("protection.wrapping") : entry.phase === "waiting" ? t("protection.waiting") : t("protection.resuming");
+    const status = usageQueueStatus(entry, now);
+    const labels: Record<UsageQueueAction, { label: string; fg: string }> = {
+      first: { label: t("protection.first"), fg: COLOR.accent },
+      last: { label: t("protection.last"), fg: COLOR.accent },
+      cancel: { label: t("protection.cancel"), fg: COLOR.dim },
+    };
     notices.push({
-      key: `usage-queue:${entry.threadId}`, glyph: "◷", glyphColor: entry.error ? COLOR.danger : COLOR.warn,
-      title: t("protection.queued", { position: index + 1, title: entry.title, phase }),
-      detail: <text fg={COLOR.dim} selectable={false}>{entry.error ?? (entry.resetsAt === null
-        ? t("protection.noReset") : t("protection.reset", { time: formatDuration(Date.parse(entry.resetsAt) - now, "minutes") }))}</text>,
-      actions: [
-        { label: t("protection.first"), fg: COLOR.accent, onClick: () => act({ type: "usage.queue", threadId: entry.threadId, direction: "first" }) },
-        { label: t("protection.last"), fg: COLOR.accent, onClick: () => act({ type: "usage.queue", threadId: entry.threadId, direction: "last" }) },
-        { label: t("protection.cancel"), fg: COLOR.dim, onClick: () => act({ type: "usage.queue", threadId: entry.threadId, direction: "cancel" }) },
-      ],
+      key: `usage-queue:${entry.threadId}`, glyph: status.running ? "▶" : "◷", glyphColor: entry.error ? COLOR.danger : status.running ? COLOR.accent : COLOR.warn,
+      title: t("protection.queued", { position: index + 1, title: entry.title, phase: status.phase }),
+      detail: <text fg={COLOR.dim} selectable={false}>{status.detail}</text>,
+      actions: status.actions.map((direction) => ({ ...labels[direction], onClick: () => act({ type: "usage.queue", threadId: entry.threadId, direction }) })),
     });
   }
   return notices;

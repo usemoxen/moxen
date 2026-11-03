@@ -8,13 +8,13 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { DateTimeModal } from "../../ui/datetimemodal.js";
 import { useWorkQueue, type QueueCondition, type QueueEntry, type QueuePolicy } from "./useWorkQueue.js";
-import { editableQueueSelection, queueConditionText } from "../../model/workqueue.js";
+import { editableQueueSelection, queueConditionText, queueEntryState, isUsageRecovery } from "../../model/workqueue.js";
 
 function EntryRow({ entry, position, active, checked, onPick }: { entry: QueueEntry; position: number; active: boolean; checked: boolean; onPick: () => void }) {
   const hover = useHover();
   return <box {...hover.handlers} onMouseDown={onPick} style={{ flexDirection: "column", paddingLeft: 1, paddingRight: 1, height: 3, flexShrink: 0 }} backgroundColor={active || hover.hovered ? SURFACE.hover : SURFACE.raised}>
     <text fg={active ? COLOR.bright : COLOR.text} selectable={false}>{`${checked ? "☑" : "☐"} ${position}. ${entry.title}`}</text>
-    <text fg={COLOR.dim} selectable={false}>{`${entry.provider} · ${entry.policy.removed ? t("queue.removed") : entry.policy.held ? t("queue.onHold") : entry.status === "running" ? t("queue.running") : entry.blocked.length ? t("queue.waiting") : t("queue.ready")}`}</text>
+    <text fg={COLOR.dim} selectable={false}>{`${entry.provider} · ${queueEntryState(entry)}`}</text>
   </box>;
 }
 
@@ -41,7 +41,8 @@ export function WorkQueueModal({ client, threads, screenWidth, screenHeight, onC
   const visibleEntries = queue.entries.filter((entry) => showRemoved ? entry.policy.removed : !entry.policy.removed);
   const active = visibleEntries[Math.min(index, Math.max(0, visibleEntries.length - 1))];
   const targets = editableQueueSelection(visibleEntries, checked, active?.turnId);
-  const policy = onSchedule ? draft : active?.policy;
+  // Conditions of a running entry are already met: listing them reads as if it still waited.
+  const policy = onSchedule ? draft : active?.status === "running" ? undefined : active?.policy;
   const width = Math.min(112, Math.max(36, screenWidth - 4));
   const height = Math.max(12, Math.min(36, screenHeight - 2));
   const left = Math.max(0, Math.floor((screenWidth - width) / 2));
@@ -83,7 +84,7 @@ export function WorkQueueModal({ client, threads, screenWidth, screenHeight, onC
         {!onSchedule && active ? <>
           <text fg={COLOR.bright}>{active.title}</text>
           <text fg={COLOR.dim}>{active.prompt.slice(0, 240)}</text>
-          <text fg={active.blocked.length ? COLOR.warn : COLOR.dim}>{active.blocked.map(tx).join(" · ") || t("queue.ready")}</text>
+          <text fg={active.blocked.length && active.status !== "running" ? COLOR.warn : COLOR.dim}>{active.status === "running" ? t(isUsageRecovery(active) ? "protection.resumedDetail" : "queue.runningNow") : active.blocked.map(tx).join(" · ") || t("queue.ready")}</text>
           <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 2, marginTop: 1 }}>
             {button(t("protection.first"), () => void queue.edit([...targets].reverse(), "first"))}
             {button(t("protection.last"), () => void queue.edit(targets, "last"))}
