@@ -531,8 +531,11 @@ Claude Agent SDK 0.3.292 / OpenCode client 2.0.24:
 - [Codex app-server](https://developers.openai.com/codex/app-server):
   `account/rateLimits/read` and updates expose percentage/reset windows;
   `turn/interrupt` stops a turn, and `turn/start` resumes work. Input totals include
-  cached tokens; estimates remove them before pricing cache reads/writes, and do
-  not add reasoning output twice. Unknown model prices stay uncalibrated.
+  cached tokens; Moxen records camelCase `inputTokens` minus `cachedInputTokens`
+  as uncached input, with cache reads recorded separately. Anthropic-style
+  `input_tokens` / `cache_read_input_tokens` are already separate and stay so.
+  Existing recorded usage is not rewritten. Estimates do not add reasoning output
+  twice. Unknown model prices stay uncalibrated.
 - [OpenCode v2 API](https://opencode.ai/v2/docs/api): ordinary external-provider
   sessions have no general subscription quota feed. Newer docs do list
   `experimental.usage.limits`, but it covers OpenCode Go/Console workspace budgets,

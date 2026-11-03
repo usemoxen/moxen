@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { codexTokenBreakdownOf } from "../protocol.js";
 import {
   CodexUsageAccumulator,
   codexImageUsageAllowed,
@@ -8,6 +9,36 @@ import {
 } from "../usage.js";
 
 describe("codex usage", () => {
+  it.each([
+    ["Codex inclusive input", { inputTokens: 10_000, cachedInputTokens: 9_000 }, 1_000],
+    ["Anthropic exclusive input", { input_tokens: 10_000, cache_read_input_tokens: 9_000 }, 10_000],
+    ["Codex fields take precedence", { inputTokens: 10_000, cachedInputTokens: 9_000, input_tokens: 20_000, cache_read_input_tokens: 500 }, 1_000],
+    ["cached input exceeds input", { inputTokens: 8_000, cachedInputTokens: 9_000 }, 0],
+  ])("does not double-count cached input for %s", (_name, raw, input) => {
+    expect(codexTokenBreakdownOf(raw)).toEqual({
+      input, cacheRead: 9_000, cacheCreate: 0, output: 0, reasoning: 0,
+    });
+  });
+
+  it("counts uncached cumulative deltas once across Codex total/last updates", () => {
+    const accumulator = new CodexUsageAccumulator();
+    const observe = (total: unknown, last: unknown) => accumulator.observe(
+      "t-1", codexTokenBreakdownOf(total), codexTokenBreakdownOf(last),
+    );
+    expect(observe(
+      { inputTokens: 100_000, cachedInputTokens: 90_000, outputTokens: 500 },
+      { inputTokens: 10_000, cachedInputTokens: 9_000, outputTokens: 50 },
+    )).toEqual({ input: 1_000, cacheRead: 9_000, cacheCreate: 0, output: 50, reasoning: 0 });
+    const total = { inputTokens: 120_000, cachedInputTokens: 108_000, outputTokens: 600 };
+    const last = { inputTokens: 20_000, cachedInputTokens: 18_000, outputTokens: 100 };
+    const expected = { input: 3_000, cacheRead: 27_000, cacheCreate: 0, output: 150, reasoning: 0 };
+    expect(observe(total, last)).toEqual(expected);
+    expect(observe(total, last)).toEqual(expected);
+    // A reset cannot subtract tokens already counted for the turn.
+    expect(observe({ inputTokens: 500, cachedInputTokens: 600 }, {})).toEqual(expected);
+    expect(accumulator.take("t-1")).toEqual(expected);
+  });
+
   it("requires both image usage reserves, including at their boundaries", () => {
     const snapshot = (session: number | null, weekly: number | null) => ({
       primary: { usedPercent: session, windowDurationMins: 300, resetsAt: 200 },

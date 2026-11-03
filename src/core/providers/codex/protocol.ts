@@ -82,12 +82,17 @@ function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-/** Read a cumulative token breakdown from either naming convention. */
+/** Read a cumulative breakdown with disjoint uncached and cached input. */
 export function codexTokenBreakdownOf(value: unknown): CodexTokenBreakdown {
   const record = asRecord(value) ?? {};
+  // Codex app-server's camelCase input includes cached tokens; Anthropic's
+  // snake_case input is already exclusive. Select a pair, not mixed aliases.
+  const inclusiveInput = record["inputTokens"] != null;
+  const input = num(record[inclusiveInput ? "inputTokens" : "input_tokens"]);
+  const cacheRead = Math.max(0, num(record[inclusiveInput ? "cachedInputTokens" : "cache_read_input_tokens"]));
   return {
-    input: num(record["inputTokens"] ?? record["input_tokens"]),
-    cacheRead: num(record["cachedInputTokens"] ?? record["cache_read_input_tokens"]),
+    input: Math.max(0, input - (inclusiveInput ? cacheRead : 0)),
+    cacheRead,
     cacheCreate: num(record["cacheWriteInputTokens"] ?? record["cacheCreationTokens"] ?? record["cache_creation_input_tokens"]),
     output: num(record["outputTokens"] ?? record["output_tokens"]),
     reasoning: num(record["reasoningOutputTokens"] ?? record["reasoningTokens"] ?? record["reasoning_tokens"]),

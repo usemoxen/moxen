@@ -148,7 +148,7 @@ describe("codex driver turns", () => {
     const outcome = await outcomePromise;
     expect(outcome.status).toBe("completed");
     expect(outcome.text).toBe("hello");
-    expect(outcome.usage).toMatchObject({ input: 10, cacheRead: 2, output: 5, thinking: 1 });
+    expect(outcome.usage).toMatchObject({ input: 8, cacheRead: 2, output: 5, thinking: 1 });
     // No `modelContextWindow` or `totalTokens` in this notification: the
     // window stays unknown and used falls back to input + output.
     expect(await driver.contextUsage("thread-1")).toEqual({
