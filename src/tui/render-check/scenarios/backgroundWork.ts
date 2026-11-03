@@ -71,8 +71,8 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   if (!/(Background|Bkgd) 1/.test(tab)) fail("Background tab carries no running-count badge");
   if (!tab.includes("tail -f build.log")) fail("Background tab row is missing the task's command");
 
-  // A row opens the browser: grouped by kind, each task its name over the
-  // command it runs.
+  // A row opens the browser straight on that task's details: status,
+  // command, and its output.
   const tabRows = tab.split("\n");
   const taskRow = tabRows.findIndex((row) => row.includes("Shell · watch the build log"));
   const taskCol = tabRows[taskRow]!.indexOf("Shell · watch the build log");
@@ -80,22 +80,10 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   // ModalShell fades in over ~150ms; capture once it's opaque.
   await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
   await setup.flush();
-  const list = setup.captureCharFrame();
-  console.log("--- background browser: list ---");
-  console.log(list);
-  if (!list.includes("Background work")) fail("Background tab row did not open the background browser");
-  if (!list.includes("Shells (1)")) fail("background browser did not group the task under Shells");
-  if (!list.includes("watch the build log") || !list.includes("tail -f build.log")) {
-    fail("background browser row is missing the task's name or command");
-  }
-
-  // Enter drills into the task: status, command, and its output.
-  await act(async () => setup.mockInput.pressEnter());
-  await setup.flush();
   const details = setup.captureCharFrame();
   console.log("--- background browser: details ---");
   console.log(details);
-  if (!details.includes("Shell · watch the build log")) fail("details view did not title the task by kind and name");
+  if (!details.includes("Shell · watch the build log")) fail("Background tab row did not open that task's details");
   if (!details.includes("● running")) fail("details view did not show the running status");
   if (!details.includes("watching build.log")) fail("details view did not show the task's output");
 
@@ -105,7 +93,15 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   await act(async () => setup.mockInput.pressEscape());
   await settle();
   await setup.flush();
-  if (!setup.captureCharFrame().includes("Shells (1)")) fail("esc from details did not return to the list");
+  // The list behind it groups tasks by kind, each its name over its command.
+  const list = setup.captureCharFrame();
+  console.log("--- background browser: list ---");
+  console.log(list);
+  if (!list.includes("Background work")) fail("esc from details did not return to the background browser");
+  if (!list.includes("Shells (1)")) fail("background browser did not group the task under Shells");
+  if (!list.includes("watch the build log") || !list.includes("tail -f build.log")) {
+    fail("background browser row is missing the task's name or command");
+  }
   await act(async () => setup.mockInput.pressEscape());
   await settle();
   await setup.flush();
