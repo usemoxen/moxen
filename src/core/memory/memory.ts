@@ -18,11 +18,11 @@
  * through file writes, which would need permission prompts outside the
  * workspace.
  */
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { CliError } from "../errors.js";
-import { renameReplacing } from "../infra/atomic.js";
+import { writeAtomic } from "../infra/atomic.js";
 
 export const MEMORY_SCOPES = ["project", "global"] as const;
 export type MemoryScope = (typeof MEMORY_SCOPES)[number];
@@ -109,13 +109,6 @@ export function parseMemoryFile(text: string, fallbackName: string): Omit<Memory
     type: type !== undefined && (MEMORY_TYPES as readonly string[]).includes(type) ? (type as MemoryType) : "project",
     body: match[2]!.trim(),
   };
-}
-
-async function writeAtomic(file: string, text: string): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-  await writeFile(tmp, text, "utf8");
-  await renameReplacing(tmp, file);
 }
 
 /** Every memory in one folder, by name. A file that does not parse is skipped, not fatal. */

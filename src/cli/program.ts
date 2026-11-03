@@ -1603,6 +1603,28 @@ function formatUsageSummary(usage: ProviderUsageLimits | null): string {
 }
 
 const providers = program.command("providers").description("List configured provider instances.");
+const skills = program.command("skills").description("Inspect user skill packages and choose their providers.");
+skills.command("list")
+  .description("List global or registered-project skill packages.")
+  .option("--project <project-id>", "Registered project; omit for global skills.")
+  .action((options: { project?: string }) => action(async () => {
+    const context = await commandContext();
+    const result = await (await cliClient(context.config)).query({ type: "skills.manage.list", ...(options.project ? { projectId: options.project } : {}) });
+    writeSuccess(result, context, result.skills.map((skill) => `${skill.source}\t${skill.folder}\t${skill.enabled ? "enabled" : "disabled"}\t${skill.providers?.join(",") || "all"}`).join("\n") || "No skill packages.");
+  }));
+skills.command("providers")
+  .description("Choose providers for a skill package; all means every provider.")
+  .requiredOption("--source <source>", "Skill source: agents or claude.")
+  .requiredOption("--folder <folder>", "Skill package folder name.")
+  .requiredOption("--providers <kinds>", "Comma-separated claude,codex,opencode,harness; all for every provider.")
+  .option("--project <project-id>", "Registered project; omit for global skills.")
+  .action((options: { source: string; folder: string; providers: string; project?: string }) => action(async () => {
+    const context = await commandContext();
+    // The server validates the source and provider names, including over remote connections.
+    const command = { type: "skills.providers.set", source: options.source, folder: options.folder, providers: options.providers === "all" ? [] : options.providers.split(",").map((kind) => kind.trim()), ...(options.project ? { projectId: options.project } : {}) } as import("../server/api.js").CommandOf<"skills.providers.set">;
+    const result = await (await cliClient(context.config)).dispatch(command);
+    writeSuccess(result, context, "Skill providers saved. Start a new provider session to apply them.");
+  }));
 
 const usage = program.command("usage").description("Inspect shared quota forecasts and manage protected threads.");
 usage.command("status").description("Show forecasts and the durable recovery queue.").action(() => action(async () => {

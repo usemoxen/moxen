@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { discoverSkills, parseSkillFile } from "../skills.js";
+import { SKILL_ROUTING_FILE } from "../../../skills/routing.js";
 
 let dir: string;
 beforeEach(() => {
@@ -27,6 +28,16 @@ describe("parseSkillFile", () => {
 });
 
 describe("discoverSkills", () => {
+  it("does not offer a skill limited to another provider, but keeps existing unrestricted skills", () => {
+    const cwd = path.join(dir, "work");
+    const home = path.join(dir, "home");
+    const folder = path.join(cwd, ".agents", "skills");
+    for (const name of ["unrestricted", "codex-only", "harness-only"]) write(folder, name, `---\nname: ${name}\ndescription: A procedure.\n---\nDo the work.`);
+    fs.writeFileSync(path.join(folder, "codex-only", SKILL_ROUTING_FILE), JSON.stringify({ providers: ["codex"] }));
+    fs.writeFileSync(path.join(folder, "harness-only", SKILL_ROUTING_FILE), JSON.stringify({ providers: ["harness"] }));
+    expect(discoverSkills({ cwd, home }).map((skill) => skill.name)).toEqual(["harness-only", "unrestricted"]);
+  });
+
   it("takes a skill of the same name from the project before the user's folder, and skips one with no description", () => {
     const cwd = path.join(dir, "work");
     const home = path.join(dir, "home");

@@ -5,7 +5,16 @@
  * retried a few times before the error is allowed through.
  */
 import fs from "node:fs";
-import { rename } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+/** Finish a same-directory temporary file before replacing the original. */
+export async function writeAtomic(file: string, text: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  await writeFile(tmp, text, "utf8");
+  await renameReplacing(tmp, file);
+}
 
 const RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
 const ATTEMPTS = 12;

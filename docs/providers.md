@@ -447,6 +447,19 @@ directory's) are listed in a
 `skill` tool and loaded on request. A worktree-isolated session is held to its
 worktree for edits, commands and MCP arguments alike, following symlinks.
 
+User packages can restrict their providers with a `providers` list in the package's
+`.moxen-skill-routing.json`; absent or empty means all providers that discover that package.
+Use `moxen skills list` to read the choice and `moxen skills providers` to change it
+(see [skill management](cli.md)). Claude receives an SDK skill context filter and per-skill deny rules, and its agent-skills
+mod omits excluded packages. Codex receives session-local `skills.config` disables by file path.
+OpenCode receives session-local skill-ID denies, including on an external server; Harness leaves
+excluded skills out of its tool. Inventories offered through the server are filtered too. These
+choices apply to new sessions and do not delete packages or prevent ordinary file reads.
+
+Saving an edited skill replaces its file atomically after the conflict check: a same-directory
+temporary file is renamed over it, with retry handling for Windows sharing violations. Disable/enable
+keeps its exclusive-create collision protection.
+
 `read` returns png, jpg, gif and webp files as pictures to a model with vision.
 `bash` can start a command in the background (`run_in_background`); `task_output`
 reads it and `task_stop` ends it, and it appears in the tasks panel. It ends with

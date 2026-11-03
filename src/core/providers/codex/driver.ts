@@ -23,6 +23,7 @@ import { codexMethodUnavailable, readCodexHistory, readCodexTurns } from "./hist
 import { codexDisabledToolConfig } from "../../nativetools.js";
 import { CliError } from "../../errors.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
+import { excludedSkills } from "../../skills/discovery.js";
 import type { CodexProviderConfig, InteractionMode, ModelSelection, RuntimeMode } from "../../types.js";
 import { JsonRpcPeer } from "../stdio.js";
 import type {
@@ -253,7 +254,7 @@ async function codexUserInput(peer: JsonRpcPeer, cwd: string, prompt: string, im
       for (const raw of Array.isArray(skills) ? skills : []) {
         const skill = asRecord(raw);
         const path = asString(skill?.["path"]);
-        if (skill?.["name"] === name && skill["enabled"] !== false && path) return [...blocks, { type: "skill", name, path }];
+        if (skill?.["name"] === name && skill["enabled"] !== false && path && !excludedSkills(cwd, "codex").some((excluded) => excluded.file === path)) return [...blocks, { type: "skill", name, path }];
       }
     }
   } catch {
@@ -423,6 +424,8 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         const inheritedConfig = asRecord(await peer.request("config/read", { includeLayers: false }))?.["config"];
         const requestedPolicy = staticPolicyForRuntimeMode(session.runtimeMode);
         const policy = session.isolation && requestedPolicy.sandbox === "danger-full-access" ? { approvalPolicy: "on-request", sandbox: "workspace-write" } : requestedPolicy;
+        const excluded = excludedSkills(input.workingDirectory, "codex");
+        const inheritedSkills = asRecord(asRecord(inheritedConfig)?.["skills"])?.["config"];
         const overrides = {
           cwd: input.workingDirectory,
           ...(session.model ? { model: session.model } : {}),
@@ -430,6 +433,10 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           approvalsReviewer: session.runtimeMode === "auto" ? "auto_review" : "user",
           sandbox: policy.sandbox,
           config: {
+            ...(excluded.length > 0 ? { "skills.config": [
+              ...(Array.isArray(inheritedSkills) ? inheritedSkills : []),
+              ...excluded.map((skill) => ({ path: skill.file, enabled: false })),
+            ] } : {}),
             ...codexMcpConfig(input.mcpServers ?? [], input.disabledMcpTools),
             ...codexDirectMcpConfig(inheritedConfig, [CODEX_HARNESS_SERVER, ...(input.mcpServers ?? []).map((server) => server.name)]),
             ...((this.providerConfig.compactionModels?.[input.modelSelection?.model ?? ""] ?? this.providerConfig.compaction ?? "provider") !== "provider" ? { model_auto_compact_token_limit: Number.MAX_SAFE_INTEGER } : {}),

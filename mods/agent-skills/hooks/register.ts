@@ -115,6 +115,13 @@ export const register: Register = (on) => {
         for (const claudeRoot of claudeRoots) provided ||= await $.fs.exists(`${claudeRoot}/${entry.name}/SKILL.md`)
         if (provided) continue
         try {
+          const routingFile = `${dir}/.moxen-skill-routing.json`
+          if (await $.fs.exists(routingFile)) {
+            const routing = JSON.parse(await $.fs.read(routingFile))
+            const providers = routing.providers
+            if (providers !== undefined && (!Array.isArray(providers) || providers.some((kind: unknown) => !['claude', 'codex', 'opencode', 'harness'].includes(kind as string)))) continue
+            if (providers?.length && !providers.includes('claude')) continue
+          }
           const { meta, body } = parseSkill(await $.fs.read(file))
           const name = meta.name && /^[\w-]{1,64}$/.test(meta.name) ? meta.name : entry.name
           if (found.has(name)) continue

@@ -122,6 +122,8 @@ export interface OpencodeServerConnection {
   sessionTitle(sessionID: string): Promise<string | null>;
   /** `session.update` with a title. */
   renameSession(sessionID: string, title: string): Promise<void>;
+  /** Session-scoped denies also hide skills from OpenCode's instruction catalog. */
+  restrictSkills(sessionID: string, names: readonly string[]): Promise<void>;
   /**
    * Have OpenCode's `title` agent name the session again: an empty title
    * clears it and the server regenerates one from the conversation before
@@ -365,6 +367,14 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
 
   async renameSession(sessionID: string, title: string): Promise<void> {
     await request("session.update", () => this.client.session.update({ sessionID, title }));
+  }
+
+  async restrictSkills(sessionID: string, names: readonly string[]): Promise<void> {
+    const current = await request("session.get", () => this.client.session.get({ sessionID }));
+    await request("session.update", () => this.client.session.update({ sessionID, permissions: [
+      ...(current.permissions ?? []),
+      ...names.map((resource) => ({ action: "skill", resource, effect: "deny" as const })),
+    ] }));
   }
 
   async regenerateSessionTitle(sessionID: string): Promise<string | null> {

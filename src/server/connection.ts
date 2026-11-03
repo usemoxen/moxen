@@ -20,7 +20,8 @@
 import path from "node:path";
 import { appendFile } from "node:fs/promises";
 import os from "node:os";
-import { importManagedSkill, listManagedSkills, readManagedSkill, removeManagedSkill, saveManagedSkill, setManagedSkillEnabled, type SkillRoots } from "../core/skills/management.js";
+import { importManagedSkill, listManagedSkills, readManagedSkill, removeManagedSkill, saveManagedSkill, setManagedSkillEnabled, setManagedSkillProviders, type SkillRoots } from "../core/skills/management.js";
+import { excludedSkills } from "../core/skills/discovery.js";
 import { randomUUID } from "node:crypto";
 import { readExperience, updateExperience } from "../core/experience/experience.js";
 import { discoverModels } from "../core/providers/harness/discover.js";
@@ -903,6 +904,9 @@ export class DirectConnection implements ClientApi {
       case "skills.enabled.set":
         await setManagedSkillEnabled(await this.skillRoots(command.projectId), command, command.enabled);
         return accepted;
+      case "skills.providers.set":
+        await setManagedSkillProviders(await this.skillRoots(command.projectId), command, command.providers);
+        return accepted;
       case "skills.remove":
         return await removeManagedSkill(await this.skillRoots(command.projectId), command);
       case "memory.embeddings.setup":
@@ -1697,7 +1701,10 @@ export class DirectConnection implements ClientApi {
       }
       case "skills.list": {
         const driver = this.driverFor(query.instanceId);
-        return driver.skillInventory ? await driver.skillInventory(query.cwd) : EMPTY_SKILL_INVENTORY;
+        const inventory = driver.skillInventory ? await driver.skillInventory(query.cwd) : EMPTY_SKILL_INVENTORY;
+        const kind = driverKindOfInstance(query.instanceId);
+        const excluded = new Set(kind ? excludedSkills(query.cwd, kind).flatMap((skill) => [skill.name, skill.folder]) : []);
+        return { ...inventory, skills: inventory.skills.filter((skill) => !excluded.has(skill.name)) };
       }
       case "image-generation.availability": {
         const { available, reason } = await this.imageAvailability(query.threadId);

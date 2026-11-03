@@ -18,6 +18,10 @@ it("keeps skill edits in the selected registered project and refuses a forged so
     expect(inventory.skills).toMatchObject([{ folder: "diagrams", source: "agents", enabled: true }]);
     const file = path.join(harness.work, ".agents", "skills", "diagrams", "SKILL.md");
     expect(inventory.skills[0]?.path).toBe(file);
+    await connection.dispatch({ type: "skills.providers.set", projectId, ...address, providers: ["harness"] });
+    expect((await connection.query({ type: "skills.manage.list", projectId })).skills[0]?.providers).toEqual(["harness"]);
+    await expect(connection.dispatch({ type: "skills.providers.set", projectId, ...address, providers: ["wrong" as "harness"] })).rejects.toThrow("providers must be a list");
+    await expect(connection.dispatch({ type: "skills.providers.set", projectId, ...address } as never)).rejects.toThrow("requires providers");
     await connection.dispatch({ type: "skills.save", projectId, ...address, previous: text, text: text.replace("Draw clearly.", "Read the guide.") });
     expect(await readFile(file, "utf8")).toContain("Read the guide.");
     await writeFile(file, "");

@@ -254,6 +254,28 @@ bundled skills used to. Copies an older Moxen made in a project (folders marked 
 The older keys `skills.moxen`, `providers.<kind>.moxenSkills` and `installSkills` still load and do nothing.
 `providers.claude.agentSkills` serves your own `.agents/skills` on Claude Code, which reads only `.claude/skills`.
 
+User skill packages can be inspected and routed without opening the Skills page:
+
+```text
+moxen skills list [--project <project-id>]
+moxen skills providers --source agents --folder diagrams --providers codex,harness [--project <project-id>]
+moxen skills providers --source agents --folder diagrams --providers all [--project <project-id>]
+```
+
+Omit `--project` for global packages. Sources are `agents` and `claude`; provider kinds are
+`claude`, `codex`, `opencode` and `harness`, not individual model or profile IDs. Each package's
+`.moxen-skill-routing.json` holds `{ "providers": ["codex", "harness"] }`. A missing or empty
+list means every provider that discovers the package, preserving existing skills. The choice stays
+with the package when it is disabled, imported or recovered from removal. It applies to new provider
+sessions; start a fresh session after changing it. Native name/ID-based deny rules may also block
+another package with the same name/ID. Routing controls discovery and skill invocation, not file
+access: the package remains on disk.
+
+Skill edits keep the “changed outside Moxen” check and write a temporary file in the same directory
+before renaming it over the previous file. A failed write leaves the previous skill intact; this also
+applies to disabled skill edits and the cleanup of an older Moxen's Git-exclude block. Enable/disable
+still refuses an existing counterpart rather than overwriting it. Provider routing is saved atomically too.
+
 ## Remote access
 
 Drive a moxen server on another machine (see [Another machine](overview.md#another-machine)).

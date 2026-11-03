@@ -72,6 +72,7 @@ import {
   type ClaudeSettings,
 } from "./config.js";
 import type { SkillsMod } from "./skillsmod.js";
+import { excludedSkills } from "../../skills/discovery.js";
 import {
   classifyToolUse,
   needsAllowDangerouslySkipPermissions,
@@ -212,6 +213,7 @@ interface ClaudeSession {
   mcpServers: readonly McpServerSpec[] | null;
   /** Tools hidden from the model: MCP tools the user switched off, and the to-do tools when the to-do list is off. */
   readonly disallowedTools: readonly string[];
+  readonly skillNames: readonly string[] | null;
   readonly instructions: string | null;
   /** Set when the session runs in its own worktree: the PreToolUse hook refuses what reaches the checkout it came from. */
   readonly isolation: WorktreeIsolation | null;
@@ -514,6 +516,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         input.runtimeMode ?? "full-access",
         { permissionMode: launch.permissionMode, skipPermissions: launch.skipPermissions },
       );
+      const excluded = new Set(excludedSkills(input.workingDirectory, "claude").flatMap((skill) => [skill.name, skill.folder]));
+      // Resolve through Claude itself so an allowlist preserves plugin and bundled skills too.
+      const inventory = excluded.size > 0 ? await this.skillInventory(input.workingDirectory) : null;
       const session: ClaudeSession = {
         threadId: input.threadId,
         workingDirectory: input.workingDirectory,
@@ -532,6 +537,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
           ...(input.disabledNativeTools ?? []),
           ...(input.checklist === false ? CHECKLIST_TOOLS : []),
         ],
+        skillNames: inventory ? [...inventory.skills, ...inventory.commands].map((skill) => skill.name).filter((name) => !excluded.has(name)) : null,
         instructions: input.instructions ?? null,
         isolation: input.isolation ?? null,
         sdkMessages: new Map(),
@@ -640,10 +646,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<SDKUserMessage>>(() => undefined) }),
     };
     const stringEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
+    for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) if (typeof value === "string") stringEnv[key] = value;
     const query = this.transport.query(never, {
       cwd,
       permissionMode: "default",
+      disallowedTools: excludedSkills(cwd, "claude").map((skill) => `Skill(${skill.name})`),
       env: stringEnv,
       pathToClaudeCodeExecutable: resolveClaudeExecutable(this.settings.binaryPath, this.baseEnv),
     });
@@ -2377,7 +2384,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       ...(session.resumeSessionId ? { resume: session.resumeSessionId } : {}),
       // Built per query: an in-process server instance connects to one query only, so a rebuilt one needs its own.
       ...(session.mcpServers ? { mcpServers: claudeMcpServers(session.mcpServers) } : {}),
-      ...(session.disallowedTools.length > 0 ? { disallowedTools: [...session.disallowedTools] } : {}),
+      disallowedTools: [...session.disallowedTools, ...excludedSkills(session.workingDirectory, "claude").map((skill) => `Skill(${skill.name})`)],
+      ...(session.skillNames !== null ? { skills: [...session.skillNames] } : {}),
       // Always Claude Code's own prompt: the SDK's default when this is
       // omitted is an *empty* custom prompt (`systemPrompt = ""`), which
       // left sessions without Claude Code's tool and environment guidance.

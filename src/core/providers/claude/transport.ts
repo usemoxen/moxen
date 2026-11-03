@@ -38,6 +38,8 @@ export interface ClaudeQueryOptions {
   readonly mcpServers?: Record<string, McpServerConfig>;
   /** Permission deny rules: tools the model is not offered (`mcp__…`, `TodoWrite`, `Skill(name)`). */
   readonly disallowedTools?: string[];
+  /** SDK context filter: unlisted skills are hidden and cannot be invoked. */
+  readonly skills?: string[];
   /** Local plugins to load for this session (the `agent-skills` mod). */
   readonly plugins?: Array<{ type: "local"; path: string }>;
   /** Claude Code's own prompt with moxen's runtime instructions appended. */

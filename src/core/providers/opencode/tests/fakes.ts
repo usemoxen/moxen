@@ -129,6 +129,10 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     this.title = title;
   }
 
+  async restrictSkills(sessionID: string, names: readonly string[]): Promise<void> {
+    this.calls.push({ method: "session.update", args: { sessionID, permissions: names.map((resource) => ({ action: "skill", resource, effect: "deny" })) } });
+  }
+
   async regenerateSessionTitle(sessionID: string): Promise<string | null> {
     this.calls.push({ method: "session.regenerateTitle", args: { sessionID } });
     this.title = this.regeneratedTitle;

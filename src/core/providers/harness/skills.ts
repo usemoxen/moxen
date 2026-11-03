@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { HarnessTool, ToolResult } from "./tools/index.js";
+import { skillOfferedTo } from "../../skills/routing.js";
 
 const MARKER_FILE = ".moxen-skill.json";
 const MAX_SKILLS = 60;
@@ -102,6 +103,7 @@ export function discoverSkills(input: DiscoverSkillsInput): Skill[] {
   const found = new Map<string, Skill>();
   for (const folder of folders) {
     for (const dir of skillDirs(folder)) {
+      if (!skillOfferedTo(dir, "harness")) continue;
       const skill = readSkill(dir);
       if (!skill || found.has(skill.name)) continue;
       found.set(skill.name, skill);

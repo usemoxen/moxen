@@ -28,6 +28,7 @@ import { CliError } from "../../errors.js";
 import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolation.js";
 import { modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../../threads/modes.js";
 import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
+import { excludedSkills } from "../../skills/discovery.js";
 import type { InteractionMode, ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../types.js";
 import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
 import { isCompactCommand } from "../spi.js";
@@ -900,6 +901,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
             return null;
           }) : null;
           native = resumed ?? (await connection.createSession({}));
+          const excluded = excludedSkills(input.workingDirectory, "opencode");
+          if (excluded.length > 0) await connection.restrictSkills(native.sessionID, excluded.map((skill) => skill.folder));
           break;
         } catch (cause) {
           if (attempt > 0 || !isServerUnreachable(cause)) throw cause;

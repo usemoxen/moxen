@@ -10,8 +10,9 @@
  * Nothing here throws.
  */
 import { spawnSync } from "node:child_process";
-import { readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { writeAtomic } from "../infra/atomic.js";
 
 export const MARKER_FILE = ".moxen-skill.json";
 const EXCLUDE_BEGIN = "# >>> moxen skills (managed)";
@@ -52,7 +53,7 @@ async function dropGitExclude(workingDirectory: string): Promise<void> {
   const start = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END, start);
   if (start === -1 || end === -1) return;
-  await writeFile(file, `${current.slice(0, start)}${current.slice(end + EXCLUDE_END.length).replace(/^\n/, "")}`);
+  await writeAtomic(file, `${current.slice(0, start)}${current.slice(end + EXCLUDE_END.length).replace(/^\n/, "")}`);
 }
 
 /** Takes Moxen's copies out of both skills folders, and its block out of `.git/info/exclude`. Returns what went. */

@@ -23,6 +23,8 @@
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
+import { parseSkillProviders } from "../core/skills/routing.js";
+import type { McpProviderKind } from "../core/mcp.js";
 import { CliError } from "../core/errors.js";
 import type { KnowledgeReading, KnowledgeSearch } from "../core/knowledge/types.js";
 import { knowledgeInput } from "../core/knowledge/input.js";
@@ -221,6 +223,7 @@ export type CommandBody =
   | { readonly type: "skills.import"; readonly projectId?: string; readonly source: SkillSource; readonly from: string }
   | ({ readonly type: "skills.save"; readonly projectId?: string; readonly text: string; readonly previous: string } & SkillAddress)
   | ({ readonly type: "skills.enabled.set"; readonly projectId?: string; readonly enabled: boolean } & SkillAddress)
+  | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
@@ -374,6 +377,7 @@ export interface CommandResults {
   "skills.import": SkillAddress;
   "skills.save": Accepted;
   "skills.enabled.set": Accepted;
+  "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
@@ -1064,6 +1068,9 @@ export function decodeCommand(value: unknown): Command {
     case "skills.enabled.set":
       if (typeof record.enabled !== "boolean") throw new CliError("INVALID_THREAD_OPTION", "skills.enabled.set requires enabled as a boolean.");
       return { ...meta, type, ...decodeSkillAddress(record, type), enabled: record.enabled };
+    case "skills.providers.set":
+      if (record.providers === undefined) throw new CliError("INVALID_SKILL", "skills.providers.set requires providers (an empty list means every provider).");
+      return { ...meta, type, ...decodeSkillAddress(record, type), providers: parseSkillProviders(record.providers) };
     case "skills.remove":
       return { ...meta, type, ...decodeSkillAddress(record, type) };
     case "thread.image.generate":

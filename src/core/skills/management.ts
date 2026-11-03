@@ -4,6 +4,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { CliError } from "../errors.js";
 import { parseSkillFile } from "../providers/harness/skills.js";
+import { writeAtomic } from "../infra/atomic.js";
+import type { McpProviderKind } from "../mcp.js";
+import { parseSkillProviders, skillProviders, SKILL_ROUTING_FILE } from "./routing.js";
 
 export const SKILL_SOURCES = ["agents", "claude"] as const;
 export type SkillSource = (typeof SKILL_SOURCES)[number];
@@ -15,6 +18,7 @@ export interface ManagedSkill extends SkillAddress {
   readonly path: string;
   readonly enabled: boolean;
   readonly editable: boolean;
+  readonly providers?: readonly McpProviderKind[];
 }
 const FILE = "SKILL.md";
 const DISABLED = "SKILL.md.disabled";
@@ -71,7 +75,8 @@ export async function listManagedSkills(roots: SkillRoots): Promise<ManagedSkill
       catch (error) { if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) continue; throw error; }
       const { fields } = parseSkillFile(text);
       const info = await lstat(file);
-      skills.push({ source, folder: entry.name, name: fields.name || entry.name, description: fields.description || "", path: file, enabled, editable: !entry.isSymbolicLink() && info.isFile() && !info.isSymbolicLink() && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(entry.name) });
+      const providers = skillProviders(dir);
+      skills.push({ source, folder: entry.name, name: fields.name || entry.name, description: fields.description || "", path: file, enabled, editable: !entry.isSymbolicLink() && info.isFile() && !info.isSymbolicLink() && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(entry.name), ...(providers.length > 0 ? { providers } : {}) });
     }
   }
   return skills.sort((left, right) => left.name.localeCompare(right.name) || left.source.localeCompare(right.source));
@@ -91,7 +96,20 @@ export async function saveManagedSkill(roots: SkillRoots, address: SkillAddress,
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink()) failure("Linked skill files are read-only.");
   if (await readFile(file, "utf8") !== previous) failure("The skill changed outside Moxen. Reload it before saving.");
-  await writeFile(file, text, "utf8");
+  await writeAtomic(file, text);
+}
+
+export async function setManagedSkillProviders(roots: SkillRoots, address: SkillAddress, value: readonly McpProviderKind[]): Promise<void> {
+  const providers = parseSkillProviders(value);
+  const dir = await editableDirectory(roots, address);
+  const info = await lstat((await skillFile(dir)).file);
+  if (!info.isFile() || info.isSymbolicLink()) failure("Linked skill files are read-only.");
+  const file = path.join(dir, SKILL_ROUTING_FILE);
+  if (await exists(file)) {
+    const routing = await lstat(file);
+    if (!routing.isFile() || routing.isSymbolicLink()) failure("Linked skill routing files are read-only.");
+  }
+  await writeAtomic(file, `${JSON.stringify({ providers }, null, 2)}\n`);
 }
 
 export async function setManagedSkillEnabled(roots: SkillRoots, address: SkillAddress, enabled: boolean): Promise<void> {
@@ -125,6 +143,7 @@ export async function importManagedSkill(roots: SkillRoots, source: SkillSource,
   if (await exists(path.join(from, ".moxen-skill.json"))) failure("This is an obsolete Moxen-managed skill, not a user skill package.");
   const { file } = await skillFile(from);
   const metadata = validateText(await readFile(file, "utf8"));
+  skillProviders(from);
   const address = { source, folder: metadata.name };
   const destination = folderPath(roots, address);
   const origin = realpathSync.native(from);
