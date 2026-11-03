@@ -9,6 +9,8 @@ import { mcpToolName, openMcpPool, untrustedContext, type McpPool } from "../mcp
 import type { HarnessTool, ToolContext } from "../tools/index.js";
 import { ReadState } from "../tools/index.js";
 import { stdioSpec } from "./mcpfixtures.js";
+import { IMAGE_LIMITS } from "../../../attachments.js";
+import { MAX_RESULT_CHARS } from "../mcpclient.js";
 
 let dir: string;
 const pools: McpPool[] = [];
@@ -57,6 +59,40 @@ describe("names", () => {
 });
 
 describe("the pool", () => {
+  it("preserves image-only error results and all supported image types in order", async () => {
+    const pool = await open([stdioSpec(dir)], options());
+    const types = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+    const result = await tool(pool, "mcp__files__echo").run({ isError: true, content: types.map((mimeType) => ({ type: "image", mimeType, data: "AAAA" })) }, { ...context(), acceptsImages: true });
+    expect(result.isError).toBe(true);
+    expect(result.images?.map((image) => image.mimeType)).toEqual(types);
+    expect(result.content).toContain("attached as MCP image 4");
+  });
+
+  it("does not lose an image after text exceeds the MCP text cap", async () => {
+    const pool = await open([stdioSpec(dir)], options());
+    const result = await tool(pool, "mcp__files__echo").run({ content: [
+      { type: "text", text: "x".repeat(MAX_RESULT_CHARS + 1) },
+      { type: "image", mimeType: "image/png", data: "AAAA" },
+    ] }, { ...context(), acceptsImages: true });
+    expect(result.images).toEqual([{ name: "MCP image 1", mimeType: "image/png", data: "AAAA" }]);
+  });
+
+  it("keeps unsupported, oversized, invalid and excess MCP images as explanatory placeholders", async () => {
+    const pool = await open([stdioSpec(dir)], options());
+    const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+    const result = await tool(pool, "mcp__files__echo").run({ content: [
+      { ...image, mimeType: "image/tiff" },
+      { ...image, data: Buffer.alloc(5_000_001).toString("base64") },
+      { ...image, data: "not base64!" },
+      ...Array.from({ length: IMAGE_LIMITS.imagesPerMessage + 1 }, () => image),
+    ] }, { ...context(), acceptsImages: true });
+    expect(result.content).toContain("[image: image/tiff, unsupported type]");
+    expect(result.content).toContain("[image: image/png, too large]");
+    expect(result.content).toContain("[image: image/png, invalid data]");
+    expect(result.content).toContain("[image: image/png, too many images]");
+    expect(result.images).toHaveLength(IMAGE_LIMITS.imagesPerMessage);
+  });
+
   it("offers every server's tools next to each other, sorted, with the in-process ones called directly", async () => {
     const calls: Array<[string, Record<string, unknown>]> = [];
     const pool = await open([stdioSpec(dir, "zeta"), inProcess("moxen", [{ name: "delegate" }, { name: "task_status", readOnly: true }], calls), stdioSpec(dir, "alpha")], options());

@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { runTurn, type LoopEvent, type TurnConfig } from "../loop.js";
+import { openMcpPool } from "../mcp.js";
+import { stdioSpec } from "./mcpfixtures.js";
 import { DEFAULT_QUIRKS } from "../quirks.js";
 import { HarnessTranscript } from "../session.js";
 import { builtinTools, ReadState, type HarnessTool } from "../tools/index.js";
@@ -55,6 +57,32 @@ const toolCall = (name: string, args: unknown, id = `c_${name}`): ModelEvent[] =
 ];
 
 describe("runTurn", () => {
+  it.each([true, false])("preserves mixed MCP text and images through the transport when vision is %s", async (vision) => {
+    const pool = await openMcpPool([stdioSpec(dir)], { cwd: dir, artifactDir: dir });
+    try {
+      const content = [
+        { type: "text", text: "before" },
+        { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+        { type: "text", text: "after" },
+      ];
+      const { run, requests } = setup([toolCall("mcp__files__echo", { text: "", content }), text("seen")], {
+        tools: pool.tools,
+        quirks: { ...DEFAULT_QUIRKS, images: vision ? "native" : "none" },
+        toolContext: { cwd: dir, readState: new ReadState(), artifactDir: dir, acceptsImages: vision },
+      });
+      expect((await run()).status).toBe("completed");
+      const result = requests[1]!.messages.find((message) => message.role === "tool")!;
+      expect(result.content).toMatch(vision ? /before\n\[image: image\/png, attached as MCP image 1\]\nafter/ : /before\n\[image: image\/png, model does not support images\]\nafter/);
+      if (vision) expect(requests[1]!.messages.at(-1)).toMatchObject({ role: "user", content: [
+        { type: "text", text: "[Image returned by mcp__files__echo: MCP image 1]" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } },
+      ] });
+      else expect(requests[1]!.messages.some((message) => Array.isArray(message.content))).toBe(false);
+    } finally {
+      await pool.close();
+    }
+  });
+
   it("runs a tool the model calls and shows it the result before it answers", async () => {
     const file = path.join(dir, "a.txt");
     fs.writeFileSync(file, "hello\n");

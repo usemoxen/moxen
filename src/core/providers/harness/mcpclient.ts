@@ -17,7 +17,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 import type { OutOfProcessMcpServerSpec } from "../../mcp.js";
+import { attachmentFromBytes, IMAGE_LIMITS, imageSetError } from "../../attachments.js";
+import type { ProviderImage } from "../spi.js";
 import { killGroup } from "./tools/bash.js";
+import { MAX_IMAGE_BYTES } from "./tools/files.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 const MAX_MESSAGE_BYTES = 8_000_000;
@@ -51,6 +54,8 @@ export interface McpToolInfo {
 export interface McpCallResult {
   readonly text: string;
   readonly isError: boolean;
+  /** Ordered text and image positions; text remains the fallback for callers without vision. */
+  readonly parts?: readonly { readonly text: string; readonly image?: ProviderImage }[];
 }
 
 interface Rpc {
@@ -363,22 +368,65 @@ function toolInfo(raw: unknown): McpToolInfo | null {
   };
 }
 
-/** What a result holds, as text the model can read. Images and binary resources are named, not carried. */
-function resultText(result: Record<string, unknown>): string {
-  const parts: string[] = [];
+/** Keep image positions alongside text, without making a non-vision caller hold a binary string in its text. */
+function resultContent(result: Record<string, unknown>): Omit<McpCallResult, "isError"> {
+  const parts: { text: string; image?: ProviderImage }[] = [];
+  const images: { name: string; dataUrl: string }[] = [];
+  const addText = (text: string) => parts.push({ text });
   for (const block of Array.isArray(result.content) ? result.content : []) {
     if (!isRecord(block)) continue;
-    if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
-    else if (block.type === "image" || block.type === "audio") parts.push(`[${String(block.type)}${typeof block.mimeType === "string" ? `: ${block.mimeType}` : ""}, not shown]`);
-    else if (block.type === "resource_link" && typeof block.uri === "string") parts.push(`[link: ${block.uri}]`);
+    if (block.type === "text" && typeof block.text === "string") addText(block.text);
+    else if (block.type === "image") {
+      const mime = typeof block.mimeType === "string" ? block.mimeType : "unknown";
+      const placeholder = (why: string) => `[image: ${mime}, ${why}]`;
+      let why: string | null = null;
+      if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)) why = "unsupported type";
+      else if (typeof block.data !== "string" || block.data.length === 0) why = "invalid data";
+      // Match the built-in file reader's byte cap before allocating decoded bytes.
+      else if (block.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) why = "too large";
+      else if (block.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(block.data)) why = "invalid data";
+      else if (images.length >= IMAGE_LIMITS.imagesPerMessage) why = "too many images";
+      if (why !== null) {
+        addText(placeholder(why));
+        continue;
+      }
+      const data = block.data as string;
+      const bytes = Buffer.from(data, "base64");
+      const name = `MCP image ${images.length + 1}`;
+      const built = attachmentFromBytes(name, mime, bytes);
+      if (bytes.length > MAX_IMAGE_BYTES || built.error !== null) {
+        addText(placeholder("too large"));
+        continue;
+      }
+      const candidate = { name, dataUrl: built.attachment.dataUrl };
+      if (imageSetError([...images, candidate]) !== null) {
+        addText(placeholder("image set limit exceeded"));
+        continue;
+      }
+      images.push(candidate);
+      parts.push({ text: placeholder("model does not support images"), image: { name, mimeType: mime, data } });
+    } else if (block.type === "audio") addText(`[audio${typeof block.mimeType === "string" ? `: ${block.mimeType}` : ""}, not shown]`);
+    else if (block.type === "resource_link" && typeof block.uri === "string") addText(`[link: ${block.uri}]`);
     else if (block.type === "resource" && isRecord(block.resource)) {
       const { text, uri } = block.resource;
-      parts.push(typeof text === "string" ? text : `[resource${typeof uri === "string" ? `: ${uri}` : ""}, not shown]`);
+      addText(typeof text === "string" ? text : `[resource${typeof uri === "string" ? `: ${uri}` : ""}, not shown]`);
     }
   }
-  if (parts.length === 0 && result.structuredContent !== undefined) parts.push(JSON.stringify(result.structuredContent));
-  const text = parts.join("\n");
-  return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[… cut at ${MAX_RESULT_CHARS} characters]` : text;
+  if (parts.length === 0 && result.structuredContent !== undefined) addText(JSON.stringify(result.structuredContent));
+  const text = parts.map((part) => part.text).join("\n");
+  const boundedText = text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[… cut at ${MAX_RESULT_CHARS} characters]` : text;
+  if (images.length === 0) return { text: boundedText };
+  let remaining = MAX_RESULT_CHARS;
+  const bounded = parts.flatMap((part) => {
+    // A long text block must not erase the pictures that follow it.
+    if (part.image) return [part];
+    if (remaining <= 0) return [];
+    const text = part.text.slice(0, remaining);
+    remaining -= part.text.length + 1;
+    return [{ ...part, text }];
+  });
+  if (remaining < 0) bounded.push({ text: `[… cut at ${MAX_RESULT_CHARS} characters]` });
+  return { text: boundedText, parts: bounded };
 }
 
 export class McpClient {
@@ -434,7 +482,7 @@ export class McpClient {
       throw error;
     }
     if (!isRecord(result)) return { text: "The server answered with something that is not a tool result.", isError: true };
-    return { text: resultText(result), isError: result.isError === true };
+    return { ...resultContent(result), isError: result.isError === true };
   }
 
   close(): Promise<void> {

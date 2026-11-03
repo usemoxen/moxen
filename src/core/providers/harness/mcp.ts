@@ -140,9 +140,12 @@ function adapt(name: string, server: ServerHandle, info: McpToolInfo, artifactDi
     intent: () => ({ action: info.readOnly ? "read" : "exec", paths: [], command: name, mcp: true }),
     async run(args, context): Promise<ToolResult> {
       const result = await server.call(info.name, args, context.signal);
-      if (result.text === "") return { content: result.isError ? "The tool failed and said nothing." : "(no output)", isError: result.isError };
+      const images = context.acceptsImages ? result.parts?.flatMap((part) => part.image ? [part.image] : []) : undefined;
+      // Position markers keep mixed results readable; transports send pictures using the same path as built-in tools.
+      const text = context.acceptsImages && result.parts ? result.parts.map((part) => part.image ? `[image: ${part.image.mimeType}, attached as ${part.image.name}]` : part.text).join("\n") : result.text;
+      if (text === "") return { content: result.isError ? "The tool failed and said nothing." : "(no output)", isError: result.isError };
       // Bounded first, so the saved file holds the server's own words, then marked as data.
-      return { content: untrustedContext(boundOutput(result.text, artifactDir, "mcp"), `mcp:${server.name}/${info.name}`), isError: result.isError };
+      return { content: untrustedContext(boundOutput(text, artifactDir, "mcp"), `mcp:${server.name}/${info.name}`), isError: result.isError, ...(images && images.length > 0 ? { images } : {}) };
     },
   };
   return tool as unknown as HarnessTool<never>;

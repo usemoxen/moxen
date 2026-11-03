@@ -17,7 +17,7 @@ const MAX_LINE_CHARS = 2000;
 const MAX_READ_CHARS = 80_000;
 const MAX_LIST_ENTRIES = 200;
 /** Endpoints refuse pictures much past this, and the base64 text is a third bigger again. */
-const MAX_IMAGE_BYTES = 5_000_000;
+export const MAX_IMAGE_BYTES = 5_000_000;
 
 const IMAGE_TYPES: Readonly<Record<string, { mime: string; matches: (head: Buffer) => boolean }>> = {
   ".png": { mime: "image/png", matches: (head) => head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },

@@ -435,7 +435,14 @@ connected when the session starts, over stdio or HTTP, and their tools appear as
 read-only runs without asking; any other asks like a shell
 command does ("don't ask again" covers that one tool) and is refused in a
 delegated task. Results are cut to a head and tail (the whole is saved to a file
-the model is told about) and arrive inside `<untrusted_context>`. A stdio server
+the model is told about) and arrive inside `<untrusted_context>`. PNG, JPEG, GIF
+and WebP results reach models that take images, like pictures from the built-in
+file reader. Text keeps position markers and pictures keep their result order.
+Each image has the file reader's 5 MB raw-byte cap; the attachment limits also
+apply (100 images, 30 MiB encoded in one result, 8000 px per side, or 2000 px
+above 20 images). Unsupported, invalid or over-limit images keep a text
+placeholder explaining why; models without vision get placeholders too. The
+MCP transport's existing 8 MB message cap still applies. A stdio server
 gets a small environment (`PATH`, `HOME` and the like) plus its own `env`, not
 moxen's; add what it needs (a proxy, a CA file) to its `env`. A server that fails
 to start is reported at the next turn and the rest carry on; one that dies
