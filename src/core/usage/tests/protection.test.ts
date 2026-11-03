@@ -30,7 +30,60 @@ async function world(provider: "claude" | "codex" = "codex") {
   return { ...harness, ctx, sent, make, guard: new UsageProtection(async () => ctx) };
 }
 
+async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId: string) {
+  const started = (await w.store.readTurns(threadId)).filter((turn) => turn.status === "running");
+  await flushTurnRunners();
+  const turns = await w.store.readTurns(threadId);
+  for (const turn of started) expect(turns.find((settled) => settled.id === turn.id)?.status).toBe("completed");
+  expect(openTurn(turns)).toBeNull();
+}
+
 describe("usage protection", () => {
+  it("keeps queued input held while the wrap-up settles slowly, before and after completion", async () => {
+    const w = await world();
+    const id = await w.make("gated wrap-up");
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const checkpoint = new Promise<void>((resolve) => { reached = resolve; });
+    const append = w.store.appendLedger.bind(w.store);
+    const persist = vi.spyOn(w.store, "appendLedger").mockImplementation(async (threadId, name, row) => {
+      if (threadId === id && name === "checkpoints") { reached(); await gate; }
+      return append(threadId, name, row);
+    });
+    let unsubscribe = () => {};
+    try {
+      recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: null }]);
+      await w.guard.tick();
+      await checkpoint;
+      const running = openTurn(await w.store.readTurns(id))!;
+      expect((await w.store.readMessages(id)).find((message) => message.id === running.messageId)?.origin).toBe("usage-protection");
+      const completed = new Promise<void>((resolve) => {
+        unsubscribe = w.store.subscribe((event) => {
+          if (event.type === "backend.thread.changed" && event.threadId === id && event.reason === "turn-completed") resolve();
+        });
+      });
+      const queued = await sendTurn(w.store, id, { prompt: "held input", delivery: "queue" });
+      expect(queued.turn.status).toBe("queued");
+      expect(running.id).not.toBe(queued.turn.id);
+      await w.guard.tick();
+      expect(openTurn(await w.store.readTurns(id))?.id).toBe(running.id);
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
+      release();
+      await completed;
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === running.id)?.status).toBe("completed");
+      await w.guard.tick();
+      expect(openTurn(await w.store.readTurns(id))).toBeNull();
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
+    } finally {
+      release();
+      unsubscribe();
+      await flushTurnRunners();
+      persist.mockRestore();
+      w.guard.close();
+    }
+  });
+
   it.each(["off", "auto"] as const)("%s ticks do not reread idle history and discover queued work from store events", async (mode) => {
     const w = await world();
     w.ctx.config.usageProtection = mode;
@@ -278,7 +331,7 @@ describe("usage protection", () => {
     expect(w.sent).toEqual([]);
     const restarted = new UsageProtection(async () => w.ctx);
     await restarted.tick(reset + 6000);
-    await flushTurnRunners(1000);
+    await settleStartedTurns(w, id);
     expect(w.sent.filter((threadId) => threadId === id).length).toBe(queued ? 2 : 1);
     expect((await w.store.readMessages(id)).filter((message) => message.role === "user" && message.origin === "usage-continue")).toHaveLength(1);
     await restarted.tick(reset + 7000);
@@ -294,7 +347,7 @@ describe("usage protection", () => {
     await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: turn.id } });
     await sendTurn(w.store, id, { prompt: "Do this next week only", scheduledFor: new Date(Date.now() + 7 * 86400_000).toISOString() });
     const first = await continueThread(w.ctx, { threadId: id, automatic: true });
-    await flushTurnRunners(1000);
+    await settleStartedTurns(w, first.threadId);
     const again = await continueThread(w.ctx, { threadId: id, automatic: true });
     expect(again.threadId).toBe(first.threadId);
     expect(w.sent).toEqual([first.threadId]);
@@ -312,7 +365,7 @@ describe("usage protection", () => {
     const reset = new Date(Date.now() + 3600_000).toISOString();
     recordUsageWindows(provider, [{ id: "session", label: "Session", usedPercent: 94, exhausted: false, resetsAt: reset }]);
     await w.guard.tick();
-    await flushTurnRunners(1000);
+    await settleStartedTurns(w, first);
     expect(w.sent).toEqual([first]);
     expect((await w.store.readThreadRecord(second))?.usagePause?.phase).toBe("pending");
     const queued = await sendTurn(w.store, first, { prompt: "Also test the edge case", delivery: "queue" });
@@ -320,7 +373,7 @@ describe("usage protection", () => {
     expect(openTurn(await w.store.readTurns(first))).toBeNull();
     const restarted = new UsageProtection(async () => w.ctx);
     await restarted.tick();
-    await flushTurnRunners(1000);
+    await settleStartedTurns(w, second);
     expect(w.sent).toEqual([first, second]);
     await restarted.tick();
     expect(restarted.read().queue.every((entry) => entry.phase === "waiting")).toBe(true);
@@ -361,7 +414,7 @@ describe("usage protection", () => {
     const queued = await sendTurn(w.store, id, { prompt: "queued", delivery: "queue" });
     expect(queued.turn.status).toBe("queued");
     await w.guard.tick();
-    await flushTurnRunners(1000);
+    await settleStartedTurns(w, id);
     await w.guard.tick();
     expect(w.guard.read().queue[0]?.resetsAt).toBeNull();
     expect(openTurn(await w.store.readTurns(id))).toBeNull();
