@@ -1046,11 +1046,26 @@ async function adoptRunningTasks(store: ThreadStore, sourceId: string, destinati
   );
   const adopted: { taskId: string; title: string }[] = [];
   for (const row of rows) {
+    // A row's `running` is not kept up to date when a task finishes: ask the task itself.
+    if (!(await taskUnfinished(store, row.childThreadId))) continue;
     await store.updateDelegation(row.id, { parentThreadId: destinationId });
     const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
     adopted.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
   }
   return adopted;
+}
+
+/**
+ * Whether a delegated task still owes its parent a result: a turn running or
+ * queued, or its last run stopped by a usage limit with no resume left waiting.
+ */
+async function taskUnfinished(store: ThreadStore, childThreadId: string): Promise<boolean> {
+  const turns = await store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
+  if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return true;
+  const lastRan = turns.findLast((turn) => turn.status === "completed");
+  if (!lastRan) return false;
+  const activities = await store.readActivities(childThreadId).catch(() => [] as StoredActivity[]);
+  return activities.some((activity) => (activity.kind === "usage.limit" || activity.kind === "usage.wrap-up") && activity.createdAt >= lastRan.createdAt);
 }
 
 /** The handoff's note of tasks still running, which now report to the new thread. */

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn } from "../threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { continueThread, queueTaskNotification, runningTasksNote, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -71,9 +71,18 @@ describe("an orchestrator continued in a new thread", () => {
     const parent = await w.make("orchestrator");
     const running = await w.make("still running");
     const done = await w.make("already done");
+    const limited = await w.make("stopped by a limit");
     const now = new Date().toISOString();
-    await w.store.appendDelegation({ id: "r", parentThreadId: parent.id, childThreadId: running.id, prompt: "A", status: "running", notify: true, createdAt: now, updatedAt: now });
-    await w.store.appendDelegation({ id: "d", parentThreadId: parent.id, childThreadId: done.id, prompt: "B", status: "completed", createdAt: now, updatedAt: now });
+    // Every row says running: the ledger is not updated when a task finishes, so the task's own turns decide.
+    for (const [id, child] of [["r", running], ["d", done], ["l", limited]] as const) {
+      await w.store.appendDelegation({ id, parentThreadId: parent.id, childThreadId: child.id, prompt: id, status: "running", notify: true, createdAt: now, updatedAt: now });
+    }
+    await sendTurn(w.store, running.id, { prompt: "A", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+    const finished = (await sendTurn(w.store, done.id, { prompt: "B" })).turn;
+    await completeTurn(w.store, done.id, finished.id, { text: "Done." });
+    const stopped = (await sendTurn(w.store, limited.id, { prompt: "C" })).turn;
+    await w.store.appendLedger(limited.id, "activity", { id: "limit", threadId: limited.id, turnId: stopped.id, kind: "usage.limit", summary: "Usage limit reached", payload: {}, createdAt: w.store.nowIso() });
+    await completeTurn(w.store, limited.id, stopped.id, { text: "Stopped at the limit." });
     const turn = (await sendTurn(w.store, parent.id, { prompt: "Orchestrate" })).turn;
     await completeTurn(w.store, parent.id, turn.id, { text: "Waiting on tasks." });
 
@@ -81,12 +90,16 @@ describe("an orchestrator continued in a new thread", () => {
     const rows = await w.store.readDelegations();
     expect(rows.find((row) => row.id === "r")?.parentThreadId).toBe(continued.threadId);
     expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(parent.id);
+    expect(rows.find((row) => row.id === "l")?.parentThreadId).toBe(continued.threadId);
     const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
     expect(prompt).toContain(`"still running" (taskId ${running.id})`);
+    expect(prompt).toContain(`"stopped by a limit" (taskId ${limited.id})`);
     expect(prompt).not.toContain(done.id);
     await flushTurnRunners();
 
     // A notification batched for the old parent before the move still reaches the new one.
+    const waiting = (await w.store.readTurns(running.id)).find((turn) => turn.status === "queued")!;
+    await interruptTurn(w.store, running.id, waiting.id);
     queueTaskNotification(w.ctx, parent.id, running.id);
     await new Promise((resolve) => setTimeout(resolve, 2 * TASK_NOTIFICATION_BATCH_MS + 300));
     await flushTurnRunners();
