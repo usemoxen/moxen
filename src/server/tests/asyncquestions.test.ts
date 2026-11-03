@@ -1,4 +1,5 @@
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import * as Effect from "effect/Effect";
 
@@ -54,7 +55,10 @@ describe("Codex asynchronous questions", () => {
     }
     if (state === "restarted") {
       await Effect.runPromise(current.driver.stopAll());
-      transport = new FakeCodexTransport();
+      // A slow response must not lose notifications sent as soon as the request arrives.
+      transport = new FakeCodexTransport({ beforeResponse: async (method) => {
+        if (method === "turn/start") await delay(1500);
+      } });
       driver = new CodexDriver({ transport });
       connection = new DirectConnection({ storeRoot: current.harness.root, drivers: { codex: () => driver } });
       connections.push(connection);
@@ -76,7 +80,7 @@ describe("Codex asynchronous questions", () => {
       server.notify("turn/started", { threadId: "codex-thread-1", turn: { id: "second" } });
       server.notify("item/completed", { item: { type: "agentMessage", id: "continued", text: "Using all images.", phase: "final_answer" } });
       server.notify("turn/completed", { threadId: "codex-thread-1", turn: { id: "second", status: "completed" } });
-      await expect.poll(async () => (await current.harness.store.readTurns("thread")).at(-1)?.status).toBe("completed");
+      await expect.poll(async () => (await current.harness.store.readTurns("thread")).at(-1)?.status, { timeout: 5000 }).toBe("completed");
     }
     await Effect.runPromise(driver.stopAll());
   });

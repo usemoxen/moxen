@@ -663,6 +663,42 @@ describe("codex MCP injection", () => {
 
 
 describe("Codex lifecycle boundaries", () => {
+  it.each(["response", "continuation"] as const)("does not lose completion while the turn/start %s is held", async (boundary) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const transport = new FakeCodexTransport({ beforeResponse: async (method) => {
+      if (boundary === "response" && method === "turn/start") await gate;
+    } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeout) => {
+      const result = await request(method, params, timeout);
+      if (boundary === "continuation" && method === "turn/start") await gate;
+      return result;
+    });
+    let returned = false;
+    const sending = Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "hi" })).then((sent) => { returned = true; return sent; });
+    try {
+      await expect.poll(() => server.requestsTo("turn/start").length).toBe(1);
+      server.notify("turn/started", { threadId: "codex-thread-1", turn: { id: "early" } });
+      server.notify("item/completed", { threadId: "codex-thread-1", item: { id: "answer", type: "agentMessage", text: "Already done.", phase: "final_answer" } });
+      server.notify("turn/completed", { threadId: "codex-thread-1", turn: { id: "early", status: "completed" } });
+      const snapshot = await Effect.runPromise(driver.readThread(START.threadId));
+      await expect(driver.awaitTurn(START.threadId, snapshot.turns.at(-1)!.id)).resolves.toMatchObject({ status: "completed", text: "Already done." });
+      expect(returned).toBe(false);
+      release();
+      const sent = await sending;
+      expect(await driver.awaitTurn(START.threadId, sent.turnId)).toMatchObject({ status: "completed", text: "Already done." });
+    } finally {
+      release();
+      await sending;
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
   it("falls back from advertised but unimplemented history and revert methods, without hiding other failures", async () => {
     const transport = new FakeCodexTransport({ failRequests: { "thread/items/list": "thread/items/list is not supported yet", "thread/turns/list": "thread/turns/list is not supported yet", "thread/revert": "thread/revert is not supported yet" }, historyTurns: [
       { id: "first", status: "completed", items: [{ id: "prompt", type: "userMessage", content: [{ type: "text", text: "retained prompt" }] }] },

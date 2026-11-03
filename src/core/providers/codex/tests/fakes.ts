@@ -23,6 +23,8 @@ export interface FakeCodexScript {
   readonly items?: unknown[];
   readonly turns?: unknown[];
   readonly historyTurns?: unknown[];
+  /** Hold a response while server notifications continue to flow. */
+  readonly beforeResponse?: (method: string) => Promise<void>;
 }
 
 export class FakeCodexServer {
@@ -36,6 +38,7 @@ export class FakeCodexServer {
     this.peer = new JsonRpcPeer(serverProcess, { forceKillAfterMs: 0 });
     this.peer.onRequest(async (method, params) => {
       this.requests.push({ method, params });
+      if (this.script.beforeResponse) await this.script.beforeResponse(method);
       return this.answer(method, params);
     });
   }

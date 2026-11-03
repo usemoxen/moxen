@@ -1,4 +1,5 @@
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect, it, vi } from "vitest";
 import { testHarness } from "../../core/testing/harness.js";
 import { CodexDriver } from "../../core/providers/codex/driver.js";
@@ -13,7 +14,11 @@ it("rechecks Codex reserves before dispatch, then runs and reads a native image 
   harness.config.thinkingEffort = "max";
   const reset = Math.floor(Date.now() / 1000) + 3600;
   const primary = { usedPercent: 97, windowDurationMins: 300, resetsAt: reset };
-  const transport = new FakeCodexTransport({ account: { account: { type: "chatgpt", planType: "plus" } }, rateLimits: { rateLimits: { limitId: "codex", primary, secondary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: reset } } } });
+  let delayed = false;
+  const transport = new FakeCodexTransport({ account: { account: { type: "chatgpt", planType: "plus" } }, rateLimits: { rateLimits: { limitId: "codex", primary, secondary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: reset } } }, beforeResponse: async (method) => {
+    // Exercise completion before a slow turn/start response, not just the immediate fake.
+    if (method === "turn/start" && !delayed) { delayed = true; await delay(1500); }
+  } });
   const codex = new CodexDriver({ transport });
   let catalogFailed = false;
   const luna = (slug: string): ProviderSummary["models"][number] => ({ slug, name: slug, isDefault: false, isCustom: false, isHidden: false, efforts: [{ id: "effort", label: "Effort", currentValue: null, choices: ["none", "max", "low"].map((id) => ({ id, label: id, isDefault: id === "max" })) }] });
@@ -51,7 +56,7 @@ it("rechecks Codex reserves before dispatch, then runs and reads a native image 
     await vi.waitFor(async () => {
       const status = await callMoxenTool(connection, parent.threadId, "image_gen", { taskId, waitMs: 0 });
       expect(JSON.parse(status.text)).toMatchObject({ status: "completed", images: [image] });
-    });
+    }, { timeout: 5000 });
     expect((await connection.query({ type: "image-generation.availability", threadId: taskId })).available).toBe(false);
     // A new release is picked on the next call, without a restart or a config edit.
     provider.models.push(luna("gpt-6.1-luna"));
