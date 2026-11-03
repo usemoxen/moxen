@@ -195,6 +195,25 @@ describe("claude driver turns", () => {
     expect(outcome.status).toBe("failed");
     expect(outcome.error).toContain("boom");
   });
+
+  it.each([[5, 5], [1, 2]])("keeps failed result cost %s in usage and settlement without lowering the total", async (reported, expected) => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    const firstOutcome = driver.awaitTurn("thread-1", first.turnId);
+    transport.created[0]!.push(successResult("done", 2));
+    await firstOutcome;
+
+    const eventsPromise = Effect.runPromise(Stream.runCollect(Stream.takeUntil(driver.streamEvents, (event) => event.type === "turn.failed")));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    transport.created[0]!.push(errorResult("error_during_execution", "boom", { total_cost_usd: reported }));
+    const outcome = await outcomePromise;
+    const events = [...await eventsPromise];
+    expect(outcome).toMatchObject({ status: "failed", usage: { costUsd: expected } });
+    expect(events).toContainEqual(expect.objectContaining({ type: "token-usage.updated", raw: { costUsd: expected } }));
+  });
 });
 
 describe("claude driver permissions", () => {

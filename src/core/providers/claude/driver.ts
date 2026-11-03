@@ -1874,11 +1874,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       session.pendingText = null;
       return;
     }
+    // The SDK's total is the session's running spend, even on failure; the highest figure seen stands.
+    const cost = Math.max(session.usage.costUsd, typeof message.total_cost_usd === "number" ? message.total_cost_usd : 0);
+    session.usage = { ...session.usage, costUsd: cost };
+    const open = session.transcript.find((turn) => turn.status === "running");
     if (message.subtype === "success") {
-      // The SDK's total is the session's running spend; the highest figure seen stands.
-      const cost = Math.max(session.usage.costUsd, typeof message.total_cost_usd === "number" ? message.total_cost_usd : 0);
-      session.usage = { ...session.usage, costUsd: cost };
-      const open = session.transcript.find((turn) => turn.status === "running");
       // A steer that arrived too late to fold into this run is queued as the
       // CLI's next run, announced here; our turn is not over until it is.
       const queued = (message as { queued_turn_count?: unknown }).queued_turn_count;
@@ -1896,19 +1896,21 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       if (open && typeof message.result === "string" && message.result) {
         open.text = message.result;
       }
-      this.publish({
-        type: "token-usage.updated",
-        provider: "claude",
-        threadId: session.threadId,
-        usage: {
-          input: session.usage.input,
-          cacheRead: session.usage.cacheRead,
-          cacheCreate: session.usage.cacheCreate,
-          output: session.usage.output,
-          thinking: session.usage.thinking,
-        },
-        raw: { costUsd: cost },
-      });
+    }
+    this.publish({
+      type: "token-usage.updated",
+      provider: "claude",
+      threadId: session.threadId,
+      usage: {
+        input: session.usage.input,
+        cacheRead: session.usage.cacheRead,
+        cacheCreate: session.usage.cacheCreate,
+        output: session.usage.output,
+        thinking: session.usage.thinking,
+      },
+      raw: { costUsd: cost },
+    });
+    if (message.subtype === "success") {
       this.publish({
         type: "turn.completed",
         provider: "claude",

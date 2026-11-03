@@ -106,7 +106,9 @@ the cost source. These are estimates, not subscription charges or an invoice.
 
 Recovery waits for the reset of the window that triggered protection or ran out,
 with a short grace period. If several windows triggered it, recovery waits for
-all of their resets. After that, all reported windows must
+all of their resets. A manual wrap-up with no triggering forecast waits for the
+window with the highest usage percentage; ties use the earliest reset.
+After that, all reported windows must
 have room. `usageRecovery` supplies the initial concurrency for recovery entries:
 `parallel` admits eligible work together; `sequential` admits one entry at a time
 per provider. The queue exposes the order and lets each entry change this choice.

@@ -298,7 +298,7 @@ export function successResult(
   });
 }
 
-export function errorResult(subtype = "error_during_execution", error = "boom"): SDKMessage {
+export function errorResult(subtype = "error_during_execution", error = "boom", overrides: Record<string, unknown> = {}): SDKMessage {
   return asMessage({
     type: "result",
     subtype,
@@ -307,6 +307,7 @@ export function errorResult(subtype = "error_during_execution", error = "boom"):
     duration_ms: 1,
     uuid: "result-err",
     session_id: "session-1",
+    ...overrides,
   });
 }
 

@@ -203,6 +203,30 @@ describe("usage protection", () => {
     w.guard.close();
   });
 
+  it("counts live Claude cost after its cumulative total restarts below the settled total", async () => {
+    const w = await world("claude");
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("restarted cost");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, {
+      text: "done", usage: { input: 100, output: 100, thinking: 0, cacheRead: 0, cacheCreate: 0, costUsd: 5 },
+    });
+    await sendTurn(w.store, id, { prompt: "more work" });
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    try {
+      await w.guard.tick();
+      await w.store.appendLedger(id, "activity", {
+        id: "context", threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(), payload: { costUsd: 1 },
+      });
+      await w.guard.tick();
+      await w.guard.tick();
+      expect(forecast.mock.calls.map(([, , work]) => work.costUsd)).toEqual([5, 6, 6]);
+    } finally {
+      forecast.mockRestore();
+      w.guard.close();
+    }
+  });
+
   it.each(["codex", "claude"] as const)("%s cost stays monotone when paid threads leave the candidate set", async (provider) => {
     const w = await world(provider);
     w.ctx.config.usageProtection = "notify";
@@ -329,6 +353,24 @@ describe("usage protection", () => {
     await flushTurnRunners();
     expect(w.sent).toHaveLength(5);
     restarted.close();
+    w.guard.close();
+  });
+
+  it.each([20, 80])("manual wrap-up does not wait for a less urgent reset (weekly usage: %s percent)", async (weeklyPercent) => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("manual wrap-up");
+    const now = Date.now();
+    const session = new Date(now + 3600_000).toISOString();
+    recordUsageWindows("codex", [
+      { id: "weekly", label: "Weekly", usedPercent: weeklyPercent, exhausted: false, resetsAt: new Date(now + 6 * 86400_000).toISOString() },
+      { id: "session", label: "Session", usedPercent: 80, exhausted: false, resetsAt: session },
+    ]);
+    await w.guard.tick(now);
+    expect(w.guard.read().forecasts.every((forecast) => !forecast.shouldWrap)).toBe(true);
+    await w.guard.wrap("codex");
+    expect((await w.store.readThreadRecord(id))?.usagePause?.resetsAt).toBe(session);
+    await settleStartedTurns(w, id);
     w.guard.close();
   });
 

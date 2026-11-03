@@ -216,7 +216,8 @@ export class UsageProtection {
 
   private async begin(ctx: OperationContext, rows: Row[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
-    const relevant = triggering === undefined ? windows.filter((window) => window.usedPercent >= 90)
+    const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
+      || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
       : [...triggering, ...windows.filter((window) => window.usedPercent >= 100)];
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
@@ -296,7 +297,7 @@ export class UsageProtection {
             if (cost === undefined) continue;
             previous = cost;
           }
-          if (typeof context?.costUsd === "number") inFlight = Math.max(0, context.costUsd - previous);
+          if (typeof context?.costUsd === "number") inFlight = context.costUsd >= previous ? context.costUsd - previous : context.costUsd;
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
