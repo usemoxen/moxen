@@ -214,7 +214,7 @@ export function normalizeConfig(raw: unknown): CliConfig {
     if (input.memoryEmbeddingLoading !== "keep-loaded" && input.memoryEmbeddingLoading !== "on-demand") throw new CliError("INVALID_CONFIG", "memoryEmbeddingLoading must be keep-loaded or on-demand.");
     result.memoryEmbeddingLoading = input.memoryEmbeddingLoading;
   }
-  for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"] })) {
+  for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"], usageColdResume: ["same-thread", "handoff"] })) {
     const value = (input as Record<string, unknown>)[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || !choices.includes(value)) throw new CliError("INVALID_CONFIG", `${key} must be one of ${choices.join(", ")}.`);
@@ -225,6 +225,15 @@ export function normalizeConfig(raw: unknown): CliConfig {
     if (value === undefined) continue;
     if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new CliError("INVALID_CONFIG", `${key} must be a percentage from 0 to 100.`);
     result[key] = value;
+  }
+  if (input.usageColdResumeAfter !== undefined) {
+    result.usageColdResumeAfter = asString(input.usageColdResumeAfter, "usageColdResumeAfter");
+  }
+  if (input.usageColdResumeTokens !== undefined) {
+    const raw: unknown = input.usageColdResumeTokens;
+    const value = typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : raw;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 2_000_000) throw new CliError("INVALID_CONFIG", "usageColdResumeTokens must be a whole number of tokens from 0 to 2000000.");
+    result.usageColdResumeTokens = value;
   }
   if (input.autoContinueAtUsageLimit !== undefined) {
     // A boolean in the file; `config set` hands it over as text.

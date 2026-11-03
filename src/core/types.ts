@@ -20,6 +20,12 @@ export interface CliConfig {
   usageMinimumWeekly?: number;
   usageRecovery?: "parallel" | "sequential";
   usageContinuation?: "same-thread" | "handoff";
+  /** At usage recovery, hand a thread whose prompt cache has gone cold off to a new thread instead of re-reading it. */
+  usageColdResume?: "same-thread" | "handoff";
+  /** How long since the thread's last activity before its cache counts as cold, e.g. `1h`. */
+  usageColdResumeAfter?: string;
+  /** Below this many context tokens, re-reading the conversation is cheap enough to stay. */
+  usageColdResumeTokens?: number;
   projectPolicy: ProjectPolicy;
   workspaceMode: WorkspaceMode;
   openMode: OpenMode;

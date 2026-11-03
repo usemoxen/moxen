@@ -135,6 +135,12 @@ parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
 that continues while tasks it delegated are still running takes them along:
 the handoff lists them, and their notifications go to the new thread.
+A provider's prompt cache lasts minutes up to an hour, so a recovery long after
+the thread's last activity reads the whole conversation again. With
+`usageColdResume handoff`, a due automatic recovery whose thread has been idle
+longer than `usageColdResumeAfter` (default `1h`) and whose last context reading
+is at least `usageColdResumeTokens` (default 65,536) becomes a stored handoff
+into a new thread instead. Missing activity or context data keeps it in place.
 The older `usageContinuation` config key remains readable but is hidden; new
 protection entries default to continuing here. Automatic usage-limit continuation
 and long-thread compaction do not compete with a held wrap-up.

@@ -59,6 +59,7 @@ import type {
 } from "../types.js";
 import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
+import { prefersColdHandoff } from "../usage/coldresume.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, withInstructionsUpdate, type InstructionState } from "./instructions.js";
@@ -424,6 +425,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     const admission = queueAdmission(row, candidate, rows, ctx.config, now);
     if (candidate.queue && (JSON.stringify(admission.latched) !== JSON.stringify(candidate.queue.latched ?? []) || JSON.stringify(admission.conditions) !== JSON.stringify(candidate.queue.conditions))) await ctx.store.withThreadLock(threadId, () => ctx.store.updateTurn(threadId, candidate.id, { queue: { ...candidate.queue!, latched: admission.latched, conditions: admission.conditions } }));
     if (admission.blocked.length) continue;
+    if (await switchColdRecovery(ctx, row, candidate, now)) continue;
     const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary);
     if (!turn) return false;
     await runRecoveredTurn(ctx, threadId, turn);
@@ -431,6 +433,27 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     return true;
   }
   return false;
+}
+
+/**
+ * An automatic usage recovery that is due, on a thread whose prompt cache has
+ * gone cold (`usageColdResume`), becomes a stored handoff instead: the work
+ * queue prepares the new thread on its next pass. Returns whether it switched.
+ */
+async function switchColdRecovery(ctx: OperationContext, row: QueueRow, candidate: StoredTurn, now: number): Promise<boolean> {
+  const queue = candidate.queue;
+  if (!queue?.automatic || !queue.requestId?.startsWith("usage:") || queue.continuation !== "same-thread" || ctx.config.usageColdResume !== "handoff") return false;
+  const times = row.turns.flatMap((turn) => (turn.id === candidate.id ? [] : [turn.completedAt, turn.startedAt].filter((at): at is string => typeof at === "string").map(Date.parse)));
+  const lastActivityAt = times.length > 0 ? Math.max(...times) : null;
+  const reading = (await ctx.store.readActivities(row.thread.id)).findLast((activity) => activity.kind === "context-window.updated")?.payload as Record<string, unknown> | undefined;
+  const usedTokens = typeof reading?.usedTokens === "number" ? reading.usedTokens : null;
+  if (!prefersColdHandoff(ctx.config, { lastActivityAt, usedTokens, now })) return false;
+  await ctx.store.withThreadLock(row.thread.id, async () => {
+    await ctx.store.updateTurn(row.thread.id, candidate.id, { queue: { ...queue, continuation: "stored" } });
+    await ctx.store.appendLedger(row.thread.id, "activity", { id: ctx.store.newId(), threadId: row.thread.id, turnId: candidate.id, kind: "usage.cold-resume", summary: "Prompt cache expired; continuing in a new thread", payload: { lastActivityAt: new Date(lastActivityAt!).toISOString(), usedTokens }, createdAt: ctx.store.nowIso() });
+  });
+  ctx.store.emit(row.thread.id, "queue-changed");
+  return true;
 }
 
 async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
