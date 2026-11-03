@@ -194,11 +194,14 @@ describe("usage protection", () => {
     const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
     await w.guard.tick();
     await w.store.appendLedger(id, "activity", {
-      id: "context", threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(), payload: { costUsd: 3 },
+      id: "context", threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(), payload: { costUsd: 3, usedTokens: 200_000, cachedInputTokens: 0 },
     });
     await w.guard.tick();
     await w.guard.tick();
     expect(forecast.mock.calls.map(([, , work]) => work.costUsd)).toEqual([6, 8, 8]);
+    // A 200k Opus context costs one input plus 4096 output tokens each tick,
+    // independent of the $8 accumulated across past turns and the live turn.
+    for (const [, , work] of forecast.mock.calls.slice(1)) expect(work.wrapCostUsd).toBeCloseTo(1.3524, 9);
     forecast.mockRestore();
     w.guard.close();
   });
@@ -533,6 +536,32 @@ describe("usage protection", () => {
 });
 
 describe("usage forecasts", () => {
+  it("does not wrap at 64 percent when parallel Claude turns report cost in lumps", () => {
+    const f = new UsageForecaster();
+    const window = { id: "session", kind: "session", label: "Session", resetsAt: "2030-01-01" };
+    // Two threads run for twenty minutes, but only completed turns add cost.
+    // The last four points report just $0.10: interval learning reserves 90 points.
+    const samples: readonly (readonly [number, number, number])[] = [
+      [44, 10, 0], [48, 12, 480_000], [52, 14, 960_000],
+      [56, 15.9, 1_440_000], [60, 15.9, 1_680_000], [64, 16, 2_400_000],
+    ];
+    for (const [usedPercent, costUsd, activeMs] of samples) {
+      const forecast = f.forecast("claude", { ...window, usedPercent }, { costUsd, activeMs, wrapCostUsd: 1.5, running: 2 });
+      expect(forecast.shouldWrap).toBe(false);
+      if (usedPercent === 64) expect(forecast).toMatchObject({ reservePercent: 7.5, remainingWorkMs: 1_980_000 });
+    }
+    expect(f.forecast("claude", { ...window, usedPercent: 90 }, { costUsd: 23.8, activeMs: 5_520_000, wrapCostUsd: 1.5, running: 2 }).shouldWrap).toBe(true);
+  });
+
+  it.each([null, 100])("bounds the reserve even with an uncalibrated or oversized wrap-up cost (%s)", (wrapCostUsd) => {
+    const f = new UsageForecaster();
+    const window = { id: "session", kind: "session", label: "Session", resetsAt: null };
+    const work = { costUsd: 10, activeMs: 0, wrapCostUsd, running: 20 };
+    f.forecast("claude", { ...window, usedPercent: 44 }, work);
+    expect(f.forecast("claude", { ...window, usedPercent: 64 }, { ...work, costUsd: 10.1, activeMs: 60_000 })).toMatchObject({ reservePercent: 10, shouldWrap: false });
+    expect(f.forecast("claude", { ...window, usedPercent: 87 }, { ...work, costUsd: 10.2, activeMs: 120_000 })).toMatchObject({ reservePercent: 10, shouldWrap: true });
+  });
+
   it("learns cost per percent separately per window and forgets it at reset", () => {
     const f = new UsageForecaster();
     const window = { id: "s", kind: "session", label: "Session", usedPercent: 90, resetsAt: "2030-01-01" };
@@ -541,6 +570,10 @@ describe("usage forecasts", () => {
     expect(forecast).toMatchObject({ reservePercent: 3, remainingWorkMs: 90_000, shouldWrap: true });
     expect(f.forecast("codex", { ...window, resetsAt: "2030-01-02", usedPercent: 1 }, { activeMs: 250_000, costUsd: 13, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
     expect(f.forecast("codex", { ...window, id: "w" }, { activeMs: 250_000, costUsd: 13, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
+    expect(f.forecast("codex", { ...window, id: "w", usedPercent: 94 }, { activeMs: 290_000, costUsd: 17, wrapCostUsd: 1, running: 2 })).toMatchObject({ reservePercent: 2, remainingWorkMs: 15_000 });
+    // A reset can also arrive as a percentage or cost regression without a new reset timestamp.
+    expect(f.forecast("codex", { ...window, id: "w", usedPercent: 2 }, { activeMs: 300_000, costUsd: 18, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
+    expect(f.forecast("codex", { ...window, id: "w", usedPercent: 3 }, { activeMs: 310_000, costUsd: 1, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
   });
 
   it("prefers reported cost, charges cached input once, and never adds reasoning twice", () => {

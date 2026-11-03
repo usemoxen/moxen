@@ -60,7 +60,11 @@ export interface UsageForecast {
   readonly running: number;
 }
 
-interface Sample { percent: number; reset: string | null; activeMs: number; costUsd: number; msPerPercent: number | null; dollarsPerPercent: number | null }
+interface Sample {
+  percent: number; reset: string | null; costUsd: number;
+  initialPercent: number; initialActiveMs: number; initialCostUsd: number;
+  msPerPercent: number | null; dollarsPerPercent: number | null;
+}
 
 /** Ratios are learned per account window, never shared between session and weekly quotas.
  * Active time is accumulated by the owner, excluding user/approval waits. */
@@ -71,22 +75,27 @@ export class UsageForecaster {
     const key = `${provider}:${window.id}`;
     let sample = this.samples.get(key);
     if (!sample || sample.reset !== window.resetsAt || window.usedPercent < sample.percent || work.costUsd < sample.costUsd) {
-      sample = { percent: window.usedPercent, reset: window.resetsAt, activeMs: work.activeMs, costUsd: work.costUsd, msPerPercent: null, dollarsPerPercent: null };
+      sample = { percent: window.usedPercent, reset: window.resetsAt, costUsd: work.costUsd,
+        initialPercent: window.usedPercent, initialActiveMs: work.activeMs, initialCostUsd: work.costUsd,
+        msPerPercent: null, dollarsPerPercent: null };
       this.samples.set(key, sample);
     }
-    const delta = window.usedPercent - sample.percent;
-    if (delta > 0) {
-      const elapsed = work.activeMs - sample.activeMs;
-      const cost = work.costUsd - sample.costUsd;
+    if (window.usedPercent > sample.percent) {
+      // Turn-end cost reports lag the quota's continuous rise. Learn over the
+      // observed window, not an interval that may contain only a small report.
+      const delta = window.usedPercent - sample.initialPercent;
+      const elapsed = work.activeMs - sample.initialActiveMs;
+      const cost = work.costUsd - sample.initialCostUsd;
       if (elapsed > 0) sample.msPerPercent = elapsed / delta;
       if (cost > 0) sample.dollarsPerPercent = cost / delta;
       sample.percent = window.usedPercent;
-      sample.activeMs = work.activeMs;
       sample.costUsd = work.costUsd;
     }
     // Two points minimum for event/report lag; before calibration, reserve two per thread.
-    const reservePercent = Math.max(2, work.wrapCostUsd !== null && sample.dollarsPerPercent !== null
-      ? work.wrapCostUsd / sample.dollarsPerPercent * 1.5 : 2 * work.running);
+    // Cap at ten points: even delayed/mismatched account telemetry must not
+    // stop work before 87% (97 minus 10), while leaving room for a short wrap-up.
+    const reservePercent = Math.min(10, Math.max(2, work.wrapCostUsd !== null && sample.dollarsPerPercent !== null
+      ? work.wrapCostUsd / sample.dollarsPerPercent * 1.5 : 2 * work.running));
     return {
       provider, windowId: window.id, label: window.label, usedPercent: window.usedPercent, resetsAt: window.resetsAt,
       costSource: provider === "claude" ? "reported" : "estimated", wrapCostUsd: work.wrapCostUsd,

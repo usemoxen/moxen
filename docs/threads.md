@@ -112,11 +112,15 @@ edits already on disk remain. Provider telemetry can lag or be missing, and
 other clients can spend the same allowance, so this cannot guarantee staying
 below a limit.
 
-The forecast learns active thread-time and dollars per percentage point separately
-for each window; user-input and approval waits are excluded. It budgets cached
-reads, cache writes and 4,096 output tokens for each model's wrap-up, with a 50%
-margin and at least two percentage points of reserve. Before calibration or for
-unknown model prices, it reserves two points per running thread. Claude's reported
+The forecast learns active thread-time and dollars per percentage point from the
+cumulative gains since each window's first observed sample, starting over at reset;
+session and weekly windows are learned separately. User-input and approval waits
+are excluded. It budgets cached reads, cache writes and 4,096 output tokens for
+each model's wrap-up, with a 50%
+margin and between two and ten percentage points of reserve. The ten-point cap
+prevents delayed cost reports from stopping work before 87% usage. Before
+calibration or for unknown model prices, it reserves two points per running
+thread, capped at ten. Claude's reported
 cumulative cost is counted by gains (native child costs are not added again);
 Codex tokens use a dated API-equivalent price table. `usage status --json` labels
 the cost source. These are estimates, not subscription charges or an invoice.

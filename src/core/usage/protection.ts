@@ -309,6 +309,8 @@ export class UsageProtection {
         costUsd += inFlight;
         const used = typeof context?.usedTokens === "number" ? context.usedTokens : null;
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
+        // One wrap-up request per open thread: its context input plus a short
+        // output, not the cumulative spend of its previous turns.
         const estimate = used === null ? null : usageCost(selection.model, { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
