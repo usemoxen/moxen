@@ -130,6 +130,9 @@ hard limit. It does not silently retry summary generation. Both paths keep origi
 image paths outside transcript trimming and carry the selected entry's unsent
 request. Other queued/scheduled requests stay on the source thread. Destination
 identity is persisted before creation to avoid duplicate handoffs after restart.
+A delegated task that continues in a new thread stays its parent's task: the
+parent is not told when the source hands off, and is told once when the
+continuation settles, by its new taskId with the original one named.
 The older `usageContinuation` config key remains readable but is hidden; new
 protection entries default to continuing here. Automatic usage-limit continuation
 and long-thread compaction do not compete with a held wrap-up.

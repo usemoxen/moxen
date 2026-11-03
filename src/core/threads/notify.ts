@@ -29,6 +29,8 @@ export interface TaskNotification {
   readonly filesChanged: number | null;
   readonly additions: number | null;
   readonly deletions: number | null;
+  /** The task id the parent delegated, when this task carried on in a new thread after a handoff. */
+  readonly continuedFrom?: string;
 }
 
 /** The first line of a report, as its headline (markdown emphasis and heading marks dropped). */
@@ -68,7 +70,7 @@ export function taskNotificationText(tasks: readonly TaskNotification[]): string
       task.filesChanged === null || task.filesChanged === 0 ? null : `${task.filesChanged} file${task.filesChanged === 1 ? "" : "s"} changed (+${task.additions ?? 0} −${task.deletions ?? 0})`,
     ].filter((fact): fact is string => fact !== null);
     return [
-      `- Task "${task.title}" (taskId ${task.taskId}) ${VERB[task.status]}${facts.length > 0 ? ` · ${facts.join(" · ")}` : ""}.`,
+      `- Task "${task.title}" (taskId ${task.taskId}${task.continuedFrom ? `, continued from taskId ${task.continuedFrom}` : ""}) ${VERB[task.status]}${facts.length > 0 ? ` · ${facts.join(" · ")}` : ""}.`,
       task.headline === null ? null : `  Headline: ${task.headline}`,
     ]
       .filter((line): line is string => line !== null)

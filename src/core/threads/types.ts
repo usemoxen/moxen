@@ -284,6 +284,10 @@ export interface StoredDelegation {
   readonly baseBranch?: string | null;
   /** The parent is told when the task settles for good, however many turns that takes (a usage-limit pause and its resume included). */
   readonly notify?: boolean;
+  /** The thread this task continued in after a handoff; the parent hears from that thread, not this one. */
+  readonly continuedIn?: string;
+  /** The task id the parent first knew, when this row is a handoff's continuation. */
+  readonly continuesTaskId?: string;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

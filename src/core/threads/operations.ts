@@ -90,7 +90,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
-import type { SendTurnInput, StoredActivity, StoredThread, StoredTurn } from "./types.js";
+import type { SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -957,14 +957,19 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     });
     await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
   }
-  if ((await store.readTurns(created.id)).length === 0) await startTurn(ctx, {
-    threadId: created.id,
-    prompt: handoff,
-    ...(request.queue ? { queue: request.queue } : {}),
-    ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
-    // Noop subscriber: the driver's shared pump exists before any client subscribes.
-    onEvent: () => undefined,
-  });
+  const notifyParent = await carryDelegation(store, source.id, created.id);
+  if ((await store.readTurns(created.id)).length === 0) {
+    const started = await startTurn(ctx, {
+      threadId: created.id,
+      prompt: handoff,
+      ...(request.queue ? { queue: request.queue } : {}),
+      ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
+      // Noop subscriber: the driver's shared pump exists before any client subscribes.
+      onEvent: () => undefined,
+    });
+    // A queued continuation reports through `runRecoveredTurn` when it is admitted; one started now reports here.
+    if (notifyParent && started.run !== null) void started.run.then(() => queueTaskNotification(ctx, notifyParent, created.id)).catch(() => undefined);
+  }
   await store.appendLedger(source.id, "activity", {
     id: store.newId(),
     threadId: source.id,
@@ -976,6 +981,34 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   });
   store.emit(source.id, "thread-continued");
   return { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null };
+}
+
+/**
+ * A delegated task that carries on in a new thread stays the parent's task:
+ * the continuation gets its own delegation row (so the parent is told when it
+ * ends), and the source's row records where the work went (so the source
+ * settling by handing off is not reported as the task finishing).
+ * Idempotent: a handoff retried after a restart adds no second row.
+ */
+async function carryDelegation(store: ThreadStore, sourceId: string, destinationId: string): Promise<string | null> {
+  const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === sourceId && candidate.status === "running");
+  if (!row || row.continuedIn !== undefined || rows.some((candidate) => candidate.childThreadId === destinationId)) return null;
+  const now = store.nowIso();
+  await store.appendDelegation({
+    id: randomUUID(),
+    parentThreadId: row.parentThreadId,
+    childThreadId: destinationId,
+    prompt: row.prompt,
+    status: "running",
+    ...(row.baseBranch !== undefined ? { baseBranch: row.baseBranch } : {}),
+    ...(row.notify ? { notify: true } : {}),
+    continuesTaskId: row.continuesTaskId ?? row.childThreadId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await store.updateDelegation(row.id, { continuedIn: destinationId });
+  return row.notify ? row.parentThreadId : null;
 }
 
 /** The delegation that created this thread, with its parent's title, if it is a delegated task. */
@@ -1887,7 +1920,7 @@ export function queueTaskNotification(ctx: OperationContext, parentThreadId: str
  * told and the task is not simply waiting for another resume.
  */
 async function notifyParentOfResumedTask(ctx: OperationContext, childThreadId: string): Promise<void> {
-  const delegation = (await ctx.store.readDelegations()).find((row) => row.childThreadId === childThreadId && row.notify === true);
+  const delegation = (await ctx.store.readDelegations()).find((row) => row.childThreadId === childThreadId && row.notify === true && row.continuedIn === undefined);
   if (delegation) queueTaskNotification(ctx, delegation.parentThreadId, childThreadId);
 }
 
@@ -1954,10 +1987,18 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  */
 async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, childThreadIds: readonly string[]): Promise<void> {
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
-  const final = (await Promise.all(childThreadIds.map(async (id) => ((await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
+  // One that handed off to a new thread has not finished either: its parent hears from the continuation.
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
+  const final = (await Promise.all(childThreadIds.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
     (id): id is string => id !== null,
   );
-  const tasks = (await Promise.all(final.map((id) => taskNotificationOf(ctx, id)))).filter(
+  const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
+  const tasks = (await Promise.all(final.map(async (id) => {
+    const task = await taskNotificationOf(ctx, id);
+    const from = continuesTaskId(id);
+    return task && from ? { ...task, continuedFrom: from } : task;
+  }))).filter(
     (task): task is TaskNotification => task !== null,
   );
   if (tasks.length === 0) return;
