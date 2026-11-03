@@ -112,9 +112,8 @@ export class UsageProtection {
         cost = reported >= before ? reported - before : reported;
         previous.set(provider, reported);
       } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
-        cost = usageCost(selection.model, {
-          ...turn.usage, input: Math.max(0, turn.usage.input - turn.usage.cacheRead - turn.usage.cacheCreate),
-        }, fast)?.usd ?? 0;
+        // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
+        cost = usageCost(selection.model, turn.usage, fast)?.usd ?? 0;
       }
       if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
       if (this.counted.has(key)) continue;
@@ -299,7 +298,7 @@ export class UsageProtection {
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
-          if (live) inFlight = usageCost(selection.model, { ...live, input: Math.max(0, live.input - live.cacheRead - live.cacheCreate) }, fast)?.usd ?? 0;
+          if (live) inFlight = usageCost(selection.model, live, fast)?.usd ?? 0;
         }
         const key = `${thread.id}:${turn.id}`;
         inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);

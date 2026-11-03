@@ -160,6 +160,27 @@ describe("usage protection", () => {
     w.guard.close();
   });
 
+  it("prices recorded usage as it is: input already excludes cached reads, so the cache is not subtracted again", async () => {
+    // Every driver records `input` and `cacheRead` as disjoint (MXN-235): 10,000 uncached plus 90,000 cached.
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("cached work");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    const usage = { input: 10_000, cacheRead: 90_000, cacheCreate: 0, output: 0, thinking: 0 };
+    w.guard.observe({ type: "token-usage.updated", threadId: id, provider: "codex", usage });
+    await w.guard.tick();
+    const priced = usageCost("gpt-6.1-sol", usage)!.usd;
+    expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBeCloseTo(priced, 9);
+    await completeTurn(w.store, id, turn.id, { text: "done", usage });
+    w.guard.observe({ type: "turn.completed", threadId: id, provider: "codex", turnId: turn.id });
+    await w.guard.tick();
+    expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBeCloseTo(priced, 9);
+    forecast.mockRestore();
+    w.guard.close();
+  });
+
   it("counts Claude cumulative gains and session resets once, not every historical snapshot", async () => {
     const w = await world("claude");
     w.ctx.config.usageProtection = "notify";
