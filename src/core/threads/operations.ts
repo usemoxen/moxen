@@ -442,8 +442,38 @@ async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
   return rows;
 }
 
+/** Candidate snapshots omit idle dependencies; load only those referenced by work. */
+async function queueDependencies(ctx: OperationContext, rows: QueueRow[]): Promise<void> {
+  const known = new Set(rows.map((row) => row.thread.id));
+  const load = async (id: string): Promise<QueueRow | undefined> => {
+    if (!known.has(id)) {
+      known.add(id);
+      const thread = await ctx.store.readThreadRecord(id);
+      if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+    }
+    return rows.find((row) => row.thread.id === id);
+  };
+  for (const row of rows) for (const turn of row.turns) {
+    if (turn.status !== "queued") continue;
+    for (const condition of turn.queue?.conditions ?? []) {
+      if (condition.type !== "thread" && condition.type !== "entry") continue;
+      const dependency = await load(condition.threadId);
+      if (condition.type !== "entry") continue;
+      let target = dependency?.turns.find((turn) => turn.id === condition.turnId);
+      const seen = new Set<string>();
+      while (target?.handoff && !seen.has(target.id)) {
+        seen.add(target.id);
+        const { destinationThreadId, requestId } = target.handoff;
+        const destination = await load(destinationThreadId);
+        target = destination?.turns.find((turn) => turn.queue?.requestId === `handoff:${requestId}`);
+      }
+    }
+  }
+}
+
 export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly QueueRow[]): Promise<WorkQueueEntry[]> {
-  const rows = snapshot ?? await queueRows(ctx);
+  const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+  if (snapshot) await queueDependencies(ctx, rows);
   const entries: WorkQueueEntry[] = [];
   for (const row of rows) {
     if (!row.turns.some((turn) => turn.status === "queued" || turn.queue && turn.status !== "completed")) continue;
@@ -520,9 +550,10 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
   });
 }
 
-export async function runWorkQueue(ctx: OperationContext, now = Date.now()): Promise<void> {
+export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<void> {
   await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
-    const rows = await queueRows(ctx);
+    const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+    if (snapshot) await queueDependencies(ctx, rows);
     for (const row of rows) for (const turn of row.turns) {
       if (turn.status !== "queued" || !turn.queue) continue;
       const admission = queueAdmission(row, turn, rows, ctx.config, now);

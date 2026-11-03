@@ -11,6 +11,11 @@ import type { ProviderRuntimeEvent } from "../providers/spi.js";
 export type BackendEvent =
   | ProviderRuntimeEvent
   | {
+      readonly type: "backend.context.updated";
+      readonly threadId: string;
+      readonly payload: Record<string, unknown>;
+    }
+  | {
       readonly type: "backend.thread.changed";
       readonly threadId: string;
       readonly reason: string;

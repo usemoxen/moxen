@@ -18,6 +18,7 @@
  *   effort picker) works unmodified.
  */
 import path from "node:path";
+import { appendFile } from "node:fs/promises";
 import os from "node:os";
 import { importManagedSkill, listManagedSkills, readManagedSkill, removeManagedSkill, saveManagedSkill, setManagedSkillEnabled, type SkillRoots } from "../core/skills/management.js";
 import { randomUUID } from "node:crypto";
@@ -203,6 +204,7 @@ export class DirectConnection implements ClientApi {
   private readonly usageProtection = new UsageProtection(() => this.context());
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
+  private readonly usageFailures = new Set<string>();
   private readonly usageSubscriptions: Array<() => void> = [];
   private readonly storeRoot: string;
   private readonly embeddingRuntime: EmbeddingRuntime;
@@ -538,6 +540,14 @@ export class DirectConnection implements ClientApi {
       if (this.closed || this.usageTickRunning) return;
       this.usageTickRunning = true;
       try { await this.usageProtection.tick(); }
+      catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (!this.usageFailures.has(message)) {
+          this.usageFailures.add(message);
+          await appendFile(path.join(this.storeRoot, "server.log"),
+            `${new Date().toISOString()} usage protection: ${message}\n`, "utf8").catch(() => undefined);
+        }
+      }
       finally { this.usageTickRunning = false; }
     };
     this.usageTimer = setInterval(() => { void usageTick().catch(() => undefined); }, 2000);
@@ -1734,6 +1744,7 @@ export class DirectConnection implements ClientApi {
   async close(): Promise<void> {
     this.closed = true;
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
+    this.usageProtection.close();
     for (const unsubscribe of this.usageSubscriptions) unsubscribe();
     this.embeddingGeneration++;
     this.semanticMemory.cancel();

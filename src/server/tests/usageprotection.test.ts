@@ -1,4 +1,6 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { testHarness } from "../../core/testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn } from "../../core/threads/threads.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
@@ -7,8 +9,32 @@ import type { ClientApi } from "../api.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../core/usage/limits.js";
 import { DirectConnection } from "../connection.js";
 import { decodeCommand, decodeQuery } from "../protocol.js";
+import type { UsageProtection } from "../../core/usage/protection.js";
 
 afterEach(resetUsageLimitsForTests);
+
+it("logs each distinct scheduler failure once instead of silently retrying every two seconds", async () => {
+  const w = await testHarness();
+  const api = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });
+  const guard = Reflect.get(api, "usageProtection") as UsageProtection;
+  const tick = vi.spyOn(guard, "tick").mockRejectedValue(new Error("first tick failure"));
+  vi.useFakeTimers();
+  try {
+    api.startScheduling();
+    const log = () => readFile(path.join(w.root, "server.log"), "utf8");
+    await vi.waitFor(async () => expect(await log()).toContain("first tick failure"));
+    await vi.advanceTimersByTimeAsync(4000);
+    tick.mockRejectedValue(new Error("second tick failure"));
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(async () => expect(await log()).toContain("second tick failure"));
+    expect((await log()).match(/first tick failure/g)).toHaveLength(1);
+    expect((await log()).match(/second tick failure/g)).toHaveLength(1);
+    expect(tick.mock.calls.length).toBeGreaterThanOrEqual(4);
+  } finally {
+    await api.close();
+    vi.useRealTimers();
+  }
+});
 
 it("holds explicitly queued client input across reconnection and never accepts the coordinator bypass over the wire", async () => {
   const w = await testHarness();

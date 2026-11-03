@@ -1523,7 +1523,7 @@ export function App({
         };
   /** What waits over the composer, most urgent first; the banner pages between them. */
   const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
-  notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now));
+  notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now, providers));
   if (usageProtection.error) notices.push({ key: "usage-error", glyph: "!", glyphColor: COLOR.danger, title: usageProtection.error, detail: null, actions: [] });
   if (usageBanner.banner !== null) {
     const banner = usageBanner.banner;

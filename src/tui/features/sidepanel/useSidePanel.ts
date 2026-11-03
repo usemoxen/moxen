@@ -3,6 +3,7 @@ import type { MutableRefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
+import { dispatchErrorMessage } from "../../../core/errors.js";
 import type { ContextBreakdown } from "../../model/sidepanel.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { QueryResults } from "../../../server/protocol.js";
@@ -92,7 +93,10 @@ export function useUsageProtection(client: ClientApi) {
   }, [client]);
   const act = useCallback((command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel" }) => {
     setError(null);
-    void client.dispatch(command).then(() => client.query({ type: "usage.protection" })).then(setState).catch((cause: unknown) => setError(String(cause)));
+    void client.dispatch(command)
+      .then(() => client.query({ type: "usage.protection" }))
+      .then(setState)
+      .catch((cause: unknown) => setError(dispatchErrorMessage(cause)));
   }, [client]);
   return { state, error, act };
 }

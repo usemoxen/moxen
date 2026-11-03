@@ -27,6 +27,24 @@ async function world() {
 }
 
 describe("conditional work queue", () => {
+  it.each(["thread", "entry"] as const)("does not report an existing idle %s dependency as unavailable in a candidate snapshot", async (type) => {
+    const w = await world();
+    const dependency = await w.make();
+    const finished = await sendTurn(w.store, dependency.id, { prompt: "prerequisite" });
+    await completeTurn(w.store, dependency.id, finished.turn.id, { text: "done" });
+    const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, {
+      prompt: "dependent work",
+      queue: parseQueuePolicy({ conditions: [{ type, threadId: dependency.id, turnId: finished.turn.id }] }),
+    });
+    const rows = [{ thread, turns: await w.store.readTurns(thread.id) }];
+    const entries = await readWorkQueue(w.ctx, rows);
+    expect(entries.find((entry) => entry.turnId === queued.turn.id)?.blocked).toEqual([]);
+    await runWorkQueue(w.ctx, Date.now(), rows);
+    await flushTurnRunners(1000);
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
   it("does not promote or batch conditional work when an ordinary turn settles", async () => {
     const w = await world(); const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });

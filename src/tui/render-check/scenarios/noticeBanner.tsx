@@ -73,7 +73,10 @@ export async function runNoticeBanner(): Promise<void> {
   const protection = usageProtectionNotices({
     forecasts: [{ provider: "codex", windowId: "session", label: "Session", usedPercent: 94, resetsAt: "2026-11-01T11:12:00Z", remainingWorkMs: 360_000, reservePercent: 4, shouldWrap: true, running: 2, costSource: "estimated", wrapCostUsd: 0.4 }],
     queue: [{ provider: "codex", threadId: "held", title: "Finish keyboard navigation", phase: "waiting", order: 1, resetsAt: "2026-11-01T11:12:00Z", handoff: false }],
-  }, (command) => commands.push(command), now);
+  }, (command) => commands.push(command), now, [{
+    instanceId: "codex", driver: "codex", displayName: "Codex", enabled: true, installed: true,
+    status: null, authStatus: null, models: [], supportedRuntimeModes: null, usageLimits: null, skills: [],
+  }]);
   function Protection() {
     const [index, setIndex] = useState(0);
     return <NoticeBanner notices={protection} index={index} onPage={setIndex} width={80} />;
@@ -83,7 +86,9 @@ export async function runNoticeBanner(): Promise<void> {
   console.log("--- usage protection: forecast and manual wrap-up ---");
   const forecast = guarded.captureCharFrame();
   console.log(forecast);
-  if (!forecast.includes("94%") || !forecast.includes("6 min") || !forecast.includes("72 min")) fail("usage protection forecast lost its estimates");
+  if (!forecast.includes("Codex") || !forecast.includes("94%") || !forecast.includes("6 min") || !forecast.includes("1 h 12 min")) {
+    fail("usage protection forecast lost its display name or estimates");
+  }
   const forecastRows = forecast.split("\n");
   const actionRow = forecastRows.findIndex((line) => line.includes("Wrap up all"));
   await act(async () => guarded.mockMouse.click(forecastRows[actionRow]!.indexOf("Wrap up all") + 2, actionRow));

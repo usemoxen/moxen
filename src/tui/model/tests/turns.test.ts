@@ -445,6 +445,9 @@ describe("formatDuration", () => {
     expect(formatDuration(209_000)).toBe("3m 29s");
     expect(formatDuration(17_000)).toBe("17s");
     expect(formatDuration(150_000)).toBe("2m 30s");
+    expect(formatDuration(4_320_000, "minutes")).toBe("1 h 12 min");
+    expect(formatDuration(359_001, "minutes")).toBe("6 min");
+    expect(formatDuration(-1000, "minutes")).toBe("0 min");
   });
 });
 

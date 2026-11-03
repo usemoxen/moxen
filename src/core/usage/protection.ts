@@ -15,6 +15,7 @@ const RESUME_PROMPT = "The usage allowance has reset. Resume the unfinished task
 export interface UsageQueueEntry extends UsagePause { readonly threadId: string; readonly title: string }
 export interface UsageProtectionSnapshot { readonly forecasts: readonly UsageForecast[]; readonly queue: readonly UsageQueueEntry[] }
 interface Row { thread: StoredThread; turns: StoredTurn[] }
+export const USAGE_CANDIDATE_RESCAN_MS = 60_000;
 
 /** Account-wide coordinator owned by the server, never by an open client tab.
  * Queue state is in the thread record so a server restart cannot release held messages. */
@@ -24,6 +25,16 @@ export class UsageProtection {
   private readonly nativeWrap = new Set<string>();
   private readonly activeMs = new Map<string, number>();
   private readonly activeCounts = new Map<string, number>();
+  private readonly candidates = new Map<string, Row>();
+  private readonly dirty = new Set<string>();
+  private readonly contexts = new Map<string, Record<string, unknown> | null>();
+  private readonly counted = new Set<string>();
+  private readonly completedCost = new Map<string, number>();
+  private readonly costCounter = new Map<string, number>();
+  private readonly runningCost = new Map<string, number>();
+  private unsubscribe: (() => void) | null = null;
+  private scannedAt: number | null = null;
+  private closed = false;
   private lastAt: number | null = null;
   private snapshot: UsageProtectionSnapshot = { forecasts: [], queue: [] };
   private enabled = false;
@@ -33,11 +44,16 @@ export class UsageProtection {
 
   observe(event: ProviderRuntimeEvent): void {
     if (event.type === "token-usage.updated") this.live.set(event.threadId, event.usage);
-    if (event.type === "thread.state.changed" && event.state === "usage-wrap-up") this.nativeWrap.add(event.threadId);
+    if (event.type === "thread.state.changed" && event.state === "usage-wrap-up") {
+      this.nativeWrap.add(event.threadId);
+      this.dirty.add(event.threadId);
+    }
     if (event.type === "turn.completed" || event.type === "turn.interrupted" || event.type === "turn.failed") {
       this.live.delete(event.threadId);
     }
   }
+
+  close(): void { this.closed = true; this.unsubscribe?.(); this.unsubscribe = null; }
 
   read(): UsageProtectionSnapshot { return { ...this.snapshot, forecasts: this.enabled ? this.snapshot.forecasts : [] }; }
 
@@ -56,7 +72,7 @@ export class UsageProtection {
       if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
       if (!usageLimitsSnapshot()[provider]?.windows.length) throw new CliError("USAGE_UNAVAILABLE", "This provider has not reported usage windows.");
       await this.begin(ctx, rows, provider);
-      await this.refresh(ctx, Date.now());
+      await this.refresh(ctx, Date.now(), await this.rows(ctx, Date.now(), true));
     });
   }
 
@@ -64,7 +80,7 @@ export class UsageProtection {
     return this.serialize(async () => {
       const ctx = await this.context();
       const rows = await this.rows(ctx);
-      const row = rows.find((row) => row.thread.id === threadId);
+      const row = rows.find((row) => row.thread.id === threadId && !row.thread.archivedAt);
       if (!row?.thread.usagePause) throw new CliError("USAGE_QUEUE_MISSING", "The thread is not waiting for usage.");
       if (direction === "cancel") {
         // Cancellation removes automatic recovery, not a request to start work now.
@@ -76,26 +92,90 @@ export class UsageProtection {
         const orders = rows.flatMap((row) => row.thread.usagePause ? [row.thread.usagePause.order] : []);
         await this.pause(ctx, threadId, { ...row.thread.usagePause, order: direction === "first" ? Math.min(...orders) - 1 : Math.max(...orders) + 1 });
       }
-      await this.refresh(ctx, Date.now());
+      await this.refresh(ctx, Date.now(), await this.rows(ctx, Date.now(), true));
     });
   }
 
-  private async rows(ctx: OperationContext, heldOnly = false, now = Date.now()): Promise<Row[]> {
-    const rows: Row[] = [];
-    for (const id of await ctx.store.listThreadIds()) {
-      let thread = await ctx.store.readThreadRecord(id);
-      if (!thread || thread.archivedAt || thread.deletedAt) continue;
-      if (thread.usageProtectionOverride && !usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, now)) {
-        await ctx.store.withThreadLock(id, async () => {
-          const current = await ctx.store.readThreadRecord(id);
-          if (current?.usageProtectionOverride && !usageProtectionOverrideActive(current.usageProtectionOverride, current.usageProtectionOverride.provider, now)) await ctx.store.writeThreadRecord({ ...current, usageProtectionOverride: null });
-        });
-        thread = (await ctx.store.readThreadRecord(id))!;
+  private account(row: Row): void {
+    const previous = new Map<string, number>();
+    for (const turn of row.turns) {
+      const selection = turn.modelSelection ?? row.thread.modelSelection;
+      const provider = driverKindOfInstance(selection.instanceId);
+      if (!provider) continue;
+      const fast = selection.options?.some((option) =>
+        (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
+      const reported = turn.usage?.costUsd;
+      const key = `${row.thread.id}:${turn.id}`;
+      let cost = 0;
+      if (provider === "claude" && reported !== undefined) {
+        const before = previous.get(provider) ?? 0;
+        cost = reported >= before ? reported - before : reported;
+        previous.set(provider, reported);
+      } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
+        cost = usageCost(selection.model, {
+          ...turn.usage, input: Math.max(0, turn.usage.input - turn.usage.cacheRead - turn.usage.cacheCreate),
+        }, fast)?.usd ?? 0;
       }
-      if (thread.usagePause) await recoverOrphanedTurn(ctx, id);
-      rows.push({ thread, turns: !heldOnly || thread.usagePause ? await ctx.store.readTurns(id) : [] });
+      if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
+      if (this.counted.has(key)) continue;
+      this.counted.add(key);
+      this.completedCost.set(provider, (this.completedCost.get(provider) ?? 0) + Math.max(cost, this.runningCost.get(key) ?? 0));
+      this.runningCost.delete(key);
     }
-    return rows.sort((left, right) => left.thread.createdAt.localeCompare(right.thread.createdAt) || left.thread.id.localeCompare(right.thread.id));
+  }
+
+  private async rows(ctx: OperationContext, now = Date.now(), dirtyOnly = false): Promise<Row[]> {
+    if (this.closed) return [];
+    if (!this.unsubscribe) this.unsubscribe = ctx.store.subscribe((event) => {
+      if (event.type === "backend.thread.changed") this.dirty.add(event.threadId);
+      if (event.type === "backend.context.updated") this.contexts.set(event.threadId, event.payload);
+    });
+    const rescan = !dirtyOnly && (this.scannedAt === null || now - this.scannedAt >= USAGE_CANDIDATE_RESCAN_MS);
+    const ids = new Set([...(dirtyOnly ? [] : this.candidates.keys()), ...this.dirty]);
+    // Consume before awaiting: events emitted during reads belong to the next pass.
+    this.dirty.clear();
+    if (rescan) for (const id of await ctx.store.listThreadIds()) ids.add(id);
+    try {
+      for (const id of ids) {
+        let thread = await ctx.store.readThreadRecord(id);
+        if (!thread || thread.deletedAt) {
+          this.candidates.delete(id);
+          this.contexts.delete(id);
+          continue;
+        }
+        const override = thread.usageProtectionOverride;
+        if (!thread.archivedAt && override && !usageProtectionOverrideActive(override, override.provider, now)) {
+          await ctx.store.withThreadLock(id, async () => {
+            const current = await ctx.store.readThreadRecord(id);
+            const override = current?.usageProtectionOverride;
+            if (current && override && !usageProtectionOverrideActive(override, override.provider, now)) {
+              await ctx.store.writeThreadRecord({ ...current, usageProtectionOverride: null });
+            }
+          });
+          thread = (await ctx.store.readThreadRecord(id))!;
+        }
+        if (!thread.archivedAt && thread.usagePause) {
+          await recoverOrphanedTurn(ctx, id);
+          thread = (await ctx.store.readThreadRecord(id))!;
+        }
+        const row = { thread, turns: await ctx.store.readTurns(id) };
+        if (!thread.archivedAt) this.account(row);
+        if (row.turns.some((turn) => turn.status === "running" || turn.status === "queued")
+          || thread.usagePause || thread.usageProtectionOverride || this.nativeWrap.has(id)) {
+          this.candidates.set(id, row);
+        } else {
+          this.candidates.delete(id);
+          this.contexts.delete(id);
+        }
+      }
+    } catch (cause) {
+      // A failed read must not lose a newly discovered thread until the next rescan.
+      for (const id of ids) this.dirty.add(id);
+      throw cause;
+    }
+    if (rescan) this.scannedAt = now;
+    return [...this.candidates.values()].sort((left, right) =>
+      left.thread.createdAt.localeCompare(right.thread.createdAt) || left.thread.id.localeCompare(right.thread.id));
   }
 
   private async pause(ctx: OperationContext, id: string, usagePause: UsagePause | null, now = Date.now()): Promise<void> {
@@ -139,7 +219,11 @@ export class UsageProtection {
     const relevant = windows.filter((window) => window.usedPercent >= 90);
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
-    const eligible = rows.filter(({ thread, turns }) => !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now) && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming") && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider && (openTurn(turns) || this.nativeWrap.has(thread.id))
+    const eligible = rows.filter(({ thread, turns }) =>
+      !thread.archivedAt && !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)
+      && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming")
+      && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider
+      && (openTurn(turns) || this.nativeWrap.has(thread.id))
       && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
     if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
@@ -161,74 +245,97 @@ export class UsageProtection {
     }
   }
 
-  private async refresh(ctx: OperationContext, now: number): Promise<Row[]> {
+  private async refresh(ctx: OperationContext, now: number, rows: Row[]): Promise<void> {
     this.enabled = ctx.config.usageProtection === "notify" || ctx.config.usageProtection === "auto";
-    const rows = await this.rows(ctx, !this.enabled, now);
+    if (this.enabled || rows.some(({ thread }) => thread.usagePause)) {
+      for (const { thread, turns } of rows) {
+        if (thread.archivedAt || !openTurn(turns) || this.contexts.has(thread.id)) continue;
+        const activities = await ctx.store.readActivities(thread.id);
+        if (!this.contexts.has(thread.id)) this.contexts.set(thread.id,
+          activities.findLast((activity) => activity.kind === "context-window.updated")?.payload ?? null);
+      }
+    }
+    this.forecast(ctx, now, rows);
+  }
+
+  /** Re-project changed work without reading ledgers or advancing the clock twice. */
+  private forecast(ctx: OperationContext, now: number, rows: Row[]): void {
     const elapsed = this.lastAt === null ? 0 : Math.max(0, Math.min(now - this.lastAt, 10_000));
     this.lastAt = now;
     const forecasts: UsageForecast[] = [];
     if (!this.enabled && !rows.some(({ thread }) => thread.usagePause)) {
       this.snapshot = { forecasts: [], queue: [] };
       this.activeCounts.clear();
-      return rows;
+      return;
     }
     for (const [provider, limits] of Object.entries(usageLimitsSnapshot(now))) {
-      const members = rows.filter(({ thread, turns }) => driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider);
+      const members = rows.filter(({ thread, turns }) => !thread.archivedAt
+        && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider);
       const running = members.filter(({ thread, turns }) => openTurn(turns) && !thread.hasPendingApprovals && !thread.hasPendingUserInput);
       const activeMs = (this.activeMs.get(provider) ?? 0) + elapsed * Math.min(running.length, this.activeCounts.get(provider) ?? 0);
       this.activeCounts.set(provider, running.length);
       this.activeMs.set(provider, activeMs);
-      let costUsd = 0;
+      let costUsd = this.completedCost.get(provider) ?? 0;
       let wrapCostUsd: number | null = 0;
       for (const { thread, turns } of members) {
-        const selection = openTurn(turns)?.modelSelection ?? thread.modelSelection;
+        const turn = openTurn(turns);
+        if (!turn) continue;
+        const selection = turn.modelSelection ?? thread.modelSelection;
         const fast = selection.options?.some((option) => (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
-        const activities = await ctx.store.readActivities(thread.id);
-        const context = activities.findLast((activity) => activity.kind === "context-window.updated")?.payload;
+        const context = this.contexts.get(thread.id);
         const providerTurns = turns.filter((turn) => driverKindOfInstance((turn.modelSelection ?? selection).instanceId) === provider);
+        let inFlight = 0;
         // Claude totals include native tasks. Count gains, including session resets,
         // rather than adding cumulative snapshots or native child costs again.
         if (provider === "claude") {
           let previous = 0;
           for (const turn of providerTurns) {
+            if (turn.status === "running" || turn.status === "queued") continue;
             const cost = turn.usage?.costUsd;
             if (cost === undefined) continue;
-            costUsd += cost >= previous ? cost - previous : cost;
             previous = cost;
           }
-          if (typeof context?.costUsd === "number") costUsd += Math.max(0, context.costUsd - previous);
+          if (typeof context?.costUsd === "number") inFlight = Math.max(0, context.costUsd - previous);
         }
         else {
-          for (const turn of providerTurns) if (turn.usage) costUsd += usageCost((turn.modelSelection ?? selection).model, { ...turn.usage, input: Math.max(0, turn.usage.input - turn.usage.cacheRead - turn.usage.cacheCreate) }, fast)?.usd ?? 0;
-          const live = this.live.get(thread.id);
-          if (live && openTurn(turns)) costUsd += usageCost(selection.model, { ...live, input: Math.max(0, live.input - live.cacheRead - live.cacheCreate) }, fast)?.usd ?? 0;
+          const live = this.live.get(thread.id) ?? turn.usage;
+          if (live) inFlight = usageCost(selection.model, { ...live, input: Math.max(0, live.input - live.cacheRead - live.cacheCreate) }, fast)?.usd ?? 0;
         }
-        if (!openTurn(turns)) continue;
+        const key = `${thread.id}:${turn.id}`;
+        inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);
+        this.runningCost.set(key, inFlight);
+        costUsd += inFlight;
         const used = typeof context?.usedTokens === "number" ? context.usedTokens : null;
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
         const estimate = used === null ? null : usageCost(selection.model, { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
       }
+      costUsd = Math.max(costUsd, this.costCounter.get(provider) ?? 0);
+      this.costCounter.set(provider, costUsd);
       for (const window of limits.windows) {
         const forecast = this.forecaster.forecast(provider, window, { activeMs, costUsd, wrapCostUsd, running: running.length });
         forecasts.push(provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
       }
     }
-    this.snapshot = { forecasts, queue: rows.flatMap(({ thread }) => thread.usagePause ? [{ ...thread.usagePause, threadId: thread.id, title: thread.title }] : []).sort((a, b) => a.order - b.order) };
-    return rows;
+    this.snapshot = { forecasts, queue: rows.flatMap(({ thread }) =>
+      !thread.archivedAt && thread.usagePause ? [{ ...thread.usagePause, threadId: thread.id, title: thread.title }] : []).sort((a, b) => a.order - b.order) };
   }
 
   private async step(now: number): Promise<void> {
     const ctx = await this.context();
-    let rows = await this.refresh(ctx, now);
+    if (this.closed) return;
+    let rows = await this.rows(ctx, now);
+    await this.refresh(ctx, now, rows);
+    let changed = false;
     if (ctx.config.usageProtection === "auto") {
       for (const provider of new Set(this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now);
-      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, await this.rows(ctx), "claude", now);
-      rows = await this.rows(ctx);
+      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now);
+      if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
     }
     this.nativeWrap.clear();
-    const queue = rows.filter((row) => row.thread.usagePause).sort((a, b) => a.thread.usagePause!.order - b.thread.usagePause!.order);
+    const queue = rows.filter((row) => !row.thread.archivedAt && row.thread.usagePause)
+      .sort((a, b) => a.thread.usagePause!.order - b.thread.usagePause!.order);
     const busy = new Set<string>();
     for (const row of queue) {
       const pause = row.thread.usagePause!;
@@ -283,7 +390,9 @@ export class UsageProtection {
       }
       await this.ensureRecovery(ctx, row.thread.id, waiting);
     }
-    await runWorkQueue(ctx, now);
-    await this.refresh(ctx, now);
+    if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
+    await runWorkQueue(ctx, now, rows);
+    if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
+    if (changed) this.forecast(ctx, now, rows);
   }
 }

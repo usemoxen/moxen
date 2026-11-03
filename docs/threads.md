@@ -70,6 +70,13 @@ time left and reset time; its **Wrap up now** action pauses the account's runnin
 threads. Automatic uses the same action without waiting for a click. The server
 owns this work, so closing the TUI does not disable it.
 
+The server checks every two seconds, sharing one candidate snapshot with the work
+queue: running or queued turns, usage holds and active overrides. A startup scan
+finds existing work; store change events keep that set current, with a full scan
+every minute for writes from other processes. Idle history is not reread on normal
+ticks. Context readings are retained from store events after one initial activity
+read per running thread, and completed costs are counted once per server lifetime.
+
 Before interrupting any turn, Moxen persists a hold on every affected thread.
 It then asks the model for a safe stopping point, one thread at a time, without
 requesting a full summary. The transcript marks this request with a **Usage

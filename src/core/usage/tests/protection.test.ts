@@ -3,9 +3,11 @@ import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
 import { continueThread, scheduleUsageContinue, type OperationContext } from "../../threads/operations.js";
+import { parseQueuePolicy } from "../../threads/queue.js";
+import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../limits.js";
-import { UsageProtection, WRAP_UP_PROMPT } from "../protection.js";
+import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../protection.js";
 import { UsageForecaster, usageCost } from "../forecast.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -29,6 +31,132 @@ async function world(provider: "claude" | "codex" = "codex") {
 }
 
 describe("usage protection", () => {
+  it.each(["off", "auto"] as const)("%s ticks do not reread idle history and discover queued work from store events", async (mode) => {
+    const w = await world();
+    w.ctx.config.usageProtection = mode;
+    const idle: string[] = [];
+    for (let index = 0; index < 50; index++) {
+      const id = await w.make(`idle ${index}`);
+      await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "done" });
+      await w.store.rewriteLedger(id, "activity", Array.from({ length: 20 }, (_, index) => ({
+        id: `activity-${index}`, threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(),
+        payload: { usedTokens: 10_000, cachedInputTokens: 5000, detail: "history".repeat(100) },
+      })));
+      idle.push(id);
+    }
+    const running = await w.make("running");
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const now = Date.now();
+    await w.guard.tick(now);
+    const turns = vi.spyOn(w.store, "readTurns");
+    const activities = vi.spyOn(w.store, "readActivities");
+    const records = vi.spyOn(w.store, "readThreadRecord");
+    const lists = vi.spyOn(w.store, "listThreadIds");
+    for (let tick = 1; tick <= 3; tick++) await w.guard.tick(now + tick * 2000);
+    expect(turns.mock.calls.every(([id]) => id === running)).toBe(true);
+    expect(records.mock.calls.every(([id]) => id === running)).toBe(true);
+    expect(activities).not.toHaveBeenCalled();
+    expect(lists).not.toHaveBeenCalled();
+    await sendTurn(w.store, idle[0]!, { prompt: "queued through the API", queue: parseQueuePolicy({ conditions: [], held: true }) });
+    turns.mockClear(); records.mockClear();
+    await w.guard.tick(now + 8000);
+    expect(turns.mock.calls.some(([id]) => id === idle[0])).toBe(true);
+    expect(turns.mock.calls.every(([id]) => id === running || id === idle[0])).toBe(true);
+    expect(lists).not.toHaveBeenCalled();
+    // Another process has no local emitter: a periodic scan must still find its work.
+    const outside = await openThreadStore(w.root);
+    const external = await createThread(outside, {
+      projectId: "p", title: "external write", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await sendTurn(outside, external.id, { prompt: "work from another process" });
+    await w.guard.tick(now + 10_000);
+    expect(turns.mock.calls.some(([id]) => id === external.id)).toBe(false);
+    await w.guard.tick(now + USAGE_CANDIDATE_RESCAN_MS);
+    expect(turns.mock.calls.some(([id]) => id === external.id)).toBe(true);
+    expect(lists).toHaveBeenCalledTimes(1);
+    w.guard.close();
+  });
+
+  it("keeps context readings live without rereading activity history, and replaces live cost on settlement", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("live context");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    await w.guard.tick();
+    const activities = vi.spyOn(w.store, "readActivities");
+    await w.store.appendLedger(id, "activity", {
+      id: "context", threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(),
+      payload: { usedTokens: 20_000, cachedInputTokens: 10_000 },
+    });
+    w.guard.observe({ type: "token-usage.updated", threadId: id, provider: "codex",
+      usage: { input: 100, output: 100, thinking: 0, cacheRead: 0, cacheCreate: 0, costUsd: 2 } });
+    await w.guard.tick();
+    expect(forecast.mock.calls.at(-1)?.[2]).toMatchObject({ costUsd: 2 });
+    expect(forecast.mock.calls.at(-1)?.[2].wrapCostUsd).toBeGreaterThan(0);
+    await completeTurn(w.store, id, turn.id, {
+      text: "done", usage: { input: 100, output: 100, thinking: 0, cacheRead: 0, cacheCreate: 0, costUsd: 3 },
+    });
+    w.guard.observe({ type: "turn.completed", threadId: id, provider: "codex", turnId: turn.id });
+    await w.guard.tick();
+    expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBe(3);
+    expect(activities).not.toHaveBeenCalled();
+    forecast.mockRestore();
+    w.guard.close();
+  });
+
+  it("counts Claude cumulative gains and session resets once, not every historical snapshot", async () => {
+    const w = await world("claude");
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("cumulative costs");
+    const usage = { input: 100, output: 100, thinking: 0, cacheRead: 0, cacheCreate: 0 };
+    for (const costUsd of [2, 5, 1]) {
+      await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "done", usage: { ...usage, costUsd } });
+      await sendTurn(w.store, id, { prompt: "more work" });
+    }
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    await w.guard.tick();
+    await w.store.appendLedger(id, "activity", {
+      id: "context", threadId: id, kind: "context-window.updated", createdAt: w.store.nowIso(), payload: { costUsd: 3 },
+    });
+    await w.guard.tick();
+    await w.guard.tick();
+    expect(forecast.mock.calls.map(([, , work]) => work.costUsd)).toEqual([6, 8, 8]);
+    forecast.mockRestore();
+    w.guard.close();
+  });
+
+  it.each(["codex", "claude"] as const)("%s cost stays monotone when paid threads leave the candidate set", async (provider) => {
+    const w = await world(provider);
+    w.ctx.config.usageProtection = "notify";
+    const paid = await w.make("paid work");
+    const other = await w.make("still running");
+    const turn = openTurn(await w.store.readTurns(paid))!;
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    const window = { id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null };
+    recordUsageWindows(provider, [window]);
+    const now = Date.now();
+    await w.guard.tick(now);
+    await completeTurn(w.store, paid, turn.id, {
+      text: "done", usage: { input: 100, output: 100, thinking: 0, cacheRead: 0, cacheCreate: 0, costUsd: 4 },
+    });
+    recordUsageWindows(provider, [{ ...window, usedPercent: 21 }]);
+    await w.guard.tick(now + 2000);
+    const calibrated = w.guard.read().forecasts[0]!.remainingWorkMs;
+    expect(calibrated).not.toBeNull();
+    const turns = vi.spyOn(w.store, "readTurns");
+    await w.guard.tick(now + 4000);
+    expect(turns.mock.calls.every(([id]) => id === other)).toBe(true);
+    const costs = forecast.mock.calls.map(([, , work]) => work.costUsd);
+    expect(costs).toEqual([0, 4, 4]);
+    expect(w.guard.read().forecasts[0]!.remainingWorkMs).toBe(calibrated);
+    forecast.mockRestore();
+    w.guard.close();
+  });
+
   it.each(["claude", "codex"] as const)("%s lets a manual message override only its thread until the next reset, across restart", async (provider) => {
     const w = await world(provider);
     const first = await w.make("override");
@@ -80,6 +208,22 @@ describe("usage protection", () => {
     await completeTurn(w.store, id, turn.id, { text: "Stopped safely. Next: tests." });
     await restarted.tick();
     expect(restarted.read().queue[0]?.phase).toBe("waiting");
+  });
+
+  it("does not lose native wrap-up when its turn settles before the next scheduler tick", async () => {
+    const w = await world("claude");
+    w.ctx.config.providers = { claude: { usageWrapUp: "provider" } };
+    const id = await w.make("already stopped");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "safe stopping point" });
+    recordUsageWindows("claude", [{
+      id: "session", label: "Session", usedPercent: 100, exhausted: true,
+      resetsAt: new Date(Date.now() + 3600_000).toISOString(),
+    }]);
+    w.guard.observe({ type: "thread.state.changed", provider: "claude", threadId: id, state: "usage-wrap-up" });
+    await w.guard.tick();
+    expect(w.guard.read().queue[0]).toMatchObject({ threadId: id, phase: "waiting", native: true });
+    expect((await w.store.readThreadRecord(id))?.usagePause?.recoveryTurnId).toBeTruthy();
+    w.guard.close();
   });
 
   it("notify mode leaves work running until requested, and cancellation keeps queued messages unsent", async () => {

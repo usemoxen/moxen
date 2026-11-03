@@ -256,12 +256,17 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
   return groups;
 }
 
-export function formatDuration(durationMs: number): string {  const seconds = Math.round(durationMs / 1000);
+/** Minute precision rounds estimates up; elapsed durations keep their compact seconds. */
+export function formatDuration(durationMs: number, precision: "seconds" | "minutes" = "seconds"): string {
+  const seconds = precision === "minutes"
+    ? Math.max(0, Math.ceil(durationMs / 60_000)) * 60 : Math.round(durationMs / 1000);
+  if (precision === "minutes" && seconds < 3600) return t("time.minutes", { m: seconds / 60 });
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   if (minutes < 60) return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
   const hours = Math.floor(minutes / 60);
+  if (precision === "minutes") return t("time.hoursMinutes", { h: hours, m: minutes % 60 });
   return `${hours}h ${minutes % 60}m`;
 }
 

@@ -18,6 +18,7 @@ import { renameReplacing } from "../infra/atomic.js";
 import { appEnv, appHomeDir } from "../config.js";
 import { CliError } from "../errors.js";
 import type { EventBus } from "../events/bus.js";
+import { createEventBus } from "../events/bus.js";
 import type { BackendEvent } from "../events/bus.js";
 import { decodeDataUrl, imageExtension, type ImageAttachmentUpload } from "../attachments.js";
 import { storedInteractionMode } from "../interactionmode.js";
@@ -61,14 +62,14 @@ function parseLedgerLine<T>(line: string, file: string): T {
 export class ThreadStore {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly aborts = new Map<string, () => void>();
-  private readonly bus: EventBus<BackendEvent> | undefined;
+  private readonly bus: EventBus<BackendEvent>;
   private readonly clock: () => number;
 
   private constructor(
     private readonly root: string,
     options: ThreadStoreOptions = {},
   ) {
-    this.bus = options.bus;
+    this.bus = options.bus ?? createEventBus({ bufferSize: 0 });
     this.clock = options.clock ?? Date.now;
   }
 
@@ -106,7 +107,11 @@ export class ThreadStore {
   }
 
   emit(threadId: string, reason: string): void {
-    this.bus?.publish({ type: "backend.thread.changed", threadId, reason });
+    this.bus.publish({ type: "backend.thread.changed", threadId, reason });
+  }
+
+  subscribe(listener: (event: BackendEvent) => void): () => void {
+    return this.bus.subscribe(listener);
   }
 
   /** Stage 2 drivers register a live run so interrupt can abort it. */
@@ -269,6 +274,12 @@ export class ThreadStore {
   async appendLedger(threadId: string, name: LedgerName, row: unknown): Promise<void> {
     await mkdir(this.threadDir(threadId), { recursive: true });
     await appendFile(ledgerFile(this.root, threadId, name), `${JSON.stringify(row)}\n`, "utf8");
+    if (name === "activity") {
+      const activity = row as StoredActivity;
+      if (activity.kind === "context-window.updated" && activity.payload) {
+        this.bus.publish({ type: "backend.context.updated", threadId, payload: activity.payload });
+      }
+    }
   }
 
   async readTurns(threadId: string): Promise<StoredTurn[]> {
