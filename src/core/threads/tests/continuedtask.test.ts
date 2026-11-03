@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, queueTaskNotification, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../operations.js";
+import { continueThread, queueTaskNotification, runningTasksNote, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
 
 afterEach(() => vi.useRealTimers());
@@ -62,5 +62,39 @@ describe("a delegated task continued in a new thread", () => {
     await completeTurn(w.store, thread.id, turn.id, { text: "Done for now." });
     await continueThread(w.ctx, { threadId: thread.id });
     expect(await w.store.readDelegations()).toEqual([]);
+  });
+});
+
+describe("an orchestrator continued in a new thread", () => {
+  it("takes its running tasks along: listed in the handoff, reporting to the new thread", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const running = await w.make("still running");
+    const done = await w.make("already done");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "r", parentThreadId: parent.id, childThreadId: running.id, prompt: "A", status: "running", notify: true, createdAt: now, updatedAt: now });
+    await w.store.appendDelegation({ id: "d", parentThreadId: parent.id, childThreadId: done.id, prompt: "B", status: "completed", createdAt: now, updatedAt: now });
+    const turn = (await sendTurn(w.store, parent.id, { prompt: "Orchestrate" })).turn;
+    await completeTurn(w.store, parent.id, turn.id, { text: "Waiting on tasks." });
+
+    const continued = await continueThread(w.ctx, { threadId: parent.id });
+    const rows = await w.store.readDelegations();
+    expect(rows.find((row) => row.id === "r")?.parentThreadId).toBe(continued.threadId);
+    expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(parent.id);
+    const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
+    expect(prompt).toContain(`"still running" (taskId ${running.id})`);
+    expect(prompt).not.toContain(done.id);
+    await flushTurnRunners();
+
+    // A notification batched for the old parent before the move still reaches the new one.
+    queueTaskNotification(w.ctx, parent.id, running.id);
+    await new Promise((resolve) => setTimeout(resolve, 2 * TASK_NOTIFICATION_BATCH_MS + 300));
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    expect((await notificationsIn(w, continued.threadId)).join("\n")).toContain(`taskId ${running.id}`);
+  }, 15_000);
+
+  it("adds no note when no task is running", () => {
+    expect(runningTasksNote([])).toBe("");
   });
 });

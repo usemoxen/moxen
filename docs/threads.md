@@ -132,7 +132,9 @@ request. Other queued/scheduled requests stay on the source thread. Destination
 identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
-continuation settles, by its new taskId with the original one named.
+continuation settles, by its new taskId with the original one named. A thread
+that continues while tasks it delegated are still running takes them along:
+the handoff lists them, and their notifications go to the new thread.
 The older `usageContinuation` config key remains readable but is hidden; new
 protection entries default to continuing here. Automatic usage-limit continuation
 and long-thread compaction do not compete with a held wrap-up.

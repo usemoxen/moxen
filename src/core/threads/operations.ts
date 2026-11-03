@@ -958,10 +958,11 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
   }
   const notifyParent = await carryDelegation(store, source.id, created.id);
+  const adopted = await adoptRunningTasks(store, source.id, created.id);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
-      prompt: handoff,
+      prompt: handoff + runningTasksNote(adopted),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
@@ -1009,6 +1010,36 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
   });
   await store.updateDelegation(row.id, { continuedIn: destinationId });
   return row.notify ? row.parentThreadId : null;
+}
+
+/**
+ * An orchestrator that carries on in a new thread takes its running tasks
+ * with it: their delegations name the continuation as parent, so their
+ * notifications reach the conversation that is still working.
+ */
+async function adoptRunningTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
+  const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
+    (row) => row.parentThreadId === sourceId && row.status === "running" && row.continuedIn === undefined,
+  );
+  const adopted: { taskId: string; title: string }[] = [];
+  for (const row of rows) {
+    await store.updateDelegation(row.id, { parentThreadId: destinationId });
+    const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
+    adopted.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
+  }
+  return adopted;
+}
+
+/** The handoff's note of tasks still running, which now report to the new thread. */
+export function runningTasksNote(tasks: readonly { taskId: string; title: string }[]): string {
+  if (tasks.length === 0) return "";
+  return [
+    "",
+    "",
+    "## Delegated tasks still running",
+    "These tasks were delegated from the previous thread and now report here; a task-notification arrives as each settles.",
+    ...tasks.map((task) => `- "${task.title}" (taskId ${task.taskId})`),
+  ].join("\n");
 }
 
 /** The delegation that created this thread, with its parent's title, if it is a delegated task. */
@@ -1986,11 +2017,18 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  * running one. It wakes a settled parent — the work is the parent's own.
  */
 async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, childThreadIds: readonly string[]): Promise<void> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  // A task whose parent continued in a new thread reports there instead.
+  const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
+  for (const id of childThreadIds) {
+    const parent = liveParent(id);
+    if (parent !== undefined && parent !== parentThreadId) queueTaskNotification(ctx, parent, id);
+  }
+  const mine = childThreadIds.filter((id) => (liveParent(id) ?? parentThreadId) === parentThreadId);
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
-  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
-  const final = (await Promise.all(childThreadIds.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
+  const final = (await Promise.all(mine.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
     (id): id is string => id !== null,
   );
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
