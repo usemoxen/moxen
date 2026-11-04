@@ -69,9 +69,10 @@ try {
     `import { dlopen } from "bun:ffi";`,
     `const resolved = import.meta.resolve(${JSON.stringify(target.nativePackage)});`,
     `const library = (await import(${JSON.stringify(target.nativePackage)})).default;`,
-    // Opening the library and calling into it (the layout engine inside libopentui) proves it loads on this machine.
-    `const { symbols } = dlopen(library, { YGConfigNew: { args: [], returns: "ptr" }, YGConfigFree: { args: ["ptr"], returns: "void" } });`,
-    `symbols.YGConfigFree(symbols.YGConfigNew());`,
+    // Opening the library and calling into it proves it loads here. OpenTUI binds this symbol itself on every platform;
+    // the layout engine's own (`YG*`) are not exported on Windows.
+    `const { symbols } = dlopen(library, { getArenaAllocatedBytes: { args: [], returns: "u64" } });`,
+    `symbols.getArenaAllocatedBytes();`,
     `console.log(JSON.stringify({ resolved, library }));`,
   ].join("\n");
   const native = run(process.execPath, ["--eval", probe], { cwd: folder, env });
