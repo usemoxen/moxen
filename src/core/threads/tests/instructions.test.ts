@@ -18,12 +18,12 @@ const LINUX = { platform: "linux" as const, shells: ["bash", "sh"] as readonly S
 const SHELL_TEXT = buildShellGuidance({ ...LINUX, harness: "Claude Code" });
 
 describe("runtime instructions", () => {
-  it("names the model only for providers whose prompt is Moxen's, and only for the instance running it", () => {
+  it("names the model and effort for every provider, and only for the instance running it", () => {
     const options = [{ id: "effort", value: "high" }];
     expect(runningModelOf({ instanceId: "codex", model: "gpt-6.1-sol", options }, "codex")).toEqual({ model: "gpt-6.1-sol", effort: "high" });
     expect(runningModelOf({ instanceId: "harness/colab", model: "qwen" }, "harness/colab")).toEqual({ model: "qwen" });
-    expect(runningModelOf({ instanceId: "claudeAgent", model: "claude-opus-5-5" }, "claudeAgent")).toBeNull();
-    expect(runningModelOf({ instanceId: "opencode/anthropic", model: "m" }, "opencode/anthropic")).toBeNull();
+    expect(runningModelOf({ instanceId: "claudeAgent", model: "claude-opus-5-5", options }, "claudeAgent")).toEqual({ model: "claude-opus-5-5", effort: "high" });
+    expect(runningModelOf({ instanceId: "opencode/anthropic", model: "m", options: [{ id: "variant", value: "max" }] }, "opencode/anthropic")).toEqual({ model: "m", effort: "max" });
     expect(runningModelOf({ instanceId: "claudeAgent", model: "claude-opus-5-5" }, "codex")).toBeNull();
   });
 

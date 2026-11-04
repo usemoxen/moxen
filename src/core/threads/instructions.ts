@@ -33,18 +33,23 @@ import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.
 import { buildWebGuidance, type WebGuidanceInput } from "./webguidance.js";
 import { UI_BLOCK_LANGUAGE, UI_BLOCK_LIMITS, UI_BLOCK_VERSION, UI_COLORS, UI_STATES } from "./uiblock.js";
 
-/** What to tell a session about its model: only where the prompt is Moxen's, and only for the instance that runs `selection`. */
+/** The option ids a selection's reasoning effort may be stored under, by provider. */
+const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort", "reasoning", "variant"]);
+
+/**
+ * What to tell a session about its model, only for the instance that runs `selection`. Every provider gets it:
+ * Claude Code's own prompt names the model but not the effort, and a provider's own line can't follow a change mid-thread.
+ */
 export function runningModelOf(selection: ModelSelection, instanceId: string): { model: string; effort?: string } | null {
-  const kind = driverKindOfInstance(instanceId);
-  if ((kind !== "codex" && kind !== "harness") || selection.instanceId !== instanceId) return null;
-  const effort = selection.options?.find((option) => option.id === "effort")?.value;
+  if (selection.instanceId !== instanceId) return null;
+  const effort = selection.options?.find((option) => EFFORT_OPTION_IDS.has(option.id))?.value;
   return { model: selection.model, ...(effort === undefined ? {} : { effort: String(effort) }) };
 }
 
 export interface RuntimeInstructionsInput {
   /** The model selection's instance id (`claudeAgent`, `opencode/…`): names the harness. */
   readonly instanceId: string;
-  /** The model and effort of a session whose prompt states neither (`runningModelOf`). */
+  /** The model and effort the session runs on (`runningModelOf`). */
   readonly running?: { readonly model: string; readonly effort?: string };
   /** Where the session runs. A worktree gets told what that means. */
   readonly env: ThreadEnv;
