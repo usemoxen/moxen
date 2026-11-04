@@ -187,6 +187,27 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "task_send",
+    description:
+      "Send a message to a task you delegated, to correct or redirect it without cancelling it. It arrives as a message from you, not from the user. " +
+      "The result's outcome says what happened: steered (the running turn received it and reads it at its next step); " +
+      "queued (the task is busy and cannot take input mid-turn, so the message waits and runs as its next turn: it has NOT read it yet); " +
+      "started (a new turn began on an idle task); not_delivered (recorded but it did not reach the running turn: send it again after the task settles). " +
+      "Never assume the task read a message unless the outcome is steered or started. " +
+      "A task that has finished or been settled is refused unless you pass wake: true, which starts a new turn on it and spends usage; you then get a task notification when it settles again. " +
+      "Only reaches your own tasks, and not a research run's roles or lead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        message: { type: "string", description: "What the task should know or do. It has none of your conversation: say it in full." },
+        wake: { type: "boolean", description: "Allow starting a new turn on a task that has finished or been settled (default false)." },
+      },
+      required: ["taskId", "message"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 /** Finding and reading other threads (MXN-133). Results stay in the caller's context, so each answer is held to a budget. */
@@ -239,7 +260,7 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task is itself the delegation, so it gets none.
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "thread_search", "thread_read", "image_gen"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "thread_search", "thread_read", "image_gen"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -647,6 +668,12 @@ export async function callMoxenTool(
         const taskId = argString(args, "taskId", true)!;
         const cancelled = await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId });
         return ok({ taskId, cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
+      }
+      case "task_send": {
+        if (args.wake !== undefined && typeof args.wake !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "wake must be true or false.");
+        const taskId = argString(args, "taskId", true)!;
+        const sent = await api.dispatch({ type: "thread.task.send", parentThreadId, taskId, message: argString(args, "message", true)!, ...(args.wake === true ? { wake: true } : {}) });
+        return ok({ taskId, outcome: sent.outcome, status: sent.task.status, woke: sent.woke, note: sent.note });
       }
       default:
         return { text: `Unknown tool: ${name}`, isError: true };

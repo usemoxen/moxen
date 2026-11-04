@@ -685,7 +685,7 @@ function withDelegatedTitles(activities: readonly ActivityEnvelope[]): ActivityE
   if (titles.size === 0) return [...activities];
   return activities.map((activity) => {
     const call = tool(activity);
-    if (call === null || (call.name !== "task_status" && call.name !== "task_cancel")) return activity;
+    if (call === null || (call.name !== "task_status" && call.name !== "task_cancel" && call.name !== "task_send")) return activity;
     const taskId = asRecord(call.state.input)?.taskId;
     const title = typeof taskId === "string" ? titles.get(taskId) : undefined;
     return title === undefined ? activity : { ...activity, payload: { ...call.payload, delegatedTitle: title } };

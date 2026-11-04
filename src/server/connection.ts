@@ -118,6 +118,7 @@ import {
   pendingHandoff,
   submitHandoff,
   cancelTask,
+  sendTaskMessage,
   continueThread,
   delegate,
   beginResearchRun,
@@ -1111,6 +1112,8 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
+      case "thread.task.send":
+        return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
       case "thread.plan.set":
         return await recordChecklist(await this.context(), command.threadId, command.plan);
       case "thread.background.stop": {

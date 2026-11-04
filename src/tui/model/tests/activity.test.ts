@@ -955,6 +955,7 @@ describe("moxen and subagent tool rows", () => {
       state: "finished",
     });
     expect(call("moxen.task_cancel", "completed", { taskId: "t" })).toMatchObject({ title: "cancel task", state: "stopped" });
+    expect(call("moxen.task_send", "completed", { taskId: "t", message: "m" }, JSON.stringify({ taskId: "t", outcome: "queued", status: "running" }))).toMatchObject({ title: "message task", state: "queued for its next turn" });
   });
 
   it("names a native subagent by type and description, not its prompt", () => {

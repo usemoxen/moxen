@@ -143,7 +143,7 @@ session runs in Moxen, in a worktree, as a delegated task, how its shell and
 tools behave on this machine, how to use Moxen memory and the web tools it
 has — under one heading per subject, and end with the user's own
 instructions. Every top-level thread also gets the `moxen` MCP server
-(`delegate`, `task_status`, `task_cancel`), so an agent can hand work to a
+(`delegate`, `task_status`, `task_cancel`, `task_send`), so an agent can hand work to a
 subagent thread in a worktree of its own, find and read other threads
 (`thread_search`, `thread_read`), consult the shipped [knowledge base](knowledge.md)
 (`knowledge_search`, `knowledge_read`), and keep Moxen memory (`memory_*`, see

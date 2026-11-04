@@ -270,8 +270,8 @@ export interface StoredMessage {
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
 }
 
-/** Internal inputs: task results, usage reset continuations, and answer-panel replies. */
-export type MessageOrigin = "task-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer";
+/** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. */
+export type MessageOrigin = "task-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message";
 
 export interface StoredActivity {
   readonly id: string;

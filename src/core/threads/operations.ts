@@ -62,7 +62,7 @@ import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -1990,7 +1990,7 @@ const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeo
 export function queueTaskNotification(ctx: OperationContext, parentThreadId: string, childThreadId: string): void {
   const pending = pendingNotifications.get(parentThreadId);
   if (pending) clearTimeout(pending.timer);
-  const taskIds = [...(pending?.taskIds ?? []), childThreadId];
+  const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
   const timer = setTimeout(() => {
     pendingNotifications.delete(parentThreadId);
     void deliverTaskNotifications(ctx, parentThreadId, taskIds).catch(() => undefined);
@@ -2680,6 +2680,142 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
     interruptRequested: true,
     stateAfter: state,
   };
+}
+
+/** What became of a message sent to a delegated task. */
+export type TaskMessageOutcome =
+  /** It reached the running turn, which reads it at its next step. */
+  | "steered"
+  /** The task is busy and cannot take input mid-turn (here): it runs as the task's next turn, once the current one ends. Not read yet. */
+  | "queued"
+  /** The task was idle, finished or settled: a new turn started on it. */
+  | "started"
+  /** It was recorded on the running turn but never reached it, and nothing will resend it. */
+  | "not_delivered";
+
+export interface SentTaskMessage extends Omit<DescribedTask, "task"> {
+  readonly task: TaskView;
+  readonly outcome: TaskMessageOutcome;
+  readonly turnId: string;
+  readonly messageId: string;
+  /** A finished or settled task was woken by this message. */
+  readonly woke: boolean;
+  /** What the caller should and should not assume. */
+  readonly note: string;
+}
+
+/**
+ * A message from the thread that delegated a task, into that task. Only the
+ * delegating thread (or the thread an orchestrator continued in, which the
+ * running delegations were re-pointed to) reaches it, and never a research
+ * run's role or lead: their messages are scoped and capped (`research*`), and
+ * a free message would be a way round both.
+ *
+ * It takes the same path as every send (`startTurn`), then reports from what
+ * that returned, not from what the provider is known for: a steer counts only
+ * when `steerDelivered` says the running provider turn received it.
+ */
+export async function sendTaskMessage(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+  rawMessage: string,
+  wake: boolean,
+): Promise<SentTaskMessage> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const message = rawMessage.trim();
+  if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
+  const rows = await ctx.store.readDelegations();
+  const owned = rows.find((row) => row.parentThreadId === parentThreadId && row.childThreadId === requireThreadId(rawTaskId));
+  if (!owned) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
+  }
+  // A task that carried on in a new thread is that thread now.
+  let row = owned;
+  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+    const next = rows.find((candidate) => candidate.parentThreadId === parentThreadId && candidate.childThreadId === row.continuedIn);
+    if (!next) break;
+    row = next;
+  }
+  const caller = await ctx.store.readThreadRecord(parentThreadId);
+  const target = await ctx.store.readThreadRecord(row.childThreadId);
+  if (!caller || !target) throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3 });
+  if (caller.researchRole || isResearchRunActive(caller.researchRun) || target.researchRole || target.researchRun) {
+    throw new CliError(
+      "TASK_SEND_RESEARCH",
+      "A research run's roles and lead take messages only through the run (research_message_submit, and the lead's follow-ups), which are scoped and capped: task_send does not reach them.",
+      { exitCode: 4, details: { taskId: row.childThreadId } },
+    );
+  }
+
+  const before = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const turns = await ctx.store.readTurns(target.id);
+  const running = openTurn(turns);
+  const idle = running === null;
+  if (idle && (before.task.status !== "running" || threadStatus(target) === "settled") && !wake) {
+    throw new CliError(
+      "TASK_SETTLED",
+      `Task ${row.childThreadId} has ${threadStatus(target) === "settled" ? "been settled" : "finished"}. Pass wake: true to start a new turn on it; it then reports back with a task notification when it settles again.`,
+      { exitCode: 4, details: { taskId: row.childThreadId, status: before.task.status } },
+    );
+  }
+  // A busy task takes the message mid-turn only where this process holds a session whose provider can; otherwise it waits as the next turn.
+  const steerable = running !== null && (await canSteer(ctx, target));
+  const started = await startTurn(ctx, {
+    threadId: target.id,
+    prompt: `${TASK_MESSAGE_HEADER}\n\n${message}`,
+    origin: "task-message",
+    delivery: running === null ? "auto" : steerable ? "steer" : "queue",
+    wakeSettled: wake,
+    onEvent: () => undefined,
+  });
+  const outcome: TaskMessageOutcome =
+    started.delivery === "steered" || started.delivery === "injected"
+      ? started.steerDelivered === true ? "steered" : "not_delivered"
+      : started.turn.status === "queued" ? "queued" : "started";
+  // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
+  if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, row.parentThreadId, target.id);
+  const after = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const notes: Record<TaskMessageOutcome, string> = {
+    steered: "The running turn received it and reads it at its next step.",
+    queued: "The task is busy and cannot take input mid-turn, so the message waits and runs as its next turn once the current one ends. It has not read it yet.",
+    started: wake && idle ? "The task was idle or settled; the message started a new turn on it. A task notification arrives when it settles again." : "The message started a new turn on the task.",
+    not_delivered: "The message is recorded in the task's thread but did not reach its running turn, and nothing will resend it. Send it again once the task settles.",
+  };
+  return { ...after, outcome, turnId: started.turn.id, messageId: started.messageId, woke: idle && (before.task.status !== "running" || threadStatus(target) === "settled"), note: notes[outcome] };
+}
+
+/**
+ * Tell a task's parent when the task next has nothing left to run. Watches the
+ * ledger's turn events rather than one run: a message queued behind a running
+ * turn is run by that turn's runner, which nothing awaits.
+ */
+function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, childThreadId: string): void {
+  let done = false;
+  let checking = false;
+  let again = false;
+  const stop = ctx.store.subscribe((event) => {
+    if (event.type !== "backend.thread.changed" || event.threadId !== childThreadId) return;
+    if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
+    void check();
+  });
+  const check = async (): Promise<void> => {
+    if (done) return;
+    if (checking) { again = true; return; }
+    checking = true;
+    try {
+      do {
+        again = false;
+        if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
+        done = true;
+        stop();
+        queueTaskNotification(ctx, parentThreadId, childThreadId);
+      } while (again);
+    } finally {
+      checking = false;
+    }
+  };
+  void check();
 }
 
 /** One checklist item, as the tasks panel reads it (`turn.plan.updated`'s `plan`). */

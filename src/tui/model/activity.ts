@@ -840,10 +840,18 @@ const DELEGATED_STATUS: Record<string, string> = {
   queued: "queued",
 };
 
+/** What `task_send` reports, as a row says it. */
+const TASK_MESSAGE_OUTCOME: Record<string, string> = {
+  steered: "sent to the running turn",
+  queued: "queued for its next turn",
+  started: "started a new turn",
+  not_delivered: "not delivered",
+};
+
 /**
  * A moxen tool call in words: what was delegated and to what, where a
  * delegated task stands — instead of `moxen: delegate` over the title.
- * `task_status` / `task_cancel` name only a task id; `timeline()` adds the
+ * `task_status` / `task_cancel` / `task_send` name only a task id; `timeline()` adds the
  * delegated title as `delegatedTitle` from the `delegate` call it came from.
  */
 function moxenToolView(
@@ -876,6 +884,10 @@ function moxenToolView(
       return view("task status", said);
     case "task_cancel":
       return view("cancel task", status === null ? "stopped" : said);
+    case "task_send": {
+      const outcome = asString(result?.outcome);
+      return view("message task", outcome === null ? null : (TASK_MESSAGE_OUTCOME[outcome] ?? outcome));
+    }
     case "models":
       return { ...view("models", null), subject: asString(input.provider) ?? "every provider" };
     default:

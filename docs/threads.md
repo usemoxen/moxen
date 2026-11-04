@@ -546,8 +546,44 @@ appear as user messages in the conversation.
 ## Steering
 
 Sending into a running turn steers it when the provider takes mid-turn
-input (Claude, OpenCode) and is only recorded otherwise. A steer
+input and this process holds the session, and is only recorded otherwise
+(`steerDelivered` says which; the decision is the driver having `steerTurn`,
+a live session, and the steer succeeding, not a list of providers). A steer
 never starts a second provider run.
+
+### Messaging a delegated task (`task_send`)
+
+A thread can message a task it delegated, to correct or redirect it instead of
+cancelling it. `task_send` takes `taskId`, `message` and an optional `wake`, and
+goes through the same send path as `threads send`. The message reaches the task
+as a user turn headed "Message from the thread that delegated this task (not from
+the user)", stored with `origin: "task-message"`, and the task's instructions say
+what that header means. The result's `outcome` reports what really happened:
+
+- `steered`: the running turn received it and reads it at its next step.
+- `queued`: the task is busy and its driver cannot take input mid-turn here (no
+  `steerTurn`, or no live session in this process), so the message waits and
+  runs as the task's next turn. The task has not read it; do not assume it acts
+  on it. It is not refused.
+- `started`: the task was idle and a new turn began.
+- `not_delivered`: the steer was recorded but did not reach the running turn
+  (the provider refused it); nothing resends it, so send it again.
+
+A task that has finished or been settled is refused (`TASK_SETTLED`) unless the
+caller passes `wake: true`, which starts a new turn and spends usage. The parent
+is told again, by a task notification, when the task next has nothing left to
+run: the notification is not one-shot, and covers a queued message's turn too.
+`task_status` reports `running` from the moment of the wake.
+
+Only the delegating thread reaches a task. When an orchestrator continues in a
+new thread, the tasks still running move with it and it can message them; the
+earlier thread, an unrelated thread (same project or not) and a task that has
+already finished before the move cannot. A research run's lead and roles are
+never reachable (`TASK_SEND_RESEARCH`): their messages are scoped and capped by
+the run, and a free message would be a way round both. A delegated task, a
+research lead and a research role are not offered `task_send` at all. An empty
+message is refused as in `threads send`; there is no length cap, as there is
+none there.
 
 Some providers wake a session on their own — a finished background task,
 a monitor event. That output arrives as a turn like any other and is shown

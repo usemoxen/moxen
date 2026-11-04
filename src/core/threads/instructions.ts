@@ -179,6 +179,9 @@ export const MESSAGES_GUIDANCE = [
   MODE_LINE,
 ].join("\n");
 
+/** Opens a message from the thread that delegated a task, so the task's model does not read it as the user's. */
+export const TASK_MESSAGE_HEADER = "Message from the thread that delegated this task (not from the user):";
+
 /**
  * What a session with the delegation tools is told about the message Moxen
  * sends it when a task it delegated settles: it arrives as a turn of the
@@ -330,6 +333,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
       "Your final message is returned to that agent as the task's result, and it is all they will read.",
       "Make it a self-contained report: what you did, which files you changed, how you verified it, and anything left unfinished.",
       "Open the report with a single line that sums up the outcome (e.g. \"Audited 3 route files: 2 missing auth checks\") — it is shown as the task's headline.",
+      `A later message opening "${TASK_MESSAGE_HEADER}" is from that agent, not the user: take it as a correction or redirection of this task, and finish with a report again.`,
       input.researchLead
         ? "You lead a full research run. Use research_role_start to start a researcher, critic or finalizer with a self-contained question, provider, model and effort; research_role_report to read its report; research_role_cancel to stop it. These roles cannot delegate. You have no delegation tools. Merge the roles' findings into your final answer: that answer is the single report returned to the orchestrator."
         : NO_REDELEGATION_GUIDANCE,

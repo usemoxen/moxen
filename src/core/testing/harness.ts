@@ -56,7 +56,18 @@ class HarnessDriver implements TurnDriver {
     private readonly onStartSession?: (input: Record<string, unknown>) => void,
     private readonly onSendTurn?: (input: SentTurn) => void,
     private readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void,
-  ) {}
+    steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
+  ) {
+    // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
+    if (steer) {
+      this.steerTurn = (threadId, text) =>
+        steer.mode === "fails"
+          ? Effect.fail(new CliError("STEER_FAILED", "Harness driver could not steer the turn."))
+          : Effect.sync(() => steer.onSteer?.(threadId, text));
+    }
+  }
+
+  steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
 
   /** Like the drivers that can: a session already running is given the servers of the day. */
   async updateMcpServers(threadId: string, servers: readonly McpServerSpec[]): Promise<void> {
@@ -146,12 +157,23 @@ export interface TestHarnessOptions {
   readonly onSendTurn?: (input: SentTurn) => void;
   /** Sees the MCP servers a live session is given at each send (`updateMcpServers`). */
   readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void;
+  /** Which providers' drivers take input mid-turn (they have `steerTurn`): `delivers`, or `fails` when asked. The others have none. */
+  readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
+  /** Sees each steer a driver accepted. */
+  readonly onSteer?: (threadId: string, text: string) => void;
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
-  const factory = (): TurnDriver => new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers);
-  return { claude: factory, codex: factory, opencode: factory, ...options.drivers };
+  const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
+    const mode = kind === undefined ? undefined : options.steering?.[kind];
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined);
+  };
+  return {
+    claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),
+    harness: factory("harness"),
+    ...options.drivers,
+  };
 }
 
 export async function testHarness(options: TestHarnessOptions = {}) {

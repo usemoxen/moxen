@@ -34,6 +34,7 @@ import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transpor
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
   CancelledTask,
+  SentTaskMessage,
   ChecklistStep,
   DelegateRequest,
   Delegation,
@@ -253,6 +254,8 @@ export type CommandBody =
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
+  /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
+  | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
   | { readonly type: "thread.background.stop"; readonly threadId: string; readonly taskId: string }
   /** The agent's checklist, for a provider with none of its own (moxen's `todos` tool). The whole list. */
@@ -412,6 +415,7 @@ export interface CommandResults {
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
+  "thread.task.send": SentTaskMessage;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
@@ -1159,6 +1163,15 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
+      };
+    case "thread.task.send":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+        message: requireField(record.message, type, "message"),
+        ...optionalBoolean(record, "wake"),
       };
     case "thread.background.stop":
       return {
