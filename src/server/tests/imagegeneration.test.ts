@@ -78,7 +78,8 @@ it("rechecks Codex reserves before dispatch, then runs and reads a native image 
         expect(snapshot?.kind === "snapshot" ? snapshot.snapshot.threads.map((thread) => thread.id).sort() : []).toEqual([parent.threadId, ordinary.task.taskId].sort());
       });
       expect((await reopened.query({ type: "threads.list" })).threads.map((thread) => thread.id).sort()).toEqual([parent.threadId, ordinary.task.taskId].sort());
-      expect((await reopened.query({ type: "threads.search", query: "Image generation" })).threads).toEqual([]);
+      // Only the hidden thread is out of reach: the parent's own task notification names it too, once that has landed.
+      expect((await reopened.query({ type: "threads.search", query: "Image generation" })).threads.map((thread) => thread.threadId)).not.toContain(taskId);
       expect((await reopened.query({ type: "thread.task.status", parentThreadId: parent.threadId, taskId })).task.status).toBe("completed");
       expect(errors).toEqual([]);
     } finally { unsubscribe(); await reopened.close(); }
