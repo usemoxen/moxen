@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { testHarness } from "../../core/testing/harness.js";
-import { openThreadStore } from "../../core/threads/store.js";
+import { openThreadStore, ThreadStore } from "../../core/threads/store.js";
 import { DirectConnection } from "../connection.js";
 import { availableMoxenTools, callMoxenTool, DELEGATION_TOOLS } from "../mcp/tools.js";
 import type { ShellFrame } from "../api.js";
@@ -355,6 +355,25 @@ describe("full research runs", () => {
       expect(await store.readThreadRecord(role.task.taskId)).toMatchObject({ interactionMode: "research" });
     } finally { await connection.close(); }
   }, 20_000);
+
+  it("never writes a lead or role record without its research field, so a shell poll can't lose it", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const write = vi.spyOn(ThreadStore.prototype, "writeThreadRecord");
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      write.mockClear();
+      const lead = await connection.startResearchRun({ parentThreadId: parent.threadId, task: "Report", wait: false }, { researchers: 1, critics: 1 });
+      const role = await connection.dispatch({ type: "research.role.start", leadThreadId: lead.child.id, role: "researcher", question: "Evidence" });
+      const records = write.mock.calls.map(([record]) => record);
+      const leadRecords = records.filter((record) => record.id === lead.child.id);
+      const roleRecords = records.filter((record) => record.id === role.child.id);
+      expect(leadRecords.length).toBeGreaterThan(0);
+      expect(roleRecords.length).toBeGreaterThan(0);
+      expect(leadRecords.every((record) => record.researchRun !== undefined)).toBe(true);
+      expect(roleRecords.every((record) => record.researchRole !== undefined)).toBe(true);
+    } finally { write.mockRestore(); await connection.close(); }
+  });
 
   it("persists roles across connections and reports only the lead to the orchestrator", async () => {
     const harness = await testHarness();

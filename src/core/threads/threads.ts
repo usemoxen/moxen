@@ -190,6 +190,8 @@ export async function createThread(
     snoozedAt: null,
     hasPendingApprovals: false,
     hasPendingUserInput: false,
+    ...(input.researchRun ? { researchRun: input.researchRun } : {}),
+    ...(input.researchRole ? { researchRole: input.researchRole } : {}),
   };
   await store.writeThreadRecord(thread);
   store.emit(thread.id, "created");

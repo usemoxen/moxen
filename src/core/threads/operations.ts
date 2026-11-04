@@ -2336,7 +2336,8 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const createChild = async (): Promise<StoredThread> => {
     const lead = options.researchRole === undefined ? null : await requireResearchLead(ctx, parentThreadId);
     if (lead) await checkResearchStart(lead.researchRun, options.researchRole!);
-    let child = await createThread(ctx.store, {
+    // In the record's first write: a shell poll can rewrite a new thread from what it read, so a second write could be lost.
+    const child = await createThread(ctx.store, {
       id: childThreadId,
       ...(options.hidden === true ? { hidden: true } : {}),
       projectId: parent.projectId,
@@ -2346,25 +2347,20 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       runtimeMode,
       interactionMode,
       env: worktree ? { mode: "worktree", path: worktree.path, branch: worktree.branch } : { ...parentEnv },
+      ...(research ? { researchRun: {
+        leadThreadId: childThreadId, ...research, messages: [], roles: [], state: "running" as const, createdAt: now, updatedAt: now,
+      } } : {}),
+      ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
     });
-    if (options.fullResearchRun || options.researchRole !== undefined) {
-      child = { ...child,
-        ...(research ? { researchRun: {
-          leadThreadId: child.id, ...research, messages: [], roles: [], state: "running" as const, createdAt: now, updatedAt: now,
-        } } : {}),
-        ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
-      };
-      await ctx.store.writeThreadRecord(child);
-      if (lead) {
-        // Publish membership only once clients can describe this delegated task.
-        await recordDelegation();
-        const run = lead.researchRun;
-        await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run,
-          roles: [...run.roles, { threadId: child.id, role: options.researchRole!, question: task }],
-          messages: [...(run.messages ?? []), { id: randomUUID(), threadId: child.id, kind: "handoff", text: task, findings: findingsOf(run), createdAt: now }], updatedAt: now,
-        } });
-        ctx.store.emit(parentThreadId, "research-role-started");
-      }
+    if (lead) {
+      // Publish membership only once clients can describe this delegated task.
+      await recordDelegation();
+      const run = lead.researchRun;
+      await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run,
+        roles: [...run.roles, { threadId: child.id, role: options.researchRole!, question: task }],
+        messages: [...(run.messages ?? []), { id: randomUUID(), threadId: child.id, kind: "handoff", text: task, findings: findingsOf(run), createdAt: now }], updatedAt: now,
+      } });
+      ctx.store.emit(parentThreadId, "research-role-started");
     }
     return child;
   };

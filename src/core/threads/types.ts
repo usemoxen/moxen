@@ -350,6 +350,8 @@ export interface CreateThreadInput {
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: InteractionMode;
   readonly env?: Partial<ThreadEnv>;
+  readonly researchRun?: StoredResearchRun;
+  readonly researchRole?: StoredThread["researchRole"];
 }
 
 export type SendIfBusy = "reject" | "inject";
