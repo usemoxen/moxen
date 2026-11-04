@@ -12,6 +12,9 @@ import { openQuestions } from "../../core/threads/views.js";
 import { toThreadEnvelope } from "../../core/threads/project.js";
 import { DirectConnection } from "../connection.js";
 
+/** A loaded runner takes well over vitest's 1 s default to start a session (Windows CI). */
+const SLOW_RUNNER = { timeout: 10_000 };
+
 const connections: DirectConnection[] = [];
 afterEach(async () => {
   for (const connection of connections.splice(0).reverse()) await connection.close();
@@ -26,17 +29,17 @@ async function setup(failRequests: Record<string, string> = {}) {
   const project = await ensureStoredProject(harness.root, { workspaceRoot: path.resolve(harness.work) });
   await connection.dispatch({ type: "thread.create", threadId: "thread", projectId: project.project.id, title: "Async question", modelSelection: { instanceId: "codex", model: "gpt-test" } });
   await connection.dispatch({ type: "thread.turn.start", threadId: "thread", message: { text: "Research compaction" } });
-  await expect.poll(() => transport.sessions[0]?.server.requestsTo("turn/start").length).toBe(1);
+  await expect.poll(() => transport.sessions[0]?.server.requestsTo("turn/start").length, SLOW_RUNNER).toBe(1);
   const server = transport.sessions[0]!.server;
   server.notify("turn/started", { threadId: "codex-thread-1", turn: { id: "first" } });
   const item = { id: "question", type: "agentMessage", phase: "final_answer", delivery: "async", text: "Which images?\n- All\n- Recent", questions: [{ title: "Which images?", options: ["All", "Recent"] }] };
   server.notify("item/started", { threadId: "codex-thread-1", item });
   server.notify("item/completed", { threadId: "codex-thread-1", item });
-  await expect.poll(async () => (await readThread(harness.store, "thread")).activities.some((row) => row.kind === "user-input.requested")).toBe(true);
+  await expect.poll(async () => (await readThread(harness.store, "thread")).activities.some((row) => row.kind === "user-input.requested"), SLOW_RUNNER).toBe(true);
   const finish = async (nativeId = "first") => {
     server.notify("item/completed", { threadId: "codex-thread-1", item: { type: "agentMessage", id: `answer-${nativeId}`, phase: "final_answer", text: "Research result." } });
     server.notify("turn/completed", { threadId: "codex-thread-1", turn: { id: nativeId, status: "completed" } });
-    await expect.poll(async () => (await harness.store.readTurns("thread")).at(-1)?.status).toBe("completed");
+    await expect.poll(async () => (await harness.store.readTurns("thread")).at(-1)?.status, SLOW_RUNNER).toBe("completed");
   };
   return { transport, driver, harness, connection, server, finish };
 }
@@ -71,7 +74,7 @@ describe("Codex asynchronous questions", () => {
     expect(answerMessage).toMatchObject({ origin: "question-answer", text: "> Which images?\n\nAll" });
     const server = transport.sessions[0]!.server;
     const method = state === "running" ? "turn/steer" : "turn/start";
-    await expect.poll(() => server.requestsTo(method).length).toBe(state === "completed" ? 2 : 1);
+    await expect.poll(() => server.requestsTo(method).length, SLOW_RUNNER).toBe(state === "completed" ? 2 : 1);
     const params = server.requestsTo(method).at(-1)!.params as { input: { text: string }[] };
     expect(params.input[0]?.text).toContain(`<send_user_message_question_reply>\n${JSON.stringify([{ questionItemId: questionId, question: "Which images?", answer: "All" }])}\n</send_user_message_question_reply>`);
     expect((await current.harness.store.readActivities("thread")).filter((row) => row.kind === "user-input.resolved")).toHaveLength(1);
@@ -80,7 +83,7 @@ describe("Codex asynchronous questions", () => {
       server.notify("turn/started", { threadId: "codex-thread-1", turn: { id: "second" } });
       server.notify("item/completed", { item: { type: "agentMessage", id: "continued", text: "Using all images.", phase: "final_answer" } });
       server.notify("turn/completed", { threadId: "codex-thread-1", turn: { id: "second", status: "completed" } });
-      await expect.poll(async () => (await current.harness.store.readTurns("thread")).at(-1)?.status, { timeout: 5000 }).toBe("completed");
+      await expect.poll(async () => (await current.harness.store.readTurns("thread")).at(-1)?.status, SLOW_RUNNER).toBe("completed");
     }
     await Effect.runPromise(driver.stopAll());
   });
@@ -114,7 +117,7 @@ describe("Codex asynchronous questions", () => {
     current.server.notify("item/completed", { threadId: "codex-thread-1", item });
     current.server.notify("item/completed", { threadId: "codex-thread-1", item });
     const late = async () => (await current.harness.store.readActivities("thread")).filter((row) => row.kind === "user-input.requested" && row.payload?.requestId === "codex-async:codex-thread-1:late");
-    await expect.poll(late).toHaveLength(1);
+    await expect.poll(late, SLOW_RUNNER).toHaveLength(1);
     await Effect.runPromise(current.driver.stopAll());
   });
 });
