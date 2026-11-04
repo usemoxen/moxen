@@ -196,6 +196,11 @@ export class UsageProtection {
     await interruptTurn(ctx.store, row.thread.id, turn.id);
   }
 
+  /** One thread's failure must not stop the others being held or recovered; the next tick tries it again. */
+  private async stopBackgroundOrRetry(ctx: OperationContext, row: Row, pause: UsagePause): Promise<void> {
+    await this.stopBackground(ctx, row, pause).catch(() => undefined);
+  }
+
   private async stopBackground(ctx: OperationContext, row: Row, pause: UsagePause): Promise<void> {
     const turn = openTurn(await ctx.store.readTurns(row.thread.id));
     const driver = ctx.driverFor((turn?.modelSelection ?? row.thread.modelSelection).instanceId);
@@ -270,7 +275,7 @@ export class UsageProtection {
     }, now);
     for (const row of eligible) {
       const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
-      if (pause) await this.stopBackground(ctx, row, pause);
+      if (pause) await this.stopBackgroundOrRetry(ctx, row, pause);
       if (this.nativeWrap.has(row.thread.id)) continue;
       if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
@@ -387,7 +392,7 @@ export class UsageProtection {
     const busy = new Set<string>();
     for (const row of queue) {
       const pause = row.thread.usagePause!;
-      if (pause.phase !== "resuming") await this.stopBackground(ctx, row, pause);
+      if (pause.phase !== "resuming") await this.stopBackgroundOrRetry(ctx, row, pause);
       const running = openTurn(row.turns);
       if (pause.phase === "resuming") {
         if (running) busy.add(pause.provider);

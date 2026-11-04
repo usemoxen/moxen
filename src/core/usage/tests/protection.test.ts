@@ -511,6 +511,24 @@ describe("usage protection", () => {
     expect(w.sent).toHaveLength(2);
   });
 
+  it("still recovers the other held threads when closing one thread's session fails", async () => {
+    const w = await world();
+    w.ctx.config.usageRecovery = "parallel";
+    const stuck = await w.make("one");
+    await w.make("two");
+    const reset = Date.now() + 60_000;
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(reset).toISOString() }]);
+    await w.guard.tick();
+    const driverFor = w.ctx.driverFor;
+    vi.spyOn(w.ctx, "driverFor").mockImplementation((id) => {
+      const driver = Object.create(driverFor(id)) as TurnDriver;
+      return Object.assign(driver, { stopSession: (threadId: string) => threadId === stuck ? Effect.fail(new CliError("CODEX_FAILED", "session would not close")) : Effect.void });
+    });
+    await w.guard.tick(reset + 6000);
+    await flushTurnRunners(1000);
+    expect(w.sent).toHaveLength(2);
+  });
+
   it.each([false, true])("resumes after a crash before recovery admission when wrap-up was skipped (queued input: %s)", async (queued) => {
     const w = await world();
     const id = await w.make("skipped wrap-up");
