@@ -23,6 +23,11 @@ import { SURFACE } from "../../theme.js";
 import { PermissionPanel } from "../../features/permissionpanel/permissionpanel.js";
 import { QueuedPanel } from "../../features/queuedpanel/queuedpanel.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../../features/remote/codemodal.js";
+import { ResearchPickerModal } from "../../features/researchrun/researchpicker.js";
+import { ResearchRunView } from "../../features/researchrun/researchrunview.js";
+import { RunBackBar } from "../../features/researchrun/runbackbar.js";
+import { useResearchRunView } from "../../features/researchrun/useResearchRunView.js";
+import { fixtureProposal, fixtureSummary, researchClient, type RunStage } from "../researchFixture.js";
 import { SubagentBar } from "../../features/subagentview/subagentbar.js";
 import { BackgroundTasksModal } from "../../features/taskspanel/backgroundtasksmodal.js";
 import { StatsModal } from "../../features/stats/statsmodal.js";
@@ -42,6 +47,26 @@ import { act } from "react";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
 const noop = (): void => {};
+
+function RunViewGallery({ stage, width, height }: { stage: RunStage; width: number; height: number }) {
+  const view = useResearchRunView();
+  const fixture = researchClient(stage);
+  return (
+    <Stage width={width} height={height}>
+      <ResearchRunView
+        client={fixture.client}
+        summary={fixtureSummary(stage)}
+        view={view}
+        width={width}
+        now={Date.now()}
+        labelFor={() => ({ name: "Claude Opus 5", color: null })}
+        homeDir={undefined}
+        onOpenAgent={noop}
+        onOpenLead={noop}
+      />
+    </Stage>
+  );
+}
 
 /** One thread across modes (MXN-236): a plain Build message, a one-off Research one, a sticky switch to Orchestrate, and back to Build. */
 const MODE_TURNS: ReadonlyArray<{ id: string; ask: string; reply: string; mode?: TurnInteractionMode }> = [
@@ -439,6 +464,61 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         />
       </Stage>
     ),
+  },
+  {
+    id: "run-back-bar",
+    group: "researchrun",
+    title: "RunBackBar",
+    width: 100,
+    height: 6,
+    element: () => (
+      <Stage width={100} height={6}>
+        <RunBackBar title="Critic 2 · Risks" state="working" width={100} onBack={noop} />
+        <Caption text="narrow" />
+        <RunBackBar title="Critic 2 · Risks" state="working" width={50} onBack={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "research-picker",
+    group: "researchrun",
+    title: "ResearchPickerModal",
+    width: 100,
+    height: 19,
+    settleMs: 250,
+    element: () => (
+      <Stage width={100} height={19}>
+        <ResearchPickerModal
+          proposal={fixtureProposal()}
+          modelName={() => "Claude Opus 5 · Medium"}
+          providerName="Claude"
+          screenWidth={100}
+          screenHeight={19}
+          left={14}
+          top={1}
+          onStart={noop}
+          onSingle={noop}
+        />
+      </Stage>
+    ),
+  },
+  ...(["researching", "reviewing", "finished"] as const).map((stage: RunStage): GalleryEntry => ({
+    id: `research-run-${stage}`,
+    group: "researchrun",
+    title: `ResearchRunView: ${stage}`,
+    width: 110,
+    height: 30,
+    settleMs: 250,
+    element: () => <RunViewGallery stage={stage} width={110} height={30} />,
+  })),
+  {
+    id: "research-run-narrow",
+    group: "researchrun",
+    title: "ResearchRunView: narrow",
+    width: 60,
+    height: 30,
+    settleMs: 250,
+    element: () => <RunViewGallery stage="reviewing" width={60} height={30} />,
   },
   {
     id: "subagent-bar",

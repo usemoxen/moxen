@@ -63,6 +63,7 @@ import { runExperience } from "./scenarios/experience.js";
 import { runUpdateScreen } from "./scenarios/updateScreen.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
+import { runResearchRun } from "./scenarios/researchRun.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -157,5 +158,6 @@ export async function runWalkthrough(): Promise<void> {
   await runUpdateScreen();
   await runModalInput();
   await runWorkQueueModal();
+  await runResearchRun();
 
 }

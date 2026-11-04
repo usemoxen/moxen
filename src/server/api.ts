@@ -46,6 +46,7 @@ export type {
   ShellFrame,
   ThreadFrame,
   ResearchRunView,
+  ResearchRole,
   ResearchRoleRequest,
   ResearchPlan,
   ResearchModels,

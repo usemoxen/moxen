@@ -1551,7 +1551,7 @@ threads
   )
   .option("--thinking-effort <effort>", "Model-specific reasoning/thinking effort override.")
   .addOption(new Option("--mode <mode>", "Build (default), or a single read-only researcher.").choices(["build", "research"]))
-  .option("--research-size <researchers,critics>", "Start a full Research run with this user-chosen size: 1–8 researchers, 1–3 critics and one finalizer.")
+  .option("--research-size <researchers,critics>", "Start a full Research run with this user-chosen size: 1–8 researchers, 1 or 3 critics and one finalizer.")
   .option("--research-models <json>", "Role model defaults: a JSON object keyed by researcher, critic and finalizer, each with provider, model and thinkingEffort. Requires --research-size.")
   .option("--no-wait", "Return after dispatching without waiting for the child's terminal turn.")
   .option("--timeout-ms <ms>", "Wait budget in milliseconds (default 600000). Expiring it ends the wait without cancelling the child.")

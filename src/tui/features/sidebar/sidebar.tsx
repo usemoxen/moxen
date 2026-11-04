@@ -61,6 +61,9 @@ const DELEGATED_OUTCOME: Record<string, { glyph: string; color: string }> = {
   interrupted: { glyph: "■", color: COLOR.dim },
 };
 
+/** A thread that leads a research run: the run is read inside it, its role threads have no rows. */
+const RESEARCH_MARK = "◈";
+
 /** Needs the user: pending approval or question (answerable elsewhere). */
 const WAITING_GLYPH = "?";
 
@@ -146,7 +149,7 @@ function ActiveCard({
   // a family reshaping (depth 1 to 0) left stale cells and squeezed rows.
   if (compact === true || nested) {
     const tail = `${row.age.length > 0 ? `${row.age} ` : ""}${glyph}${row.waiting ? " ?" : ""}${marked ? ` ${DRAFT_DOT}` : ""}`;
-    const lead = nested ? `  ${row.last ? "└" : "├"} ⇢ ` : " ";
+    const lead = nested ? `  ${row.last ? "└" : "├"} ${row.research ? RESEARCH_MARK : "⇢"} ` : row.research ? ` ${RESEARCH_MARK} ` : " ";
     return (
       <>
       <box
@@ -159,7 +162,7 @@ function ActiveCard({
       >
         <text fg={showMarker ? markerFg : COLOR.faint} selectable={false}>{showMarker ? MARKER : " "}</text>
         {nested ? <text fg={COLOR.faint} selectable={false}>{lead.slice(0, 4)}</text> : null}
-        {nested ? <text fg={COLOR.diff} selectable={false}>{lead.slice(4)}</text> : null}
+        {nested ? <text fg={row.research ? COLOR.accent : COLOR.diff} selectable={false}>{lead.slice(4)}</text> : null}
         <OverflowText fg={titleFg} selectable={false} width={Math.max(0, body - tail.length - (nested ? lead.length : 0))} padToWidth prefix={nested ? "" : lead} active={hovered || open}>{row.title}</OverflowText>
         {/* Only texts with content: an empty <text> still takes a cell, and
             two of them pushed the row one column past its width, squeezing
@@ -193,7 +196,7 @@ function ActiveCard({
       </box>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
         <text fg={showMarker ? markerFg : COLOR.faint} selectable={false}>{showMarker ? MARKER : " "}</text>
-        <OverflowText fg={titleFg} selectable={false} width={body - 1 - (row.waiting ? 1 : 0)} padToWidth prefix=" " active={hovered || open}>{row.title}</OverflowText>
+        <OverflowText fg={titleFg} selectable={false} width={body - 1 - (row.waiting ? 1 : 0)} padToWidth prefix={row.research ? ` ${RESEARCH_MARK} ` : " "} active={hovered || open}>{row.title}</OverflowText>
         <text fg={glyphColor} selectable={false}>{glyph}</text>
         {row.waiting ? <text fg={waitColor} selectable={false}>{WAITING_GLYPH}</text> : null}
       </box>

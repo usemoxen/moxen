@@ -1630,6 +1630,7 @@ export function Timeline({
   turnStartedAt,
   turnFileDiffs,
   gitFiles,
+  titleReserve = 24,
 }: {
   groups: TurnGroup[];
   title: string;
@@ -1670,13 +1671,15 @@ export function Timeline({
       consulted when no checkpoint patch exists — historical turns must not
       render current-tree content. */
   gitFiles: readonly PatchFile[];
+  /** Cells of the pane's width the frame's title leaves to its corners; a narrow column gives less. */
+  titleReserve?: number;
 }) {
   const lastId = groups[groups.length - 1]?.id;
   const running = sessionStatus === "running" || sessionStatus === "starting";
   const live = running ? runStatus(groups[groups.length - 1], now, turnStartedAt) : null;
 
   const titleHover = useHover();
-  const shownTitle = useScrollingText(title, Math.max(10, width - 24), focused || titleHover.hovered);
+  const shownTitle = useScrollingText(title, Math.max(10, width - titleReserve), focused || titleHover.hovered);
   const [atBottom, setAtBottom] = useState(true);
   const renderer = useRenderer();
   // Jump pill breathes accent→bright only while visible (off-screen = zero cost).

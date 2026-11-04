@@ -79,7 +79,8 @@ import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
+import { RESEARCH_SIZE_MESSAGE, isValidResearchSize } from "../core/threads/researchvocab.js";
+import type { ResearchMessage, ResearchRole, ResearchPlan, ResearchModels, ResearchSize, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
 import type { ThreadInspection, ThreadListStatus, ThreadReadView, ThreadReading } from "../core/threads/views.js";
 import type {
   InteractionMode,
@@ -100,6 +101,7 @@ import type {
  */
 export type {
   ResearchRunView,
+  ResearchRole,
   ResearchRoleRequest,
   ResearchPlan,
   ResearchModels,
@@ -150,7 +152,8 @@ export interface ResearchProposal {
   readonly target: "delegation" | "user-thread";
   readonly plan: ResearchPlan;
   readonly leadModel: ModelSelection;
-  readonly expiresAt: string;
+  /** When a delegation falls back to one researcher. Null for the user's own thread: `/research` waits while the client stays connected. */
+  readonly expiresAt: string | null;
 }
 
 export type CommandBody =
@@ -1462,9 +1465,8 @@ export function decodeResearchPlan(value: unknown): ResearchPlan {
   const size = asRecord(record?.size);
   const researchers = size?.researchers;
   const critics = size?.critics;
-  if (typeof researchers !== "number" || !Number.isInteger(researchers) || researchers < 1 || researchers > 8 ||
-      typeof critics !== "number" || !Number.isInteger(critics) || critics < 1 || critics > 3) {
-    throw new CliError("INVALID_THREAD_OPTION", "Research size requires researchers 1 to 8 and critics 1 to 3.", { exitCode: 2 });
+  if (typeof researchers !== "number" || typeof critics !== "number" || !isValidResearchSize({ researchers, critics })) {
+    throw new CliError("INVALID_THREAD_OPTION", RESEARCH_SIZE_MESSAGE, { exitCode: 2 });
   }
   const models: Partial<ResearchModels> = {};
   if (record?.models !== undefined) {

@@ -252,4 +252,13 @@ describe("runtime instructions", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("gives a lone critic all three labelled lenses and each of three critics one", () => {
+    const base = { instanceId: CLAUDE, shell: LINUX, env: LOCAL, delegation: { parentTitle: "P", baseBranch: null }, researchRole: "critic" as const };
+    const alone = buildRuntimeInstructions({ ...base, criticLens: "all" });
+    for (const label of ["Evidence", "Risks", "Alternatives"]) expect(alone).toContain(label);
+    const risks = buildRuntimeInstructions({ ...base, criticLens: "risks" });
+    expect(risks).toContain('labelled "Risks"');
+    expect(risks).not.toContain('labelled "Evidence"');
+  });
 });

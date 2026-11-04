@@ -1,9 +1,14 @@
 import type { ProjectEnvelope, ThreadEnvelope } from "../../core/types.js";
+import type { ResearchProposal, StoredResearchRun } from "../../server/api.js";
 
 export interface ShellState {
   snapshotSequence: number;
   projects: ProjectEnvelope[];
   threads: ThreadEnvelope[];
+  /** Every research run (past ones too) the server knows, with the roles it started. */
+  researchRuns?: StoredResearchRun[];
+  /** Run sizes waiting for this client's answer, for the threads it opted in to answer for. */
+  researchProposals?: ResearchProposal[];
   synchronized: boolean;
   unhandled: Record<string, number>;
 }
@@ -42,6 +47,8 @@ export function applyShellFrame(state: ShellState, frame: unknown): ShellState {
       snapshotSequence: typeof snapshot.snapshotSequence === "number" ? snapshot.snapshotSequence : state.snapshotSequence,
       projects: asRows(snapshot.projects) as unknown as ProjectEnvelope[],
       threads: asRows(snapshot.threads) as unknown as ThreadEnvelope[],
+      researchRuns: asRows(snapshot.researchRuns) as unknown as StoredResearchRun[],
+      researchProposals: asRows(snapshot.researchProposals) as unknown as ResearchProposal[],
     };
   }
   if (kind === "synchronized") return { ...state, synchronized: true };

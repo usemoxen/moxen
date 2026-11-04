@@ -100,7 +100,7 @@ describe("full research runs", () => {
       }
       if (reason === "deadline") {
         // Advance only the production deadline; provider I/O uses real timers.
-        vi.spyOn(Date, "now").mockReturnValue(Date.parse(proposal!.expiresAt) + 1);
+        vi.spyOn(Date, "now").mockReturnValue(Date.parse(proposal!.expiresAt!) + 1);
         await connection.query({ type: "research.proposals", threadId: parent.threadId });
         vi.restoreAllMocks();
       }
@@ -201,6 +201,44 @@ describe("full research runs", () => {
     } finally { unsubscribe(); await connection.close(); }
   });
 
+  it("offers the size picker for /research and the first prompt after switching to Research mode, with no answer deadline", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    const proposals = async (threadId: string) => await connection.query({ type: "research.proposals", threadId });
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBe(true);
+      const first = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: true });
+      await expect.poll(async () => (await proposals(own.threadId)).length, WAIT).toBe(1);
+      const [proposal] = await proposals(own.threadId);
+      expect(proposal).toMatchObject({ target: "user-thread", expiresAt: null });
+      // A user's own proposal has no deadline: far in the future it is still waiting.
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 3_600_000);
+      expect(await proposals(own.threadId)).toHaveLength(1);
+      vi.restoreAllMocks();
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await first;
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBeUndefined();
+      // Answered once: later messages in the mode do not ask again.
+      await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Second question" }, wait: true });
+      expect(await proposals(own.threadId)).toEqual([]);
+      // Switching out and back in arms it again; `/research` always asks.
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "default" });
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBe(true);
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "default" });
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBeUndefined();
+      const oneOff = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Slash" }, interactionMode: "research", wait: true });
+      await expect.poll(async () => (await proposals(own.threadId)).length, WAIT).toBe(1);
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: (await proposals(own.threadId))[0]!.id, choice: "single" });
+      await oneOff;
+    } finally { vi.restoreAllMocks(); unsubscribe(); await connection.close(); }
+  });
+
   it("does not propose research while busy and preserves mode-lock and delivery semantics", async () => {
     const harness = await testHarness({ leaveTurnsRunning: true });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
@@ -248,7 +286,7 @@ describe("full research runs", () => {
     try {
       const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
       const request = { parentThreadId: parent.threadId, task: "Investigate", wait: true };
-      for (const size of [{ researchers: 9, critics: 1 }, { researchers: 1, critics: 4 }, { researchers: 0, critics: 1 }, { researchers: 1, critics: 0 }]) await expect(connection.startResearchRun(request, size)).rejects.toThrow(/researchers 1 to 8 and critics 1 to 3/);
+      for (const size of [{ researchers: 9, critics: 1 }, { researchers: 1, critics: 2 }, { researchers: 1, critics: 4 }, { researchers: 0, critics: 1 }, { researchers: 1, critics: 0 }]) await expect(connection.startResearchRun(request, size)).rejects.toThrow(/researchers 1 to 8 and critics 1 or 3/);
       const lead = await connection.startResearchRun(request, { researchers: 1, critics: 1 });
       const store = await openThreadStore(harness.root);
       const before = (await store.listThreadIds()).length;

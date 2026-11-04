@@ -32,6 +32,13 @@ import { useReconnects, useServerLink } from "../features/remote/useServerLink.j
 import { linkNoticeText } from "../features/remote/linkNotice.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../features/remote/codemodal.js";
 import { SubagentBar } from "../features/subagentview/subagentbar.js";
+import { ResearchPickerModal, PICKER_SIZE } from "../features/researchrun/researchpicker.js";
+import { ResearchRunView, agentTitle } from "../features/researchrun/researchrunview.js";
+import { RunBackBar } from "../features/researchrun/runbackbar.js";
+import { useResearchProposal } from "../features/researchrun/useResearchProposal.js";
+import { useResearchRunView } from "../features/researchrun/useResearchRunView.js";
+import { parseModeCommand } from "../model/modes.js";
+import { latestRunOf, roleThreadIds, runOfRole, summarizeRun } from "../model/researchrun.js";
 import { describeScheduled } from "../model/schedule.js";
 import { WorkQueueModal } from "../features/queue/queuemodal.js";
 import type { QueuePolicy } from "../features/queue/useWorkQueue.js";
@@ -264,6 +271,7 @@ export function App({
   /** A sidebar row or search result: it always shows the thread itself, so the parent of an open subagent goes back to the parent. */
   const openThreadFromSidebar = (threadId: string) => {
     subagentView.close();
+    setLeadFull(null);
     setFocus("chat");
     setCreating(false);
     setPicker(null);
@@ -500,6 +508,24 @@ export function App({
     setError,
     isRunning: () => sessionRunningRef.current,
   });
+  // -- research runs: one sidebar row and one view per run ---------------------
+  const runView = useResearchRunView();
+  /** The lead whose own thread is open in full, from its run view. */
+  const [leadFull, setLeadFull] = useState<string | null>(null);
+  const runSummary = useMemo(() => {
+    const run = latestRunOf(shell.researchRuns, openThreadId);
+    return run === null ? null : summarizeRun(run, shell.threads);
+  }, [shell.researchRuns, shell.threads, openThreadId]);
+  /** The run a role thread belongs to, when one is open in full. */
+  const roleRun = useMemo(() => runOfRole(shell.researchRuns, openThreadId), [shell.researchRuns, openThreadId]);
+  const showRunView = runSummary !== null && leadFull !== openThreadId && !creating;
+  /** The lead the open role (or lead thread in full) goes back to. */
+  const backToLeadId = roleRun !== null ? roleRun.leadThreadId : leadFull !== null && leadFull === openThreadId ? leadFull : null;
+  const backToRun = () => {
+    if (backToLeadId === null) return;
+    setLeadFull(null);
+    setOpenThreadId(backToLeadId);
+  };
   const { inventory: skillInventory, refresh: refreshSkills } = useSkillInventory(client, effectiveModelSelection?.instanceId, skillDirectory);
   const pickerSkills = useMemo(() => pickerEntries(skillInventory), [skillInventory]);
   const promptDirectory = skillDirectory ?? (remote ? null : cwd);
@@ -709,9 +735,14 @@ export function App({
   const exportPending = useMemo(() => pendingUserInputRequests(threadState), [threadState]);
   const suggestedPrompt = useMemo(() => promptSuggestion(threadState), [threadState]);
   const notify = useTerminalNotify(renderer);
+  // A run tells of itself through its lead: its roles finishing one by one is not news.
+  const notifiable = useMemo(() => {
+    const roles = roleThreadIds(shell.researchRuns);
+    return roles.size === 0 ? shell.threads : shell.threads.filter((thread) => !roles.has(thread.id));
+  }, [shell.threads, shell.researchRuns]);
   useThreadNotifications({
-    threads: shell.threads,
-    openThreadId,
+    threads: notifiable,
+    openThreadId: roleRun !== null ? roleRun.leadThreadId : openThreadId,
     openThreadTitle: selected?.title ?? null,
     pendingQuestions: exportPending.length,
     pushToast: toasts.push,
@@ -1019,7 +1050,7 @@ export function App({
     }
     // The same for the modals opened outside the picker (a side answer,
     // a forge prompt): they own their keys while they are up.
-    if (sideQuestion.open || forgePrompt !== null) {
+    if (sideQuestion.open || forgePrompt !== null || researchProposal.proposal !== null) {
       return;
     }
     // The inline answer and permission panels own their keys exactly like a modal does.
@@ -1107,6 +1138,38 @@ export function App({
         return;
       }
       scrollPane(sidePanel.tab === "diff" && diffPanel.expandedTurn !== null ? diffScrollRef.current : sidePanel.scrollRef.current, key.name);
+      return;
+    }
+    // The research run view: arrows walk the roster, tab the columns, enter opens the agent in full.
+    if (showRunView && runSummary !== null) {
+      if (key.name === "left" || key.name === "right") {
+        runView.stepAgent(runSummary, key.name === "right" ? 1 : -1);
+        return;
+      }
+      if (key.name === "tab") {
+        runView.stepRole(runSummary, key.shift === true ? -1 : 1);
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        const agent = runView.agentOf(runSummary, runView.roleOf(runSummary));
+        if (agent?.threadId) {
+          setLeadFull(null);
+          setOpenThreadId(agent.threadId);
+        }
+        return;
+      }
+      if (key.name === "l" && key.ctrl !== true && key.meta !== true) {
+        setLeadFull(openThreadId);
+        return;
+      }
+      if (["up", "down", "pageup", "pagedown", "home", "end"].includes(key.name)) {
+        runView.scroll(runSummary, key.name);
+        return;
+      }
+    }
+    // A role (or the lead) read in full: escape is the way back to the run.
+    if (key.name === "escape" && backToLeadId !== null) {
+      backToRun();
       return;
     }
     // Escape in the chat pane never kills a running turn; it only closes
@@ -1293,7 +1356,7 @@ export function App({
   const contextUsageDisplay = threadState.contextUsage === null ? null : formatContextUsage(threadState.contextUsage);
 
   // -- side panel (Diff / Agents / Context / Background) --------------------
-  const sidePanelOpen = sidePanel.tab !== null && !creating;
+  const sidePanelOpen = sidePanel.tab !== null && !creating && !showRunView;
   const turnKey = `${selected?.latestTurn?.turnId ?? ""}:${selected?.latestTurn?.state ?? ""}`;
   const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId) ?? null;
   const [planUsageRead, setPlanUsageRead] = useState(false);
@@ -1348,6 +1411,38 @@ export function App({
     const slash = reference.indexOf("/");
     return slash < 0 ? { name: reference, color: null } : labelFor({ instanceId: reference.slice(0, slash), model: reference.slice(slash + 1) });
   };
+  // The server asks for a run size while a thread can start one: Research mode is on, `/research` is typed, or the thread orchestrates.
+  const researchProposal = useResearchProposal(
+    client,
+    creating || roleRun !== null ? null : openThreadId,
+    interaction.mode === "research" || interaction.mode === "orchestrate" || parseModeCommand(draft)?.mode === "research",
+    setError,
+  );
+  const proposalModel = (role: "researcher" | "critic" | "finalizer"): string => {
+    const request = researchProposal.proposal?.plan.models?.[role];
+    if (request?.provider === undefined || request.model === undefined) return "";
+    const name = labelFor({ instanceId: request.provider, model: request.model }).name;
+    const effort = request.thinkingEffort === undefined ? "" : ` · ${tx(request.thinkingEffort.charAt(0).toUpperCase() + request.thinkingEffort.slice(1))}`;
+    return `${name}${effort}`;
+  };
+  const proposalProviders = (): string => {
+    const proposal = researchProposal.proposal;
+    if (proposal === null) return "";
+    const ids = new Set<string>([proposal.leadModel.instanceId, ...Object.values(proposal.plan.models ?? {}).flatMap((request) => (request.provider === undefined ? [] : [request.provider]))]);
+    return [...ids].map((id) => providers?.find((candidate) => candidate.instanceId === id)?.displayName ?? id).join(", ");
+  };
+  /** The role open in full, as the run view names it. */
+  const openRoleAgent = (() => {
+    if (roleRun === null || openThreadId === null) return null;
+    const summary = summarizeRun(roleRun, shell.threads);
+    for (const list of Object.values(summary.agents)) {
+      const found = list.find((agent) => agent.threadId === openThreadId);
+      if (found) return { agent: found, summary };
+    }
+    return null;
+  })();
+  const runBackTitle = () => (openRoleAgent === null ? String(selected?.title ?? "") : agentTitle(openRoleAgent.agent, openRoleAgent.summary));
+  const runBackState = () => sessionStatusLabel(session?.status ?? "idle");
   const agentRows = useMemo(
     () => agentThreads(shell.threads, openThreadId, now, (instanceId, model) => labelFor({ instanceId, model }).name),
     // `labelFor` reads the provider catalog; recompute when it loads.
@@ -2494,7 +2589,7 @@ export function App({
    * would swallow them into the draft and keep blinking. Closing restores
    * focus via closePicker's explicit target.
    */
-  const modalOwnsInput = picker !== null || quitConfirmOpen || sideQuestion.open || forgePrompt !== null;
+  const modalOwnsInput = picker !== null || quitConfirmOpen || sideQuestion.open || forgePrompt !== null || researchProposal.proposal !== null;
   const composerFocused = focus === "composer" && !modalOwnsInput;
   /**
    * Inline answer panel for the pending agent question, rendered in place
@@ -2587,7 +2682,7 @@ export function App({
         <Sidebar
           sections={sections}
           {...(server === null ? {} : { serverName: server.name })}
-          openThreadId={openThreadId}
+          openThreadId={roleRun !== null ? roleRun.leadThreadId : openThreadId}
           markedThreadIds={markedThreadIds}
           settledExpanded={settledExpanded}
           width={SIDEBAR_WIDTH}
@@ -2777,6 +2872,22 @@ export function App({
               flashing an empty transcript that reads as "no messages". */}
           {viewedImage !== null ? (
             <ImageViewer image={viewedImage} onClose={closeImageViewer} onOpenExternally={openViewedImage} />
+          ) : showRunView && runSummary !== null ? (
+            <ResearchRunView
+              client={client}
+              summary={runSummary}
+              view={runView}
+              width={chatWidth}
+              now={now}
+              labelFor={labelFor}
+              homeDir={homeDir}
+              onOpenAgent={(agent) => {
+                if (agent.threadId === null) return;
+                setLeadFull(null);
+                setOpenThreadId(agent.threadId);
+              }}
+              onOpenLead={() => setLeadFull(openThreadId)}
+            />
           ) : threadState.synchronized ? (
           <Timeline
             groups={subagentView.target === null ? groups : subagentView.groups}
@@ -2836,7 +2947,7 @@ export function App({
               needs air, unlike the thin rule. With tasks hidden the notice
               drops its rule — the frame's own border is separator enough —
               but keeps the blank row. */}
-          {dockPane === "tasks" && plan !== null ? (
+          {showRunView ? null : dockPane === "tasks" && plan !== null ? (
             <TasksPanel plan={plan} width={chatWidth} {...(dockPagerControl ? { pager: dockPagerControl } : {})} />
           ) : dockPane === "queued" ? (
             <QueuedPanel
@@ -2854,7 +2965,14 @@ export function App({
             width={chatWidth}
             {...(dockPane !== null ? { flushTop: true } : { tight: true })}
           />
-          {subagentView.target !== null ? (
+          {backToLeadId !== null && !showRunView ? (
+            <RunBackBar
+              title={roleRun === null ? t("run.leadTitle") : runBackTitle()}
+              state={roleRun === null ? sessionStatusLabel(session?.status ?? "idle") : runBackState()}
+              width={chatWidth}
+              onBack={backToRun}
+            />
+          ) : subagentView.target !== null ? (
             <SubagentBar
               title={subagentTitle(subagentView.transcript, subagentRows.find((row) => row.agentId === subagentView.target?.agentId)?.agentType ?? null)}
               state={subagentState(subagentView.transcript, now)}
@@ -3158,6 +3276,20 @@ export function App({
               .catch(() => undefined);
           }}
           onClose={() => setForgePrompt(null)}
+        />
+      ) : null}
+      {researchProposal.proposal !== null ? (
+        <ResearchPickerModal
+          key={researchProposal.proposal.id}
+          proposal={researchProposal.proposal}
+          modelName={proposalModel}
+          providerName={proposalProviders()}
+          screenWidth={width}
+          screenHeight={height}
+          left={Math.max(0, Math.floor((width - PICKER_SIZE.width) / 2))}
+          top={Math.max(0, Math.floor((height - PICKER_SIZE.height) / 2))}
+          onStart={researchProposal.start}
+          onSingle={researchProposal.single}
         />
       ) : null}
       {sideQuestion.open && sideQuestion.current !== null ? (

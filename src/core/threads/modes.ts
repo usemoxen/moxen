@@ -79,7 +79,9 @@ const RESEARCH = [
     "send findings that matter to the critic, and hand validated material to the finalizer. You merge; nobody else does.",
   "- Researchers: one self-contained question each, researched with their provider's own tools (web search, fetch, code), read only. " +
     "They list subtopics they find; they never delegate.",
-  "- Critic: checks a set of findings adversarially (what is unsupported, contradicted or missing). For claims that matter, not every scout pass.",
+  "- Critic: checks a set of findings adversarially (what is unsupported, contradicted or missing). For claims that matter, not every scout pass. " +
+    "Every run gets three reviews, Evidence, Risks and Alternatives: with one critic it does all three in one labelled verdict, with three critics each does one. " +
+    "The server tells each critic its lens.",
   "- Finalizer: composes the final report from the validated reports, nothing else.",
   "Use the user's per-role models. Every researcher publishes its report with research_message_submit, every critic publishes its verdict, and the finalizer publishes the final report.",
   "",
@@ -89,7 +91,7 @@ const RESEARCH = [
   "",
   "## Caps",
   "At most 8 researchers total per run; finished researchers do not free slots. Each critic has at most 3 verdicts across the whole run. " +
-    "Reports before a verdict share one findings revision; a report after review starts a new revision. The chosen size may be smaller. At most 3 critic agents and one finalizer. " +
+    "Reports before a verdict share one findings revision; a report after review starts a new revision. The chosen size may be smaller. A run has 1 or 3 critic agents (never 2) and one finalizer. " +
     "Finalization requires at least one critic, and every started critic must have a current verdict or have exhausted its 3 rounds. Report unresolved questions to the user.",
   "",
   "Each role is a separate thread and spends provider usage. Keep questions scoped and do not start roles the request does not need.",

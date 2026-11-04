@@ -89,7 +89,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
           type: "object",
           description: "Propose a full run, only with mode research. This is not permission to start it. Role models use provider, model and thinkingEffort from models.",
           properties: {
-            size: { type: "object", properties: { researchers: { type: "integer", minimum: 1, maximum: 8 }, critics: { type: "integer", minimum: 1, maximum: 3 } }, required: ["researchers", "critics"], additionalProperties: false },
+            size: { type: "object", properties: { researchers: { type: "integer", minimum: 1, maximum: 8 }, critics: { type: "integer", enum: [1, 3] } }, required: ["researchers", "critics"], additionalProperties: false },
             models: { type: "object", properties: Object.fromEntries(["researcher", "critic", "finalizer"].map((role) => [role, {
               type: "object", properties: { provider: { type: "string" }, model: { type: "string" }, thinkingEffort: { type: "string" } }, additionalProperties: false,
             }])), additionalProperties: false },

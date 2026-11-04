@@ -51,7 +51,12 @@ not every review or scout pass. It uses a lead, the chosen researchers and
 critics, and one finalizer. Each is a separate conversation spending provider
 usage; a size of 2 researchers and 1 critic means 5 threads including the lead.
 Researchers gather evidence, critics challenge it independently, and the
-finalizer composes from validated findings. Usage protection applies to every
+finalizer composes from validated findings. Every run gets three reviews:
+Evidence (is each claim sourced?), Risks (what breaks or is missing?) and
+Alternatives (what was not considered?). A run has 1 critic, who does all three
+in one verdict with a labelled section for each, or 3 critics, who do one each.
+There is no 2: the server refuses it. The server tells each critic its lens, so
+the finalizer reads the same labelled structure either way. Usage protection applies to every
 role just as it does to any other thread.
 
 The `delegate` tool can suggest a full run with `mode: "research"` and
@@ -68,6 +73,32 @@ entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
 Existing calls and CLI JSON envelopes are unchanged.
 
+### Research run view
+
+The TUI shows a run as one sidebar row, the lead's, marked `◈`; the role threads
+have no rows of their own and their completions raise no toasts. Opening the lead
+shows the run in place of its chat, with no side panel: a header (the run's name,
+its phase and the time it has taken or took), a roster with one glyph per agent
+(`○` waiting, `◐` working, `✓` done, `✗` failed, `■` stopped; up to 8 researchers,
+3 critics and the finalizer) and three live columns, one agent per role. The
+phase decides the widths: researchers are wide first, then the critics, then the
+finalizer; a column nothing has started in shrinks to a sliver. Below about 66
+columns it shows one column at a time under a switcher, roster still on top.
+
+Keys (chat focus): `←`/`→` walk the roster and show that agent in its column, `tab`
+moves between columns, `↑`/`↓`/page keys scroll the focused column, `enter` opens the
+agent as a normal full thread with a bar to go back to the run (`esc` or a click
+on it), `l` (or the footer link) opens the lead's own thread the same way. Clicking
+a glyph shows that agent too. A run that is over keeps its view; slots nobody
+started are dropped from the roster.
+
+The size picker is a modal asking for a `research.proposal.answer`: researchers
+as dots (1–8, a total for the run), critics as two choices (1 or 3), the model and
+effort per role, the thread count and the providers. `←`/`→` change the focused
+row, `↑`/`↓` move between rows, `enter` starts, `esc` runs one researcher instead.
+The TUI opts in (`researchProposals`) for the open thread while it is in Research
+or Orchestrate mode or `/research` is typed.
+
 ### Research proposal API
 
 The server owns approval; a client only presents it. A capable client opts in
@@ -78,7 +109,7 @@ subscription does not count. Opt in before requesting research.
 - Query `research.proposals` with `threadId`, or read `researchProposals` in
   shell snapshots. Each proposal has `id`, `threadId`, `task`, `target`
   (`delegation` or `user-thread`), `plan`, `leadModel` and `expiresAt`.
-- `plan` contains `size` (researchers 1–8, critics 1–3) and the resolved
+- `plan` contains `size` (researchers 1–8, critics 1 or 3) and the resolved
   per-role `models`. Use the model catalog for display names, efforts and
   choices. Count `researchers + critics + 2` threads, including the lead and
   finalizer; the providers are the union of the lead and role models.
@@ -90,6 +121,9 @@ subscription does not count. Opt in before requesting research.
   Losing the last such subscription also falls back. An unanswered proposal
   falls back after 45 seconds, below the usual MCP call timeout. The deadline
   is absolute; duplicate or late answers fail with `RESEARCH_PROPOSAL_EXPIRED`.
+  A `user-thread` proposal (below) has no deadline (`expiresAt` is `null`): it
+  waits while the client stays connected, because nothing is waiting on a tool
+  call. Only the `delegation` target keeps the 45 seconds.
   Invalid answers leave the proposal pending until corrected or expired.
 - Pending proposals are transient, not thread records. Server shutdown cancels
   pending commands rather than starting new work while closing. Clients must
@@ -98,8 +132,11 @@ subscription does not count. Opt in before requesting research.
 `/research` (`interactionMode: "research"` on `thread.turn.start`) uses this
 same surface. After approval, the user's own thread is the lead; no delegated
 lead is created. With a single-researcher answer or no answering client, it
-researches directly without role tools. The picker itself is separate TUI work;
-clients that have not opted in keep the single-researcher behavior.
+researches directly without role tools. The picker shows only for `/research`
+and for the first prompt after the user switches the thread into Research mode
+(the thread keeps a `researchPicker` mark until then), not on every message of a
+thread that stays in Research mode. Clients that have not opted in keep the
+single-researcher behavior.
 
 A full-run lead's `thread.json` stores a
 `researchRun`: the lead id, role thread ids with their role and question, state,
@@ -116,7 +153,7 @@ tools; ordinary delegated tasks still cannot delegate. Shell snapshots expose
 `researchRuns` for run discovery and membership changes. The `research.run`
 query returns the lead and roles with current thread/task state and reports;
 clients use the existing per-thread subscriptions for each role's live chat.
-The run also stores its user-chosen size (1–8 researchers and 1–3 critics), role
+The run also stores its user-chosen size (1–8 researchers and 1 or 3 critics), role
 models and an ordered message log. Older internal runs without a size keep the
 8-researcher/3-critic limits. `research_messages` reads that log for the
 calling session's run only; neither it nor `research_message_submit` accepts a

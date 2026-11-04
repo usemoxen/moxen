@@ -359,7 +359,7 @@ export async function delegateTask(config: CliConfig, options: ThreadDelegateOpt
   let research;
   if (options.researchSize !== undefined) {
     if (!/^\d+,\d+$/.test(options.researchSize)) {
-      throw new CliError("INVALID_THREAD_OPTION", "--research-size must be researchers,critics (1 to 8,1 to 3).", { exitCode: 2 });
+      throw new CliError("INVALID_THREAD_OPTION", "--research-size must be researchers,critics (1 to 8 researchers, 1 or 3 critics).", { exitCode: 2 });
     }
     const [researchers, critics] = options.researchSize.split(",").map(Number);
     let models: unknown;

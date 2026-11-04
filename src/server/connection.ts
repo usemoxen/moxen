@@ -521,17 +521,18 @@ export class DirectConnection implements ClientApi {
     const config = await this.loadConfig();
     const selection = options.modelSelection ?? followUpSelection(thread.modelSelection, config, options.modelRequest, task) ?? thread.modelSelection;
     const plan = resolveResearchPlan(selection, config, options.suggested ?? { size: { researchers: 2, critics: 1 } });
-    // This is a user-answer deadline, not provider timing. Disconnects also
-    // resolve immediately; a forgotten picker cannot hold a tool call forever.
-    const answerWindowMs = 45_000;
+    // A delegation is a tool call, which cannot wait forever: it has a
+    // user-answer deadline, not provider timing. `/research` in the user's own
+    // thread has none while the client stays connected; a disconnect resolves it.
+    const answerWindowMs = target === "delegation" ? 45_000 : null;
     const proposal: ResearchProposal = {
       id: randomUUID(), threadId, task, target, plan, leadModel: selection,
-      expiresAt: new Date(Date.now() + answerWindowMs).toISOString(),
+      expiresAt: answerWindowMs === null ? null : new Date(Date.now() + answerWindowMs).toISOString(),
     };
     return await new Promise((resolve) => {
-      const timer = setTimeout(() => answer(null), answerWindowMs);
+      const timer = answerWindowMs === null ? null : setTimeout(() => answer(null), answerWindowMs);
       const answer = (chosen: ResearchPlan | null): void => {
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
         this.researchProposals.delete(proposal.id);
         this.researchRevision++;
         resolve(chosen);
@@ -544,7 +545,7 @@ export class DirectConnection implements ClientApi {
 
   private expireResearchProposals(): void {
     for (const entry of this.researchProposals.values()) {
-      if (Date.parse(entry.proposal.expiresAt) <= Date.now()) entry.answer(null);
+      if (entry.proposal.expiresAt !== null && Date.parse(entry.proposal.expiresAt) <= Date.now()) entry.answer(null);
     }
   }
 
@@ -1447,7 +1448,19 @@ export class DirectConnection implements ClientApi {
     const thread = await (await this.store()).readThreadRecord(threadId);
     const mode = command.interactionMode ?? thread?.interactionMode;
     const pending = (await (await this.store()).readTurns(threadId)).some((turn) => turn.status === "running" || turn.status === "queued");
-    if (mode === "research" && !pending && !isResearchRunActive(thread?.researchRun) && !thread?.researchRole &&
+    // The picker shows for `/research` (a prompt-only Research mode) and for the first
+    // prompt after the user switched the thread into Research mode, not for every message in it.
+    const asksSize = command.interactionMode === "research" || (thread?.researchPicker === true && mode === "research");
+    if (asksSize && thread?.researchPicker === true) {
+      await (await this.store()).withThreadLock(threadId, async () => {
+        const current = await (await this.store()).readThreadRecord(threadId);
+        if (current?.researchPicker) {
+          const { researchPicker: _asked, ...rest } = current;
+          await (await this.store()).writeThreadRecord(rest);
+        }
+      });
+    }
+    if (asksSize && mode === "research" && !pending && !isResearchRunActive(thread?.researchRun) && !thread?.researchRole &&
         !(await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
       const plan = await this.chooseResearch(threadId, message.text, "user-thread", command.modelSelection ? { modelSelection: command.modelSelection } : {});
       if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");

@@ -43,6 +43,7 @@ export interface ResearchSize {
   readonly critics: number;
 }
 
+
 /** User-approved defaults for each role; omitted roles inherit the lead's model. */
 export type ResearchModels = Readonly<Partial<Record<ResearchRole, ModelRequest>>>;
 
@@ -80,6 +81,8 @@ export interface StoredResearchRun {
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
+  /** The user switched this thread into Research mode and has not been offered a run size yet; the next prompt offers it once. */
+  readonly researchPicker?: boolean;
   readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
   /** The thread this one continued (`thread.continue`): its finished tasks are still this thread's to reach. */
   readonly continuedFrom?: string;

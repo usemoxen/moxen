@@ -1171,8 +1171,11 @@ export async function updateThreadMeta(
       title = seed.length <= 80 ? seed : `${seed.slice(0, 79)}…`;
       titleSource = "seed";
     }
+    const { researchPicker: _picker, ...kept } = thread;
+    const switched = input.interactionMode !== undefined && input.interactionMode !== thread.interactionMode;
     const next: StoredThread = {
-      ...thread,
+      ...(switched ? kept : thread),
+      ...(switched && input.interactionMode === "research" ? { researchPicker: true } : {}),
       title,
       ...(titleSource ? { titleSource } : {}),
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),

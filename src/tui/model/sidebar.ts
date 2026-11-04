@@ -1,5 +1,6 @@
 import { t } from "../i18n/index.js";
 import type { NativeSubagentEnvelope, ProjectEnvelope, ThreadEnvelope } from "../../core/types.js";
+import { roleThreadIds } from "./researchrun.js";
 import { threadSortTime, threadStatus, type ShellState, type ThreadStatus } from "./shell.js";
 
 export interface SidebarThread {
@@ -24,6 +25,8 @@ export interface SidebarThread {
    * sit below the delegated threads.
    */
   natives: SidebarNative[];
+  /** The thread leads a research run: its role threads have no rows, this one stands for the run. */
+  research: boolean;
 }
 
 /** One of a thread's native subagents (Claude's Agent tool), as the sidebar lists it under the thread. */
@@ -142,6 +145,7 @@ function toSidebarThread(
   depth = 0,
   last = false,
   natives: SidebarNative[] = [],
+  leads: ReadonlySet<string> = NO_LEADS,
 ): SidebarThread {
   const project = projects.get(thread.projectId);
   const projectTitle = project?.title ?? t("sidebar.unknownProject");
@@ -160,8 +164,11 @@ function toSidebarThread(
     depth,
     last,
     natives,
+    research: leads.has(thread.id),
   };
 }
+
+const NO_LEADS: ReadonlySet<string> = new Set();
 
 /**
  * A list with every delegated task moved right under its parent, oldest
@@ -273,7 +280,10 @@ export function orderedProjectIds(state: ShellState): string[] {
 export function buildSidebarSections(state: ShellState, options: SidebarOptions): SidebarSections {
   const mode = options.mode ?? "flat";
   const projects = new Map(state.projects.map((project) => [project.id, project]));
-  const live = state.threads.filter((thread) => thread.archivedAt === null && thread.deletedAt == null);
+  // A research run has one row, its lead's: the threads of its roles are read inside the run.
+  const roles = roleThreadIds(state.researchRuns);
+  const leads: ReadonlySet<string> = new Set((state.researchRuns ?? []).map((run) => run.leadThreadId));
+  const live = state.threads.filter((thread) => thread.archivedAt === null && thread.deletedAt == null && !roles.has(thread.id));
 
   const active: ThreadEnvelope[] = [];
   const settled: ThreadEnvelope[] = [];
@@ -347,14 +357,14 @@ export function buildSidebarSections(state: ShellState, options: SidebarOptions)
           projectTitle,
           badge: projectBadge(projectTitle),
           badgeColor: badgeColor(id),
-          threads: nestDelegated(rows, options.now).map(({ thread, depth, last, natives }) => toSidebarThread(thread, projects, options.now, depth, last, natives)),
+          threads: nestDelegated(rows, options.now).map(({ thread, depth, last, natives }) => toSidebarThread(thread, projects, options.now, depth, last, natives, leads)),
           collapsed: options.collapsedProjects?.has(id) ?? false,
         };
       });
   }
 
   return {
-    active: nestDelegated(visible, options.now).map(({ thread, depth, last, natives }) => toSidebarThread(thread, projects, options.now, depth, last, natives)),
+    active: nestDelegated(visible, options.now).map(({ thread, depth, last, natives }) => toSidebarThread(thread, projects, options.now, depth, last, natives, leads)),
     // Settled threads list their delegated tasks only; their subagents are history.
     settled: nestDelegated(
       options.settledExpanded
@@ -364,7 +374,7 @@ export function buildSidebarSections(state: ShellState, options: SidebarOptions)
           })()
         : [],
     ).map(({ thread, depth, last }) =>
-      toSidebarThread(thread, projects, options.now, depth, last),
+      toSidebarThread(thread, projects, options.now, depth, last, [], leads),
     ),
     settledTotal: visibleSettled.length,
     mode,

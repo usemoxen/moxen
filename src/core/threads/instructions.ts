@@ -29,6 +29,7 @@ import path from "node:path";
 
 import { APP_DISPLAY_NAME, APP_NAME } from "../config.js";
 import type { ResearchRole, ThreadEnv } from "./types.js";
+import type { ResearchLens } from "./researchvocab.js";
 import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.js";
 import { buildWebGuidance, type WebGuidanceInput } from "./webguidance.js";
 import { UI_BLOCK_LANGUAGE, UI_BLOCK_LIMITS, UI_BLOCK_VERSION, UI_COLORS, UI_STATES } from "./uiblock.js";
@@ -67,6 +68,8 @@ export interface RuntimeInstructionsInput {
   readonly delegationTools?: boolean;
   readonly researchLead?: boolean;
   readonly researchRole?: ResearchRole;
+  /** A critic's review: all three lenses (one critic in the run) or the one it was given. */
+  readonly criticLens?: ResearchLens | "all";
   /** True only while the built-in Moxen MCP server reaches this session. */
   readonly knowledge?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
@@ -76,6 +79,21 @@ export interface RuntimeInstructionsInput {
   /** Moxen memory (`core/memory/`): `write` for a thread's own agent, `read` for a delegated task, absent when off. */
   readonly memory?: "read" | "write";
 }
+
+const LENS_QUESTIONS = {
+  evidence: "Evidence: is each claim sourced, and does the source say it?",
+  risks: "Risks: what breaks, what is contradicted, what is missing?",
+  alternatives: "Alternatives: what was not considered?",
+} as const;
+
+/** Every run gets all three reviews; the finalizer reads the same labelled structure either way. */
+const CRITIC_LENS_GUIDANCE: Readonly<Record<ResearchLens | "all", string>> = {
+  all: "You are the run's only critic: review the findings through all three lenses and write your verdict as three sections, labelled Evidence, Risks and Alternatives. " +
+    Object.values(LENS_QUESTIONS).join(" "),
+  evidence: `You are one of three critics, and your lens is Evidence. Write your verdict under one section labelled "Evidence". The other lenses are covered by the other critics. ${LENS_QUESTIONS.evidence}`,
+  risks: `You are one of three critics, and your lens is Risks. Write your verdict under one section labelled "Risks". The other lenses are covered by the other critics. ${LENS_QUESTIONS.risks}`,
+  alternatives: `You are one of three critics, and your lens is Alternatives. Write your verdict under one section labelled "Alternatives". The other lenses are covered by the other critics. ${LENS_QUESTIONS.alternatives}`,
+};
 
 /**
  * Agents lean on what they already know and local greps for how a library or
@@ -352,6 +370,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
         "The finalizer publishes the final report; the lead publishes follow-ups. Chat alone is not a submitted report or verdict.",
       );
     }
+    if (input.criticLens) lines.push(CRITIC_LENS_GUIDANCE[input.criticLens]);
     if (input.env.mode === "worktree" && input.env.branch) {
       lines.push(
         `You work in your own git worktree at ${input.env.path}, on branch ${input.env.branch}` +

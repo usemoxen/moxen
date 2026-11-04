@@ -91,6 +91,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
+import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
 import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
@@ -276,6 +277,7 @@ async function sessionSetup(
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
   const running = runningModelOf(thread.modelSelection, instanceId);
+  const criticLens = thread.researchRole?.role === "critic" ? await criticLensOf(ctx, thread.researchRole.leadThreadId, thread.id) : undefined;
   const current = buildRuntimeInstructions({
     instanceId: thread.modelSelection.instanceId,
     ...(running ? { running } : {}),
@@ -283,6 +285,7 @@ async function sessionSetup(
     delegation,
     researchLead: isResearchRunActive(thread.researchRun),
     ...(thread.researchRole ? { researchRole: thread.researchRole.role } : {}),
+    ...(criticLens ? { criticLens } : {}),
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: !isResearchRunActive(thread.researchRun) && reach.orchestration && builtin.some((server) => server.name === "moxen"),
@@ -2267,9 +2270,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   }
   if (options.fullResearchRun && request.interactionMode !== "research") throw new CliError("INVALID_THREAD_OPTION", "A full research run must use Research mode.");
   const size = options.researchSize ?? { researchers: 8, critics: 3 };
-  if (options.fullResearchRun && (!Number.isInteger(size.researchers) || size.researchers < 1 || size.researchers > 8 || !Number.isInteger(size.critics) || size.critics < 1 || size.critics > 3)) {
-    throw new CliError("INVALID_THREAD_OPTION", "Research size requires researchers 1 to 8 and critics 1 to 3.");
-  }
+  if (options.fullResearchRun && !isValidResearchSize(size)) throw new CliError("INVALID_THREAD_OPTION", RESEARCH_SIZE_MESSAGE);
   const task = request.task.trim();
   if (!task) throw new CliError("PROMPT_REQUIRED", "A non-empty delegated task is required.", { exitCode: 2 });
   const timeoutMs = request.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS;
@@ -2530,6 +2531,19 @@ export interface ResearchRoleRequest extends ModelRequest {
 
 function findingsOf(run: StoredResearchRun): number {
   return Math.max(0, ...(run.messages ?? []).map((message) => message.findings));
+}
+
+/**
+ * What a critic reviews: every lens when the run has one critic, otherwise the
+ * lens of its place among the run's critics (evidence, risks, alternatives).
+ */
+async function criticLensOf(ctx: OperationContext, leadThreadId: string, threadId: string): Promise<ResearchLens | "all" | undefined> {
+  const run = (await ctx.store.readThreadRecord(leadThreadId))?.researchRun;
+  if (!run) return undefined;
+  const critics = run.roles.filter((entry) => entry.role === "critic");
+  if ((run.size?.critics ?? 3) === 1) return "all";
+  const index = critics.findIndex((entry) => entry.threadId === threadId);
+  return index < 0 ? undefined : RESEARCH_LENSES[index % RESEARCH_LENSES.length];
 }
 
 /** Called with the lead lock held, before creating a child. Membership consumes capacity for good. */
