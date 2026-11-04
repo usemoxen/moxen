@@ -10,7 +10,7 @@
  * deliberately not a server command, so a paired remote client cannot reach it (`moxen self-update --install`
  * refuses `--server`).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, cp, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { appEnv, appHomeDir } from "../config.js";
@@ -36,6 +36,19 @@ export function appLayout(env: NodeJS.ProcessEnv = process.env, home?: string): 
   const root = appEnv("STORE_ROOT", env)?.trim();
   const app = root ? path.join(path.resolve(root), "app") : path.join(appHomeDir(home), "app");
   return { app, versions: path.join(app, "versions"), current: path.join(app, "current"), previous: path.join(app, "previous"), bin: path.join(app, "bin") };
+}
+
+const realPath = (target: string): string => {
+  try {
+    return realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+};
+
+/** Whether `folder` sits directly in `versions/`. A running install's folder has its links resolved and the layout's doesn't, so both are resolved here. */
+export function isInstalledFolder(folder: string, layout: AppLayout): boolean {
+  return path.dirname(realPath(folder)) === realPath(layout.versions);
 }
 
 /** A version becomes a folder name, so it may not hold a separator or a `..`. */
@@ -144,7 +157,7 @@ export async function installRelease(options: InstallOptions = {}): Promise<Inst
   }
   const layout = options.layout ?? appLayout(options.env);
   const target = path.join(layout.versions, install.version);
-  const alreadyInside = path.dirname(path.resolve(install.folder)) === path.resolve(layout.versions);
+  const alreadyInside = isInstalledFolder(install.folder, layout);
   const exists = existsSync(target);
 
   await mkdir(layout.versions, { recursive: true });

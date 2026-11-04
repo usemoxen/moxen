@@ -258,6 +258,17 @@ describe("updateRelease", () => {
     expect(readdirSync(store)).toEqual([]);
   });
 
+  it("updates an install whose store is reached through a symlink", async () => {
+    if (process.platform === "win32") return; // creating a symlink needs a privilege Windows runners may lack
+    const archive = buildArchive("1.1.0");
+    const w = world(["1.0.0"], "1.0.0", null, "1.0.0", network("1.1.0", archive));
+    const link = path.join(temp(), "linked-store");
+    symlinkSync(w.store, link);
+    const layout = appLayout({ MOXEN_STORE_ROOT: link } as NodeJS.ProcessEnv);
+    await updateRelease(w.options({ layout }));
+    expect(text(layout.current)).toBe("1.1.0\n");
+  });
+
   describe("pruning", () => {
     it("keeps the new current, the previous and the version this process runs from, and deletes the rest", async () => {
       const archive = buildArchive("1.1.0");

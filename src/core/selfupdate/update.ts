@@ -27,7 +27,7 @@ import { renameReplacing, writeAtomic } from "../infra/atomic.js";
 import { RELEASE_MARKER, listCommand, releaseBaseName, releaseMarker, releaseTargetOf, unpackCommand, type ReleaseTarget } from "../release.js";
 import { checkForUpdate } from "./check.js";
 import { readInstall, type ReadInstallOptions } from "./install.js";
-import { appLayout, SAFE_VERSION, TEMP_PREFIX, type AppLayout } from "./installer.js";
+import { appLayout, isInstalledFolder, SAFE_VERSION, TEMP_PREFIX, type AppLayout } from "./installer.js";
 import type { InstallInfo, ReleaseAsset, RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "./vocabulary.js";
 
 export type { RollbackResult, UpdateAction, UpdateProgress, UpdateResult, UpdateStage } from "./vocabulary.js";
@@ -94,7 +94,7 @@ function requireInstalledRelease(install: InstallInfo, layout: AppLayout): void 
   if (install.kind !== "release" || install.folder === null || install.target === null) {
     throw fail("SELF_UPDATE_SOURCE_INSTALL", "This Moxen is a source checkout, which moxen never installs or updates. Update it with git and a rebuild.");
   }
-  if (path.dirname(path.resolve(install.folder)) !== path.resolve(layout.versions)) {
+  if (!isInstalledFolder(install.folder, layout)) {
     throw fail("SELF_UPDATE_NOT_INSTALLED", "This release is not installed under Moxen's app folder yet. Run moxen self-update --install first, then use the installed moxen.");
   }
 }
