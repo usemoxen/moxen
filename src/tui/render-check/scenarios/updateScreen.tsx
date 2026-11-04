@@ -123,7 +123,7 @@ export async function runUpdateScreen(): Promise<void> {
   console.log(setup.captureCharFrame());
   await act(async () => finish({ ...RESULT, warnings: ["Could not delete the old version 0.1.2: it is in use."] }));
   await see("Moxen 0.2.0 is installed.");
-  await see("Restart the Moxen server to use it");
+  await see("run moxen server stop");
   await see("Could not delete the old version 0.1.2");
   console.log("--- update screen, finished ---");
   console.log(setup.captureCharFrame());

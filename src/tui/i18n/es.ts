@@ -1348,7 +1348,7 @@ export const es: Catalog = {
   "update.installedNow": "Moxen {version} está instalado.",
   "update.alreadyCurrent": "Moxen {version} ya es la versión actual. No se ha cambiado nada.",
   "update.rolledBack": "Se ha vuelto a Moxen {version}. {from} se conserva, así que puedes volver a ella.",
-  "update.restartNote": "Reinicia el servidor de Moxen para usarla. Los hilos en ejecución conservan su versión hasta entonces. No se ha reiniciado nada.",
+  "update.restartNote": "Para usarla, cierra Moxen, ejecuta moxen server stop y vuelve a abrir Moxen. Eso interrumpe los hilos en ejecución, así que hazlo cuando quieras. No se ha reiniciado nada.",
   "update.warning": "Aviso: {warning}",
   "update.untouched": "La versión que se está ejecutando no ha cambiado.",
   "update.lost": "Se ha perdido el rastro de la actualización: se cortó la conexión con el servidor.",
