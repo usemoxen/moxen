@@ -121,6 +121,7 @@ import {
   continueThread,
   delegate,
   beginResearchRun,
+  isResearchRunActive,
   resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
@@ -378,7 +379,7 @@ export class DirectConnection implements ClientApi {
    */
   private async moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): Promise<McpServerSpec> {
     const researchRun = await readResearchRun(await this.context(), threadId);
-    const researchLead = researchRun?.leadThreadId === threadId;
+    const researchLead = isResearchRunActive(researchRun) && researchRun?.leadThreadId === threadId;
     const imageGeneration = !delegated && (await this.imageAvailability(threadId)).available;
     const handoff = await pendingHandoff(await this.context(), threadId);
     // Hosted in this process: Claude calls the tools in-process, the other
@@ -405,7 +406,7 @@ export class DirectConnection implements ClientApi {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
-      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: researchRun !== null }),
+      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: isResearchRunActive(researchRun) }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
@@ -495,7 +496,7 @@ export class DirectConnection implements ClientApi {
   ): Promise<ResearchPlan | null> {
     if (this.closed || !this.researchResponders.get(threadId)) return null;
     const thread = await (await this.store()).readThreadRecord(threadId);
-    if (!thread || thread.researchRole || thread.researchRun || (await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
+    if (!thread || thread.researchRole || isResearchRunActive(thread.researchRun) || (await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
       throw new CliError("DELEGATION_REFUSED", "Only a user's own thread may propose a research run.");
     }
     const config = await this.loadConfig();
@@ -730,7 +731,7 @@ export class DirectConnection implements ClientApi {
           }),
         );
         const visible = rows.filter(isVisibleThread);
-        const researchRuns = threads.flatMap((thread) => thread.researchRun ? [thread.researchRun] : []);
+        const researchRuns = threads.flatMap((thread) => [...(thread.pastResearchRuns ?? []), ...(thread.researchRun ? [thread.researchRun] : [])]);
         const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
         lastFingerprint = fingerprint;
         const hash = JSON.stringify({ projects, threads: visible, researchRuns, researchProposals });
@@ -1400,9 +1401,11 @@ export class DirectConnection implements ClientApi {
 
   private async turnStart(command: CommandOf<"thread.turn.start">): Promise<CommandResult<"thread.turn.start">> {
     const { threadId, message } = command;
+    await readResearchRun(await this.context(), threadId);
     const thread = await (await this.store()).readThreadRecord(threadId);
     const mode = command.interactionMode ?? thread?.interactionMode;
-    if (mode === "research" && !thread?.researchRun && !thread?.researchRole &&
+    const pending = (await (await this.store()).readTurns(threadId)).some((turn) => turn.status === "running" || turn.status === "queued");
+    if (mode === "research" && !pending && !isResearchRunActive(thread?.researchRun) && !thread?.researchRole &&
         !(await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
       const plan = await this.chooseResearch(threadId, message.text, "user-thread", command.modelSelection ? { modelSelection: command.modelSelection } : {});
       if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");

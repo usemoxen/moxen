@@ -245,7 +245,7 @@ async function sessionSetup(
     !reach.orchestration && !reach.webFetch && memory === "off"
       ? []
       : (await ctx.builtinMcpServers?.(thread.id, {
-          delegated: delegation !== null || thread.researchRun !== undefined || !reach.orchestration,
+          delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
           webFetch: reach.webFetch, memory,
         }) ?? []);
   const base: Record<string, McpServerEntry> = {};
@@ -279,11 +279,11 @@ async function sessionSetup(
     instanceId: thread.modelSelection.instanceId,
     env: thread.env,
     delegation,
-    researchLead: thread.researchRun !== undefined,
+    researchLead: isResearchRunActive(thread.researchRun),
     ...(thread.researchRole ? { researchRole: thread.researchRole.role } : {}),
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
-    delegationTools: !thread.researchRun && reach.orchestration && builtin.some((server) => server.name === "moxen"),
+    delegationTools: !isResearchRunActive(thread.researchRun) && reach.orchestration && builtin.some((server) => server.name === "moxen"),
     knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
       !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
     ...(memory !== "off" && builtin.some((server) => server.name === "moxen") ? { memory } : {}),
@@ -1151,6 +1151,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const { store } = ctx;
   // A dead process's turn must not swallow this send as a steer.
   await recoverOrphanedTurn(ctx, input.threadId);
+  await syncResearchRun(ctx, input.threadId);
   const thread = await inspectThread(store, input.threadId);
   // Resolved before the ledger is touched: an unknown provider fails
   // without recording a turn.
@@ -2221,8 +2222,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const parentThreadId = requireThreadId(request.parentThreadId);
   if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
   else {
+    await syncResearchRun(ctx, parentThreadId);
     const parent = await ctx.store.readThreadRecord(parentThreadId);
-    if (parent?.researchRun || parent?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
+    if (isResearchRunActive(parent?.researchRun) || parent?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
       throw new CliError("DELEGATION_REFUSED", "A delegated task or research lead cannot delegate again. Use role tools inside a full run.");
     }
   }
@@ -2333,7 +2335,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   };
   const createChild = async (): Promise<StoredThread> => {
     const lead = options.researchRole === undefined ? null : await requireResearchLead(ctx, parentThreadId);
-    if (lead) await checkResearchStart(ctx, lead.researchRun, options.researchRole!);
+    if (lead) await checkResearchStart(lead.researchRun, options.researchRole!);
     let child = await createThread(ctx.store, {
       id: childThreadId,
       ...(options.hidden === true ? { hidden: true } : {}),
@@ -2411,9 +2413,14 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   };
 }
 
+/** Delegated leads retain their task lifecycle; user-thread runs explicitly end. */
+export function isResearchRunActive(run: StoredResearchRun | null | undefined): boolean {
+  return run !== undefined && run !== null && run.endedAt === undefined;
+}
+
 export async function requireResearchLead(ctx: OperationContext, threadId: string): Promise<StoredThread & { readonly researchRun: StoredResearchRun }> {
   const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
-  if (!thread?.researchRun || thread.researchRun.leadThreadId !== threadId || thread.researchRole) {
+  if (!thread?.researchRun || !isResearchRunActive(thread.researchRun) || thread.researchRun.leadThreadId !== threadId || thread.researchRole) {
     throw new CliError("RESEARCH_LEAD_REQUIRED", "Only the lead of a full research run may use role tools.");
   }
   return { ...thread, researchRun: thread.researchRun };
@@ -2441,28 +2448,43 @@ export async function beginResearchRun(ctx: OperationContext, threadId: string, 
     if (!thread || thread.researchRole || await delegationOf(ctx.store, threadId)) {
       throw new CliError("RESEARCH_LEAD_REQUIRED", "Only a user's own thread can begin a research run here.");
     }
-    if (thread.researchRun) throw new CliError("RESEARCH_RUN_EXISTS", "This thread already leads a research run.");
+    if (isResearchRunActive(thread.researchRun)) throw new CliError("RESEARCH_RUN_EXISTS", "This thread already leads a research run.");
     if (thread.archivedAt || (await ctx.store.readTurns(threadId)).some((turn) => turn.status === "running" || turn.status === "queued")) {
       throw new CliError("THREAD_BUSY", "Start a research run in an unarchived thread with no pending turn.");
     }
     const approved = resolveResearchPlan(thread.modelSelection, ctx.config, plan);
     const now = ctx.store.nowIso();
-    await ctx.store.writeThreadRecord({ ...thread, researchRun: {
+    await ctx.store.writeThreadRecord({ ...thread,
+      ...(thread.researchRun ? { pastResearchRuns: [...(thread.pastResearchRuns ?? []), thread.researchRun] } : {}),
+      researchRun: {
       leadThreadId: threadId, ...approved, messages: [], roles: [], state: "running", createdAt: now, updatedAt: now,
+      startedAfterTurnId: (await ctx.store.readTurns(threadId)).at(-1)?.id ?? null,
     } });
     ctx.store.emit(threadId, "research-run-started");
   });
 }
 
 async function syncResearchRun(ctx: OperationContext, threadId: string): Promise<void> {
-  if (!(await ctx.store.readThreadRecord(threadId))?.researchRun) return;
+  const record = await ctx.store.readThreadRecord(threadId);
+  if (record?.researchRole) return await syncResearchRun(ctx, record.researchRole.leadThreadId);
+  if (!record?.researchRun) return;
   await ctx.store.withThreadLock(threadId, async () => {
     const thread = await ctx.store.readThreadRecord(threadId);
-    if (!thread?.researchRun) return;
+    if (!thread?.researchRun || !isResearchRunActive(thread.researchRun)) return;
+    const own = await delegationOf(ctx.store, threadId) === null;
+    const turns = await ctx.store.readTurns(threadId);
+    if (own && (thread.researchRun.startedAfterTurnId !== undefined
+      ? (turns.at(-1)?.id ?? null) === thread.researchRun.startedAfterTurnId
+      : !turns.some((turn) => turn.createdAt >= thread.researchRun!.createdAt))) return;
     const task = taskOf(await threadWithLedger(ctx.store, threadId));
-    const state = await taskHasSettledForGood(ctx, threadId) ? task.status : "running";
-    if (state === thread.researchRun.state) return;
-    await ctx.store.writeThreadRecord({ ...thread, researchRun: { ...thread.researchRun, state, updatedAt: ctx.store.nowIso() } });
+    const settled = await taskHasSettledForGood(ctx, threadId) && (!own ||
+      (await Promise.all(thread.researchRun.roles.map((role) => taskHasSettledForGood(ctx, role.threadId)))).every(Boolean));
+    const state = settled ? task.status : "running";
+    if (state === thread.researchRun.state && !(own && settled)) return;
+    const now = ctx.store.nowIso();
+    await ctx.store.writeThreadRecord({ ...thread, researchRun: { ...thread.researchRun, state, updatedAt: now,
+      ...(own && settled ? { endedAt: now, report: task.summary } : {}),
+    } });
     ctx.store.emit(threadId, "research-run-changed");
   });
 }
@@ -2474,20 +2496,17 @@ export interface ResearchRoleRequest extends ModelRequest {
 }
 
 function findingsOf(run: StoredResearchRun): number {
-  return (run.messages ?? []).filter((message) => message.kind === "report").length;
+  return Math.max(0, ...(run.messages ?? []).map((message) => message.findings));
 }
 
-/** Called with the lead lock held, before creating a child. Missing turns reserve a slot too. */
-async function checkResearchStart(ctx: OperationContext, run: StoredResearchRun, role: ResearchRole): Promise<void> {
+/** Called with the lead lock held, before creating a child. Membership consumes capacity for good. */
+async function checkResearchStart(run: StoredResearchRun, role: ResearchRole): Promise<void> {
   const size = run.size ?? { researchers: 8, critics: 3 };
   if (role === "researcher") {
-    let active = 0;
-    for (const entry of run.roles.filter((entry) => entry.role === role)) {
-      const turns = await ctx.store.readTurns(entry.threadId);
-      if (!turns.length || turns.some((turn) => turn.status === "running" || turn.status === "queued")) active++;
-    }
     const cap = Math.min(8, size.researchers);
-    if (active >= cap) throw new CliError("RESEARCH_CAP", `Researcher running cap is ${cap} (maximum 8).`);
+    if (run.roles.filter((entry) => entry.role === role).length >= cap) {
+      throw new CliError("RESEARCH_CAP", `Researcher total cap is ${cap} (maximum 8).`);
+    }
   }
   if (role === "critic") {
     const cap = Math.min(3, size.critics);
@@ -2495,8 +2514,12 @@ async function checkResearchStart(ctx: OperationContext, run: StoredResearchRun,
   }
   if (role === "finalizer") {
     const critics = run.roles.filter((entry) => entry.role === "critic");
-    if (!critics.length || critics.some((critic) => !(run.messages ?? []).some((message) => message.kind === "verdict" && message.threadId === critic.threadId && message.findings === findingsOf(run)))) {
-      throw new CliError("RESEARCH_CAP", "Finalizer requires at least one verdict from every started critic on the current findings, and at least one critic.");
+    const verdicts = (run.messages ?? []).filter((message) => message.kind === "verdict");
+    if (!critics.length || critics.some((critic) => {
+      const mine = verdicts.filter((message) => message.threadId === critic.threadId);
+      return mine.length < 3 && !mine.some((message) => message.findings === findingsOf(run));
+    })) {
+      throw new CliError("RESEARCH_CAP", "Finalizer requires every started critic to have a current verdict or exhaust its 3 rounds, and at least one critic.");
     }
     if (run.roles.some((entry) => entry.role === role)) throw new CliError("RESEARCH_CAP", "Finalizer agent cap is 1.");
   }
@@ -2521,16 +2544,21 @@ export async function readResearchMessages(ctx: OperationContext, threadId: stri
 /** Explicit submissions, not arbitrary transcript text, become reports and verdicts. */
 export async function submitResearchMessage(ctx: OperationContext, threadId: string, text: string): Promise<ResearchMessage> {
   if (typeof text !== "string" || !text.trim()) throw new CliError("INVALID_TOOL_INPUT", "A non-empty research message is required.");
+  await syncResearchRun(ctx, threadId);
   const leadId = await researchMembership(ctx, threadId);
   return await ctx.store.withThreadLock(leadId, async () => {
+    // A user can replace an ended run between the initial check and this lock.
+    await researchMembership(ctx, threadId);
     const lead = await requireResearchLead(ctx, leadId);
     const run = lead.researchRun;
     const role = run.roles.find((entry) => entry.threadId === threadId)?.role;
     const kind = role === "critic" ? "verdict" : role === "finalizer" ? "final" : threadId === leadId ? "followup" : "report";
     // Only researchers change the findings under review; a final report does not reopen review.
-    const findings = findingsOf(run) + (role === "researcher" ? 1 : 0);
-    const round = kind === "verdict" ? (run.messages ?? []).filter((message) => message.kind === "verdict" && message.threadId === threadId && message.findings === findings).length + 1 : undefined;
-    if (round !== undefined && round > 3) throw new CliError("RESEARCH_CAP", "Critic round cap is 3 per set of findings.");
+    const current = findingsOf(run);
+    const reviewed = (run.messages ?? []).some((message) => message.kind === "verdict" && message.findings === current);
+    const findings = role === "researcher" && (current === 0 || reviewed) ? current + 1 : current;
+    const round = kind === "verdict" ? (run.messages ?? []).filter((message) => message.kind === "verdict" && message.threadId === threadId).length + 1 : undefined;
+    if (round !== undefined && round > 3) throw new CliError("RESEARCH_CAP", "Critic round cap is 3 per critic for the whole run.");
     const message: ResearchMessage = { id: randomUUID(), threadId, kind, text: text.trim(), findings, ...(round === undefined ? {} : { round }), createdAt: ctx.store.nowIso() };
     await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run, messages: [...(run.messages ?? []), message], updatedAt: message.createdAt } });
     ctx.store.emit(leadId, "research-message-submitted");
@@ -2539,6 +2567,7 @@ export async function submitResearchMessage(ctx: OperationContext, threadId: str
 }
 
 export async function startResearchRole(ctx: OperationContext, request: ResearchRoleRequest): Promise<Delegation> {
+  await syncResearchRun(ctx, request.leadThreadId);
   const lead = await requireResearchLead(ctx, request.leadThreadId);
   if (!["researcher", "critic", "finalizer"].includes(request.role)) throw new CliError("INVALID_THREAD_OPTION", "Unknown research role.");
   const chosen = lead.researchRun.models?.[request.role];
@@ -2555,6 +2584,7 @@ export async function requireResearchRole(ctx: OperationContext, leadThreadId: s
 }
 
 export interface ResearchRunView extends StoredResearchRun {
+  readonly pastResearchRuns?: readonly StoredResearchRun[];
   readonly report: string | null;
   readonly lead: ThreadEnvelope;
   readonly roles: readonly { readonly threadId: string; readonly role: ResearchRole; readonly question: string; readonly thread: ThreadEnvelope; readonly task: TaskView }[];
@@ -2567,9 +2597,13 @@ export async function readResearchRun(ctx: OperationContext, threadId: string): 
   await syncResearchRun(ctx, leadId);
   const lead = await ctx.store.readThreadRecord(leadId);
   if (!lead?.researchRun) return null;
+  const run = threadId === leadId ? lead.researchRun : [lead.researchRun, ...(lead.pastResearchRuns ?? [])]
+    .find((entry) => entry.roles.some((role) => role.threadId === threadId));
+  if (!run) return null;
   const envelope = await threadWithLedger(ctx.store, leadId);
-  return { ...lead.researchRun, lead: envelope, report: taskOf(envelope).summary,
-    roles: await Promise.all(lead.researchRun.roles.map(async (role) => {
+  return { ...run, ...(threadId === leadId ? { pastResearchRuns: lead.pastResearchRuns ?? [] } : {}), lead: envelope,
+    report: run.report !== undefined ? run.report : taskOf(envelope).summary,
+    roles: await Promise.all(run.roles.map(async (role) => {
       const described = await describeTask(ctx, leadId, role.threadId);
       return { ...role, thread: described.child, task: described.task };
     })),

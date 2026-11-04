@@ -111,15 +111,22 @@ describe("full research runs", () => {
     } finally { vi.restoreAllMocks(); unsubscribe(); await connection.close(); }
   });
 
-  it("makes /research's user thread the lead, refreshes its role tools, and gives no other user thread those tools", async () => {
+  it("ends a user run only after lead and roles settle, restores tools, and starts a fresh run without losing the old one", async () => {
     const updates = new Map<string, readonly McpServerSpec[]>();
-    const harness = await testHarness({ onUpdateMcpServers: (id, servers) => updates.set(id, servers) });
+    const harness = await testHarness({ leaveTurnsRunning: true, onUpdateMcpServers: (id, servers) => updates.set(id, servers) });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     let unsubscribe = () => {};
     try {
-      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: false, threadEnvMode: "local" });
+      const store = await openThreadStore(harness.root);
+      const settle = async (id: string) => {
+        await expect.poll(async () => (await store.readTurns(id)).at(-1)?.status, WAIT).toBe("running");
+        await connection.dispatch({ type: "thread.turn.interrupt", threadId: id });
+        await expect.poll(async () => (await store.readTurns(id)).every((turn) => !["running", "queued"].includes(turn.status)), WAIT).toBe(true);
+      };
+      await settle(own.threadId);
       unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
-      const pending = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Check the claim" }, interactionMode: "research", wait: true });
+      const pending = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Check the claim" }, interactionMode: "research", wait: false });
       await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
       const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
       expect(proposal?.target).toBe("user-thread");
@@ -131,17 +138,83 @@ describe("full research runs", () => {
       const liveTools = updates.get(own.threadId)?.find((server) => server.name === "moxen");
       expect(liveTools?.type === "in-process" && liveTools.tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(ROLE_TOOLS));
       const role = await connection.dispatch({ type: "research.role.start", leadThreadId: own.threadId, role: "researcher", question: "Check" });
-      const store = await openThreadStore(harness.root);
-      await expect.poll(async () => (await store.readTurns(role.child.id)).at(-1)?.status, WAIT).toBe("completed");
+      await settle(own.threadId);
+      expect((await connection.query({ type: "research.run", threadId: own.threadId }))?.state).toBe("running");
+      await settle(role.child.id);
+      const ended = await connection.query({ type: "research.run", threadId: own.threadId });
+      expect(ended?.endedAt).toEqual(expect.any(String));
+      expect((await availableMoxenTools(connection, own.threadId, {})).some((tool) => tool.name === "delegate")).toBe(true);
+      expect((await availableMoxenTools(connection, own.threadId, {})).some((tool) => ROLE_TOOLS.includes(tool.name))).toBe(false);
+      expect((await availableMoxenTools(connection, role.child.id, {})).some((tool) => DELEGATION_TOOLS.has(tool.name) || ROLE_TOOLS.includes(tool.name))).toBe(false);
       expect(await store.listThreadIds()).toHaveLength(2);
       expect((await store.readThreadRecord(own.threadId))?.interactionMode).toBe("default");
-      await expect(connection.dispatch({ type: "thread.delegate", parentThreadId: own.threadId, task: "Escape" })).rejects.toThrow(/cannot delegate/);
-      const other = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Other", wait: true, threadEnvMode: "local" });
-      expect((await availableMoxenTools(connection, other.threadId, {})).some((tool) => ROLE_TOOLS.includes(tool.name))).toBe(false);
+      await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Later turn" }, wait: false });
+      expect((await connection.query({ type: "research.run", threadId: own.threadId }))?.endedAt).toBe(ended?.endedAt);
+      const restored = updates.get(own.threadId)?.find((server) => server.name === "moxen");
+      const restoredNames = restored?.type === "in-process" ? restored.tools?.map((tool) => tool.name) ?? [] : [];
+      expect(restoredNames).toContain("delegate");
+      expect(restoredNames.some((name) => ROLE_TOOLS.includes(name))).toBe(false);
+      await settle(own.threadId);
+      const second = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Fresh research" }, interactionMode: "research", wait: false });
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      const [next] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: next!.id, choice: "start", plan: { size: { researchers: 1, critics: 1 } } });
+      await second;
+      const fresh = await connection.query({ type: "research.run", threadId: own.threadId });
+      expect(fresh?.roles).toEqual([]);
+      expect(fresh?.pastResearchRuns).toEqual([expect.objectContaining({ endedAt: ended?.endedAt, roles: [expect.objectContaining({ threadId: role.child.id })] })]);
+      expect((await connection.query({ type: "research.run", threadId: role.child.id }))?.endedAt).toBe(ended?.endedAt);
+      await expect(connection.dispatch({ type: "research.message.submit", threadId: role.child.id, text: "Stale report" })).rejects.toThrow(/member/);
+      const newRole = await connection.dispatch({ type: "research.role.start", leadThreadId: own.threadId, role: "researcher", question: "Fresh evidence" });
+      await settle(newRole.child.id);
+      await settle(own.threadId);
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: own.threadId, task: "Ordinary delegation", wait: false });
+      await settle(delegated.child.id);
+    } finally {
+      unsubscribe();
+      const store = await openThreadStore(harness.root);
+      for (const threadId of await store.listThreadIds()) await connection.dispatch({ type: "thread.turn.interrupt", threadId });
+      await connection.close();
+    }
+  });
+
+  it("keeps a completed user's report and end state after later turns", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      const pending = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId,
+        message: { text: "Original report" }, interactionMode: "research", wait: true });
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id,
+        choice: "start", plan: { size: { researchers: 1, critics: 1 } } });
+      await pending;
+      const ended = await connection.query({ type: "research.run", threadId: own.threadId });
+      expect(ended).toMatchObject({ state: "completed", endedAt: expect.any(String), report: expect.stringContaining("Original report") });
+      await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Later answer" }, wait: true });
+      expect(await connection.query({ type: "research.run", threadId: own.threadId })).toMatchObject({
+        state: "completed", endedAt: ended?.endedAt, report: ended?.report,
+      });
     } finally { unsubscribe(); await connection.close(); }
   });
 
-  it.each([1, 8])("enforces %i running researchers atomically without orphan threads, and frees a finished slot", async (researchers) => {
+  it("does not propose research while busy and preserves mode-lock and delivery semantics", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Busy", wait: false, threadEnvMode: "local" });
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      await expect(connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Research" }, interactionMode: "research", delivery: "queue", wait: false })).rejects.toMatchObject({ code: "MODE_LOCKED_WHILE_RUNNING" });
+      expect(await connection.query({ type: "research.proposals", threadId: own.threadId })).toEqual([]);
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId: own.threadId });
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
+  it.each([1, 8])("enforces %i total researchers atomically without orphans or reusing a settled slot", async (researchers) => {
     const harness = await testHarness({ leaveTurnsRunning: true });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
     const store = await openThreadStore(harness.root);
@@ -154,14 +227,14 @@ describe("full research runs", () => {
       const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
       expect(accepted).toHaveLength(researchers);
       const refused = results.find((result) => result.status === "rejected");
-      expect(refused?.status === "rejected" && String(refused.reason)).toMatch(new RegExp(`Researcher running cap is ${researchers}`));
+      expect(refused?.status === "rejected" && String(refused.reason)).toMatch(new RegExp(`Researcher total cap is ${researchers}`));
       expect((await store.listThreadIds()).length - before.length).toBe(researchers);
       expect((await connection.query({ type: "research.run", threadId: lead.child.id }))?.size).toEqual({ researchers, critics: 1 });
       const done = accepted[0]!.child.id;
       await expect.poll(async () => (await store.readTurns(done)).at(-1)?.status, WAIT).toBe("running");
       await connection.dispatch({ type: "thread.turn.interrupt", threadId: done });
       await expect.poll(async () => (await store.readTurns(done)).at(-1)?.status, WAIT).toBe("interrupted");
-      expect((await start()).child.id).not.toBe(done);
+      await expect(start()).rejects.toThrow(`Researcher total cap is ${researchers}`);
     } finally {
       for (const threadId of await store.listThreadIds()) await connection.dispatch({ type: "thread.turn.interrupt", threadId });
       for (const threadId of await store.listThreadIds()) await expect.poll(async () => (await store.readTurns(threadId)).every((turn) => !["running", "queued"].includes(turn.status)), WAIT).toBe(true);
@@ -186,10 +259,9 @@ describe("full research runs", () => {
       const run = await connection.query({ type: "research.run", threadId: lead.child.id });
       expect(run?.messages).toEqual([expect.objectContaining({ kind: "handoff", text: "Review", threadId: run?.roles[0]?.threadId })]);
       await expect.poll(async () => (await store.readTurns(run!.roles[0]!.threadId)).at(-1)?.status, WAIT).toBe("completed");
-      for (let followup = 0; followup < 2; followup++) {
-        const role = await connection.dispatch({ type: "research.role.start", leadThreadId: lead.child.id, role: "researcher", question: "Evidence" });
-        await expect.poll(async () => (await store.readTurns(role.child.id)).at(-1)?.status, WAIT).toBe("completed");
-      }
+      const role = await connection.dispatch({ type: "research.role.start", leadThreadId: lead.child.id, role: "researcher", question: "Evidence" });
+      await expect.poll(async () => (await store.readTurns(role.child.id)).at(-1)?.status, WAIT).toBe("completed");
+      await expect(connection.dispatch({ type: "research.role.start", leadThreadId: lead.child.id, role: "researcher", question: "More" })).rejects.toThrow(/Researcher total cap is 1/);
     } finally { await connection.close(); }
   }, 20_000);
 
@@ -205,6 +277,8 @@ describe("full research runs", () => {
       await expect(start("finalizer")).rejects.toThrow(/verdict/i);
       const researcher = await start("researcher");
       expect((await callMoxenTool(connection, researcher.child.id, "research_message_submit", { text: "Evidence" })).isError).toBe(false);
+      const secondReport = await connection.dispatch({ type: "research.message.submit", threadId: researcher.child.id, text: "More evidence before review" });
+      expect(secondReport.findings).toBe(1);
       const critics = await Promise.all([start("critic"), start("critic"), start("critic")]);
       await expect(start("critic")).rejects.toThrow(/critic.*3/i);
       for (const critic of critics.slice(0, 2)) expect((await callMoxenTool(connection, critic.child.id, "research_message_submit", { text: "Validated" })).isError).toBe(false);
@@ -224,7 +298,8 @@ describe("full research runs", () => {
       expect((await callMoxenTool(connection, lead.child.id, "research_message_submit", { text: "Recheck the evidence" })).isError).toBe(false);
       expect((await callMoxenTool(connection, researcher.child.id, "research_message_submit", { text: "Revised evidence" })).isError).toBe(false);
       await expect(start("finalizer")).rejects.toThrow(/verdict/i);
-      for (const critic of critics) expect((await callMoxenTool(connection, critic.child.id, "research_message_submit", { text: "Revalidated" })).isError).toBe(false);
+      expect((await callMoxenTool(connection, critics[0]!.child.id, "research_message_submit", { text: "Forbidden fourth verdict on new findings" })).isError).toBe(true);
+      for (const critic of critics.slice(1)) expect((await callMoxenTool(connection, critic.child.id, "research_message_submit", { text: "Revalidated" })).isError).toBe(false);
       const finalizer = await start("finalizer");
       await expect(start("finalizer")).rejects.toThrow(/Finalizer agent cap is 1/);
       expect((await callMoxenTool(connection, finalizer.child.id, "research_message_submit", { text: "Final report" })).isError).toBe(false);
@@ -232,7 +307,7 @@ describe("full research runs", () => {
       expect(messages).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "followup", text: "Recheck the evidence" }),
         expect.objectContaining({ kind: "verdict", round: 3, findings: 1 }),
-        expect.objectContaining({ kind: "verdict", round: 1, findings: 2 }),
+        expect.objectContaining({ kind: "verdict", round: 2, findings: 2 }),
         expect.objectContaining({ kind: "final", text: "Final report", findings: 2 }),
       ]));
       const store = await openThreadStore(harness.root);
@@ -263,6 +338,7 @@ describe("full research runs", () => {
       const tools = await availableMoxenTools(connection, lead.child.id, {});
       expect(tools.filter((tool) => ROLE_TOOLS.includes(tool.name)).map((tool) => tool.name)).toEqual(ROLE_TOOLS);
       expect(tools.some((tool) => DELEGATION_TOOLS.has(tool.name))).toBe(false);
+      await expect(connection.dispatch({ type: "thread.delegate", parentThreadId: lead.child.id, task: "Escape" })).rejects.toThrow(/cannot delegate/);
       expect((await availableMoxenTools(connection, role.task.taskId, {})).some((tool) => DELEGATION_TOOLS.has(tool.name))).toBe(false);
       for (const id of [parent.threadId, lead.child.id, plain.child.id, role.task.taskId]) {
         const servers = starts.find((input) => input.threadId === id)?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }>;

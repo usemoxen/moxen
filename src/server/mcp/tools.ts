@@ -19,6 +19,7 @@ import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { isResearchRunActive } from "../../core/threads/operations.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan } from "../protocol.js";
 
@@ -243,7 +244,10 @@ export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
     name: "research_role_start",
-    description: "Start a read-only researcher, critic or finalizer in your research run. Each role is a nested thread, not another orchestrator task. Choose its question. The run's user-approved role model and effort take precedence over requested overrides.",
+    description: "Start a read-only researcher, critic or finalizer in your research run. " +
+      "The chosen researcher count is a total for the run; finished roles do not free slots. " +
+      "Each role is a nested thread, not another orchestrator task. Choose its question. " +
+      "The run's user-approved role model and effort take precedence over requested overrides.",
     inputSchema: { type: "object", properties: { role: { type: "string", enum: ["researcher", "critic", "finalizer"] }, question: { type: "string" }, provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" } }, required: ["role", "question"] },
   },
   { name: "research_role_report", description: "Read the state and report of one role in your research run.", inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] } },
@@ -252,7 +256,13 @@ const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
 
 const RESEARCH_MESSAGE_TOOLS: readonly McpTool[] = [
   { name: "research_messages", description: "Read only your research run's recorded hand-offs, researcher reports, critic verdicts and lead follow-ups. The run comes from your calling thread; no target is accepted.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
-  { name: "research_message_submit", description: "Submit to your own research run: researchers publish a report (a new findings revision), critics publish a verdict (at most three rounds per findings revision), and the lead publishes follow-ups. Read research_messages first. Every started critic must submit a verdict on the current findings before a finalizer can start.", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false } },
+  {
+    name: "research_message_submit",
+    description: "Submit to your own research run. Researcher reports share a findings revision until a verdict; a report after review starts a new revision. " +
+      "Each critic may submit at most three verdicts for the whole run, without resets. The lead publishes follow-ups. Read research_messages first. " +
+      "A finalizer requires at least one critic, and every started critic must have a current verdict or have exhausted its three rounds.",
+    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+  },
 ];
 
 /** Moxen memory, as a session has it: every tool, read/search (a delegated task), or none. */
@@ -401,10 +411,11 @@ export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
 
 export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
   const run = await api.query({ type: "research.run", threadId }).catch(() => null);
-  const researchLead = run?.leadThreadId === threadId;
+  const active = isResearchRunActive(run);
+  const researchLead = active && run?.leadThreadId === threadId;
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
   const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
-  return moxenToolsFor({ ...options, ...(run ? { delegated: true } : {}), imageGeneration, handoff, researchLead, researchMember: run !== null });
+  return moxenToolsFor({ ...options, ...(run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {}), imageGeneration, handoff, researchLead, researchMember: active });
 }
 
 /**

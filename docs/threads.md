@@ -126,15 +126,29 @@ the lead publishes follow-ups, and the finalizer publishes a final report. Chat
 answers alone do not count as submitted reports or verdicts. Starting a role
 records its question as a hand-off. The `research.run` query includes this log.
 
-Each researcher report creates a new findings revision. A critic's first,
-second and third verdict on that revision are its three review rounds; independent
-critics can each participate in those rounds. A fourth verdict is refused until
-new findings are submitted. Finalization requires at least one critic and a
-verdict from every started critic on the current revision. There is one finalizer.
-The chosen researcher count limits running researchers (a settled turn frees a
-slot); the chosen critic count limits critic agents across the run, not just
-those currently running. Caps are checked under the lead's lock before creating
+Researcher reports share one findings revision until a critic submits a verdict.
+A report after review starts a new revision. Each critic may submit at most three
+verdicts across the whole run; new revisions never reset that budget. Finalization
+requires at least one critic, and every started critic must have a verdict on the
+current revision or have exhausted its three rounds. There is one finalizer.
+The chosen researcher and critic counts limit total agents across the run;
+finished agents never free slots. A follow-up researcher needs unused capacity.
+Caps are checked under the lead's lock before creating
 a role thread, so a refused or concurrent over-cap start leaves no orphan thread.
+
+A user's own lead run ends once its lead turn has settled and no role has a
+running or queued turn (including scheduled resumes). Later turns cannot reopen
+it: ordinary delegation returns and role tools and lead instructions disappear.
+A new `/research` can propose a fresh run with fresh caps. The ended run remains
+in `researchRun` until replaced, then moves to `pastResearchRuns` on the thread;
+`research.run` includes that history and shell snapshots include the old runs.
+An old role's `research.run` still reads its original run, but it cannot submit
+to a newer run or gain delegation. Delegated leads keep their task lifecycle,
+one task id, one final report and one notification.
+
+A busy `/research` never opens a proposal. It follows the same send policy as
+the single-researcher fallback: existing mode locks, queue and delivery rules
+still apply, so a mode change during a running turn can be refused.
 
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds

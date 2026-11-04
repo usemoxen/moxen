@@ -71,10 +71,15 @@ export interface StoredResearchRun {
   readonly state: "running" | "completed" | "failed" | "interrupted";
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly endedAt?: string;
+  readonly report?: string | null;
+  /** Distinguishes approval from the first lead turn without comparing clocks. */
+  readonly startedAfterTurnId?: string | null;
 }
 
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
+  readonly pastResearchRuns?: readonly StoredResearchRun[];
   readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;

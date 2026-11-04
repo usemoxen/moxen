@@ -319,7 +319,13 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
         : NO_REDELEGATION_GUIDANCE,
     ];
     if (input.researchLead || input.researchRole) {
-      lines.push("Use research_messages to read only your own run's hand-offs, reports, verdicts and follow-ups. Use research_message_submit to publish your output to the run: a researcher report creates a new findings revision; a critic submission is an explicit verdict, with at most three rounds per findings revision; a finalizer publishes the final report; the lead publishes follow-ups. A finalizer can start only after every started critic has submitted a verdict on the current findings. A final answer in your chat alone is not a submitted report or verdict.");
+      lines.push(
+        "Use research_messages to read only your own run's hand-offs, reports, verdicts and follow-ups. " +
+        "Use research_message_submit to publish your output: researcher reports share one findings revision until a verdict; a report after review starts a new revision. " +
+        "Each critic has at most three verdicts across the whole run, without resets. The chosen researcher count is a total, not reusable slots. " +
+        "A finalizer requires at least one critic, and every started critic must have a verdict on the current revision or have exhausted its three rounds. " +
+        "The finalizer publishes the final report; the lead publishes follow-ups. Chat alone is not a submitted report or verdict.",
+      );
     }
     if (input.env.mode === "worktree" && input.env.branch) {
       lines.push(

@@ -84,8 +84,9 @@ const RESEARCH = [
     "The critic answers with a verdict in words: what holds, what does not, exactly what is missing. Keep reports tight; verbosity kills a research run.",
   "",
   "## Caps",
-  "At most 8 researchers at once (a finished one frees its slot for a follow-up). At most 3 critic rounds per set of findings; " +
-    "past that, stop and take the open questions to the user. The chosen size may be smaller. At most 3 critic agents, one finalizer, and a current verdict from every started critic before finalization.",
+  "At most 8 researchers total per run; finished researchers do not free slots. Each critic has at most 3 verdicts across the whole run. " +
+    "Reports before a verdict share one findings revision; a report after review starts a new revision. The chosen size may be smaller. At most 3 critic agents and one finalizer. " +
+    "Finalization requires at least one critic, and every started critic must have a current verdict or have exhausted its 3 rounds. Report unresolved questions to the user.",
   "",
   "Each role is a separate thread and spends provider usage. Keep questions scoped and do not start roles the request does not need.",
 ].join("\n");
