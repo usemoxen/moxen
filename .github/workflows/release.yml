@@ -56,7 +56,8 @@ jobs:
 
       - name: Smoke test the archive
         run: |
-          archive="$(ls release/moxen-*.tar.gz release/moxen-*.zip 2>/dev/null | head -n 1)"
+          # Each platform makes one archive; `ls` over both patterns would fail under the runner's pipefail.
+          archive="$(find release -maxdepth 1 -name 'moxen-*' ! -name '*.sha256')"
           bun scripts/smoke-release.ts "$archive" --embeddings
 
       - uses: actions/upload-artifact@v4
