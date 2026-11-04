@@ -64,7 +64,8 @@ const RESEARCH = [
   "Research mode is on: the user switched it on, and it stays on until they switch it off. Run the request as a research run:",
   "you orchestrate researcher agents, a critic and a finalizer through Moxen's `delegate` tool, and the end product is one final report, " +
     "with every source, as long and with as many tables or figures as the request needs.",
-  "If you have no `delegate` tool, you are a delegated task: you are the researcher. Do the research yourself with your own tools, read only, " +
+  "If you have `research_role_start`, you lead a delegated full research run: use research_role_start, research_role_report and research_role_cancel instead of delegate, task_status and task_cancel. Your final answer is the run's report.",
+  "If you have neither `delegate` nor `research_role_start`, you are a delegated task: you are the researcher. Do the research yourself with your own tools, read only, " +
     "and answer in the report format below; skip the roles and caps.",
   "",
   "## Roles",

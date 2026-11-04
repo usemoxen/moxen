@@ -48,6 +48,7 @@ export interface RuntimeInstructionsInput {
   readonly checklist?: boolean;
   /** True when the session has Moxen's delegation tools (not a delegated task itself, and Moxen's tools not switched off for the provider). */
   readonly delegationTools?: boolean;
+  readonly researchLead?: boolean;
   /** True only while the built-in Moxen MCP server reaches this session. */
   readonly knowledge?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
@@ -312,7 +313,9 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
       "Your final message is returned to that agent as the task's result, and it is all they will read.",
       "Make it a self-contained report: what you did, which files you changed, how you verified it, and anything left unfinished.",
       "Open the report with a single line that sums up the outcome (e.g. \"Audited 3 route files: 2 missing auth checks\") — it is shown as the task's headline.",
-      NO_REDELEGATION_GUIDANCE,
+      input.researchLead
+        ? "You lead a full research run. Use research_role_start to start a researcher, critic or finalizer with a self-contained question, provider, model and effort; research_role_report to read its report; research_role_cancel to stop it. These roles cannot delegate. You have no delegation tools. Merge the roles' findings into your final answer: that answer is the single report returned to the orchestrator."
+        : NO_REDELEGATION_GUIDANCE,
     ];
     if (input.env.mode === "worktree" && input.env.branch) {
       lines.push(

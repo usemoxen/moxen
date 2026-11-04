@@ -32,7 +32,7 @@ function provider(instanceId: string, overrides: Partial<ProviderSummary> = {}, 
 
 /** Just enough of `ClientApi` for the tools that read the catalog. */
 function catalogApi(providers: ProviderSummary[]): ClientApi {
-  return { query: async () => ({ providers }) } as unknown as ClientApi;
+  return { query: async (query: { type: string }) => query.type === "research.run" ? null : ({ providers }) } as unknown as ClientApi;
 }
 
 it.each([false, true])("tells the model about keyword fallback even when results are empty (%s)", async (empty) => {

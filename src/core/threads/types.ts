@@ -35,7 +35,20 @@ export interface ThreadEnv {
  */
 export type ThreadTitleSource = "seed" | "provider" | "user";
 
+export type ResearchRole = "researcher" | "critic" | "finalizer";
+
+/** Kept atomically with the lead, while each role keeps its own turn and usage ledgers. */
+export interface StoredResearchRun {
+  readonly leadThreadId: string;
+  readonly roles: readonly { readonly threadId: string; readonly role: ResearchRole; readonly question: string }[];
+  readonly state: "running" | "completed" | "failed" | "interrupted";
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface StoredThread {
+  readonly researchRun?: StoredResearchRun;
+  readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;

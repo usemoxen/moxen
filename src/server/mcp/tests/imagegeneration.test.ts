@@ -5,7 +5,7 @@ import { availableMoxenTools, callMoxenTool } from "../tools.js";
 
 it("does not offer image generation without eligibility, or to a delegated task", async () => {
   let available = true;
-  const api = { query: vi.fn(async () => ({ available })) } as unknown as ClientApi;
+  const api = { query: vi.fn(async (query: { type: string }) => query.type === "research.run" ? null : ({ available })) } as unknown as ClientApi;
   expect((await availableMoxenTools(api, "parent", {})).some((tool) => tool.name === "image_gen")).toBe(true);
   available = false;
   expect((await availableMoxenTools(api, "parent", {})).some((tool) => tool.name === "image_gen")).toBe(false);

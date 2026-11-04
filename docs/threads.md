@@ -45,6 +45,25 @@ thread lists and search, so they do not appear under the parent in the sidebar.
 Task-id reads, completion notifications and cancellation still work. The hidden
 flag is persisted from creation; ordinary delegated work is not hidden.
 
+Internally, a delegated Research task can be the lead of a full research run
+(the public delegation choice is not exposed yet). Its `thread.json` stores a
+`researchRun`: the lead id, role thread ids with their role and question, state,
+and creation/update times. Role threads store `researchRole` with the lead id
+and role, and keep their own conversation, turn and usage ledgers. The existing
+delegation ledger nests each role under the lead, with notifications disabled.
+Only the lead reports back to the orchestrator: one task id, one notification,
+and the lead's final answer as the report.
+
+The server offers `research_role_start`, `research_role_report` and
+`research_role_cancel` only to a full-run lead, and checks that ownership on
+every call. Roles run read-only in Research mode with no delegation or role
+tools; ordinary delegated tasks still cannot delegate. Shell snapshots expose
+`researchRuns` for run discovery and membership changes. The `research.run`
+query returns the lead and roles with current thread/task state and reports;
+clients use the existing per-thread subscriptions for each role's live chat.
+Role access to run messages, procedure caps and the finalizer gate are separate
+follow-up work.
+
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds
 them between the calls they narrate. Completed thinking is stored whole;

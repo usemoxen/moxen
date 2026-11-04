@@ -91,7 +91,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
-import type { SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -276,6 +276,7 @@ async function sessionSetup(
     instanceId: thread.modelSelection.instanceId,
     env: thread.env,
     delegation,
+    researchLead: thread.researchRun !== undefined,
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: reach.orchestration && builtin.some((server) => server.name === "moxen"),
@@ -393,7 +394,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   })
     // A delegated task resumed after a usage limit (or recovered after a crash)
     // still owes its parent the report when it finally ends.
-    .then(() => notifyParentOfResumedTask(ctx, threadId))
+    .then(async () => {
+      await syncResearchRun(ctx, threadId);
+      await notifyParentOfResumedTask(ctx, threadId);
+    })
     .catch(() => undefined);
 }
 
@@ -1204,7 +1208,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     ...(onEvent ? { onEvent } : {}),
     ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
     ...longThreadHook(ctx, thread.id),
-  }).catch(() => undefined);
+  }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
   return { ...sent, run };
 }
 
@@ -2195,8 +2199,13 @@ function taskOf(child: ThreadEnvelope, taskId = child.id): TaskView {
  *
  * Waiting awaits the run itself; this used to be a 200ms ledger poll.
  */
-export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean } = {}): Promise<Delegation> {
+export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean; readonly fullResearchRun?: boolean; readonly researchRole?: ResearchRole } = {}): Promise<Delegation> {
   const parentThreadId = requireThreadId(request.parentThreadId);
+  if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
+  else if ((await ctx.store.readThreadRecord(parentThreadId))?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
+    throw new CliError("DELEGATION_REFUSED", "A delegated task cannot delegate again.");
+  }
+  if (options.fullResearchRun && request.interactionMode !== "research") throw new CliError("INVALID_THREAD_OPTION", "A full research run must use Research mode.");
   const task = request.task.trim();
   if (!task) throw new CliError("PROMPT_REQUIRED", "A non-empty delegated task is required.", { exitCode: 2 });
   const timeoutMs = request.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS;
@@ -2309,6 +2318,25 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // Recorded before the child's session starts: that start reads it to tell
   // the child it is a delegated task (`core/threads/instructions.ts`).
   const now = new Date().toISOString();
+  if (options.fullResearchRun || options.researchRole !== undefined) {
+    created = {
+      ...created,
+      ...(options.fullResearchRun ? { researchRun: { leadThreadId: created.id, roles: [], state: "running" as const, createdAt: now, updatedAt: now } } : {}),
+      ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
+    };
+    await ctx.store.writeThreadRecord(created);
+    if (options.researchRole !== undefined) {
+      const role = options.researchRole;
+      await ctx.store.withThreadLock(parentThreadId, async () => {
+        const lead = await requireResearchLead(ctx, parentThreadId);
+        await ctx.store.writeThreadRecord({
+          ...lead,
+          researchRun: { ...lead.researchRun, roles: [...lead.researchRun.roles, { threadId: created.id, role, question: task }], updatedAt: now },
+        });
+        ctx.store.emit(parentThreadId, "research-role-started");
+      });
+    }
+  }
   await ctx.store
     .appendDelegation({
       id: randomUUID(),
@@ -2321,7 +2349,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       createdAt: now,
       updatedAt: now,
     })
-    .catch(() => undefined);
+    .catch((cause: unknown) => {
+      if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
+    });
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
     throw new CliError(
       "THREAD_START_FAILED",
@@ -2348,6 +2378,66 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     task: { ...taskOf(child), waitTimedOut },
     messageId: started.messageId,
     ...(worktree ? { worktree: { path: worktree.path, branch: worktree.branch, baseBranch: worktree.baseBranch } } : {}),
+  };
+}
+
+export async function requireResearchLead(ctx: OperationContext, threadId: string): Promise<StoredThread & { readonly researchRun: StoredResearchRun }> {
+  const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
+  if (!thread?.researchRun || thread.researchRun.leadThreadId !== threadId || thread.researchRole || !(await delegationOf(ctx.store, threadId))) {
+    throw new CliError("RESEARCH_LEAD_REQUIRED", "Only the lead of a full research run may use role tools.");
+  }
+  return { ...thread, researchRun: thread.researchRun };
+}
+
+async function syncResearchRun(ctx: OperationContext, threadId: string): Promise<void> {
+  if (!(await ctx.store.readThreadRecord(threadId))?.researchRun) return;
+  await ctx.store.withThreadLock(threadId, async () => {
+    const thread = await ctx.store.readThreadRecord(threadId);
+    if (!thread?.researchRun) return;
+    const task = taskOf(await threadWithLedger(ctx.store, threadId));
+    const state = await taskHasSettledForGood(ctx, threadId) ? task.status : "running";
+    if (state === thread.researchRun.state) return;
+    await ctx.store.writeThreadRecord({ ...thread, researchRun: { ...thread.researchRun, state, updatedAt: ctx.store.nowIso() } });
+    ctx.store.emit(threadId, "research-run-changed");
+  });
+}
+
+export interface ResearchRoleRequest extends ModelRequest {
+  readonly leadThreadId: string;
+  readonly role: ResearchRole;
+  readonly question: string;
+}
+
+export async function startResearchRole(ctx: OperationContext, request: ResearchRoleRequest): Promise<Delegation> {
+  await requireResearchLead(ctx, request.leadThreadId);
+  if (!["researcher", "critic", "finalizer"].includes(request.role)) throw new CliError("INVALID_THREAD_OPTION", "Unknown research role.");
+  return await delegate(ctx, { ...request, parentThreadId: request.leadThreadId, task: request.question, title: `${request.role}: ${request.question}`, interactionMode: "research", isolation: "shared", wait: false, notify: false }, { researchRole: request.role });
+}
+
+export async function requireResearchRole(ctx: OperationContext, leadThreadId: string, taskId: string): Promise<void> {
+  const lead = await requireResearchLead(ctx, leadThreadId);
+  if (!lead.researchRun.roles.some((role) => role.threadId === taskId)) throw new CliError("TASK_NOT_FOUND", "No such role in this research run.");
+}
+
+export interface ResearchRunView extends StoredResearchRun {
+  readonly report: string | null;
+  readonly lead: ThreadEnvelope;
+  readonly roles: readonly { readonly threadId: string; readonly role: ResearchRole; readonly question: string; readonly thread: ThreadEnvelope; readonly task: TaskView }[];
+}
+
+/** Client read surface; role tools separately check lead ownership before calling it. */
+export async function readResearchRun(ctx: OperationContext, threadId: string): Promise<ResearchRunView | null> {
+  const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
+  const leadId = thread?.researchRole?.leadThreadId ?? threadId;
+  await syncResearchRun(ctx, leadId);
+  const lead = await ctx.store.readThreadRecord(leadId);
+  if (!lead?.researchRun) return null;
+  const envelope = await threadWithLedger(ctx.store, leadId);
+  return { ...lead.researchRun, lead: envelope, report: taskOf(envelope).summary,
+    roles: await Promise.all(lead.researchRun.roles.map(async (role) => {
+      const described = await describeTask(ctx, leadId, role.threadId);
+      return { ...role, thread: described.child, task: described.task };
+    })),
   };
 }
 

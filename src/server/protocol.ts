@@ -43,6 +43,8 @@ import type {
   Handover,
   HandoverRequest,
   RecordedChecklist,
+  ResearchRoleRequest,
+  ResearchRunView,
   RevertResult,
   ThreadList,
   ThreadListQuery,
@@ -75,7 +77,7 @@ import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
-import type { SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
+import type { StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
 import type { ThreadInspection, ThreadListStatus, ThreadReadView, ThreadReading } from "../core/threads/views.js";
 import type {
   InteractionMode,
@@ -94,6 +96,12 @@ import type {
  * (`src/tests/layering.test.ts`). Types only — the implementations stay
  * behind `ClientApi`.
  */
+export type {
+  ResearchRunView,
+  ResearchRoleRequest,
+  StoredResearchRun,
+};
+
 export type {
   GitBranch,
   GitCommit,
@@ -220,6 +228,8 @@ export type CommandBody =
   | ({ readonly type: "thread.handover"; readonly wait?: boolean } & HandoverRequest)
   /** A task run in a child thread of the same project. The task id is the child thread id. */
   | ({ readonly type: "thread.delegate" } & DelegateRequest)
+  | ({ readonly type: "research.role.start" } & ResearchRoleRequest)
+  | { readonly type: "research.role.cancel"; readonly leadThreadId: string; readonly taskId: string }
   | { readonly type: "thread.image.generate"; readonly parentThreadId: string; readonly prompt: string; readonly references?: readonly string[] }
   | { readonly type: "skills.import"; readonly projectId?: string; readonly source: SkillSource; readonly from: string }
   | ({ readonly type: "skills.save"; readonly projectId?: string; readonly text: string; readonly previous: string } & SkillAddress)
@@ -375,6 +385,8 @@ export interface CommandResults {
   "thread.conversation.revert": RevertResult & Accepted;
   "thread.handover": Omit<Handover, "started"> & { readonly started: StartedTurnSummary | null };
   "thread.delegate": Delegation;
+  "research.role.start": Delegation;
+  "research.role.cancel": CancelledTask;
   "thread.image.generate": Delegation;
   "skills.import": SkillAddress;
   "skills.save": Accepted;
@@ -450,6 +462,8 @@ export type Query =
       readonly lastTurn?: boolean;
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
+  | { readonly type: "research.run"; readonly threadId: string }
+  | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
   /**
    * Resolves once the turn is no longer running or queued. A read that
    * blocks: it changes nothing, so a client can abandon it (or, over a
@@ -605,6 +619,8 @@ export interface QueryResults {
   "thread.inspect": { readonly project: StoredProject | null; readonly thread: ThreadInspection };
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
+  "research.run": ResearchRunView | null;
+  "research.role.report": DescribedTask;
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
   doctor: Diagnosis;
@@ -669,6 +685,7 @@ export type ShellFrame =
         readonly snapshotSequence: number;
         readonly projects: readonly ProjectEnvelope[];
         readonly threads: readonly ThreadEnvelope[];
+        readonly researchRuns?: readonly StoredResearchRun[];
       };
     }
   | { readonly kind: "synchronized" };
@@ -1083,6 +1100,10 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeSkillAddress(record, type) };
     case "thread.image.generate":
       return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
+    case "research.role.start":
+      return { ...meta, type, leadThreadId: requireThreadId(record.leadThreadId), role: requireEnum(record.role, type, "role", ["researcher", "critic", "finalizer"] as const), question: requireField(record.question, type, "question"), ...decodeModelRequest(record, type) };
+    case "research.role.cancel":
+      return { ...meta, type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
     case "thread.delegate":
       return {
         ...meta,
@@ -1401,6 +1422,10 @@ export function decodeQuery(value: unknown): Query {
         ...(typeof record.view === "string" ? { view: record.view as ThreadReadView } : {}),
         ...optionalBoolean(record, "lastTurn"),
       };
+    case "research.run":
+      return { type, threadId: requireThreadId(record.threadId) };
+    case "research.role.report":
+      return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
     case "thread.task.status":
       return {
         type,

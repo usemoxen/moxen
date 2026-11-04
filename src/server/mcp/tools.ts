@@ -226,6 +226,16 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  */
 export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "thread_search", "thread_read", "image_gen"]);
 
+const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
+  {
+    name: "research_role_start",
+    description: "Start a read-only researcher, critic or finalizer in your research run. Each role is a nested thread, not another orchestrator task. Choose its question, provider, model and effort.",
+    inputSchema: { type: "object", properties: { role: { type: "string", enum: ["researcher", "critic", "finalizer"] }, question: { type: "string" }, provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" } }, required: ["role", "question"] },
+  },
+  { name: "research_role_report", description: "Read the state and report of one role in your research run.", inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] } },
+  { name: "research_role_cancel", description: "Cancel a role in your research run, keeping its thread and report.", inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] } },
+];
+
 /** Moxen memory, as a session has it: every tool, read/search (a delegated task), or none. */
 export type MemoryAccess = "write" | "read" | "off";
 
@@ -340,6 +350,7 @@ export const MEMORY_TOOLS: readonly McpTool[] = [
 const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(["memory_save", "memory_edit", "memory_append", "memory_delete"]);
 
 export interface MoxenToolOptions {
+  readonly researchLead?: boolean;
   readonly handoff?: boolean;
   readonly imageGeneration?: boolean;
   readonly checklist?: boolean;
@@ -361,15 +372,18 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
+  if (options.researchLead === true) tools.push(...RESEARCH_ROLE_TOOLS);
   if (options.imageGeneration === true && options.delegated !== true) tools.push(IMAGE_GENERATION_TOOL);
   if (options.handoff === true) tools.push(SUBMIT_HANDOFF_TOOL);
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
 export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+  const run = await api.query({ type: "research.run", threadId }).catch(() => null);
+  const researchLead = run?.leadThreadId === threadId;
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
   const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
-  return moxenToolsFor({ ...options, imageGeneration, handoff });
+  return moxenToolsFor({ ...options, ...(run ? { delegated: true } : {}), imageGeneration, handoff, researchLead });
 }
 
 /**
@@ -493,6 +507,12 @@ export async function callMoxenTool(
   }
   try {
     switch (name) {
+      case "research_role_start":
+        return ok(await api.dispatch({ type: "research.role.start", leadThreadId: parentThreadId, role: argString(args, "role", true)! as "researcher", question: argString(args, "question", true)!, ...(argString(args, "provider") ? { provider: argString(args, "provider")! } : {}), ...(argString(args, "model") ? { model: argString(args, "model")! } : {}), ...(argString(args, "effort") ? { thinkingEffort: argString(args, "effort")! } : {}) }));
+      case "research_role_report":
+        return ok(await api.query({ type: "research.role.report", leadThreadId: parentThreadId, taskId: argString(args, "taskId", true)! }));
+      case "research_role_cancel":
+        return ok(await api.dispatch({ type: "research.role.cancel", leadThreadId: parentThreadId, taskId: argString(args, "taskId", true)! }));
       case "submit_handoff":
         return ok(await api.dispatch({ type: "handoff.submit", threadId: parentThreadId, requestId: argString(args, "requestId", true)!, summary: argString(args, "summary", true)! }));
       case "knowledge_search":

@@ -120,6 +120,10 @@ import {
   cancelTask,
   continueThread,
   delegate,
+  startResearchRole,
+  requireResearchRole,
+  readResearchRun,
+  type DelegateRequest,
   recordChecklist,
   describeTask,
   ensureProject,
@@ -362,6 +366,7 @@ export class DirectConnection implements ClientApi {
    * environment (some do), and the tools must reach the same threads.
    */
   private async moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): Promise<McpServerSpec> {
+    const researchLead = (await readResearchRun(await this.context(), threadId))?.leadThreadId === threadId;
     const imageGeneration = !delegated && (await this.imageAvailability(threadId)).available;
     const handoff = await pendingHandoff(await this.context(), threadId);
     // Hosted in this process: Claude calls the tools in-process, the other
@@ -388,7 +393,7 @@ export class DirectConnection implements ClientApi {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
-      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null }),
+      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
@@ -463,6 +468,11 @@ export class DirectConnection implements ClientApi {
       driverFor: (instanceId: string) => this.driverFor(instanceId),
       ...(this.builtinMcpServers ? { builtinMcpServers: this.builtinMcpServers } : {}),
     };
+  }
+
+  /** Internal until MXN-243 adds the orchestrator's public choice. */
+  async startResearchRun(request: DelegateRequest) {
+    return await delegate(await this.context(), { ...request, interactionMode: "research" }, { fullResearchRun: true });
   }
 
   /**
@@ -665,13 +675,14 @@ export class DirectConnection implements ClientApi {
           }),
         );
         const visible = rows.filter(isVisibleThread);
+        const researchRuns = threads.flatMap((thread) => thread.researchRun ? [thread.researchRun] : []);
         lastFingerprint = fingerprint;
-        const hash = JSON.stringify({ projects, threads: visible });
+        const hash = JSON.stringify({ projects, threads: visible, researchRuns });
         if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
-            snapshot: { snapshotSequence: 0, projects, threads: visible },
+            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}) },
           });
         }
       } catch (cause) {
@@ -996,6 +1007,13 @@ export class DirectConnection implements ClientApi {
       case "thread.delegate": {
         const { type: _type, commandId: _id, ...request } = command;
         return await delegate(await this.context(), request);
+      }
+      case "research.role.start":
+        return await startResearchRole(await this.context(), command);
+      case "research.role.cancel": {
+        const ctx = await this.context();
+        await requireResearchRole(ctx, command.leadThreadId, command.taskId);
+        return await cancelTask(ctx, command.leadThreadId, command.taskId);
       }
       case "thread.image.generate": {
         const availability = await this.imageAvailability(command.parentThreadId);
@@ -1559,6 +1577,11 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.status":
         return await describeTask(ctx, query.parentThreadId, query.taskId);
+      case "research.run":
+        return await readResearchRun(ctx, query.threadId);
+      case "research.role.report":
+        await requireResearchRole(ctx, query.leadThreadId, query.taskId);
+        return await describeTask(ctx, query.leadThreadId, query.taskId);
       case "thread.turn.await":
         return { status: await this.turnSettled(query.threadId, query.turnId) };
       case "providers.list":
