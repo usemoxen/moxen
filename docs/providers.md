@@ -106,6 +106,9 @@ Harness implementations. `todo` updates feed the tasks panel, and Codex's own
 `update_plan` is removed. This transport also attaches
 the tools to existing rollouts without replacing the conversation. Disabling
 Shell in Codex's tool settings removes the replacement shell tools too.
+Harness calls require a live turn, including turns Codex starts in the
+background. A delayed interrupt reply or start failure can only end its own
+turn; it does not disable the tools for a later turn.
 All MCP servers attached by Moxen, including its own memory/delegation tools and
 configured servers, are exposed as direct tool calls alongside the Harness
 tools. They bypass `functions.exec` and tool-search deferral. Other code-mode

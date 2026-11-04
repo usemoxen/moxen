@@ -8,6 +8,8 @@ import type { ProviderRuntimeEvent } from "../../spi.js";
 import { CodexDriver, codexContextUsageOf } from "../driver.js";
 import { codexDisabledToolConfig } from "../../../nativetools.js";
 import { FakeCodexTransport } from "./fakes.js";
+import { McpClient } from "../../harness/mcpclient.js";
+import { CODEX_HARNESS_SERVER } from "../tools.js";
 
 async function collectEvents(driver: CodexDriver, count: number): Promise<ProviderRuntimeEvent[]> {
   const chunk = await Effect.runPromise(Stream.runCollect(Stream.take(driver.streamEvents, count)));
@@ -663,6 +665,78 @@ describe("codex MCP injection", () => {
 
 
 describe("Codex lifecycle boundaries", () => {
+  it.each(["turn/interrupt", "turn/start"])("keeps Harness tools live after a stale %s response crosses interrupted and failed turns", async (method) => {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => { entered = resolve; });
+    let holdNext = false;
+    const transport = new FakeCodexTransport({ beforeResponse: async (request) => {
+      if (!holdNext || request !== method) return;
+      holdNext = false;
+      entered();
+      await gate;
+      if (method === "turn/start") throw new Error("Delayed start failure");
+    } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, workingDirectory: process.cwd(), runtimeMode: "full-access" }));
+    const { server } = transport.sessions[0]!;
+    const config = (server.requestsTo("thread/start")[0]!.params as { config: Record<string, unknown> }).config;
+    const endpoint = config[`mcp_servers.${CODEX_HARNESS_SERVER}`] as { url: string; http_headers: Record<string, string> };
+    const client = await McpClient.connect({ type: "http", name: CODEX_HARNESS_SERVER, url: endpoint.url, headers: endpoint.http_headers }, process.cwd());
+    let pending: Promise<unknown> = Promise.resolve();
+    const complete = (id: string, status: string) => server.notify("turn/completed", { turn: { id, status } });
+    const started = (id: string) => server.notify("turn/started", { turn: { id } });
+    try {
+      const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "Resume after reset" }));
+      started("first");
+      if (method === "turn/interrupt") {
+        holdNext = true;
+        pending = Effect.runPromise(driver.interruptTurn(START.threadId));
+        await held;
+        complete("first", "interrupted");
+      } else await Effect.runPromise(driver.interruptTurn(START.threadId));
+      expect((await driver.awaitTurn(START.threadId, first.turnId)).status).toBe("interrupted");
+
+      if (method === "turn/start") {
+        holdNext = true;
+        // Observe the rejection immediately, even while the response is held.
+        pending = Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "Wrap up" })).then(() => null, (error: unknown) => error);
+        await held;
+      } else await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "Wrap up" }));
+      started("second");
+      complete("second", "failed");
+      const snapshot = await Effect.runPromise(driver.readThread(START.threadId));
+      expect((await driver.awaitTurn(START.threadId, snapshot.turns.at(-1)!.id)).status).toBe("failed");
+
+      const later = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "Keep going" }));
+      started("later");
+      release();
+      const result = await pending;
+      if (method === "turn/start") expect(result).toBeInstanceOf(Error);
+      started("first");
+      complete("first", "interrupted");
+      complete("second", "failed");
+      const signal = new AbortController().signal;
+      const shell = process.platform === "win32" ? "powershell" : "bash";
+      expect(await client.call(shell, { command: "echo recovered" }, signal)).toMatchObject({ isError: false, text: expect.stringContaining("recovered") });
+      expect((await client.call("task_output", { task_id: "missing" }, signal)).text).not.toContain("There is no active turn");
+      complete("later", "completed");
+      expect((await driver.awaitTurn(START.threadId, later.turnId)).status).toBe("completed");
+      expect(await client.call(shell, { command: "echo outside" }, signal)).toMatchObject({ isError: true, text: expect.stringContaining("There is no active turn") });
+      started("background");
+      expect(await client.call(shell, { command: "echo background" }, signal)).toMatchObject({ isError: false, text: expect.stringContaining("background") });
+      const background = await Effect.runPromise(driver.readThread(START.threadId));
+      complete("background", "completed");
+      expect((await driver.awaitTurn(START.threadId, background.turns.at(-1)!.id)).status).toBe("completed");
+    } finally {
+      release();
+      await pending;
+      await client.close();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
   it.each(["response", "continuation"] as const)("does not lose completion while the turn/start %s is held", async (boundary) => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

@@ -122,12 +122,19 @@ export class CodexHarnessTools {
     return { url: `http://127.0.0.1:${address.port}/mcp`, http_headers: { Authorization: `Bearer ${token}` }, required: true, tool_timeout_sec: 86_400, default_tools_approval_mode: "approve" };
   }
 
-  beginTurn(id: string): void { this.endTurn(); this.active = { id, controller: new AbortController() }; }
-  endTurn(): void { this.active?.controller.abort(); this.active = null; }
+  beginTurn(id: string): void {
+    if (this.active) this.endTurn(this.active.id);
+    this.active = { id, controller: new AbortController() };
+  }
+  endTurn(id: string): void {
+    if (this.active?.id !== id) return;
+    this.active.controller.abort();
+    this.active = null;
+  }
 
   async close(): Promise<void> {
     this.closed = true;
-    this.endTurn();
+    if (this.active) this.endTurn(this.active.id);
     this.background.stopAll();
     await Promise.all(this.background.running().map((task) => this.background.stop(task.id)));
     this.options.publish({ type: "background.tasks.changed", provider: "codex", threadId: this.options.threadId, tasks: [] });

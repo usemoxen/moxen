@@ -909,12 +909,15 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   readonly interruptTurn = (threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, CliError> =>
     this.attempt("CLAUDE_TURN_FAILED", `Could not interrupt the turn on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
+      const open = session.transcript.find((turn) => turn.status === "running");
       this.denyParked(session, "Interrupted.");
       try {
         await session.query.interrupt();
       } catch (cause) {
         if (!session.closed) throw cause;
       }
+      // Its result may have settled it while interrupt() was still pending.
+      if (!open || open.status !== "running") return;
       this.settleOpenTurn(session, "interrupted", "Interrupted.");
       session.pendingText = null;
       // The interrupted run still ends with its own `result`; anything it

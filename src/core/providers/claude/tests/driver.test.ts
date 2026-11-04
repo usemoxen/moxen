@@ -196,6 +196,40 @@ describe("claude driver turns", () => {
     expect(outcome.error).toContain("boom");
   });
 
+  it("does not interrupt or drain a newer turn when an older interrupt reply is delayed", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const query = transport.created[0]!;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => { entered = resolve; });
+    const spy = vi.spyOn(query, "interrupt").mockImplementation(async () => {
+      entered();
+      await gate;
+      return undefined;
+    });
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "first" }));
+    const interrupt = Effect.runPromise(driver.interruptTurn(START.threadId));
+    try {
+      await held;
+      query.push(errorResult());
+      expect((await driver.awaitTurn(START.threadId, first.turnId)).status).toBe("failed");
+      const later = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "Keep going" }));
+      release();
+      await interrupt;
+      query.push(assistantText("Recovered"));
+      query.push(successResult("Recovered"));
+      expect(await driver.awaitTurn(START.threadId, later.turnId)).toMatchObject({ status: "completed", text: "Recovered" });
+    } finally {
+      release();
+      await interrupt;
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
   it.each([[5, 5], [1, 2]])("keeps failed result cost %s in usage and settlement without lowering the total", async (reported, expected) => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });

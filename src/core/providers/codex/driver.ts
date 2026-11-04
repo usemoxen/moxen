@@ -678,7 +678,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         }));
         turn.serverTurnId ??= asString(asRecord(result?.["turn"])?.["id"]);
       } catch (cause) {
-        this.settleOpenTurn(session, "failed", "Codex could not start the turn.");
+        this.settleOpenTurn(session, "failed", "Codex could not start the turn.", turn);
         throw cause;
       }
       return { threadId: session.threadId, turnId: turn.id };
@@ -687,12 +687,12 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly interruptTurn = (threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, CliError> =>
     this.attempt("CODEX_TURN_FAILED", `Could not interrupt the turn on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
-      // Settle parked approvals/inputs first: interrupting while they park
-      // deadlocks the server's stdin loop.
-      session.harness.endTurn();
-      this.denyParked(session, "Interrupted.");
       const open = session.transcript.find((turn) => turn.status === "running");
       if (!open) return;
+      // Settle parked approvals/inputs first: interrupting while they park
+      // deadlocks the server's stdin loop.
+      session.harness.endTurn(open.id);
+      this.denyParked(session, "Interrupted.");
       try {
         await session.peer.request(CODEX_METHODS.turnInterrupt, {
           threadId: this.requireCodexThread(session),
@@ -701,7 +701,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       } catch (cause) {
         if (!session.closed) throw cause;
       }
-      this.settleOpenTurn(session, "interrupted", "Interrupted.");
+      this.settleOpenTurn(session, "interrupted", "Interrupted.", open);
     });
 
   async awaitTurn(threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<CodexTurnOutcome> {
@@ -761,36 +761,33 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     };
   }
 
-  private settleOpenTurn(session: CodexSession, status: CodexTurnStatus, detail: string): void {
-    session.harness.endTurn();
-    const open = session.transcript.find((turn) => turn.status === "running");
-    const usage = open ? this.usageOf(session, open.id) : null;
-    if (open) {
-      if (usage) open.usage = usage;
-      open.status = status;
-      open.error = status === "completed" ? null : detail;
-      if (status !== "completed") open.text = open.text || detail;
-      session.usage.take(open.id);
-    }
-    const waiters = open ? (session.waiters.get(open.id) ?? []) : [];
-    if (open) session.waiters.delete(open.id);
+  private settleOpenTurn(session: CodexSession, status: CodexTurnStatus, detail: string, expectedTurn?: TranscriptTurn): void {
+    const open = expectedTurn ?? session.transcript.find((turn) => turn.status === "running");
+    if (!open || open.status !== "running") return;
+    session.harness.endTurn(open.id);
+    const usage = this.usageOf(session, open.id);
+    open.usage = usage;
+    open.status = status;
+    open.error = status === "completed" ? null : detail;
+    if (status !== "completed") open.text = open.text || detail;
+    session.usage.take(open.id);
+    const waiters = session.waiters.get(open.id) ?? [];
+    session.waiters.delete(open.id);
     const outcome: CodexTurnOutcome = {
       status,
-      text: open?.text ?? "",
-      usage: usage ?? { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 },
-      ...(open?.generation ? { generation: open.generation } : {}),
-      error: open?.error ?? detail,
+      text: open.text,
+      usage,
+      ...(open.generation ? { generation: open.generation } : {}),
+      error: open.error,
     };
     for (const waiter of waiters) waiter.resolve(outcome);
-    if (open) {
-      this.publish({
-        type: status === "completed" ? "turn.completed" : status === "failed" ? "turn.failed" : "turn.interrupted",
-        provider: "codex",
-        threadId: session.threadId,
-        turnId: open.id,
-        ...(status === "failed" ? { raw: { error: open.error } } : {}),
-      });
-    }
+    this.publish({
+      type: status === "completed" ? "turn.completed" : status === "failed" ? "turn.failed" : "turn.interrupted",
+      provider: "codex",
+      threadId: session.threadId,
+      turnId: open.id,
+      ...(status === "failed" ? { raw: { error: open.error } } : {}),
+    });
   }
 
   // -- server requests (approvals) --------------------------------------------
@@ -1001,6 +998,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     }
     const active = session.transcript.find((turn) => turn.status === "running");
     const nativeTurn = asString(notification?.["turnId"]) ?? asString(asRecord(notification?.["turn"])?.["id"]);
+    // A late ending (or started notification) belongs to its original turn,
+    // even while the next turn is still waiting for its server id.
+    if (nativeTurn && session.transcript.some((turn) => turn.serverTurnId === nativeTurn && turn.status !== "running")) return;
     if (method !== CODEX_METHODS.turnStarted && nativeTurn && active?.serverTurnId && nativeTurn !== active.serverTurnId) return;
     session.lastActiveAt = Date.now();
     switch (method) {
@@ -1048,6 +1048,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         if (!open && serverId) {
           const turn: TranscriptTurn = { id: randomUUID(), serverTurnId: serverId, prompt: "", items: [], status: "running", text: "", error: null, messages: new Map() };
           session.transcript.push(turn);
+          session.harness.beginTurn(turn.id);
           this.publish({ type: "turn.started", provider: "codex", threadId: session.threadId, turnId: turn.id, origin: "background" });
         }
         return;
