@@ -982,7 +982,14 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     runtimeMode: request.runtimeMode ?? source.runtimeMode,
     interactionMode: request.interactionMode ?? source.interactionMode,
     env: source.env,
+    continuedFrom: source.id,
   });
+  if (existing && existing.continuedFrom === undefined) {
+    await store.withThreadLock(existing.id, async () => {
+      const current = await store.readThreadRecord(existing.id);
+      if (current) await store.writeThreadRecord({ ...current, continuedFrom: source.id });
+    });
+  }
   if (source.usagePause && !existing && !request.destinationThreadId) {
     await store.withThreadLock(source.id, async () => {
       const current = await store.readThreadRecord(source.id);
@@ -2636,21 +2643,35 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   };
 }
 
+/** A thread and the threads it continued, nearest first: one conversation, carried on. */
+async function threadLineage(ctx: OperationContext, threadId: string): Promise<ReadonlySet<string>> {
+  const lineage = new Set([threadId]);
+  let from = (await ctx.store.readThreadRecord(threadId))?.continuedFrom;
+  while (from !== undefined && !lineage.has(from)) {
+    lineage.add(from);
+    from = (await ctx.store.readThreadRecord(from))?.continuedFrom;
+  }
+  return lineage;
+}
+
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
- * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
- * same for a real id and a fake one, when that thread did not delegate it.
+ * the task carried on in (`continuedIn`). A task that finished before the
+ * orchestrator continued stays listed under the older thread, and is still the
+ * continuation's to reach. Refuses with `TASK_NOT_FOUND`, the same for a real
+ * id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
   const rows = await ctx.store.readDelegations();
-  const owned = rows.find((row) => row.parentThreadId === parentThreadId && row.childThreadId === requireThreadId(rawTaskId));
+  const lineage = await threadLineage(ctx, parentThreadId);
+  const owned = rows.find((row) => lineage.has(row.parentThreadId) && row.childThreadId === requireThreadId(rawTaskId));
   if (!owned) {
     throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
   }
   // A task that carried on in a new thread is that thread now.
   let row = owned;
   for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
-    const next = rows.find((candidate) => candidate.parentThreadId === parentThreadId && candidate.childThreadId === row.continuedIn);
+    const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
     if (!next) break;
     row = next;
   }
@@ -2788,8 +2809,10 @@ export async function sendTaskMessage(
     started.delivery === "steered" || started.delivery === "injected"
       ? started.steerDelivered === true ? "steered" : "not_delivered"
       : started.turn.status === "queued" ? "queued" : "started";
+  // A task an older thread left behind is back in work: it reports to the thread that sent this, not the older one.
+  if (outcome !== "not_delivered" && row.parentThreadId !== parentThreadId) await ctx.store.updateDelegation(row.id, { parentThreadId });
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
-  if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, row.parentThreadId, target.id);
+  if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
   const notes: Record<TaskMessageOutcome, string> = {
     steered: "The running turn received it and reads it at its next step.",

@@ -192,6 +192,7 @@ export async function createThread(
     hasPendingUserInput: false,
     ...(input.researchRun ? { researchRun: input.researchRun } : {}),
     ...(input.researchRole ? { researchRole: input.researchRole } : {}),
+    ...(input.continuedFrom ? { continuedFrom: input.continuedFrom } : {}),
   };
   await store.writeThreadRecord(thread);
   store.emit(thread.id, "created");

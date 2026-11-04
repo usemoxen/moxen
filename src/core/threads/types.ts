@@ -81,6 +81,8 @@ export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
   readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
+  /** The thread this one continued (`thread.continue`): its finished tasks are still this thread's to reach. */
+  readonly continuedFrom?: string;
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;
@@ -352,6 +354,7 @@ export interface CreateThreadInput {
   readonly env?: Partial<ThreadEnv>;
   readonly researchRun?: StoredResearchRun;
   readonly researchRole?: StoredThread["researchRole"];
+  readonly continuedFrom?: string;
 }
 
 export type SendIfBusy = "reject" | "inject";

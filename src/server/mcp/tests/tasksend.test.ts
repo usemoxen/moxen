@@ -4,7 +4,7 @@
  * provider drivers (`testHarness`), which differ from the real ones in exactly one way a test can
  * choose: whether the driver has `steerTurn` and whether it succeeds.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { testHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
 import { TASK_NOTIFICATION_BATCH_MS } from "../../../core/threads/operations.js";
@@ -170,6 +170,31 @@ describe("task_send: whose task it is", () => {
       expect(fromContinuation.json).toMatchObject({ taskId, status: "running" });
       // The thread that handed the task over no longer owns it.
       expect((await t.send(t.orchestrator, taskId, "Old thread")).text).toContain("TASK_NOT_FOUND");
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+});
+
+describe("task_send: a task that finished before the orchestrator continued", () => {
+  it("stays reachable from the continuation, reports there once woken, and never reaches a stranger", async () => {
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true));
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
+      const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
+      expect((await t.send(stranger.threadId, taskId, "Take over", true)).text).toContain("TASK_NOT_FOUND");
+
+      // Two continuations on, it still needs wake, and the finished task stays listed under the first thread until then.
+      expect((await t.send(again.threadId, taskId, "One more thing")).text).toContain("TASK_SETTLED");
+      expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(t.orchestrator);
+
+      const woken = await t.send(again.threadId, taskId, "One more thing", true);
+      expect(woken.json).toMatchObject({ taskId, outcome: "started" });
+      expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(again.threadId);
+      await vi.waitFor(async () => expect(await t.notifications(again.threadId)).toHaveLength(1), { timeout: 8_000 });
     } finally {
       await t.connection.close();
     }

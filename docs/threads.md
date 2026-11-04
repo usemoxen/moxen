@@ -575,10 +575,11 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-Only the delegating thread reaches a task. When an orchestrator continues in a
+Only the delegating thread reaches a task, and the threads that continued it: one that finished before the orchestrator continued stays listed under the older thread, and waking it from the continuation moves it there, so it reports to the conversation still working. When an orchestrator continues in a
 new thread, the tasks still running move with it and it can message them; the
-earlier thread, an unrelated thread (same project or not) and a task that has
-already finished before the move cannot. A research run's lead and roles are
+earlier thread and an unrelated thread (same project or not) cannot. Threads
+continued before this link existed can't reach what their source left behind.
+A research run's lead and roles are
 never reachable (`TASK_SEND_RESEARCH`): their messages are scoped and capped by
 the run, and a free message would be a way round both. A delegated task, a
 research lead and a research role are not offered `task_send` at all. An empty
