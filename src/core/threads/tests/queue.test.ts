@@ -12,6 +12,13 @@ import { editWorkQueue, readWorkQueue, runWorkQueue, pendingHandoff, submitHando
 
 afterEach(resetUsageLimitsForTests);
 
+/**
+ * flushTurnRunners gives up silently at its limit, and a test would then assert
+ * while a run is still writing. It returns as soon as runs settle, so the limit
+ * costs nothing normally; it only has to cover a slow filesystem (Windows CI).
+ */
+const settleRuns = () => flushTurnRunners(8000);
+
 async function world() {
   const sent: { threadId: string; prompt: string }[] = [];
   const w = await testHarness({ onSendTurn: (turn) => sent.push(turn) });
@@ -41,7 +48,7 @@ describe("conditional work queue", () => {
     const entries = await readWorkQueue(w.ctx, rows);
     expect(entries.find((entry) => entry.turnId === queued.turn.id)?.blocked).toEqual([]);
     await runWorkQueue(w.ctx, Date.now(), rows);
-    await flushTurnRunners(1000);
+    await settleRuns();
     expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
   });
 
@@ -65,7 +72,7 @@ describe("conditional work queue", () => {
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.queue?.latched).toEqual([0]);
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
     await runWorkQueue({ ...w.ctx }, now + 61_000);
-    await flushTurnRunners(1000);
+    await settleRuns();
     expect(w.sent.map((t) => t.threadId)).toEqual([thread.id]);
   });
 
@@ -76,7 +83,7 @@ describe("conditional work queue", () => {
     await promoteDueScheduledTurn(w.store, first.id, running.turn.id);
     const queued = await sendTurn(w.store, second.id, { prompt: "preserve this draft", queue: { ...policy, order: 2 } });
     await sendTurn(w.store, other.id, { prompt: "other provider", queue: { ...policy, order: 3 } });
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
     expect(w.sent.map((t) => t.threadId)).toEqual([other.id]);
     await editWorkQueue(w.ctx, second.id, queued.turn.id, "remove");
     expect((await readWorkQueue(w.ctx)).find((e) => e.turnId === queued.turn.id)?.policy.removed).toBe(true);
@@ -86,7 +93,7 @@ describe("conditional work queue", () => {
     await runWorkQueue(w.ctx);
     expect(w.sent).toHaveLength(1);
     await editWorkQueue(w.ctx, second.id, queued.turn.id, "release");
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
     expect(w.sent.at(-1)?.threadId).toBe(second.id);
   });
 
@@ -98,7 +105,7 @@ describe("conditional work queue", () => {
     recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: new Date(now + 60_000).toISOString() }]);
     await runWorkQueue(w.ctx, now);
     expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: new Date(now + 60_000).toISOString() });
-    await runWorkQueue(w.ctx, now + 66_000); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
     expect(w.sent).toHaveLength(1);
   });
 
@@ -107,7 +114,7 @@ describe("conditional work queue", () => {
     await sendTurn(w.store, thread.id, { prompt: "after the event", queue: parseQueuePolicy({ conditions: [{ type: "provider", provider: "claude", state: "exhausted", mode: "after" }] }) });
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: null }], now + 1);
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: null }], now + 2);
-    await runWorkQueue(w.ctx, now + 3); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx, now + 3); await settleRuns();
     expect(w.sent).toHaveLength(1);
   });
 
@@ -126,7 +133,7 @@ describe("conditional work queue", () => {
     await editWorkQueue(w.ctx, selected.threadId, selected.turnId, "edit", { ...selected.policy, held: false, conditions: [{ type: "thread", threadId: dependency.id }, { type: "entry", threadId: dependency.id, turnId: busy.turn.id }] });
     await runWorkQueue(w.ctx); expect(w.sent).toEqual([]);
     await completeTurn(w.store, dependency.id, busy.turn.id, { text: "done" });
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
     expect(w.sent.map((turn) => turn.threadId)).toEqual([selected.threadId]);
   });
 
@@ -140,7 +147,7 @@ describe("conditional work queue", () => {
     ]);
     await runWorkQueue(w.ctx); expect(w.sent).toEqual([]);
     w.ctx.config.usageMinimumWeekly = 0;
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000); expect(w.sent).toHaveLength(1);
+    await runWorkQueue(w.ctx); await settleRuns(); expect(w.sent).toHaveLength(1);
     recordUsageWindows("codex", [{ id: "weekly", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 86400_000).toISOString() }]);
     expect(automaticUsageBlock("codex", w.ctx.config)).not.toEqual([]);
     expect(automaticUsageBlock("opencode", w.ctx.config)).toEqual([]);
@@ -195,8 +202,8 @@ describe("explicit handoff submissions", () => {
     }));
     const awaitTurn = driver.awaitTurn.bind(driver);
     driver.awaitTurn = async (threadId, turnId, signal) => threadId === source.id ? { status: "failed", text: "Ignore this final prose", usage: null, error: "quota exhausted" } : awaitTurn(threadId, turnId, signal);
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
-    await runWorkQueue(w.ctx); await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
+    await runWorkQueue(w.ctx); await runWorkQueue(w.ctx); await settleRuns();
     const original = (await w.store.readTurns(source.id)).find((t) => t.id === entry.turn.id)!;
     const destinationId = original.handoff!.destinationThreadId;
     const prompt = (await w.store.readMessages(destinationId)).find((m) => m.role === "user")!.text;
@@ -209,7 +216,7 @@ describe("explicit handoff submissions", () => {
   it("falls back to the stored handoff when the model returns prose instead of submitting", async () => {
     const w = await world(); const source = await w.make();
     const entry = await sendTurn(w.store, source.id, { prompt: "Unsent request must survive", queue: parseQueuePolicy({ conditions: [], continuation: "model" }) });
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
     await runWorkQueue(w.ctx);
     const original = (await w.store.readTurns(source.id)).find((t) => t.id === entry.turn.id)!;
     expect(original.handoff?.fallback).toBe(true);
@@ -229,7 +236,7 @@ describe("explicit handoff submissions", () => {
     expect(handoff.summaryTurnId).toBeUndefined();
     expect(w.sent).toEqual([]);
     expect((await w.store.readThreadRecord(handoff.destinationThreadId))?.modelSelection).toEqual({ instanceId: "claudeAgent", model: "claude-test" });
-    await runWorkQueue(w.ctx); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx); await settleRuns();
     expect(w.sent.map((turn) => turn.threadId)).toEqual([handoff.destinationThreadId]);
   });
 
@@ -267,7 +274,7 @@ describe("explicit handoff submissions", () => {
     await vi.waitFor(async () => {
       expect((await w.store.readTurns(destinationId))[0]?.status).toBe("completed");
     }, { timeout: 5000 });
-    await runWorkQueue(w.ctx, now + 62_000); await flushTurnRunners(1000);
+    await runWorkQueue(w.ctx, now + 62_000); await settleRuns();
     expect(w.sent.at(-1)?.threadId).toBe(dependent.id);
   });
 });
