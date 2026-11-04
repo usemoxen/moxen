@@ -215,7 +215,11 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
         break;
       case "subscribeShell":
       case "subscribeThread": {
-        const options = typeof params.afterSequence === "number" ? { afterSequence: params.afterSequence } : {};
+        const options = {
+          ...(typeof params.afterSequence === "number" ? { afterSequence: params.afterSequence } : {}),
+          ...(method === "subscribeShell" && Array.isArray(params.researchProposals) && params.researchProposals.every((id) => typeof id === "string")
+            ? { researchProposals: params.researchProposals as string[] } : {}),
+        };
         const onItem = (item: unknown): void => send({ subscription: id, item });
         const onError = (error: unknown): void => send({ subscription: id, error: toWireError(error) });
         // Acknowledge first: an implementation may emit its first frame

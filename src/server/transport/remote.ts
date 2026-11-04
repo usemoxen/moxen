@@ -437,7 +437,7 @@ export class RemoteConnection implements ClientApi {
   // -- ClientApi ---------------------------------------------------------------
 
   subscribeShell(
-    options: { afterSequence?: number },
+    options: { afterSequence?: number; researchProposals?: readonly string[] },
     onItem: (item: ShellFrame) => void,
     onError: (error: unknown) => void,
   ): () => void {

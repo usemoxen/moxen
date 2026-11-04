@@ -77,7 +77,7 @@ import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
-import type { ResearchMessage, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
 import type { ThreadInspection, ThreadListStatus, ThreadReadView, ThreadReading } from "../core/threads/views.js";
 import type {
   InteractionMode,
@@ -99,6 +99,9 @@ import type {
 export type {
   ResearchRunView,
   ResearchRoleRequest,
+  ResearchPlan,
+  ResearchModels,
+  ResearchSize,
   StoredResearchRun,
 };
 
@@ -137,6 +140,16 @@ export interface ThreadMessageInput {
 export type PermissionDecision = "accept" | "accept-session" | "decline";
 
 export type UserInputAnswers = Readonly<Record<string, string | readonly string[]>>;
+
+export interface ResearchProposal {
+  readonly id: string;
+  readonly threadId: string;
+  readonly task: string;
+  readonly target: "delegation" | "user-thread";
+  readonly plan: ResearchPlan;
+  readonly leadModel: ModelSelection;
+  readonly expiresAt: string;
+}
 
 export type CommandBody =
   | { readonly type: "prompt.improve"; readonly directory: string; readonly prompt: string; readonly modelSelection?: ModelSelection; readonly protectedText?: readonly string[] }
@@ -228,6 +241,8 @@ export type CommandBody =
   | ({ readonly type: "thread.handover"; readonly wait?: boolean } & HandoverRequest)
   /** A task run in a child thread of the same project. The task id is the child thread id. */
   | ({ readonly type: "thread.delegate" } & DelegateRequest)
+  | { readonly type: "research.proposal.answer"; readonly proposalId: string; readonly choice: "start"; readonly plan: ResearchPlan }
+  | { readonly type: "research.proposal.answer"; readonly proposalId: string; readonly choice: "single" }
   | ({ readonly type: "research.role.start" } & ResearchRoleRequest)
   | { readonly type: "research.message.submit"; readonly threadId: string; readonly text: string }
   | { readonly type: "research.role.cancel"; readonly leadThreadId: string; readonly taskId: string }
@@ -386,6 +401,7 @@ export interface CommandResults {
   "thread.conversation.revert": RevertResult & Accepted;
   "thread.handover": Omit<Handover, "started"> & { readonly started: StartedTurnSummary | null };
   "thread.delegate": Delegation;
+  "research.proposal.answer": Accepted;
   "research.role.start": Delegation;
   "research.message.submit": ResearchMessage;
   "research.role.cancel": CancelledTask;
@@ -465,6 +481,7 @@ export type Query =
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
   | { readonly type: "research.run"; readonly threadId: string }
+  | { readonly type: "research.proposals"; readonly threadId: string }
   | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
   /**
@@ -623,6 +640,7 @@ export interface QueryResults {
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
   "research.run": ResearchRunView | null;
+  "research.proposals": readonly ResearchProposal[];
   "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
   "thread.turn.await": { readonly status: TurnStatus };
@@ -690,6 +708,7 @@ export type ShellFrame =
         readonly projects: readonly ProjectEnvelope[];
         readonly threads: readonly ThreadEnvelope[];
         readonly researchRuns?: readonly StoredResearchRun[];
+        readonly researchProposals?: readonly ResearchProposal[];
       };
     }
   | { readonly kind: "synchronized" };
@@ -1110,6 +1129,12 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, threadId: requireThreadId(record.threadId), text: requireField(record.text, type, "text") };
     case "research.role.cancel":
       return { ...meta, type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
+    case "research.proposal.answer":
+      return { ...meta, type, proposalId: requireField(record.proposalId, type, "proposalId"),
+        ...(record.choice === "start"
+          ? { choice: "start" as const, plan: decodeResearchPlan(record.plan) }
+          : { choice: requireEnum(record.choice, type, "choice", ["single"] as const) }),
+      };
     case "thread.delegate":
       return {
         ...meta,
@@ -1124,6 +1149,8 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "isolation", ["shared", "worktree"] as const, type),
         ...optionalBoolean(record, "notify"),
         ...optionalBoolean(record, "fork"),
+        ...(record.research === undefined ? {} : { research: decodeResearchPlan(record.research) }),
+        ...(record.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(record.researchProposal) }),
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
       };
     case "thread.task.cancel":
@@ -1382,6 +1409,36 @@ function decodeModelRequest(record: Record<string, unknown>, command: string): M
   };
 }
 
+export function decodeResearchPlan(value: unknown): ResearchPlan {
+  const record = asRecord(value);
+  const size = asRecord(record?.size);
+  const researchers = size?.researchers;
+  const critics = size?.critics;
+  if (typeof researchers !== "number" || !Number.isInteger(researchers) || researchers < 1 || researchers > 8 ||
+      typeof critics !== "number" || !Number.isInteger(critics) || critics < 1 || critics > 3) {
+    throw new CliError("INVALID_THREAD_OPTION", "Research size requires researchers 1 to 8 and critics 1 to 3.", { exitCode: 2 });
+  }
+  const models: Partial<ResearchModels> = {};
+  if (record?.models !== undefined) {
+    const entries = asRecord(record.models);
+    if (!entries || Object.keys(entries).some((key) => !["researcher", "critic", "finalizer"].includes(key))) {
+      throw new CliError("INVALID_THREAD_OPTION", "Research models must name researcher, critic or finalizer.");
+    }
+    for (const role of ["researcher", "critic", "finalizer"] as const) {
+      if (entries[role] === undefined) continue;
+      const model = asRecord(entries[role]);
+      if (!model) throw new CliError("INVALID_THREAD_OPTION", "Each research model must be a model request.");
+      for (const key of Object.keys(model)) {
+        if (!["provider", "model", "thinkingEffort", "speedMode"].includes(key) || typeof model[key] !== "string" || !(model[key] as string).trim()) {
+          throw new CliError("INVALID_THREAD_OPTION", "Research model fields must be non-empty provider, model, thinkingEffort or speedMode strings.");
+        }
+      }
+      Object.assign(models, { [role]: decodeModelRequest(model, "research model") });
+    }
+  }
+  return { size: { researchers, critics }, ...(record?.models === undefined ? {} : { models }) };
+}
+
 /** `decodeCommand` for reads. */
 export function decodeQuery(value: unknown): Query {
   const record = asRecord(value);
@@ -1428,6 +1485,7 @@ export function decodeQuery(value: unknown): Query {
         ...(typeof record.view === "string" ? { view: record.view as ThreadReadView } : {}),
         ...optionalBoolean(record, "lastTurn"),
       };
+    case "research.proposals":
     case "research.run":
     case "research.messages":
       return { type, threadId: requireThreadId(record.threadId) };

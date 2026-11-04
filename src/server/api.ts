@@ -47,6 +47,10 @@ export type {
   ThreadFrame,
   ResearchRunView,
   ResearchRoleRequest,
+  ResearchPlan,
+  ResearchModels,
+  ResearchSize,
+  ResearchProposal,
   StoredResearchRun,
   GitBranch,
   GitCommit,
@@ -67,9 +71,9 @@ export type {
 } from "./protocol.js";
 
 export interface ClientApi {
-  /** Shell-level state: projects and the thread list. */
+  /** Shell state. researchProposals opts in to answering for these user thread IDs. */
   subscribeShell(
-    options: { afterSequence?: number },
+    options: { afterSequence?: number; researchProposals?: readonly string[] },
     onItem: (item: ShellFrame) => void,
     onError: (error: unknown) => void,
   ): () => void;

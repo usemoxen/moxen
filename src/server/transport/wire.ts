@@ -28,7 +28,7 @@ export type ClientMessage =
       readonly method: "turnDiff";
       readonly params: { readonly threadId: string; readonly toTurnCount: number };
     }
-  | { readonly id: number; readonly method: "subscribeShell"; readonly params: { readonly afterSequence?: number } }
+  | { readonly id: number; readonly method: "subscribeShell"; readonly params: { readonly afterSequence?: number; readonly researchProposals?: readonly string[] } }
   | {
       readonly id: number;
       readonly method: "subscribeThread";

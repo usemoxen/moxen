@@ -234,6 +234,9 @@ interface ThreadDelegateCommandOptions extends PromptOptions {
   timeoutMs?: string;
   dryRun?: boolean;
   isolation?: "shared" | "worktree";
+  mode?: "build" | "research";
+  researchSize?: string;
+  researchModels?: string;
 }
 
 interface ThreadTaskCommandOptions {
@@ -1501,6 +1504,9 @@ threads
       .choices(["standard", "fast"]),
   )
   .option("--thinking-effort <effort>", "Model-specific reasoning/thinking effort override.")
+  .addOption(new Option("--mode <mode>", "Build (default), or a single read-only researcher.").choices(["build", "research"]))
+  .option("--research-size <researchers,critics>", "Start a full Research run with this user-chosen size: 1–8 researchers, 1–3 critics and one finalizer.")
+  .option("--research-models <json>", "Role model defaults: a JSON object keyed by researcher, critic and finalizer, each with provider, model and thinkingEffort. Requires --research-size.")
   .option("--no-wait", "Return after dispatching without waiting for the child's terminal turn.")
   .option("--timeout-ms <ms>", "Wait budget in milliseconds (default 600000). Expiring it ends the wait without cancelling the child.")
   .option("--dry-run", "Build the child thread commands without dispatching them.")
@@ -1520,6 +1526,9 @@ threads
       const result = await delegateTask(context.config, {
         parentThreadId: rawThreadId,
         task: prompt,
+        ...(options.mode ? { interactionMode: options.mode === "build" ? "default" as const : "research" as const } : {}),
+        ...(options.researchSize !== undefined ? { researchSize: options.researchSize } : {}),
+        ...(options.researchModels !== undefined ? { researchModels: options.researchModels } : {}),
         ...(options.title ? { title: options.title } : {}),
         ...(options.provider ? { provider: options.provider } : {}),
         ...(options.model ? { model: options.model } : {}),

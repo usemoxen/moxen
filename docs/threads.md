@@ -45,8 +45,63 @@ thread lists and search, so they do not appear under the parent in the sidebar.
 Task-id reads, completion notifications and cancellation still work. The hidden
 flag is persisted from creation; ordinary delegated work is not hidden.
 
-Internally, a delegated Research task can be the lead of a full research run
-(the public delegation choice is not exposed yet). Its `thread.json` stores a
+Research delegation defaults to one read-only researcher. A full research run
+is worth the extra cost for claims that matter and need an adversarial check,
+not every review or scout pass. It uses a lead, the chosen researchers and
+critics, and one finalizer. Each is a separate conversation spending provider
+usage; a size of 2 researchers and 1 critic means 5 threads including the lead.
+Researchers gather evidence, critics challenge it independently, and the
+finalizer composes from validated findings. Usage protection applies to every
+role just as it does to any other thread.
+
+The `delegate` tool can suggest a full run with `mode: "research"` and
+`researchProposal: { size: { researchers: 2, critics: 1 }, models: { ... } }`.
+The optional model entries are keyed by `researcher`, `critic` and `finalizer`,
+each using `provider`, `model` and `thinkingEffort`. The suggestion alone creates
+no lead or role thread. Only a user answer starts a full run. Without someone
+to answer, the task runs as one researcher.
+
+On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
+starts one researcher. Adding `--research-size 2,1` supplies the user's size and
+starts a full run without a proposal. `--research-models` accepts the model
+entries as a JSON object. Omitted role models inherit the lead's model and
+effort, and become the run's fixed defaults; a role tool cannot override them.
+Existing calls and CLI JSON envelopes are unchanged.
+
+### Research proposal API
+
+The server owns approval; a client only presents it. A capable client opts in
+with `subscribeShell({ researchProposals: [threadId] }, ...)`, listing the
+user threads for which it can show and answer a picker. A normal shell
+subscription does not count. Opt in before requesting research.
+
+- Query `research.proposals` with `threadId`, or read `researchProposals` in
+  shell snapshots. Each proposal has `id`, `threadId`, `task`, `target`
+  (`delegation` or `user-thread`), `plan`, `leadModel` and `expiresAt`.
+- `plan` contains `size` (researchers 1–8, critics 1–3) and the resolved
+  per-role `models`. Use the model catalog for display names, efforts and
+  choices. Count `researchers + critics + 2` threads, including the lead and
+  finalizer; the providers are the union of the lead and role models.
+- Answer with `research.proposal.answer`, `proposalId`, `choice: "start"`
+  and the user's final `plan`, or `choice: "single"` to use one researcher.
+  The answer acknowledges acceptance; the original delegation/send resolves
+  after it starts (and, when requested, after its normal wait).
+- With no opted-in subscription for that thread, fall back immediately.
+  Losing the last such subscription also falls back. An unanswered proposal
+  falls back after 45 seconds, below the usual MCP call timeout. The deadline
+  is absolute; duplicate or late answers fail with `RESEARCH_PROPOSAL_EXPIRED`.
+  Invalid answers leave the proposal pending until corrected or expired.
+- Pending proposals are transient, not thread records. Server shutdown cancels
+  pending commands rather than starting new work while closing. Clients must
+  discard stale pickers on disconnect or when the proposal leaves snapshots.
+
+`/research` (`interactionMode: "research"` on `thread.turn.start`) uses this
+same surface. After approval, the user's own thread is the lead; no delegated
+lead is created. With a single-researcher answer or no answering client, it
+researches directly without role tools. The picker itself is separate TUI work;
+clients that have not opted in keep the single-researcher behavior.
+
+A full-run lead's `thread.json` stores a
 `researchRun`: the lead id, role thread ids with their role and question, state,
 and creation/update times. Role threads store `researchRole` with the lead id
 and role, and keep their own conversation, turn and usage ledgers. The existing
@@ -61,8 +116,9 @@ tools; ordinary delegated tasks still cannot delegate. Shell snapshots expose
 `researchRuns` for run discovery and membership changes. The `research.run`
 query returns the lead and roles with current thread/task state and reports;
 clients use the existing per-thread subscriptions for each role's live chat.
-The run also stores its size (1–8 researchers and 1–3 critics, defaulting to
-8 and 3) and an ordered message log. `research_messages` reads that log for the
+The run also stores its user-chosen size (1–8 researchers and 1–3 critics), role
+models and an ordered message log. Older internal runs without a size keep the
+8-researcher/3-critic limits. `research_messages` reads that log for the
 calling session's run only; neither it nor `research_message_submit` accepts a
 target run. Both the role's membership and the lead's ownership are checked.
 Submissions are explicit: researchers publish reports, critics publish verdicts,
@@ -317,10 +373,11 @@ A follow-up, and a delegated task, keeps its parent thread's selection unless th
 
 A thread is in one mode until the user changes it: **Build** (the default),
 **Research** or **Orchestrate**. Research and Orchestrate are procedures
-for delegating (`core/threads/modes.ts`): Research runs researcher agents,
-a critic and a finalizer towards one report; Orchestrate splits the work
-into tasks, each on the model that fits it. Both share the same steps for
-budget, memory, a model per task and isolation.
+for coordinated work (`core/threads/modes.ts`): Research offers a full run with
+the user's thread as lead, or one researcher when no full run is approved.
+Full-run leads use role tools, never `delegate`; the server enforces the chosen
+size and review gates. Orchestrate splits the work into tasks, each on the
+model that fits it, checking budget, memory and isolation before delegating.
 
 - **Switching:** Shift+Tab cycles the thread's mode and it stays until
   changed (also `--mode research|orchestrate` on `moxen handover` /

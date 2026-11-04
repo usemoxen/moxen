@@ -65,6 +65,25 @@ async function raw(endpoint: string, lines: object[]): Promise<Array<Record<stri
 }
 
 describe("transport", () => {
+  it("carries thread-scoped proposal subscriptions and user answers without starting a run on a model suggestion", async () => {
+    const harness = await testHarness();
+    const handle = await served(harness);
+    const client = await connected(handle.endpoint);
+    const parent = await client.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+    const frames: ShellFrame[] = [];
+    const unsubscribe = client.subscribeShell({ researchProposals: [parent.threadId] }, (frame) => frames.push(frame), () => {});
+    await waitFor("subscription", () => frames.some((frame) => frame.kind === "synchronized"));
+    try {
+      const pending = client.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Check claims", interactionMode: "research", researchProposal: { size: { researchers: 8, critics: 3 } }, wait: true });
+      await waitFor("proposal snapshot", () => frames.some((frame) => frame.kind === "snapshot" && frame.snapshot.researchProposals?.length === 1));
+      const [proposal] = await client.query({ type: "research.proposals", threadId: parent.threadId });
+      expect(await client.query({ type: "research.run", threadId: parent.threadId })).toBeNull();
+      await client.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "start", plan: { size: { researchers: 1, critics: 1 } } });
+      const delegated = await pending;
+      expect(await client.query({ type: "research.run", threadId: delegated.child.id })).toMatchObject({ size: { researchers: 1, critics: 1 } });
+    } finally { unsubscribe(); }
+  });
+
   it("carries commands, queries and errors — code, details and exit code intact", async () => {
     const harness = await testHarness();
     const handle = await served(harness);

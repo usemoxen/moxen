@@ -158,7 +158,7 @@ export class SdkTransport implements ClaudeTransport {
  * An in-process MCP server as the SDK hosts it (`createSdkMcpServer`): each
  * tool's handler calls the spec's `call` directly, in this process. The SDK
  * takes Zod shapes, so the tools' JSON schemas are converted — they only
- * use flat objects of strings, numbers, booleans and string enums.
+ * use nested objects of strings, numbers, booleans and string enums.
  */
 export function sdkMcpServer(spec: InProcessMcpServerSpec): McpServerConfig {
   return createSdkMcpServer({
@@ -180,7 +180,7 @@ export function sdkMcpServer(spec: InProcessMcpServerSpec): McpServerConfig {
   });
 }
 
-/** A flat JSON object schema as a Zod raw shape; anything it does not know accepts any value. */
+/** A JSON object schema as a Zod raw shape; anything it does not know accepts any value. */
 export function zodShape(schema: Record<string, unknown>): Record<string, z.ZodType> {
   const properties = (schema["properties"] ?? {}) as Record<string, Record<string, unknown>>;
   const required = new Set(Array.isArray(schema["required"]) ? (schema["required"] as string[]) : []);
@@ -193,6 +193,7 @@ export function zodShape(schema: Record<string, unknown>): Record<string, z.ZodT
       } else if (property["type"] === "string") field = z.string();
       else if (property["type"] === "number" || property["type"] === "integer") field = z.number();
       else if (property["type"] === "boolean") field = z.boolean();
+      else if (property["type"] === "object") field = z.object(zodShape(property));
       else field = z.unknown();
       if (typeof property["description"] === "string") field = field.describe(property["description"]);
       return [key, required.has(key) ? field : field.optional()];

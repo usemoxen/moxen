@@ -41,7 +41,7 @@ import { latestVersions } from "../core/providers/latest.js";
 import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
-import { defaultRuntimeMode, resolveModelSelection } from "../core/catalog/selection.js";
+import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
@@ -120,6 +120,8 @@ import {
   cancelTask,
   continueThread,
   delegate,
+  beginResearchRun,
+  resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
   readResearchRun,
@@ -149,8 +151,8 @@ import { backfillNativeSubagents, subagentTranscript } from "../core/threads/sub
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
-import type { CheckpointFileStat, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
-import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
+import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
+import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
@@ -163,6 +165,7 @@ import { remoteServerName } from "./servermode.js";
 import {
   decodeCommand,
   decodeQuery,
+  type ResearchProposal,
   type Command,
   type CommandOf,
   type CommandResult,
@@ -241,6 +244,12 @@ export class DirectConnection implements ClientApi {
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
   private closed = false;
+  private readonly researchResponders = new Map<string, number>();
+  private readonly researchProposals = new Map<string, {
+    proposal: ResearchProposal;
+    answer: (plan: ResearchPlan | null) => void;
+  }>();
+  private researchRevision = 0;
   /** Backfilled per-file stats for checkpoints recorded without them, by ref pair (immutable). */
   private readonly checkpointFiles = new Map<string, ReadonlyArray<CheckpointFileStat>>();
 
@@ -473,9 +482,50 @@ export class DirectConnection implements ClientApi {
     };
   }
 
-  /** Internal until MXN-243 adds the orchestrator's public choice. */
-  async startResearchRun(request: DelegateRequest, size?: ResearchSize) {
-    return await delegate(await this.context(), { ...request, interactionMode: "research" }, { fullResearchRun: true, ...(size ? { researchSize: size } : {}) });
+  /** A user-supplied size starts a run without a proposal. */
+  async startResearchRun(request: DelegateRequest, size: ResearchSize) {
+    return await this.dispatch({ type: "thread.delegate", ...request, interactionMode: "research", research: { ...request.research, size } });
+  }
+
+  private async chooseResearch(
+    threadId: string,
+    task: string,
+    target: ResearchProposal["target"],
+    options: { suggested?: ResearchPlan; modelRequest?: ModelRequest; modelSelection?: ModelSelection } = {},
+  ): Promise<ResearchPlan | null> {
+    if (this.closed || !this.researchResponders.get(threadId)) return null;
+    const thread = await (await this.store()).readThreadRecord(threadId);
+    if (!thread || thread.researchRole || thread.researchRun || (await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
+      throw new CliError("DELEGATION_REFUSED", "Only a user's own thread may propose a research run.");
+    }
+    const config = await this.loadConfig();
+    const selection = options.modelSelection ?? followUpSelection(thread.modelSelection, config, options.modelRequest, task) ?? thread.modelSelection;
+    const plan = resolveResearchPlan(selection, config, options.suggested ?? { size: { researchers: 2, critics: 1 } });
+    // This is a user-answer deadline, not provider timing. Disconnects also
+    // resolve immediately; a forgotten picker cannot hold a tool call forever.
+    const answerWindowMs = 45_000;
+    const proposal: ResearchProposal = {
+      id: randomUUID(), threadId, task, target, plan, leadModel: selection,
+      expiresAt: new Date(Date.now() + answerWindowMs).toISOString(),
+    };
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => answer(null), answerWindowMs);
+      const answer = (chosen: ResearchPlan | null): void => {
+        clearTimeout(timer);
+        this.researchProposals.delete(proposal.id);
+        this.researchRevision++;
+        resolve(chosen);
+      };
+      this.researchProposals.set(proposal.id, { proposal, answer });
+      this.researchRevision++;
+      if (!this.researchResponders.get(threadId) || this.closed) answer(null);
+    });
+  }
+
+  private expireResearchProposals(): void {
+    for (const entry of this.researchProposals.values()) {
+      if (Date.parse(entry.proposal.expiresAt) <= Date.now()) entry.answer(null);
+    }
   }
 
   /**
@@ -628,10 +678,12 @@ export class DirectConnection implements ClientApi {
   // -- subscriptions -------------------------------------------------------
 
   subscribeShell(
-    _options: { afterSequence?: number },
+    options: { afterSequence?: number; researchProposals?: readonly string[] },
     onItem: (item: ShellFrame) => void,
     onError: (error: unknown) => void,
   ): () => void {
+    const answering = new Set(options.researchProposals ?? []);
+    for (const threadId of answering) this.researchResponders.set(threadId, (this.researchResponders.get(threadId) ?? 0) + 1);
     let lastHash: string | null = null;
     // What the store and the project list looked like when `lastHash` was
     // taken, and when the next scheduled turn comes due. While the first
@@ -649,7 +701,7 @@ export class DirectConnection implements ClientApi {
         const store = await this.store();
         const [version, projects] = await Promise.all([store.shellVersion(), listStoredProjects(this.storeRoot)]);
         if (stopped || this.closed) return;
-        const fingerprint = `${version}#${JSON.stringify(projects)}`;
+        const fingerprint = `${version}#${this.researchRevision}#${JSON.stringify(projects)}`;
         if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
         const threads = await listThreads(store, { status: "all" });
         const now = Date.now();
@@ -679,13 +731,14 @@ export class DirectConnection implements ClientApi {
         );
         const visible = rows.filter(isVisibleThread);
         const researchRuns = threads.flatMap((thread) => thread.researchRun ? [thread.researchRun] : []);
+        const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
         lastFingerprint = fingerprint;
-        const hash = JSON.stringify({ projects, threads: visible, researchRuns });
+        const hash = JSON.stringify({ projects, threads: visible, researchRuns, researchProposals });
         if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
-            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}) },
+            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
           });
         }
       } catch (cause) {
@@ -699,8 +752,17 @@ export class DirectConnection implements ClientApi {
     });
     const timer = setInterval(() => void poll(), this.shellPollMs);
     return () => {
+      if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      for (const threadId of answering) {
+        const count = (this.researchResponders.get(threadId) ?? 1) - 1;
+        if (count) this.researchResponders.set(threadId, count);
+        else {
+          this.researchResponders.delete(threadId);
+          for (const entry of this.researchProposals.values()) if (entry.proposal.threadId === threadId) entry.answer(null);
+        }
+      }
     };
   }
 
@@ -1009,7 +1071,20 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.delegate": {
         const { type: _type, commandId: _id, ...request } = command;
-        return await delegate(await this.context(), request);
+        if (request.researchProposal && request.interactionMode !== "research") {
+          throw new CliError("INVALID_THREAD_OPTION", "A research proposal requires Research mode.");
+        }
+        const research = request.research ?? (request.researchProposal && !request.dryRun
+          ? await this.chooseResearch(request.parentThreadId, request.task, "delegation", { suggested: request.researchProposal, modelRequest: request }) : null);
+        if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");
+        return await delegate(await this.context(), { ...request, ...(research ? { research } : {}) });
+      }
+      case "research.proposal.answer": {
+        this.expireResearchProposals();
+        const pending = this.researchProposals.get(command.proposalId);
+        if (!pending) throw new CliError("RESEARCH_PROPOSAL_EXPIRED", "This research proposal is no longer pending.");
+        pending.answer(command.choice === "start" ? command.plan : null);
+        return accepted;
       }
       case "research.role.start":
         return await startResearchRole(await this.context(), command);
@@ -1325,6 +1400,18 @@ export class DirectConnection implements ClientApi {
 
   private async turnStart(command: CommandOf<"thread.turn.start">): Promise<CommandResult<"thread.turn.start">> {
     const { threadId, message } = command;
+    const thread = await (await this.store()).readThreadRecord(threadId);
+    const mode = command.interactionMode ?? thread?.interactionMode;
+    if (mode === "research" && !thread?.researchRun && !thread?.researchRole &&
+        !(await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
+      const plan = await this.chooseResearch(threadId, message.text, "user-thread", command.modelSelection ? { modelSelection: command.modelSelection } : {});
+      if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");
+      if (plan) {
+        const ctx = await this.context();
+        const approved = resolveResearchPlan(command.modelSelection ?? thread!.modelSelection, ctx.config, plan);
+        await beginResearchRun(ctx, threadId, approved);
+      }
+    }
     const started = await startTurn(await this.context(), {
       threadId,
       prompt: message.text,
@@ -1584,6 +1671,9 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "research.proposals":
+        this.expireResearchProposals();
+        return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);
       case "research.messages":
         return await readResearchMessages(ctx, query.threadId);
       case "research.role.report":
@@ -1787,6 +1877,7 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const entry of this.researchProposals.values()) entry.answer(null);
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
     this.usageProtection.close();
     for (const unsubscribe of this.usageSubscriptions) unsubscribe();

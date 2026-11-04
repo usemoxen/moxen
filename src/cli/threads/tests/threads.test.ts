@@ -11,6 +11,7 @@ import {
   settleThread as settleStoredThread,
 } from "../../../core/threads/threads.js";
 import { testHarness, type TestHarness } from "../../../core/testing/harness.js";
+import { openThreadStore } from "../../../core/threads/store.js";
 import {
   cancelTask,
   delegateTask,
@@ -663,6 +664,22 @@ describe("delegated tasks", () => {
     expect(result.task.summary).toBe("Completed: Research the retry policy.");
     expect(result.task.waitTimedOut).toBe(false);
     expect(result.verification).toMatchObject({ accepted: true, method: "message-id" });
+  });
+
+  it("starts a full run only with a user-given CLI size, keeping the default a single task", async () => {
+    const harness = await parentHarness();
+    const store = await openThreadStore(harness.root);
+    const base = { parentThreadId: "thread-parent", task: "Check claims", openMode: "none" as const, drivers: harness.drivers };
+    const single = await delegateTask(harness.config, { ...base, interactionMode: "research" });
+    expect((await store.readThreadRecord(single.child.id))?.researchRun).toBeUndefined();
+    const full = await delegateTask(harness.config, { ...base, researchSize: "2,1", researchModels: JSON.stringify({ critic: { provider: "codex", model: "gpt-5.4", thinkingEffort: "high" } }) });
+    expect((await store.readThreadRecord(full.child.id))?.researchRun).toMatchObject({
+      size: { researchers: 2, critics: 1 }, models: { critic: { provider: "codex", model: "gpt-5.4", thinkingEffort: "high" } },
+    });
+    expect(full.createCommand.interactionMode).toBe("research");
+    for (const researchSize of ["0,1", "9,1", "1,4", "2", "2,1,1", "1.5,1"]) {
+      await expect(delegateTask(harness.config, { ...base, researchSize })).rejects.toThrow(/research|Research/);
+    }
   });
 
   it("returns waitTimedOut instead of cancelling on timeout", async () => {

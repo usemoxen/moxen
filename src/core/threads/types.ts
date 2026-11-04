@@ -8,6 +8,7 @@
  * See docs/threads.md.
  */
 import type { ImageAttachmentUpload } from "../attachments.js";
+import type { ModelRequest } from "../catalog/selection.js";
 import type { TaskNotification } from "./notify.js";
 import type { QueuePolicy } from "./queue.js";
 import type { UsageProtectionOverride } from "../usage/limits.js";
@@ -42,6 +43,14 @@ export interface ResearchSize {
   readonly critics: number;
 }
 
+/** User-approved defaults for each role; omitted roles inherit the lead's model. */
+export type ResearchModels = Readonly<Partial<Record<ResearchRole, ModelRequest>>>;
+
+export interface ResearchPlan {
+  readonly size: ResearchSize;
+  readonly models?: ResearchModels;
+}
+
 export interface ResearchMessage {
   readonly id: string;
   readonly threadId: string;
@@ -56,6 +65,7 @@ export interface ResearchMessage {
 export interface StoredResearchRun {
   readonly leadThreadId: string;
   readonly size?: ResearchSize;
+  readonly models?: ResearchModels;
   readonly messages?: readonly ResearchMessage[];
   readonly roles: readonly { readonly threadId: string; readonly role: ResearchRole; readonly question: string }[];
   readonly state: "running" | "completed" | "failed" | "interrupted";

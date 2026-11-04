@@ -20,6 +20,7 @@ import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/sett
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import type { ClientApi } from "../api.js";
+import { decodeResearchPlan } from "../protocol.js";
 
 export const MAX_WAIT_MS = 45_000;
 /** A checklist is a plan at a glance, not a log: past this it stops being read. */
@@ -76,11 +77,24 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description:
       "Hand a self-contained task to a new subagent thread, which runs in parallel on any provider and model. " +
       "Only when the user has asked you to delegate (or put the thread in Research or Orchestrate mode): each subagent starts cold and spends their usage, so by default do the work yourself. " +
+      "Research defaults to one researcher. For claims that matter and need an adversarial check, propose a full research run with researchProposal (size and optional per-role models). " +
+      "A full run costs a lead, researchers, critics and a finalizer. Only the user's answer starts one; without an answering client or after its answer deadline, it runs one researcher instead. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
-      "Returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
+      "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
     inputSchema: {
       type: "object",
       properties: {
+        researchProposal: {
+          type: "object",
+          description: "Propose a full run, only with mode research. This is not permission to start it. Role models use provider, model and thinkingEffort from models.",
+          properties: {
+            size: { type: "object", properties: { researchers: { type: "integer", minimum: 1, maximum: 8 }, critics: { type: "integer", minimum: 1, maximum: 3 } }, required: ["researchers", "critics"], additionalProperties: false },
+            models: { type: "object", properties: Object.fromEntries(["researcher", "critic", "finalizer"].map((role) => [role, {
+              type: "object", properties: { provider: { type: "string" }, model: { type: "string" }, thinkingEffort: { type: "string" } }, additionalProperties: false,
+            }])), additionalProperties: false },
+          },
+          required: ["size"], additionalProperties: false,
+        },
         task: { type: "string", description: "Everything the subagent needs: it sees none of your conversation." },
         title: {
           type: "string",
@@ -229,7 +243,7 @@ export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
     name: "research_role_start",
-    description: "Start a read-only researcher, critic or finalizer in your research run. Each role is a nested thread, not another orchestrator task. Choose its question, provider, model and effort.",
+    description: "Start a read-only researcher, critic or finalizer in your research run. Each role is a nested thread, not another orchestrator task. Choose its question. The run's user-approved role model and effort take precedence over requested overrides.",
     inputSchema: { type: "object", properties: { role: { type: "string", enum: ["researcher", "critic", "finalizer"] }, question: { type: "string" }, provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" } }, required: ["role", "question"] },
   },
   { name: "research_role_report", description: "Read the state and report of one role in your research run.", inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] } },
@@ -776,6 +790,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(effort ? { thinkingEffort: effort } : {}),
     ...(fork ? { fork: true } : {}),
     ...(modeArg === "research" ? { interactionMode: "research" as const } : {}),
+    ...(args.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(args.researchProposal) }),
   });
   return {
     taskId: delegated.task.taskId,

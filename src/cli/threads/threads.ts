@@ -24,6 +24,7 @@ import {
 } from "../../core/threads/views.js";
 import type { CliConfig, OpenMode, ProjectEnvelope, SpeedMode, ThreadEnvelope } from "../../core/types.js";
 import type { ClientApi } from "../../server/api.js";
+import { decodeResearchPlan } from "../../server/protocol.js";
 import { awaitTurn, cliClient, type TurnDriverFactories } from "../infra/client.js";
 import { directAuth, directRuntime } from "../infra/direct.js";
 import type { WorkspaceOptions } from "../projects/projects.js";
@@ -348,14 +349,37 @@ export interface ThreadDelegateOptions {
   openMode?: OpenMode;
   dryRun?: boolean;
   isolation?: "shared" | "worktree";
+  interactionMode?: "default" | "research";
+  researchSize?: string;
+  researchModels?: string;
   drivers?: TurnDriverFactories;
 }
 
 export async function delegateTask(config: CliConfig, options: ThreadDelegateOptions) {
+  let research;
+  if (options.researchSize !== undefined) {
+    if (!/^\d+,\d+$/.test(options.researchSize)) {
+      throw new CliError("INVALID_THREAD_OPTION", "--research-size must be researchers,critics (1 to 8,1 to 3).", { exitCode: 2 });
+    }
+    const [researchers, critics] = options.researchSize.split(",").map(Number);
+    let models: unknown;
+    try {
+      models = options.researchModels === undefined ? undefined : JSON.parse(options.researchModels);
+    } catch {
+      throw new CliError("INVALID_THREAD_OPTION", "--research-models must be a JSON object.", { exitCode: 2 });
+    }
+    research = decodeResearchPlan({ size: { researchers, critics }, ...(models === undefined ? {} : { models }) });
+    if (options.interactionMode === "default") {
+      throw new CliError("INVALID_THREAD_OPTION", "--research-size cannot use Build mode.", { exitCode: 2 });
+    }
+  } else if (options.researchModels !== undefined) {
+    throw new CliError("INVALID_THREAD_OPTION", "--research-models requires --research-size.", { exitCode: 2 });
+  }
   const result = await (await cliClient(config, options.drivers)).dispatch({
     type: "thread.delegate",
     parentThreadId: options.parentThreadId,
     task: options.task,
+    ...(research ? { research, interactionMode: "research" as const } : options.interactionMode ? { interactionMode: options.interactionMode } : {}),
     ...(options.title !== undefined ? { title: options.title } : {}),
     ...(options.wait !== undefined ? { wait: options.wait } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),

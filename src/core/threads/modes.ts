@@ -62,10 +62,12 @@ const SHARED_STEPS = [
 
 const RESEARCH = [
   "Research mode is on: the user switched it on, and it stays on until they switch it off. Run the request as a research run:",
-  "you orchestrate researcher agents, a critic and a finalizer through Moxen's `delegate` tool, and the end product is one final report, " +
+  "the server asks the user to choose a run size before starting a full run, and the end product is one final report, " +
     "with every source, as long and with as many tables or figures as the request needs.",
-  "If you have `research_role_start`, you lead a delegated full research run: use research_role_start, research_role_report and research_role_cancel instead of delegate, task_status and task_cancel. Your final answer is the run's report.",
-  "If you have neither `delegate` nor `research_role_start`, you are a delegated task: you are the researcher. Do the research yourself with your own tools, read only, " +
+  "If you have `research_role_start`, you lead a full research run: use research_role_start, research_role_report and research_role_cancel. " +
+    "The user approved its size and role models; the server enforces them. Read research_messages and publish follow-ups with research_message_submit. " +
+    "Your final answer is the run's report.",
+  "Without `research_role_start`, you are one researcher. Do not delegate roles. Do the research yourself with your own tools, read only, " +
     "and answer in the report format below; skip the roles and caps.",
   "",
   "## Roles",
@@ -75,7 +77,7 @@ const RESEARCH = [
     "They list subtopics they find; they never delegate.",
   "- Critic: checks a set of findings adversarially (what is unsupported, contradicted or missing). For claims that matter, not every scout pass.",
   "- Finalizer: composes the final report from the validated reports, nothing else.",
-  "Default all four to one model family for one tone; override per task when the task wants it.",
+  "Use the user's per-role models. Every researcher publishes its report with research_message_submit, every critic publishes its verdict, and the finalizer publishes the final report.",
   "",
   "## Reports",
   "Ask for prose, not schemas: a one-line headline stating the finding, then findings, then sources (every claim traceable), then subtopics. " +
@@ -83,9 +85,9 @@ const RESEARCH = [
   "",
   "## Caps",
   "At most 8 researchers at once (a finished one frees its slot for a follow-up). At most 3 critic rounds per set of findings; " +
-    "past that, stop and take the open questions to the user.",
+    "past that, stop and take the open questions to the user. The chosen size may be smaller. At most 3 critic agents, one finalizer, and a current verdict from every started critic before finalization.",
   "",
-  SHARED_STEPS,
+  "Each role is a separate thread and spends provider usage. Keep questions scoped and do not start roles the request does not need.",
 ].join("\n");
 
 const ORCHESTRATE = [
@@ -96,6 +98,9 @@ const ORCHESTRATE = [
   "## Shapes to delegate into (examples, not a menu)",
   "- Scout: cheap fast model, read-only sweep, strict output (`HANDLER -- MISSING CHECK -- SEVERITY`, or `NO FINDINGS`).",
   "- Researcher: a stronger model, for a question that needs analysis rather than retrieval.",
+  "- Full research run: claims that matter and need an adversarial check. Use mode research with researchProposal to suggest size and per-role models; " +
+    "only the user's answer starts it. It costs a lead, researchers, critics and one finalizer. " +
+    "One researcher remains the default for read-only reviews and scout passes, and the fallback when nobody answers.",
   "- Implementer: makes a change in its own worktree once scouts or researchers reported, scoped to named files.",
   "- Critic: checks another child's findings adversarially before you trust them, for high-stakes claims only.",
   "- Merger: usually you. Rank, deduplicate and combine the reports.",

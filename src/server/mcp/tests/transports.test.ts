@@ -126,7 +126,7 @@ describe("in-process tools for Claude", () => {
   it("turns the tools' JSON schemas into Zod shapes", () => {
     const delegate = MOXEN_TOOLS.find((tool) => tool.name === "delegate")!;
     const shape = zodShape(delegate.inputSchema);
-    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "isolation", "mode", "model", "provider", "task", "title"]);
+    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "isolation", "mode", "model", "provider", "researchProposal", "task", "title"]);
     expect(shape.fork!.safeParse(true).success).toBe(true);
     expect(shape.task!.safeParse("do it").success).toBe(true);
     expect(shape.task!.safeParse(undefined).success).toBe(false);
@@ -134,6 +134,10 @@ describe("in-process tools for Claude", () => {
     expect(shape.title!.safeParse("fix login").success).toBe(true);
     expect(shape.isolation!.safeParse("worktree").success).toBe(true);
     expect(shape.isolation!.safeParse("elsewhere").success).toBe(false);
+    const proposal = { size: { researchers: 2, critics: 1 }, models: { critic: { provider: "codex", model: "gpt-5.4", thinkingEffort: "high" } } };
+    expect(shape.researchProposal!.safeParse(proposal)).toMatchObject({ success: true, data: proposal });
+    expect(shape.researchProposal!.safeParse({ size: { researchers: "two", critics: 1 } }).success).toBe(false);
+    expect(shape.researchProposal!.safeParse({ size: { researchers: 2 } }).success).toBe(false);
   });
 
   it("hosts them as an SDK server whose calls reach the spec directly", () => {

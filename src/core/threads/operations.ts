@@ -91,7 +91,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
-import type { ResearchMessage, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -244,7 +244,10 @@ async function sessionSetup(
   const builtin =
     !reach.orchestration && !reach.webFetch && memory === "off"
       ? []
-      : (await ctx.builtinMcpServers?.(thread.id, { delegated: delegation !== null || !reach.orchestration, webFetch: reach.webFetch, memory }) ?? []);
+      : (await ctx.builtinMcpServers?.(thread.id, {
+          delegated: delegation !== null || thread.researchRun !== undefined || !reach.orchestration,
+          webFetch: reach.webFetch, memory,
+        }) ?? []);
   const base: Record<string, McpServerEntry> = {};
   for (const built of builtin) {
     // Layered by name like any configured server, in the form a config entry has.
@@ -280,7 +283,7 @@ async function sessionSetup(
     ...(thread.researchRole ? { researchRole: thread.researchRole.role } : {}),
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
-    delegationTools: reach.orchestration && builtin.some((server) => server.name === "moxen"),
+    delegationTools: !thread.researchRun && reach.orchestration && builtin.some((server) => server.name === "moxen"),
     knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
       !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
     ...(memory !== "off" && builtin.some((server) => server.name === "moxen") ? { memory } : {}),
@@ -1904,6 +1907,10 @@ export async function handover(ctx: OperationContext, request: HandoverRequest):
 const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
 
 export interface DelegateRequest extends ModelRequest {
+  /** A size explicitly supplied by the user, never copied from a model proposal. */
+  readonly research?: ResearchPlan;
+  /** A model suggestion: the server must obtain a user answer before spending it. */
+  readonly researchProposal?: ResearchPlan;
   readonly parentThreadId: string;
   readonly task: string;
   readonly title?: string;
@@ -2200,11 +2207,24 @@ function taskOf(child: ThreadEnvelope, taskId = child.id): TaskView {
  *
  * Waiting awaits the run itself; this used to be a 200ms ledger poll.
  */
-export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean; readonly fullResearchRun?: boolean; readonly researchSize?: ResearchSize; readonly researchRole?: ResearchRole } = {}): Promise<Delegation> {
+export async function delegate(ctx: OperationContext, request: DelegateRequest, options: {
+  readonly hidden?: boolean;
+  readonly fullResearchRun?: boolean;
+  readonly researchSize?: ResearchSize;
+  readonly researchModels?: ResearchModels;
+  readonly researchRole?: ResearchRole;
+} = {}): Promise<Delegation> {
+  if (request.research) options = {
+    ...options, fullResearchRun: true, researchSize: request.research.size,
+    ...(request.research.models ? { researchModels: request.research.models } : {}),
+  };
   const parentThreadId = requireThreadId(request.parentThreadId);
   if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
-  else if ((await ctx.store.readThreadRecord(parentThreadId))?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
-    throw new CliError("DELEGATION_REFUSED", "A delegated task cannot delegate again.");
+  else {
+    const parent = await ctx.store.readThreadRecord(parentThreadId);
+    if (parent?.researchRun || parent?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
+      throw new CliError("DELEGATION_REFUSED", "A delegated task or research lead cannot delegate again. Use role tools inside a full run.");
+    }
   }
   if (options.fullResearchRun && request.interactionMode !== "research") throw new CliError("INVALID_THREAD_OPTION", "A full research run must use Research mode.");
   const size = options.researchSize ?? { researchers: 8, critics: 3 };
@@ -2231,6 +2251,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
+  const research = options.fullResearchRun ? resolveResearchPlan(modelSelection, ctx.config, {
+    size, ...(options.researchModels ? { models: options.researchModels } : {}),
+  }) : null;
   const { runtimeMode } = requireParentModes(parent);
   // A task's mode is the delegating model's choice, Build unless it asks for Research. Orchestrate delegates, and a task never does.
   if (request.interactionMode === "orchestrate") {
@@ -2324,7 +2347,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     });
     if (options.fullResearchRun || options.researchRole !== undefined) {
       child = { ...child,
-        ...(options.fullResearchRun ? { researchRun: { leadThreadId: child.id, size, messages: [], roles: [], state: "running" as const, createdAt: now, updatedAt: now } } : {}),
+        ...(research ? { researchRun: {
+          leadThreadId: child.id, ...research, messages: [], roles: [], state: "running" as const, createdAt: now, updatedAt: now,
+        } } : {}),
         ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
       };
       await ctx.store.writeThreadRecord(child);
@@ -2388,10 +2413,45 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
 export async function requireResearchLead(ctx: OperationContext, threadId: string): Promise<StoredThread & { readonly researchRun: StoredResearchRun }> {
   const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
-  if (!thread?.researchRun || thread.researchRun.leadThreadId !== threadId || thread.researchRole || !(await delegationOf(ctx.store, threadId))) {
+  if (!thread?.researchRun || thread.researchRun.leadThreadId !== threadId || thread.researchRole) {
     throw new CliError("RESEARCH_LEAD_REQUIRED", "Only the lead of a full research run may use role tools.");
   }
   return { ...thread, researchRun: thread.researchRun };
+}
+
+/** Freeze defaults before approval/start so a lead cannot silently change role models. */
+export function resolveResearchPlan(base: ModelSelection, config: CliConfig, plan: ResearchPlan): ResearchPlan {
+  const models = Object.fromEntries((["researcher", "critic", "finalizer"] as const).map((role) => {
+    const model = followUpSelection(base, config, plan.models?.[role], "") ?? base;
+    const effort = model.options?.find((option) => option.id === "effort")?.value;
+    const fastMode = model.options?.find((option) => option.id === "fastMode")?.value;
+    return [role, {
+      provider: model.instanceId, model: model.model,
+      ...(effort === undefined ? {} : { thinkingEffort: String(effort) }),
+      ...(typeof fastMode === "boolean" ? { speedMode: fastMode ? "fast" : "standard" } : {}),
+    }];
+  }));
+  return { size: plan.size, models };
+}
+
+/** The user's own conversation can lead a run without becoming a delegated task. */
+export async function beginResearchRun(ctx: OperationContext, threadId: string, plan: ResearchPlan): Promise<void> {
+  await ctx.store.withThreadLock(threadId, async () => {
+    const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
+    if (!thread || thread.researchRole || await delegationOf(ctx.store, threadId)) {
+      throw new CliError("RESEARCH_LEAD_REQUIRED", "Only a user's own thread can begin a research run here.");
+    }
+    if (thread.researchRun) throw new CliError("RESEARCH_RUN_EXISTS", "This thread already leads a research run.");
+    if (thread.archivedAt || (await ctx.store.readTurns(threadId)).some((turn) => turn.status === "running" || turn.status === "queued")) {
+      throw new CliError("THREAD_BUSY", "Start a research run in an unarchived thread with no pending turn.");
+    }
+    const approved = resolveResearchPlan(thread.modelSelection, ctx.config, plan);
+    const now = ctx.store.nowIso();
+    await ctx.store.writeThreadRecord({ ...thread, researchRun: {
+      leadThreadId: threadId, ...approved, messages: [], roles: [], state: "running", createdAt: now, updatedAt: now,
+    } });
+    ctx.store.emit(threadId, "research-run-started");
+  });
 }
 
 async function syncResearchRun(ctx: OperationContext, threadId: string): Promise<void> {
@@ -2479,8 +2539,13 @@ export async function submitResearchMessage(ctx: OperationContext, threadId: str
 }
 
 export async function startResearchRole(ctx: OperationContext, request: ResearchRoleRequest): Promise<Delegation> {
-  await requireResearchLead(ctx, request.leadThreadId);
+  const lead = await requireResearchLead(ctx, request.leadThreadId);
   if (!["researcher", "critic", "finalizer"].includes(request.role)) throw new CliError("INVALID_THREAD_OPTION", "Unknown research role.");
+  const chosen = lead.researchRun.models?.[request.role];
+  if (chosen) {
+    const { provider: _provider, model: _model, thinkingEffort: _effort, speedMode: _speed, ...rest } = request;
+    request = { ...rest, ...chosen };
+  }
   return await delegate(ctx, { ...request, parentThreadId: request.leadThreadId, task: request.question, title: `${request.role}: ${request.question}`, interactionMode: "research", isolation: "shared", wait: false, notify: false }, { researchRole: request.role });
 }
 
