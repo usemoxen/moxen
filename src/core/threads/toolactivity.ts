@@ -91,6 +91,22 @@ function statusOfEvent(type: ToolRuntimeEvent["type"]): ToolCallStatus {
   return type === "tool.execute.completed" ? "completed" : "inProgress";
 }
 
+/** The MCP server that gives Codex the Harness shell (`CODEX_HARNESS_SERVER`; a test pins the two together). */
+const CODEX_SHELL_SERVER = "moxen_harness";
+const HARNESS_SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
+const NOT_A_SHELL_FAILURE = { exit: null, noMatches: false } as const;
+
+/**
+ * What a Harness shell result says about how the command ended, for the
+ * Harness itself and for Codex, which runs the same tool over MCP. A failed
+ * command's result ends in `[exit code N]`, which the row shows as its exit.
+ */
+function harnessShellResult(tool: string, input: Record<string, unknown>, output: string | null, isError: boolean): { exit: number | null; noMatches: boolean } {
+  if (!isError || output === null || !HARNESS_SHELLS.has(tool)) return NOT_A_SHELL_FAILURE;
+  if (tool === "bash" && isNoMatches(asString(input.command) ?? "", output)) return { exit: null, noMatches: true };
+  return { exit: harnessExitCode(output), noMatches: false };
+}
+
 /**
  * Claude publishes one `tool_use` block per call (`{ toolUseId, input }`)
  * and, once the harness returns, one `tool_result`
@@ -103,10 +119,7 @@ function fromClaude(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nati
   const isError = raw.isError === true;
   const input = asRecord(raw.input) ?? {};
   const output = asString(raw.output);
-  // The Harness shell tool ends a failed command's result with `[exit code N]`; the TUI row shows it as the exit.
-  const harnessShell = event.provider === "harness" && event.tool === "bash" && isError && output !== null;
-  const exit = harnessShell ? harnessExitCode(output) : null;
-  const noMatches = harnessShell && isNoMatches(asString(input.command) ?? "", output);
+  const { exit, noMatches } = event.provider === "harness" ? harnessShellResult(event.tool, input, output, isError) : NOT_A_SHELL_FAILURE;
   const status: ToolCallStatus = event.type === "tool.execute.completed"
     ? (isError && !noMatches ? "failed" : "completed")
     : "inProgress";
@@ -116,7 +129,7 @@ function fromClaude(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nati
     input,
     output,
     status,
-    exit: noMatches ? null : exit,
+    exit,
     ...(noMatches ? { noMatches: true } : {}),
     startMs: null,
     endMs: null,
@@ -372,12 +385,35 @@ function fromCodex(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nativ
   if (type === "mcpToolCall" || type === "dynamicToolCall" || type === "collabAgentToolCall") {
     const tool = asString(item.tool) ?? "tool";
     const server = type === "mcpToolCall" ? asString(item.server) : null;
+    const input = asRecord(item.arguments) ?? {};
+    const output = item.error ? asString(asRecord(item.error)?.message) ?? JSON.stringify(item.error) : item.result ? mcpResultText(item.result) : null;
+    const isError = asRecord(item.result)?.isError === true;
+    const failedStatus = isError && status === "completed" ? "failed" : status;
+    // Codex's shell is the Harness tool over MCP, so its calls are commands, not generic tool calls.
+    if (server === CODEX_SHELL_SERVER && HARNESS_SHELLS.has(tool)) {
+      const { exit, noMatches } = harnessShellResult(tool, input, output, isError);
+      return {
+        callId,
+        tool,
+        input,
+        output,
+        status: noMatches ? "completed" : failedStatus,
+        exit,
+        ...(noMatches ? { noMatches: true } : {}),
+        startMs: null,
+        endMs: durationMs,
+        files: [],
+        patch: null,
+        title: null,
+        itemType: "command_execution",
+      };
+    }
     return {
       callId,
       tool: server && !/^mcp__.+?__.+/u.test(tool) ? `mcp__${server}__${tool}` : tool,
-      input: asRecord(item.arguments) ?? {},
-      output: item.error ? asString(asRecord(item.error)?.message) ?? JSON.stringify(item.error) : item.result ? mcpResultText(item.result) : null,
-      status: asRecord(item.result)?.isError === true && status === "completed" ? "failed" : status,
+      input,
+      output,
+      status: failedStatus,
       exit: null,
       startMs: null,
       endMs: durationMs,

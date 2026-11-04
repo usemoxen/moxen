@@ -11,7 +11,7 @@ import { testRender } from "../testrender.js";
 export async function runToolOutput(): Promise<void> {
   const at = "2026-11-01T12:00:00.000Z";
   const base = { type: "tool.execute.completed", threadId: "thread", turnId: "turn" } as const;
-  const shell = (command: string, output: string): ToolRuntimeEvent => ({ ...base, provider: "harness", tool: "bash", raw: { toolUseId: command, input: { command }, output, isError: true } });
+  const shell = (command: string, output: string): ToolRuntimeEvent => ({ ...base, provider: "codex", tool: "bash", raw: { item: { id: command, type: "mcpToolCall", server: "moxen_harness", tool: "bash", status: "completed", arguments: { command }, result: { content: [{ type: "text", text: output }], isError: true } } } });
   const events: ToolRuntimeEvent[] = [
     { ...base, provider: "codex", tool: "get_issue", raw: { item: { id: "mcp", type: "mcpToolCall", server: "linear", tool: "get_issue", status: "completed", arguments: {}, result: { content: [{ type: "text", text: "Issue MXN-1 not found.\nCheck the identifier and try again." }], isError: true } } } },
     shell("cargo build", `${"warning: unused variable\n".repeat(400)}error: could not compile\n\n[exit code 101]`),

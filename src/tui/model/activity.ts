@@ -1058,6 +1058,8 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const start = asNumber(time.start);
     const end = asNumber(time.end);
     const output = asString(state.output) ?? asString(payload.detail) ?? "";
+    // A timeout, a refusal or a shell that never started failed with no exit code to show.
+    const failed = !running && state.stopped !== true && ((exit !== null && exit !== 0) || state.status === "failed");
     return {
       kind: "command",
       tool: tool ?? "bash",
@@ -1065,9 +1067,9 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
       workdir: asString(input.workdir),
       exit,
       durationMs: start !== null && end !== null && end >= start ? end - start : null,
-      outputTail: !running && exit !== null && exit !== 0 && output.length > 0 ? lastLines(output, 3) : null,
+      outputTail: failed && output.length > 0 ? lastLines(output, 3) : null,
       noMatches: metadata.noMatches === true,
-      failed: exit !== null && exit !== 0,
+      failed,
       running,
     };
   }

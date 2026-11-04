@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { describeActivity, memoryLabel, memoryTitle, type MemoryView, type ThreadLookupView } from "../activity.js";
 import type { ActivityEnvelope } from "../../../core/types.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../core/threads/toolactivity.js";
+import { CODEX_HARNESS_SERVER } from "../../../core/providers/codex/tools.js";
 
 function view(row: { payload: Record<string, unknown>; summary: string; kind: string }) {
   const activity: ActivityEnvelope = {
@@ -119,6 +120,33 @@ describe("toolActivityRow", () => {
       const other = toolActivityRow(event({ provider: "harness", type: "tool.execute.completed", tool: "powershell", raw: { toolUseId: "p", input: { command: "rg x" }, output: "[exit code 1]", isError: true } }))!;
       expect(other.payload.status).toBe("failed");
       expect(view(other)).toMatchObject({ noMatches: false });
+    });
+  });
+
+  // Codex's shell is the Harness tool over MCP: this is the row a Codex thread really stores.
+  describe("Codex's Harness shell", () => {
+    const shell = (command: string, text: string, { tool = "bash", status = "completed", isError = true } = {}) => toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "s", type: "mcpToolCall", server: CODEX_HARNESS_SERVER, tool, status, arguments: { command }, result: { content: [{ type: "text", text }], isError } } } }))!;
+    it.each(["completed", "failed"])("shows a final search that exited 1 as no matches when Codex says %s", (status) => {
+      const row = shell("sed -n 1,5p a.ts; rg missing src", "line\n\n[exit code 1]", { status });
+      expect(row.payload.status).toBe("completed");
+      expect(view(row)).toMatchObject({ kind: "command", tool: "bash", command: "sed -n 1,5p a.ts; rg missing src", exit: null, failed: false, noMatches: true });
+    });
+    it("keeps a real exit 1 failed, with its exit and output", () => {
+      const row = shell("rg missing src; false", "[exit code 1]");
+      expect(row.payload.status).toBe("failed");
+      expect(view(row)).toMatchObject({ kind: "command", exit: 1, failed: true, noMatches: false, outputTail: "[exit code 1]" });
+    });
+    it("keeps a timeout failed, though it has no exit code", () => {
+      const text = "[The command timed out after 120s and was stopped.]";
+      expect(view(shell("rg missing src", text))).toMatchObject({ kind: "command", exit: null, failed: true, noMatches: false, outputTail: text });
+    });
+    it("shows a clean command as a command, and never relabels PowerShell", () => {
+      expect(view(shell("ls", "a.ts", { isError: false }))).toMatchObject({ kind: "command", exit: null, failed: false });
+      expect(view(shell("rg x", "[exit code 1]", { tool: "powershell" }))).toMatchObject({ kind: "command", tool: "powershell", exit: 1, failed: true, noMatches: false });
+    });
+    it("keeps other servers' tools named bash as generic calls", () => {
+      const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "o", type: "mcpToolCall", server: "other", tool: "bash", status: "completed", arguments: {}, result: { content: [{ type: "text", text: "ok" }] } } } }))!;
+      expect(row.payload.itemType).toBe("dynamic_tool_call");
     });
   });
 
