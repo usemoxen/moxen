@@ -26,7 +26,7 @@ import {
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
-import { describeInstall, describeSelfUpdate, requireCheck, selfUpdateCheck, selfUpdateInstall } from "./selfupdate.js";
+import { describeInstall, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
@@ -585,21 +585,27 @@ program
 
 program
   .command("self-update")
-  .description("Show which Moxen is installed (release or source checkout) and whether a newer GitHub release exists, or install this release under ~/.moxen/app. Updating is not available yet.")
-  .option("--check", "Look for a newer release. Read-only; asks GitHub once.")
-  .option("--install", "From an unpacked release: copy it to the app folder's versions, make it current and write the launcher. This machine only.")
-  .action((options: { check?: boolean; install?: boolean }) =>
+  .description("Update Moxen to the latest GitHub release (downloaded, checked and started before it is switched to), go back to the previous version, or look for an update. This machine only.")
+  .option("--check", "Only look for a newer release. Read-only; asks GitHub once.")
+  .option("--install", "From an unpacked release: copy it to the app folder's versions, make it current and write the launcher.")
+  .option("--rollback", "Go back to the version the last update replaced.")
+  .action((options: { check?: boolean; install?: boolean; rollback?: boolean }) =>
     action(async () => {
+      const mode = selfUpdateMode(options);
       const context = await commandContext();
-      if (options.install === true) {
-        if (options.check === true) throw new CliError("INVALID_ARGUMENT", "Use --check or --install, not both.", { exitCode: 2 });
+      if (mode === "install") {
         const result = await selfUpdateInstall();
         writeSuccess(result, context, describeInstall(result));
-        return;
+      } else if (mode === "rollback") {
+        const result = await selfUpdateRollback();
+        writeSuccess(result, context, describeRollback(result));
+      } else if (mode === "check") {
+        const report = await selfUpdateCheck(context.config);
+        writeSuccess(report, context, describeSelfUpdate(report));
+      } else {
+        const result = await selfUpdateRun();
+        writeSuccess(result, context, describeUpdate(result));
       }
-      requireCheck(options.check);
-      const report = await selfUpdateCheck(context.config);
-      writeSuccess(report, context, describeSelfUpdate(report));
     }),
   );
 

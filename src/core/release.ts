@@ -4,6 +4,8 @@
  * in GitHub's answer, so there is one copy.
  */
 
+import path from "node:path";
+
 export type ReleaseOs = "macos" | "windows";
 export type ReleaseArch = "arm64" | "x64";
 
@@ -65,4 +67,33 @@ export interface ReleaseMarker {
 
 export function releaseMarker(version: string, target: ReleaseTarget): ReleaseMarker {
   return { version, os: target.os, arch: target.arch };
+}
+
+export interface ArchiveCommand {
+  readonly command: string;
+  readonly args: string[];
+}
+
+/**
+ * The tar invocation that packs `folder` (a directory inside `parent`) into `archive`, or unpacks `archive`
+ * into `destination`. Windows uses the system bsdtar, which writes and reads zip: Git Bash's own `tar` is GNU
+ * tar and does neither, and it comes first on PATH there. Argument arrays only, never a joined command line.
+ */
+export function packCommand(target: ReleaseTarget, archive: string, parent: string, folder: string, env: NodeJS.ProcessEnv = process.env): ArchiveCommand {
+  return target.extension === "zip"
+    ? { command: windowsTar(env), args: ["-a", "-c", "-f", archive, "-C", parent, folder] }
+    : { command: "tar", args: ["-czf", archive, "-C", parent, folder] };
+}
+
+export function unpackCommand(target: ReleaseTarget, archive: string, destination: string, env: NodeJS.ProcessEnv = process.env): ArchiveCommand {
+  return { command: target.extension === "zip" ? windowsTar(env) : "tar", args: ["-xf", archive, "-C", destination] };
+}
+
+/** The command that lists an archive's entry names, one per line, without unpacking it. */
+export function listCommand(target: ReleaseTarget, archive: string, env: NodeJS.ProcessEnv = process.env): ArchiveCommand {
+  return { command: target.extension === "zip" ? windowsTar(env) : "tar", args: ["-tf", archive] };
+}
+
+function windowsTar(env: NodeJS.ProcessEnv): string {
+  return path.win32.join(env.SystemRoot ?? env.windir ?? "C:\\Windows", "System32", "tar.exe");
 }

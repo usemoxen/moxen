@@ -149,7 +149,14 @@ does everything except publish, so use it to try a change to the release itself.
   throwaway store whose path has a space, starts the launcher with `--version` from a working directory with a space,
   deletes the unpacked folder and starts it again, then repeats the install. On Windows it runs the `.cmd` through
   `cmd.exe /d /s /c` with verbatim arguments, so the launcher path is quoted once and Node adds no backslash escapes.
-  The installer is in the layering test's kernel list because it must never be a server command.
+  The installer and `core/selfupdate/update.ts` are in the layering test's kernel list because they must never be a server command; a layering test pins that nothing in `server/` or `tui/` imports them.
+- `moxen self-update` (`core/selfupdate/update.ts`) downloads the release's archive and `.sha256`, checks the SHA-256, unpacks into a
+  `.tmp-` folder inside `versions/`, starts it with `--version`, and only then names the folder and changes `current`
+  (`app/previous` records what it replaced; `--rollback` swaps them). `smoke-release.ts` runs this end to end after the
+  install steps: it makes a copy of the real archive that reports a higher version, serves it from an injected `fetch`
+  (no environment variable or setting may redirect a download: that would let someone send people a fake release), checks a
+  wrong checksum leaves `current` alone, updates, checks the launcher runs the new version, rolls back, and checks it runs the old one.
+  Always run it with `--embeddings`, as the workflow does.
 - Not signed or notarized, no Intel Mac build, and Bun is not bundled.
 
 ## Boundaries

@@ -6,15 +6,22 @@
  * It checks the folder layout, that the bundle reports the version in `package.json`, and that the native
  * OpenTUI package loads from the unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against
  * the unpacked daemon. `--remove` deletes a path first, to prove the check fails when something is missing.
- * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below).
+ * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below),
+ * then updates that install to a copy of the archive that reports a higher version (the core function, in-process,
+ * with an injected fetch: no setting can point a real `moxen` at another download), checks the launcher runs it,
+ * rolls back and checks the launcher runs the old one again, and that a wrong checksum leaves `current` alone.
  * Nothing here starts a server or touches `~/.moxen`: the commands run with a throwaway store.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
+import { appLayout } from "../src/core/selfupdate/installer.js";
+import { rollbackRelease, updateRelease } from "../src/core/selfupdate/update.js";
+import { LATEST_RELEASE_URL } from "../src/core/selfupdate/check.js";
+import { RELEASE_MARKER, archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
 
 const checkout = path.resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
@@ -134,6 +141,77 @@ try {
   assert.equal(inside.status, 0, `install from inside versions failed: ${inside.stdout}${inside.stderr}`);
   assert.deepEqual(readdirSync(path.join(installStore, "app", "versions")), [manifest.version]);
   console.log("ok: install from the installed copy");
+
+  // Update to a copy of the real archive that reports a higher version, served by an injected fetch.
+  const [major, minor, patch] = manifest.version.split(".").map(Number) as [number, number, number];
+  const higher = `${major}.${minor}.${patch + 1}`;
+  const fakeParent = path.join(scratch, "fake release");
+  mkdirSync(fakeParent);
+  const reopen = unpackCommand(target, path.resolve(archive), fakeParent);
+  const reopened = run(reopen.command, reopen.args);
+  assert.equal(reopened.status, 0, `unpacking the copy failed: ${reopened.stderr}`);
+  const fakeFolder = path.join(fakeParent, releaseBaseName(higher, target));
+  renameSync(path.join(fakeParent, base), fakeFolder);
+  // The version is compiled into the bundle's chunks as a quoted string; `--version` below proves every spot was found.
+  const patchVersion = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) patchVersion(full);
+      else if (full.endsWith(".js")) {
+        const text = readFileSync(full, "utf8");
+        if (text.includes(`"${manifest.version}"`)) writeFileSync(full, text.replaceAll(`"${manifest.version}"`, `"${higher}"`));
+      }
+    }
+  };
+  patchVersion(path.join(fakeFolder, "dist"));
+  writeFileSync(path.join(fakeFolder, "package.json"), readFileSync(path.join(fakeFolder, "package.json"), "utf8").replace(`"version": "${manifest.version}"`, `"version": "${higher}"`));
+  writeFileSync(path.join(fakeFolder, RELEASE_MARKER), JSON.stringify(releaseMarker(higher, target)));
+  const fakeArchive = path.join(fakeParent, archiveFileName(higher, target));
+  const pack = packCommand(target, fakeArchive, fakeParent, path.basename(fakeFolder));
+  const packed = run(pack.command, pack.args);
+  assert.equal(packed.status, 0, `packing the copy failed: ${packed.stderr}`);
+  const fakeBytes = readFileSync(fakeArchive);
+  const fakeSum = createHash("sha256").update(fakeBytes).digest("hex");
+
+  const download = "https://releases.example.test/moxen";
+  const serve = (checksum: string): typeof fetch =>
+    (async (url: string | URL | Request): Promise<Response> => {
+      const address = String(url);
+      if (address === LATEST_RELEASE_URL) {
+        const assets = [archiveFileName(higher, target), checksumFileName(higher, target)].map((name) => ({ name, browser_download_url: `${download}/${name}`, state: "uploaded", size: 1 }));
+        return new Response(JSON.stringify({ tag_name: `v${higher}`, html_url: `${download}/notes`, body: "", draft: false, prerelease: false, assets }));
+      }
+      if (address === `${download}/${archiveFileName(higher, target)}`) return new Response(new Uint8Array(fakeBytes));
+      if (address === `${download}/${checksumFileName(higher, target)}`) return new Response(`${checksum}  ${archiveFileName(higher, target)}\n`);
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+  const layout = appLayout(installEnv);
+  const updateOptions = (doFetch: typeof fetch) => ({ from: first.folder, layout, fetch: doFetch });
+  const current = () => readFileSync(layout.current, "utf8").trim();
+  const launched2 = (): string => {
+    const result = launch();
+    assert.equal(result.status, 0, `the launcher failed: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+
+  await assert.rejects(updateRelease(updateOptions(serve("0".repeat(64)))), { code: "SELF_UPDATE_CHECKSUM_MISMATCH" });
+  assert.equal(current(), manifest.version, "a wrong checksum changed current");
+  assert.deepEqual(readdirSync(layout.versions), [manifest.version], "a wrong checksum left something in versions");
+  console.log("ok: a wrong checksum leaves current alone");
+
+  const updated = await updateRelease(updateOptions(serve(fakeSum)));
+  assert.equal(updated.action, "updated");
+  assert.equal(updated.version, higher);
+  assert.equal(current(), higher);
+  assert.equal(launched2(), higher, "the launcher does not run the updated version");
+  console.log(`ok: update to ${higher}, the launcher runs it`);
+
+  const back = await rollbackRelease({ from: first.folder, layout });
+  assert.equal(back.version, manifest.version);
+  assert.equal(current(), manifest.version);
+  assert.equal(launched2(), manifest.version, "the launcher does not run the old version after a rollback");
+  assert.deepEqual(readdirSync(layout.versions).sort(), [manifest.version, higher].sort());
+  console.log("ok: rollback, the launcher runs the old version");
 } finally {
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

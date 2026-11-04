@@ -23,6 +23,8 @@ export interface AppLayout {
   readonly app: string;
   readonly versions: string;
   readonly current: string;
+  /** A plain text file naming the version `current` replaced, which `--rollback` goes back to. */
+  readonly previous: string;
   readonly bin: string;
 }
 
@@ -33,11 +35,11 @@ export interface AppLayout {
 export function appLayout(env: NodeJS.ProcessEnv = process.env, home?: string): AppLayout {
   const root = appEnv("STORE_ROOT", env)?.trim();
   const app = root ? path.join(path.resolve(root), "app") : path.join(appHomeDir(home), "app");
-  return { app, versions: path.join(app, "versions"), current: path.join(app, "current"), bin: path.join(app, "bin") };
+  return { app, versions: path.join(app, "versions"), current: path.join(app, "current"), previous: path.join(app, "previous"), bin: path.join(app, "bin") };
 }
 
 /** A version becomes a folder name, so it may not hold a separator or a `..`. */
-const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
+export const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
 
 export const POSIX_LAUNCHER = "moxen";
 export const WINDOWS_LAUNCHER = "moxen.cmd";
@@ -118,7 +120,7 @@ export interface InstallOptions extends ReadInstallOptions {
   readonly env?: NodeJS.ProcessEnv;
 }
 
-const TEMP_PREFIX = ".tmp-";
+export const TEMP_PREFIX = ".tmp-";
 
 async function writeLauncher(file: string, text: string): Promise<void> {
   const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;

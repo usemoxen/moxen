@@ -380,9 +380,9 @@ or `unavailable` (offline, rate limited or an unreadable answer, with a
 release that has this platform's archive and checksum; a source checkout never
 is. It only reads, asks GitHub once with no credential and ignores
 `updates.checkLatest` (an explicit check always runs). With `--server <name>`
-it shows that paired server's install, with `remote` set to its name. Without
-`--check` or `--install` it exits 1: installing an update is not available yet.
-`--json` data: `{ remote, install: { version, kind, folder, target }, status,
+it shows that paired server's install, with `remote` set to its name. `--check`
+keeps its `--json` shape. `--check`, `--install` and `--rollback` are separate
+modes: giving two of them exits 2 with `INVALID_ARGUMENT`. `--json` data: `{ remote, install: { version, kind, folder, target }, status,
 reason, latest: { version, tag, url, notes, archive, checksum } | null,
 updatable }`.
 
@@ -400,6 +400,39 @@ already installed is left alone; run from inside `versions/`, it only sets
 `current` and rewrites the launcher. It prints how to put `app/bin` on PATH and
 edits no profile. `--json` data: `{ version, folder, current, launcher, bin,
 alreadyInstalled, pathHint }`.
+
+`moxen self-update` with no flag updates this install to the latest release.
+It downloads the platform's archive and its `.sha256` from GitHub over https (no
+credential is sent; a release missing either file is refused), checks the
+archive's SHA-256 before unpacking, and unpacks into a temp folder inside
+`versions/`. It checks that the archive holds one `moxen-<version>-<os>-<arch>`
+folder with nothing outside it, then starts the new version with `--version`
+(60 s limit) and requires it to report the release's version. Only then does
+the folder take its name `versions/<version>/`, the old `current` is recorded in
+`<app>/previous`, and `current` changes. Any failure before that (download,
+checksum, unpack, start, wrong version) exits 1, removes the temp folder and
+changes nothing. Old versions are then deleted, keeping `current`, `previous`
+and the version the command itself runs from; one that cannot be deleted (on
+Windows, a folder in use) is a warning, never a failed update. An install that
+is already the latest exits 0 and writes nothing. A source checkout
+(`SELF_UPDATE_SOURCE_INSTALL`), a release not yet under `versions/`
+(`SELF_UPDATE_NOT_INSTALLED`, which says to run `--install`) and a second update
+running at once (`SELF_UPDATE_BUSY`) are refused before anything changes; with
+`--server` it exits 2 with `SELF_UPDATE_REMOTE`. It restarts nothing: threads
+that are running keep their version until the moxen server restarts. `--json`
+data: `{ action: "updated" | "already-current", version, from, previous, folder,
+current, warnings }`.
+
+`moxen self-update --rollback` makes `previous` the current version again and
+records the version it left as the new `previous`, so running it twice returns
+to where you started. With no recorded previous version, or when its folder is
+gone or no longer starts, it exits 1 with `SELF_UPDATE_NO_PREVIOUS` (or
+`SELF_UPDATE_START_FAILED`) and changes nothing. Same local-only rules as above.
+`--json` data: `{ action: "rolled-back", version, from, previous, folder,
+current, warnings }`.
+
+Changed on purpose: the plain `moxen self-update` used to exit 1 with
+`SELF_UPDATE_UNAVAILABLE`; it now updates.
 
 `moxen memory list` lists the current project's and global memories. Agents
 can also use the read-only `memory_search` MCP tool to search names,

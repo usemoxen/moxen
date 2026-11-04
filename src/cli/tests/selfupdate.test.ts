@@ -16,7 +16,7 @@ import { RemoteConnection } from "../../server/transport/remote.js";
 import { serve } from "../../server/transport/serve.js";
 import { testEndpoint } from "../../server/transport/tests/endpoint.js";
 import { setClientFactory, useRemoteServer } from "../infra/client.js";
-import { describeSelfUpdate, requireCheck, selfUpdateCheck, selfUpdateInstall } from "../selfupdate.js";
+import { describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "../selfupdate.js";
 
 const golden = (name: string): string => path.join(__dirname, "envelopes", `${name}.json`);
 const json = (data: unknown): string => `${JSON.stringify({ ok: true, data }, null, 2)}\n`;
@@ -92,20 +92,40 @@ describe("moxen self-update", () => {
     expect(text({ ...noRelease, status: "unavailable", reason: "could not reach GitHub" })).toContain("Could not check: could not reach GitHub.");
   });
 
-  it("refuses to install: without --check it exits non-zero", () => {
-    expect(() => requireCheck(undefined)).toThrow(expect.objectContaining({ code: "SELF_UPDATE_UNAVAILABLE", exitCode: 1 }));
-    expect(() => requireCheck(true)).not.toThrow();
+  it("the plain command updates now: it no longer exits 1 with SELF_UPDATE_UNAVAILABLE", () => {
+    expect(selfUpdateMode({})).toBe("update");
+    expect(selfUpdateMode({ check: true })).toBe("check");
+    expect(selfUpdateMode({ install: true })).toBe("install");
+    expect(selfUpdateMode({ rollback: true })).toBe("rollback");
   });
 
-  it("--install is refused on a paired server and, from this source checkout, before anything is written", async () => {
+  it("flags that do not go together exit 2 with INVALID_ARGUMENT", () => {
+    for (const options of [{ check: true, install: true }, { check: true, rollback: true }, { install: true, rollback: true }]) {
+      expect(() => selfUpdateMode(options)).toThrow(expect.objectContaining({ code: "INVALID_ARGUMENT", exitCode: 2 }));
+    }
+  });
+
+  it("says that running threads keep their version and that nothing was restarted", () => {
+    const base = { version: "1.1.0", from: "1.0.0", previous: "1.0.0", folder: "/app/versions/1.1.0", current: "/app/current", warnings: ["Could not delete old version 0.9.0: busy"] } as const;
+    const updated = describeUpdate({ action: "updated", ...base });
+    expect(updated).toContain("1.0.0 -> 1.1.0");
+    expect(updated).toContain("keep the version they started on until the moxen server restarts");
+    expect(updated).toContain("Warning: Could not delete old version 0.9.0");
+    expect(describeUpdate({ action: "already-current", ...base, warnings: [] })).toContain("already the current version");
+    expect(describeRollback({ action: "rolled-back", version: "1.0.0", from: "1.1.0", previous: "1.1.0", folder: "/app/versions/1.0.0", current: "/app/current", warnings: [] })).toContain("until the moxen server restarts");
+  });
+
+  it("--install, the plain update and --rollback are refused on a paired server, and from this source checkout before anything is written", async () => {
     const store = mkdtempSync(path.join(os.tmpdir(), "moxen-selfupdate-install-"));
     const previous = process.env.MOXEN_STORE_ROOT;
     process.env.MOXEN_STORE_ROOT = store;
     try {
       useRemoteServer("winbox");
-      await expect(selfUpdateInstall()).rejects.toMatchObject({ code: "SELF_UPDATE_REMOTE" });
+      for (const run of [selfUpdateInstall, selfUpdateRun, selfUpdateRollback]) await expect(run()).rejects.toMatchObject({ code: "SELF_UPDATE_REMOTE", exitCode: 2 });
       useRemoteServer(null);
       await expect(selfUpdateInstall()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
+      await expect(selfUpdateRun()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
+      await expect(selfUpdateRollback()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
       expect(readdirSync(store)).toEqual([]);
     } finally {
       if (previous === undefined) delete process.env.MOXEN_STORE_ROOT;

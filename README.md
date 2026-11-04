@@ -27,6 +27,11 @@ Windows) in `~/.moxen/app/bin`, and prints how to put that folder on your PATH. 
 it again any time: an installed version is left as it is. After that you can delete the unpacked folder, and `moxen`
 starts the version `current` names. The builds are not signed or notarized.
 
+To update an installed Moxen, run `moxen self-update`: it downloads the latest release, verifies its checksum, starts
+it once to be sure it works, and only then switches to it. `moxen self-update --rollback` goes back to the version
+before. Running threads keep their version until the moxen server restarts; the update restarts nothing.
+`moxen self-update --check` only looks.
+
 ### From a checkout
 
 ```bash

@@ -70,6 +70,8 @@ const KERNEL_PREFIXES = [
   "src/core/selfupdate/vocabulary",
   // Installing this release under the app folder: an act on this machine's own files that must never be a server command (a paired remote client could reach it), so the CLI runs it itself. It opens no store and starts nothing.
   "src/core/selfupdate/installer",
+  // Downloading, testing and switching to a new release, and rolling back: the same kind of act on this machine's own files, so the same reason. No server command or wire path may reach it (a paired remote client could); only the CLI runs it, after refusing `--server`.
+  "src/core/selfupdate/update",
   // Static starting points for the guided add flows (server types, MCP servers): data, not an operation.
   "src/core/providers/harness/presets",
   "src/core/threads/views",
@@ -186,6 +188,18 @@ describe("layering", () => {
       .filter((edge) => !DEPTH_ALLOWLIST.has(edge.target))
       .map((edge) => `${edge.file} -> ${edge.target}`);
     expect([...new Set(offenders)].sort()).toEqual([]);
+  });
+
+  /**
+   * Installing, updating and rolling back replace this machine's own program files, so no server command and no
+   * wire path may reach them: a paired remote client would otherwise be able to. Only the CLI command imports
+   * them (it refuses `--server` first).
+   */
+  it("keeps installing, updating and rolling back out of the server and the TUI", () => {
+    const reach = edges().filter(
+      (edge) => !edge.fromTest && (edge.target === "src/core/selfupdate/installer" || edge.target === "src/core/selfupdate/update") && edge.from !== "cli",
+    );
+    expect(reach.map((edge) => `${edge.file} -> ${edge.target}`)).toEqual([]);
   });
 
   /**
