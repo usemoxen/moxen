@@ -1,0 +1,92 @@
+name: Release
+
+# A `v*` tag builds, tests and publishes a release. Running it by hand does everything except publish.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Two releases must never share a run, and a release in progress is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows, so the same commands run everywhere.
+        shell: bash
+    steps:
+      # Windows would otherwise check files out with CRLF endings.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Tag matches package.json
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bun scripts/check-release-tag.ts "$TAG"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck and test
+        run: bun run check
+
+      # Builds into a clean folder: `dist/` can hold chunks of older builds.
+      - name: Build and package
+        run: bun scripts/package-release.ts --out release
+
+      - name: Smoke test the archive
+        run: |
+          archive="$(ls release/moxen-*.tar.gz release/moxen-*.zip 2>/dev/null | head -n 1)"
+          bun scripts/smoke-release.ts "$archive" --embeddings
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moxen-${{ matrix.os }}
+          path: |
+            release/moxen-*.tar.gz
+            release/moxen-*.zip
+            release/moxen-*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    # Only a tag publishes, and only when both platforms passed. A hand run stops after `build`.
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l release
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag

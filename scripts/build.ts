@@ -9,12 +9,15 @@
  * (React, OpenTUI, the grammars) out of the startup path of plain commands.
  */
 import { readdir, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { buildKnowledge } from "./build-knowledge.js";
 
 // Absolute paths throughout, so the build does not depend on the caller's cwd.
 const root = join(import.meta.dir, "..");
-const outdir = join(root, "dist");
+// `--outdir <dir>` builds somewhere else (the release packaging builds into a clean folder);
+// without it the build goes to `dist/`, as always.
+const outdirFlag = process.argv.indexOf("--outdir");
+const outdir = outdirFlag >= 0 && process.argv[outdirFlag + 1] ? resolve(process.argv[outdirFlag + 1]!) : join(root, "dist");
 
 await buildKnowledge();
 

@@ -11,11 +11,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arrrnmp/moxen.git"
+    "url": "git+https://github.com/usemoxen/moxen.git"
   },
-  "homepage": "https://github.com/arrrnmp/moxen#readme",
+  "homepage": "https://github.com/usemoxen/moxen#readme",
   "bugs": {
-    "url": "https://github.com/arrrnmp/moxen/issues"
+    "url": "https://github.com/usemoxen/moxen/issues"
   },
   "type": "module",
   "bin": {

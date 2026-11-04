@@ -115,6 +115,33 @@ To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
 - Interactive chrome gets `useHover()` feedback and `selectable={false}`; only readable text stays selectable.
 - Daily use runs the bundle: `bun run build` writes `dist/` (`scripts/build.ts`), and `moxen` is `bun dist/cli/index.js`. Bundling transpiles once, bakes in `NODE_ENV=production` (including React's production runtime) and splits the TUI out of the startup path of plain commands. The production runtime matters: under Bun's development JSX runtime every React element captures an `Error` stack in native memory, which grew a long session to 10+ GB (MXN-38). `bun run tui` rebuilds, stops the running moxen server (killing it if it will not stop), starts a new one from the new build, and opens the TUI on it (`scripts/tui.ts`), so the server never runs stale code and remote access, which only the server has, is always there. Restarting the server ends any turn it was running. Running the source directly (`bun src/cli tui`) uses the development runtime — fine for short runs, not for measuring memory or CPU. After changing anything that loads assets or finds files relative to itself, rebuild and check `bun dist/cli/index.js tui`: the tree-sitter grammars and worker are file imports that the build rewrites (see the comment in `scripts/build.ts`), and the server daemon runs `dist/server/daemon.js`.
 
+## Releases
+
+A release is a `v<version>` tag, where the version is `package.json`'s (the one source of truth, which
+`APP_VERSION` reads). To make one: bump `version`, merge, then push the tag `v<version>`.
+`.github/workflows/release.yml` then, on `macos-latest` and `windows-latest`: checks the tag against
+`package.json` (a mismatch fails), runs `bun run check`, builds and packs the archive, smoke-tests it and
+uploads it as a workflow artifact. A `publish` job, only on a tag and only once both platforms pass, creates
+the GitHub Release with both archives and their `.sha256` files. Running the workflow by hand (`workflow_dispatch`)
+does everything except publish, so use it to try a change to the release itself. A release run is never cancelled.
+
+- `bun scripts/package-release.ts [--out dir]` packs one archive for the platform it runs on:
+  `moxen-<version>-<os>-<arch>.tar.gz` (macOS) or `.zip` (Windows), one top-level folder, plus `.sha256`.
+  It builds into a clean folder with `scripts/build.ts --outdir`, never from `dist/` (which keeps old chunks for
+  a day and may be in use). The folder holds `dist/`, `mods/`, `package.json`, `README.md`, `LICENSE`,
+  `THIRD_PARTY_LICENSES.md` and `node_modules/@opentui/core-<platform>-<arch>`: the one package the bundle
+  still loads from disk (`external` in `build.ts`). The SDK's native `claude` binary is left out, since Moxen
+  always passes the user's own `claude`. If the bundle starts loading another package or file from disk,
+  `package-release.ts` must copy it and `smoke-release.ts` must fail without it.
+- `bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path>]` unpacks into a temp folder
+  outside the checkout and checks the layout, that `--version` equals `package.json`, and that the native
+  OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`
+  against the unpacked daemon. `--remove` deletes a path first, to show the test fails when it is missing.
+- Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
+  cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
+  `src/tests/release.test.ts`.
+- Not signed or notarized, no Intel Mac build, and Bun is not bundled.
+
 ## Boundaries
 
 - Never print or persist provider credentials. Provider CLIs own their own logins; we only ever observe credential *presence*. The keys Moxen itself needs (a Moxen Harness profile's API key, a web-search key, MCP secrets) are stored only in the OS keychain through `core/secrets.ts` (`Bun.secrets`: Keychain, Credential Manager, libsecret); config holds a `keychain:<name>` reference or an env var name, never the key, and nothing prints one. The same rule governs forges: `gh` and `glab` own their logins, so `core/forge/` shells out to them and never handles a token. `forge.*` config is executable paths and an off switch, nothing more.

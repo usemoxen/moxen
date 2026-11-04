@@ -10,12 +10,15 @@ import { createInterface } from "node:readline";
 import { RemoteConnection } from "../src/server/transport/remote.js";
 import { namedPipe, probe } from "../src/server/transport/endpoint.js";
 
+// `--dist <dir>` checks another bundle (an unpacked release archive's `dist/`) instead of the checkout's.
+const distFlag = process.argv.indexOf("--dist");
+const dist = path.resolve(distFlag >= 0 && process.argv[distFlag + 1] ? process.argv[distFlag + 1]! : path.join(import.meta.dir, "..", "dist"));
 const root = path.resolve(import.meta.dir, "..", ".moxen", "embedding-validation");
 await mkdir(root, { recursive: true });
 const config = path.join(root, "config.json");
 await writeFile(config, JSON.stringify({ memoryEmbeddings: false }));
 const endpoint = process.platform === "win32" ? namedPipe(`moxen-embedding-validation-${process.pid}`) : path.join(root, "server.sock");
-const start = () => spawn(process.execPath, [path.resolve(import.meta.dir, "..", "dist", "server", "daemon.js")], {
+const start = () => spawn(process.execPath, [path.join(dist, "server", "daemon.js")], {
   env: { ...process.env, MOXEN_STORE_ROOT: root, MOXEN_CONFIG: config, MOXEN_SERVER_ENDPOINT: endpoint },
   stdio: "ignore",
 });
@@ -85,7 +88,7 @@ try {
     assert.equal(offline.memories[0]?.name, "secrets");
     // Exercise the actual shipped CPU worker on macOS too, independently of
     // automatic WebGPU selection. On Windows this is the default backend.
-    const assets = path.resolve(import.meta.dir, "..", "dist", "assets");
+    const assets = path.join(dist, "assets");
     const workers = await Promise.all((await readdir(assets)).filter((file) => /^embedding-process-.*\.mjs$/.test(file)).map(async (file) => ({ file: path.join(assets, file), mtime: (await stat(path.join(assets, file))).mtimeMs })));
     const worker = workers.sort((a, b) => b.mtime - a.mtime)[0]?.file;
     assert.ok(worker, "No bundled embedding process asset");

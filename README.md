@@ -8,8 +8,26 @@ Bun (it manages packages and runs everything) and at least one provider CLI: `cl
 
 ## Install
 
+### From a release
+
+Each tagged release on [GitHub Releases](https://github.com/usemoxen/moxen/releases) has an archive per
+platform, `moxen-<version>-macos-arm64.tar.gz` or `moxen-<version>-windows-x64.zip`, and a `.sha256` file
+beside it. Bun is the only thing you need installed: the archive holds the bundle and its native library.
+Intel Macs are not built yet.
+
 ```bash
-git clone https://github.com/arrrnmp/moxen.git
+tar -xzf moxen-<version>-macos-arm64.tar.gz     # Windows: tar -xf moxen-<version>-windows-x64.zip
+bun moxen-<version>-macos-arm64/dist/cli/index.js --version
+```
+
+Check the download against its `.sha256` first (`shasum -a 256 -c <file>.sha256` on macOS; on Windows compare
+`Get-FileHash` with the file's contents). Then point a `moxen` command at `dist/cli/index.js` inside the
+unpacked folder, as shown below for a checkout. The builds are not signed or notarized.
+
+### From a checkout
+
+```bash
+git clone https://github.com/usemoxen/moxen.git
 cd moxen
 bun install
 ```
