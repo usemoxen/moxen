@@ -70,6 +70,58 @@ describe("toolActivityRow", () => {
     expect(view(row)).toMatchObject({ kind: "tool", tool: label, detail: "", running: false });
   });
 
+  describe("Codex MCP results", () => {
+    const codexResult = (result: unknown) => toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "mcp", type: "mcpToolCall", server: "docs", tool: "read", status: "completed", arguments: {}, result } } }))!;
+    it("stores the text of the result, not its JSON envelope", () => {
+      const row = codexResult({ content: [{ type: "text", text: "line one\nline two" }, { type: "image", data: "x" }, { type: "text", text: "line three" }], structuredContent: null });
+      expect(row.payload.detail).toBe("line one\nline two\nline three");
+      expect((row.payload.data as any).state.output).toBe("line one\nline two\nline three");
+    });
+    it("keeps the JSON for a result with no text", () => {
+      const result = { content: [{ type: "image", data: "x" }] };
+      expect(codexResult(result).payload.detail).toBe(JSON.stringify(result));
+      expect(codexResult({ structuredContent: { a: 1 } }).payload.detail).toBe('{"structuredContent":{"a":1}}');
+    });
+    it("shows a result that says isError as failed", () => {
+      expect(codexResult({ content: [{ type: "text", text: "nope" }], isError: true }).payload.status).toBe("failed");
+    });
+  });
+
+  describe("Harness shell output", () => {
+    const bash = (command: string, output: string) => toolActivityRow(event({ provider: "harness", type: "tool.execute.completed", tool: "bash", raw: { toolUseId: "b", input: { command }, output, isError: true } }))!;
+    it("keeps the exit code line when a long result is cut", () => {
+      const row = bash("make", `${"line\n".repeat(2000)}error: it broke\n\n[exit code 2]`);
+      const detail = row.payload.detail as string;
+      expect(detail.length).toBeLessThanOrEqual(4000);
+      expect(detail.endsWith("error: it broke\n\n[exit code 2]")).toBe(true);
+      expect(detail.startsWith("line\n")).toBe(true);
+      expect(view(row)).toMatchObject({ kind: "command", exit: 2, failed: true, noMatches: false });
+      expect((view(row) as any).outputTail).toContain("[exit code 2]");
+    });
+    it("shows a final search that exited 1 as no matches, not a failure", () => {
+      const row = bash("sed -n 1,5p a.ts; rg missing src", "line\n\n[exit code 1]");
+      expect(row.payload.status).toBe("completed");
+      expect(view(row)).toMatchObject({ kind: "command", exit: null, failed: false, noMatches: true, outputTail: null });
+    });
+    it.each([
+      ["rg missing src; false", "[exit code 1]"],
+      ["rg missing src || exit 1", "[exit code 1]"],
+      ["test -d nope && rg x", "[exit code 1]"],
+      ["rg missing /nope", "rg: /nope: No such file or directory\n\n[exit code 2]"],
+      ["rg missing src", "[exit code 1]\n\n[The command timed out after 120s and was stopped.]"],
+    ])("keeps %j failed", (command, output) => {
+      const row = bash(command, output);
+      expect(row.payload.status).toBe("failed");
+      expect(view(row)).toMatchObject({ noMatches: false });
+      if (output.endsWith("]") && /\[exit code \d+\]$/u.test(output)) expect(view(row)).toMatchObject({ failed: true });
+    });
+    it("leaves PowerShell and other providers' shells alone", () => {
+      const other = toolActivityRow(event({ provider: "harness", type: "tool.execute.completed", tool: "powershell", raw: { toolUseId: "p", input: { command: "rg x" }, output: "[exit code 1]", isError: true } }))!;
+      expect(other.payload.status).toBe("failed");
+      expect(view(other)).toMatchObject({ noMatches: false });
+    });
+  });
+
   it("shows a rejected Codex MCP call's reason instead of hiding it behind its friendly name", () => {
     const reason = "This action was rejected.\nReason: the action needs approval.\nPlease ask the user.";
     const row = toolActivityRow(event({ provider: "codex", type: "tool.execute.completed", raw: { item: { id: "mcp", type: "mcpToolCall", server: "linear", tool: "save_comment", status: "failed", arguments: {}, error: { message: reason } } } }))!;

@@ -1033,6 +1033,7 @@ export const es: Catalog = {
   "timeline.moreLines": "… {count} líneas más",
   "timeline.more": "… {count} más",
   "timeline.exit": "salida {code}",
+  "timeline.noMatches": "sin coincidencias",
   "timeline.addedLines.one": "Añadida {count} línea",
   "timeline.addedLines.other": "Añadidas {count} líneas",
   "timeline.removedLines.one": "quitada {count} línea",

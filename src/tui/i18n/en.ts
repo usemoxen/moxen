@@ -1039,6 +1039,7 @@ export const en = {
   "timeline.moreLines": "… {count} more lines",
   "timeline.more": "… {count} more",
   "timeline.exit": "exit {code}",
+  "timeline.noMatches": "no matches",
   "timeline.addedLines.one": "Added {count} line",
   "timeline.addedLines.other": "Added {count} lines",
   "timeline.removedLines.one": "removed {count} line",

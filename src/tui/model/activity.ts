@@ -13,6 +13,8 @@ export interface CommandView {
   exit: number | null;
   durationMs: number | null;
   outputTail: string | null;
+  /** A search that found nothing (exit 1): not a failure. */
+  noMatches: boolean;
   failed: boolean;
   running: boolean;
 }
@@ -1064,6 +1066,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
       exit,
       durationMs: start !== null && end !== null && end >= start ? end - start : null,
       outputTail: !running && exit !== null && exit !== 0 && output.length > 0 ? lastLines(output, 3) : null,
+      noMatches: metadata.noMatches === true,
       failed: exit !== null && exit !== 0,
       running,
     };
@@ -1244,6 +1247,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
         exit: null,
         durationMs: null,
         outputTail: null,
+        noMatches: false,
         failed: false,
         running,
       };
@@ -1326,6 +1330,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
             exit: null,
             durationMs: null,
             outputTail: null,
+            noMatches: false,
             failed: false,
             running,
           };

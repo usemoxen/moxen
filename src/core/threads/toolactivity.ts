@@ -21,6 +21,7 @@
  * folds started/updated/completed onto the first row's position by
  * `payload.toolCallId`, keeping the newest payload.
  */
+import { harnessExitCode, isNoMatches } from "./searchexit.js";
 import { webToolKind } from "./views.js";
 import type { ProviderRuntimeEvent } from "../providers/spi.js";
 
@@ -63,6 +64,8 @@ interface NativeToolCall {
   readonly patch: string | null;
   /** Cut short on purpose (an interrupt), rather than failed on its own. Only where the provider says which. */
   readonly stopped?: boolean;
+  /** A search that exited 1 because it found nothing: shown as such, not as a failure. Display only. */
+  readonly noMatches?: boolean;
   /** Provider-supplied label, when it has a better one than the tool name. */
   readonly title: string | null;
   /** Set only when the provider names the item kind itself (none does today). */
@@ -98,16 +101,23 @@ function fromClaude(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nati
   const callId = asString(raw.toolUseId);
   if (callId === null) return null;
   const isError = raw.isError === true;
+  const input = asRecord(raw.input) ?? {};
+  const output = asString(raw.output);
+  // The Harness shell tool ends a failed command's result with `[exit code N]`; the TUI row shows it as the exit.
+  const harnessShell = event.provider === "harness" && event.tool === "bash" && isError && output !== null;
+  const exit = harnessShell ? harnessExitCode(output) : null;
+  const noMatches = harnessShell && isNoMatches(asString(input.command) ?? "", output);
   const status: ToolCallStatus = event.type === "tool.execute.completed"
-    ? (isError ? "failed" : "completed")
+    ? (isError && !noMatches ? "failed" : "completed")
     : "inProgress";
   return {
     callId,
     tool: event.tool,
-    input: asRecord(raw.input) ?? {},
-    output: asString(raw.output),
+    input,
+    output,
     status,
-    exit: null,
+    exit: noMatches ? null : exit,
+    ...(noMatches ? { noMatches: true } : {}),
     startMs: null,
     endMs: null,
     files: [],
@@ -207,6 +217,43 @@ function summarize(native: NativeToolCall, itemType: string): string {
 
 /** Cap on the result text carried into the ledger (the renderer tails 3 lines). */
 const DETAIL_LIMIT = 4000;
+
+/**
+ * What a Codex MCP tool call answered, as the text a person reads: the `text`
+ * parts of its `content` joined by newlines. A result with no text part (an
+ * image, a structured-only answer) keeps its JSON, so nothing is hidden.
+ */
+function mcpResultText(result: unknown): string | null {
+  if (typeof result === "string") return asString(result);
+  const content = asRecord(result)?.content;
+  if (Array.isArray(content)) {
+    const texts = content.flatMap((block) => {
+      const record = asRecord(block);
+      return record !== null && record.type === "text" && typeof record.text === "string" ? [record.text] : [];
+    });
+    if (texts.length > 0) return asString(texts.join("\n"));
+  }
+  return JSON.stringify(result);
+}
+
+/**
+ * Cut a result to the ledger's limit. A result that ends in a bracketed note
+ * (`[exit code 1]`, `[The command timed out…]`) keeps its start and its end,
+ * note included: the one line that says why a command failed, and the lines
+ * before it, sit at the end, where a plain cut drops them.
+ */
+function cutDetail(output: string): string {
+  if (output.length <= DETAIL_LIMIT) return output;
+  if (!/\n\[[^\]\n]{1,200}\]$/u.test(output)) return output.slice(0, DETAIL_LIMIT);
+  const budget = DETAIL_LIMIT - 5;
+  const headLength = Math.floor(budget / 2);
+  const head = output.slice(0, headLength);
+  const tail = output.slice(output.length - (budget - headLength));
+  // Cut on line boundaries so the row never shows half a line.
+  const headEnd = head.lastIndexOf("\n");
+  const tailStart = tail.indexOf("\n");
+  return `${headEnd > 0 ? head.slice(0, headEnd) : head}\n…\n${tailStart >= 0 ? tail.slice(tailStart + 1) : tail}`;
+}
 
 /**
  * Map one `tool.execute.*` event to the row to append, or null when the
@@ -329,8 +376,8 @@ function fromCodex(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nativ
       callId,
       tool: server && !/^mcp__.+?__.+/u.test(tool) ? `mcp__${server}__${tool}` : tool,
       input: asRecord(item.arguments) ?? {},
-      output: item.error ? asString(asRecord(item.error)?.message) ?? JSON.stringify(item.error) : item.result ? JSON.stringify(item.result) : null,
-      status,
+      output: item.error ? asString(asRecord(item.error)?.message) ?? JSON.stringify(item.error) : item.result ? mcpResultText(item.result) : null,
+      status: asRecord(item.result)?.isError === true && status === "completed" ? "failed" : status,
       exit: null,
       startMs: null,
       endMs: durationMs,
@@ -369,7 +416,7 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
   if (native === null) return null;
 
   const itemType = native.itemType ?? itemTypeForTool(native.tool);
-  const detail = native.output === null ? null : native.output.slice(0, DETAIL_LIMIT);
+  const detail = native.output === null ? null : cutDetail(native.output);
   const payload: Record<string, unknown> = {
     itemType,
     ...(itemType === "web_search" ? { provider: event.provider } : {}),
@@ -385,11 +432,12 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
         ...(native.stopped === true ? { stopped: true } : {}),
         input: native.input,
         ...(native.output === null ? {} : { output: detail }),
-        ...(native.exit === null && native.patch === null
+        ...(native.exit === null && native.patch === null && native.noMatches !== true
           ? {}
           : {
             metadata: {
               ...(native.exit === null ? {} : { exit: native.exit }),
+              ...(native.noMatches === true ? { noMatches: true } : {}),
               ...(native.patch === null ? {} : { diff: native.patch }),
             },
           }),
@@ -413,6 +461,6 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
     // Output length stands in for the output itself: a streaming command
     // grows it monotonically, so every real change registers without
     // hashing kilobytes of terminal scrollback on each delta.
-    signature: `${native.status}${native.stopped === true ? "!" : ""}|${itemType}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}${itemType === "web_search" ? `|${JSON.stringify(native.input)}` : ""}`,
+    signature: `${native.status}${native.stopped === true ? "!" : ""}${native.noMatches === true ? "~" : ""}|${itemType}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}${itemType === "web_search" ? `|${JSON.stringify(native.input)}` : ""}`,
   };
 }

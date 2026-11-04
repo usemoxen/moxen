@@ -191,6 +191,7 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
     const rail = view.failed ? COLOR.danger : view.running ? COLOR.warn : COLOR.command;
     const meta: string[] = [];
     if (view.exit !== null) meta.push(tr("timeline.exit", { code: view.exit }));
+    if (view.noMatches) meta.push(tr("timeline.noMatches"));
     if (view.durationMs !== null) meta.push(formatMs(view.durationMs));
     if (view.running) meta.push("running");
     const command = clampInfo(view.command, MAX_COMMAND_LINES);
