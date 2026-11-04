@@ -186,6 +186,14 @@ function promptWithUpdate(prompt: string, setup: PendingUpdates): string {
   return withInstructionsUpdate(withMode, setup.instructionsUpdate?.text ?? null);
 }
 
+async function withProtectedBackground(ctx: OperationContext, thread: StoredThread, prompt: string): Promise<string> {
+  if (!thread.usagePause) return prompt;
+  const tasks = (await ctx.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background" && row.payload?.order === thread.usagePause!.order);
+  if (!tasks.length) return prompt;
+  const notes = tasks.map(({ payload }) => ({ taskId: payload!.taskId, description: payload!.description, status: payload!.status, output: Array.isArray(payload!.output) ? payload!.output.slice(-40) : null }));
+  return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
+}
+
 /** What to record once the provider accepted a prompt `promptWithUpdate` built. */
 function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
   return [setup.instructionsUpdate?.delivered, setup.modeUpdate?.delivered].filter((step): step is () => Promise<void> => step !== undefined);
@@ -392,7 +400,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     driver,
     threadId,
     storeTurnId: turn.id,
-    prompt: promptWithUpdate(message.text, setup),
+    prompt: promptWithUpdate(await withProtectedBackground(ctx, thread, message.text), setup),
     ...(steps.length > 0 ? { afterSend: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
     interactionMode: turn.interactionMode,
     ...(images.length > 0 ? { images } : {}),
@@ -1242,7 +1250,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     driver,
     threadId: thread.id,
     storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(driverPrompt ?? input.prompt.trim(), setup), rules?.text ?? null),
+    prompt: withRuleUpdate(promptWithUpdate(await withProtectedBackground(ctx, thread, driverPrompt ?? input.prompt.trim()), setup), rules?.text ?? null),
     ...(delivered.length > 0 ? { afterSend: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
     ...(images.length > 0 ? { images } : {}),
     // Always the turn's own model, so a live session switches when the

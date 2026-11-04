@@ -1,22 +1,29 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Effect from "effect/Effect";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { ClaudeDriver } from "../../providers/claude/driver.js";
+import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../../threads/threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, scheduleUsageContinue, type OperationContext } from "../../threads/operations.js";
+import { continueThread, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
+import { CliError } from "../../errors.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../limits.js";
 import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../protection.js";
 import { UsageForecaster, usageCost } from "../forecast.js";
 
 afterEach(resetUsageLimitsForTests);
 
-async function world(provider: "claude" | "codex" = "codex") {
+async function world(provider: "claude" | "codex" = "codex", driverOverride?: TurnDriver) {
   const sent: string[] = [];
-  const harness = await testHarness({ onSendTurn: (turn) => sent.push(turn.threadId) });
+  const prompts: string[] = [];
+  const harness = await testHarness({ onSendTurn: (turn) => { sent.push(turn.threadId); prompts.push(turn.prompt); } });
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = { store: harness.store, storeRoot: harness.root, config: { ...harness.config, usageProtection: "auto", usageRecovery: "sequential" }, driverFor: (id) => {
+    if (driverOverride) return driverOverride;
     const kind = driverKindOfInstance(id)!;
     let driver = drivers.get(kind);
     if (!driver) { driver = harness.drivers[kind]!(); drivers.set(kind, driver); }
@@ -27,7 +34,7 @@ async function world(provider: "claude" | "codex" = "codex") {
     await sendTurn(harness.store, thread.id, { prompt: "Finish the feature" });
     return thread.id;
   };
-  return { ...harness, ctx, sent, make, guard: new UsageProtection(async () => ctx) };
+  return { ...harness, ctx, sent, prompts, make, guard: new UsageProtection(async () => ctx) };
 }
 
 async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId: string) {
@@ -39,6 +46,82 @@ async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId
 }
 
 describe("usage protection", () => {
+  it.each(["native", "moxen"])("settles Claude's held-back %s wrap-up result by stopping its shell, and prevents a late shell wake", async (mode) => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    const w = await world("claude", driver);
+    const thread = await createThread(w.store, { projectId: "p", title: "watch CI", env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" } });
+    const system = (fields: Record<string, unknown>) => ({ type: "system", uuid: w.store.newId(), session_id: "session-1", ...fields }) as SDKMessage;
+    try {
+      if (mode === "moxen") await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "claude", phase: "wrapping", order: Date.now(), resetsAt: null, handoff: false } });
+      const started = await startTurn(w.ctx, { threadId: thread.id, prompt: "Watch CI", usageControl: true, ...(mode === "moxen" ? { origin: "usage-protection" as const } : {}) });
+      const query = transport.created[0]!;
+      // Current interactive SDK interrupts abort a turn, not the process.
+      query.interrupt = async () => undefined;
+      const stopped: string[] = [];
+      Object.assign(query, { stopTask: async (taskId: string) => {
+        stopped.push(taskId);
+        query.push(system({ subtype: "task_notification", task_id: taskId, status: "stopped", summary: "Stopped", output_file: "" }));
+        query.push(system({ subtype: "background_tasks_changed", tasks: [] }));
+        query.push(successResult("Stopping here."));
+      } });
+      query.push(system({ subtype: "task_started", task_id: "watcher", task_type: "local_bash", description: "Watch CI", is_backgrounded: true }));
+      query.push({ type: "assistant", uuid: "stopping", session_id: "session-1", parent_tool_use_id: null, message: { id: "notes", content: [{ type: "text", text: "Stopping here." }], usage: { input_tokens: 1, output_tokens: 1 } } } as unknown as SDKMessage);
+      // sdk.d.ts: idle follows heldBackResult flushing and the bg-agent do-while.
+      // Until the CLI supplies that result, text alone cannot complete a turn.
+      await vi.waitFor(() => expect(driver.backgroundTasks(thread.id)).toHaveLength(1), { timeout: 10_000 });
+      expect(openTurn(await w.store.readTurns(thread.id))?.id).toBe(started.turn.id);
+      recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: null }]);
+      if (mode === "native") w.guard.observe({ type: "thread.state.changed", provider: "claude", threadId: thread.id, state: "usage-wrap-up" });
+      await w.guard.tick();
+      expect(stopped).toEqual(["watcher"]);
+      await started.run;
+      await w.guard.tick();
+      expect(openTurn(await w.store.readTurns(thread.id))).toBeNull();
+      expect(await Effect.runPromise(driver.hasSession(thread.id))).toBe(false);
+      expect(query.closed).toBe(true);
+      expect((await w.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background")).toMatchObject([{ payload: { taskId: "watcher", status: "stopped" } }]);
+      query.push(system({ subtype: "init" }));
+      query.push(successResult("CI finished", 0.01, { origin: { kind: "task-notification" } }));
+      await w.guard.tick();
+      await expect(startBackgroundTurn(w.store, thread.id, { modelSelection: null })).rejects.toMatchObject({ code: "USAGE_PROTECTED_BACKGROUND" });
+      expect((await w.store.readTurns(thread.id)).filter((turn) => turn.delivery === "background")).toEqual([]);
+    } finally {
+      w.guard.close();
+      await Effect.runPromise(driver.interruptTurn(thread.id)).catch(() => undefined);
+      await Effect.runPromise(driver.stopAll());
+      await flushTurnRunners();
+    }
+  }, 20_000);
+
+  it.each([true, false])("holds background work before interruption and tells recovery what happened (independent stop: %s)", async (supported) => {
+    const w = await world();
+    const id = await w.make("build");
+    const driver = w.ctx.driverFor("codex");
+    let tasks = [{ taskId: "build", taskType: "command", description: "Long build" }, { taskId: "watcher", taskType: "command", description: "Watch CI" }];
+    const stopSession = vi.fn(() => Effect.sync(() => { tasks = []; }));
+    const stop = vi.fn(() => supported ? Effect.sync(() => { tasks = []; }) : Effect.fail(new CliError("BACKGROUND_TASK_STOP_UNSUPPORTED", "Cannot stop independently")));
+    Object.assign(driver, { backgroundTasks: () => tasks, backgroundTaskOutput: async () => tasks.length ? ({ lines: ["compiled 12 modules"] }) : null, stopBackgroundTask: stop, stopSession });
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 98, exhausted: false, resetsAt: null }]);
+    try {
+      await w.guard.wrap("codex");
+      await w.guard.tick();
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(stopSession).toHaveBeenCalled();
+      expect((await w.store.readActivities(id)).filter((row) => row.kind === "usage.background")).toMatchObject([
+        { payload: { taskId: "build", status: supported ? "stopped" : "detached", output: ["compiled 12 modules"] } },
+        { payload: { taskId: "watcher", status: supported ? "stopped" : "detached", output: ["compiled 12 modules"] } },
+      ]);
+      const resumed = await startTurn(w.ctx, { threadId: id, prompt: "Continue after reset", usageControl: true, origin: "usage-continue" });
+      await resumed.run;
+      expect(w.prompts.at(-1)).toContain('"status":"' + (supported ? "stopped" : "detached") + '"');
+      expect(w.prompts.at(-1)).toContain("compiled 12 modules");
+      expect(w.prompts.at(-1)).toContain("Check it again");
+    } finally {
+      w.guard.close();
+    }
+  });
+
   it("keeps queued input held while the wrap-up settles slowly, before and after completion", async () => {
     const w = await world();
     const id = await w.make("gated wrap-up");

@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OpenCodeDriver } from "../../providers/opencode/driver.js";
 import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
@@ -439,6 +439,25 @@ describe("provider-side interruptions", () => {
       queue,
     }));
   }
+
+  it("interrupts a late provider wake instead of recording a turn while usage protection holds the thread", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-protected-wake-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "Held", modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" }, env: { mode: "local", path: root, branch: null } });
+    await store.writeThreadRecord({ ...thread, usagePause: { provider: "claude", phase: "waiting", resetsAt: null, order: 1, handoff: false } });
+    const driver = await scriptedDriver(thread.id, []);
+    const interrupt = vi.fn(() => Effect.void);
+    const close = vi.fn(() => Effect.void);
+    Object.assign(driver, { interruptTurn: interrupt, stopSession: close });
+    watchDriverSession(store, driver, thread.id, root);
+    await Effect.runPromise(Queue.offer((driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue, {
+      type: "turn.started", provider: "claude", threadId: thread.id, turnId: "late", origin: "background",
+    }));
+    await vi.waitFor(() => expect(close).toHaveBeenCalledWith(thread.id), { timeout: 10_000 });
+    expect(interrupt).toHaveBeenCalledWith(thread.id);
+    expect(await store.readTurns(thread.id)).toEqual([]);
+  });
 
   it("records a session-wide model fallback and moves the turn and the thread to the new model", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-fallback-"));

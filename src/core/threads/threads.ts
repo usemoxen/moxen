@@ -541,6 +541,9 @@ export async function startBackgroundTurn(
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    if (thread.usagePause && thread.usagePause.phase !== "resuming") {
+      throw new CliError("USAGE_PROTECTED_BACKGROUND", "Usage protection is holding this thread's background work.");
+    }
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,

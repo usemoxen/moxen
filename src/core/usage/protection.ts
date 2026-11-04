@@ -196,6 +196,41 @@ export class UsageProtection {
     await interruptTurn(ctx.store, row.thread.id, turn.id);
   }
 
+  private async stopBackground(ctx: OperationContext, row: Row, pause: UsagePause): Promise<void> {
+    const turn = openTurn(await ctx.store.readTurns(row.thread.id));
+    const driver = ctx.driverFor((turn?.modelSelection ?? row.thread.modelSelection).instanceId);
+    const tasks = [...(driver.backgroundTasks?.(row.thread.id) ?? [])];
+    const recorded = tasks.length ? await ctx.store.readActivities(row.thread.id) : [];
+    const pending = tasks.filter((task) => !recorded.some((activity) => activity.kind === "usage.background" && activity.payload?.order === pause.order && activity.payload.taskId === task.taskId));
+    // Capture all logs before a fallback closes the session and its handles.
+    const outputs = await Promise.all(pending.map((task) => driver.backgroundTaskOutput?.(row.thread.id, task.taskId).catch(() => null)));
+    for (const [index, task] of pending.entries()) {
+      let status = "stopped";
+      try {
+        if (!driver.stopBackgroundTask) throw new Error("Independent task stop unavailable");
+        await Effect.runPromise(driver.stopBackgroundTask(row.thread.id, task.taskId));
+      } catch {
+        // Codex native commands cannot be stopped independently. End this
+        // run and detach its session instead; never claim the process died.
+        status = "detached";
+        await this.stop(ctx, row);
+        if (!driver.stopSession) throw new Error("Cannot detach protected session");
+        await Effect.runPromise(driver.stopSession(row.thread.id));
+      }
+      await ctx.store.appendLedger(row.thread.id, "activity", {
+        id: ctx.store.newId(), threadId: row.thread.id, turnId: turn?.id ?? null,
+        kind: "usage.background", summary: `${status === "stopped" ? "Stopped" : "Detached"} for usage protection: ${task.description || task.taskId}`,
+        payload: { ...task, status, order: pause.order, output: outputs[index]?.lines ?? null }, createdAt: ctx.store.nowIso(),
+      });
+      ctx.store.emit(row.thread.id, "activity");
+    }
+    // Like continuation (MXN-259), a held thread closes its idle provider
+    // session, not just its turn: a late task notification must not wake it.
+    if (!openTurn(await ctx.store.readTurns(row.thread.id)) && driver.stopSession) {
+      await Effect.runPromise(driver.stopSession(row.thread.id));
+    }
+  }
+
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
     if (!(await ctx.store.readThreadRecord(threadId))?.usagePause) return;
     if (pause.recoveryTurnId || pause.error) return;
@@ -234,6 +269,8 @@ export class UsageProtection {
       ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
     }, now);
     for (const row of eligible) {
+      const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
+      if (pause) await this.stopBackground(ctx, row, pause);
       if (this.nativeWrap.has(row.thread.id)) continue;
       if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
@@ -340,6 +377,7 @@ export class UsageProtection {
     if (ctx.config.usageProtection === "auto") {
       const triggering = this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap);
       for (const provider of new Set(triggering.map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
+      if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
       if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now, triggering.filter((forecast) => forecast.provider === "claude"));
     }
     if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
@@ -349,6 +387,7 @@ export class UsageProtection {
     const busy = new Set<string>();
     for (const row of queue) {
       const pause = row.thread.usagePause!;
+      if (pause.phase !== "resuming") await this.stopBackground(ctx, row, pause);
       const running = openTurn(row.turns);
       if (pause.phase === "resuming") {
         if (running) busy.add(pause.provider);

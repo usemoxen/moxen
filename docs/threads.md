@@ -640,6 +640,17 @@ and only the tasks the provider can name are stopped. Sending the old thread a
 message resumes it from its cursor, without its old background work. Delegated
 tasks are separate and unchanged by this.
 
+Usage protection also stops the background tasks a provider can name, both
+when it holds a thread and while its wrap-up runs. This deliberately stops
+long builds as well as cheap watchers: an unattended task must not keep the
+wrap-up open or spend the protected allowance. Each task's disposition and
+available output are kept in the thread and included in the recovery prompt.
+If an independent stop is unsupported or fails, protection interrupts the
+turn and detaches its provider session instead. A detached task's process
+may still be running; recovery must check before restarting it. Once the
+turn settles, protection closes the session so late task output cannot wake
+the held thread. Background turns are refused while protection holds it.
+
 ## Live updates
 
 The instructions a conversation began with are kept, not rewritten. What

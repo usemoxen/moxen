@@ -34,6 +34,7 @@ export class FakeQuery implements ClaudeQuery {
 
   close(): void {
     this.closed = true;
+    this.end();
   }
 
   /** What `getContextUsage` answers; the details asked for are recorded. */

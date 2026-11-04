@@ -764,6 +764,9 @@ async function runBackgroundTurn(
   try {
     const thread = await store.readThreadRecord(threadId);
     if (!thread) return;
+    if (thread.usagePause && thread.usagePause.phase !== "resuming") {
+      throw new CliError("USAGE_PROTECTED_BACKGROUND", "Usage protection is holding this thread's background work.");
+    }
     const turn = await startBackgroundTurn(store, threadId, { modelSelection: null });
     await executeTurn({
       store,
@@ -776,7 +779,12 @@ async function runBackgroundTurn(
       workingDirectory: cwd,
       ...(afterSettle ? { afterSettle } : {}),
     });
-  } catch {
+  } catch (cause) {
+    if (cause instanceof CliError && cause.code === "USAGE_PROTECTED_BACKGROUND") {
+      await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
+      if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
+      return;
+    }
     // Best effort: a background turn that cannot be recorded still runs in
     // the provider; only its transcript rows are missing.
   }

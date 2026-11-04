@@ -836,6 +836,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     } catch {
       // Best effort: the process may already be gone.
     }
+    // An interactive interrupt only stops the turn; close terminates the
+    // transport too, including background work and later notifications.
+    session.query.close?.();
     session.input.close();
     this.sessions.delete(session.threadId);
     this.publish({
