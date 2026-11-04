@@ -1,16 +1,18 @@
 /**
  * `moxen self-update`: `--check` says what Moxen this server is and whether GitHub Releases has a newer one (it
  * only reads; on `--server <name>` the answer is that paired server's install, labelled as remote). Installing,
- * updating and rolling back act on this machine's own app folder and are refused on a paired server: no server
- * command does them, so a paired client can never reach them.
+ * updating and rolling back act on this machine's own app folder: the CLI refuses `--server` first, and the
+ * server's transport refuses both commands to any remote client anyway. Updating and rolling back run in the
+ * server (`app.update.apply`, `app.update.rollback`); `--install` runs from an unpacked archive, before there is
+ * an installed Moxen, so it stays here.
  */
+import { randomUUID } from "node:crypto";
+
 import { CliError } from "../core/errors.js";
 import { installRelease, type InstallResult } from "../core/selfupdate/installer.js";
-import { rollbackRelease, updateRelease, type RollbackResult, type UpdateResult } from "../core/selfupdate/update.js";
-import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
+import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import type { CliConfig } from "../core/types.js";
-import { defaultEndpoint, probe } from "../server/transport/endpoint.js";
-import { RemoteConnection } from "../server/transport/remote.js";
+import type { CommandOf, CommandResult } from "../server/api.js";
 import { activeRemoteServer, cliClient } from "./infra/client.js";
 
 /** The `--json` data: the server's answer, plus which server that was (null: this machine's). */
@@ -45,28 +47,70 @@ export async function selfUpdateInstall(): Promise<InstallResult> {
   return await installRelease();
 }
 
-/** The version this machine's server runs, so an update doesn't delete it. Asks only a server that is up: this must not start one. */
-async function localServerVersions(): Promise<readonly string[]> {
-  const endpoint = defaultEndpoint();
-  if (!(await probe(endpoint))) return [];
-  const connection = await RemoteConnection.connect(endpoint, { reconnect: false });
+/**
+ * Runs an update command on this machine's server and relays its stages to `onProgress`. The stages arrive as
+ * shell events tagged with this command's id; the subscription is ready (`synchronized`) before the command goes,
+ * so none is missed. The server starts if none runs, like for every command: it is what updates, and what knows
+ * which version it runs so that one is never pruned.
+ */
+async function runOnServer<T extends "app.update.apply" | "app.update.rollback">(config: CliConfig, type: T, onProgress: ((progress: UpdateProgress) => void) | undefined): Promise<CommandResult<T>> {
+  const client = await cliClient(config);
+  const commandId = randomUUID();
+  let unsubscribe: (() => void) | null = null;
   try {
-    return [(await connection.query({ type: "app.update.check" })).install.version];
+    if (onProgress !== undefined) {
+      await new Promise<void>((ready, failed) => {
+        unsubscribe = client.subscribeShell(
+          {},
+          (frame) => {
+            if (frame.kind === "synchronized") ready();
+            else if (frame.kind === "event" && frame.event.type === "app.update-progress" && frame.event.payload.commandId === commandId) onProgress(frame.event.payload.progress);
+          },
+          failed,
+        );
+      });
+    }
+    return await client.dispatch({ type, commandId } as CommandOf<T>);
   } finally {
-    await connection.close();
+    (unsubscribe as (() => void) | null)?.();
   }
 }
 
 /** The plain command: download, test and switch to the latest release. This machine only. */
-export async function selfUpdateRun(): Promise<UpdateResult> {
+export async function selfUpdateRun(config: CliConfig, onProgress?: (progress: UpdateProgress) => void): Promise<UpdateResult> {
   requireLocal("Updating");
-  return await updateRelease({ runningVersions: localServerVersions });
+  return await runOnServer(config, "app.update.apply", onProgress);
 }
 
 /** `--rollback`: back to the recorded previous version. This machine only. */
-export async function selfUpdateRollback(): Promise<RollbackResult> {
+export async function selfUpdateRollback(config: CliConfig, onProgress?: (progress: UpdateProgress) => void): Promise<RollbackResult> {
   requireLocal("Rolling back");
-  return await rollbackRelease();
+  return await runOnServer(config, "app.update.rollback", onProgress);
+}
+
+const MIB = 1024 * 1024;
+
+/** One line per stage; a download says how far it is. */
+export function describeProgress(progress: UpdateProgress): string {
+  const version = progress.version === undefined ? "" : ` ${progress.version}`;
+  switch (progress.stage) {
+    case "checking":
+      return "Checking for the latest release...";
+    case "downloading": {
+      const done = `${((progress.bytes ?? 0) / MIB).toFixed(1)} MiB`;
+      return progress.total == null ? `Downloading Moxen${version}: ${done}` : `Downloading Moxen${version}: ${done} of ${(progress.total / MIB).toFixed(1)} MiB`;
+    }
+    case "verifying":
+      return "Checking the download's SHA-256...";
+    case "unpacking":
+      return "Unpacking...";
+    case "testing":
+      return `Starting Moxen${version} to check it works...`;
+    case "switching":
+      return `Switching to Moxen${version}...`;
+    case "done":
+      return "Done.";
+  }
 }
 
 const RESTART_NOTE = "Threads that are running keep the version they started on until the moxen server restarts. Nothing was restarted.";

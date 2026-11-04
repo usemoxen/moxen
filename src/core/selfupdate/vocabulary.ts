@@ -48,6 +48,45 @@ export interface UpdateCheck {
   readonly updatable: boolean;
 }
 
+export type UpdateAction = "updated" | "already-current";
+
+export interface UpdateResult {
+  readonly action: UpdateAction;
+  /** The version `current` names afterwards. */
+  readonly version: string;
+  /** The version `current` named before; null when it named none. */
+  readonly from: string | null;
+  /** The version `--rollback` goes back to; null when there is none. */
+  readonly previous: string | null;
+  /** `<app>/versions/<version>`. */
+  readonly folder: string;
+  readonly current: string;
+  /** Old versions that could not be deleted. They never fail an update. */
+  readonly warnings: readonly string[];
+}
+
+export interface RollbackResult {
+  readonly action: "rolled-back";
+  readonly version: string;
+  readonly from: string;
+  readonly previous: string;
+  readonly folder: string;
+  readonly current: string;
+  readonly warnings: readonly string[];
+}
+
+/** The stages an update (or rollback) reports, in order; a rollback only has `testing`, `switching` and `done`. */
+export type UpdateStage = "checking" | "downloading" | "verifying" | "unpacking" | "testing" | "switching" | "done";
+
+/** One report of where an update is. `bytes` and `total` are only on `downloading` (`total` null when the server did not say). */
+export interface UpdateProgress {
+  readonly stage: UpdateStage;
+  /** The release being installed, once the check has named it. */
+  readonly version?: string;
+  readonly bytes?: number;
+  readonly total?: number | null;
+}
+
 interface Semver {
   readonly core: readonly [number, number, number];
   readonly pre: readonly string[];

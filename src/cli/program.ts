@@ -13,6 +13,7 @@ import {
 import { describeSettings, isSettingKey, listTarget, readSetting, restartRequired, secretKeyName } from "../core/configschema.js";
 import { readListValue } from "../core/configlist.js";
 import { addProfile, duplicateProfile, editProfile, exportProfile, importProfile, listProfiles, probeProfile, removeProfile, showProfile, testProfile } from "./harness/harness.js";
+import type { UpdateProgress } from "../core/selfupdate/vocabulary.js";
 import type { MergeStrategy } from "../server/api.js";
 import {
   commentOnForgeRequest,
@@ -26,7 +27,7 @@ import {
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
-import { describeInstall, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "./selfupdate.js";
+import { describeInstall, describeProgress, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
@@ -583,6 +584,24 @@ program
     }),
   );
 
+/**
+ * Text mode narrates an update's stages on stderr; `--json` stays silent so stdout holds the one final envelope.
+ * A download reports every half megabyte, so only each tenth of it (or each 10 MiB when its size is unknown) is printed.
+ */
+function progressWriter(json: boolean): ((progress: UpdateProgress) => void) | undefined {
+  if (json) return undefined;
+  let lastStep = -1;
+  return (progress) => {
+    if (progress.stage === "downloading") {
+      const bytes = progress.bytes ?? 0;
+      const step = progress.total ? Math.floor((bytes / progress.total) * 10) : Math.floor(bytes / (10 * 1024 * 1024));
+      if (step === lastStep) return;
+      lastStep = step;
+    }
+    process.stderr.write(`${describeProgress(progress)}\n`);
+  };
+}
+
 program
   .command("self-update")
   .description("Update Moxen to the latest GitHub release (downloaded, checked and started before it is switched to), go back to the previous version, or look for an update. This machine only.")
@@ -597,13 +616,13 @@ program
         const result = await selfUpdateInstall();
         writeSuccess(result, context, describeInstall(result));
       } else if (mode === "rollback") {
-        const result = await selfUpdateRollback();
+        const result = await selfUpdateRollback(context.config, progressWriter(context.json));
         writeSuccess(result, context, describeRollback(result));
       } else if (mode === "check") {
         const report = await selfUpdateCheck(context.config);
         writeSuccess(report, context, describeSelfUpdate(report));
       } else {
-        const result = await selfUpdateRun();
+        const result = await selfUpdateRun(context.config, progressWriter(context.json));
         writeSuccess(result, context, describeUpdate(result));
       }
     }),

@@ -39,7 +39,8 @@ import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
 import { latestVersions } from "../core/providers/latest.js";
 import { checkForUpdate } from "../core/selfupdate/check.js";
-import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
+import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/selfupdate/update.js";
+import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
 import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
@@ -214,6 +215,10 @@ export interface DirectConnectionOptions {
   readonly latestVersions?: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   /** Checks GitHub Releases for a newer Moxen (tests); defaults to the real check of the running install. */
   readonly checkAppUpdate?: () => Promise<UpdateCheck>;
+  /** Updates Moxen itself (tests); defaults to the real `updateRelease` on this install. */
+  readonly updateApp?: (options: UpdateOptions) => Promise<UpdateResult>;
+  /** Rolls Moxen itself back (tests); defaults to the real `rollbackRelease`. */
+  readonly rollbackApp?: (options: UpdateOptions) => Promise<RollbackResult>;
   /** The `fetch` the harness test and probe use; tests hand in a fake server. */
   readonly harnessFetch?: typeof fetch;
 }
@@ -246,6 +251,10 @@ export class DirectConnection implements ClientApi {
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
   private readonly checkAppUpdate: () => Promise<UpdateCheck>;
+  private readonly updateApp: (options: UpdateOptions) => Promise<UpdateResult>;
+  private readonly rollbackApp: (options: UpdateOptions) => Promise<RollbackResult>;
+  /** Shell subscribers, who are told where an update is. */
+  private readonly updateListeners = new Set<(frame: ShellFrame) => void>();
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
@@ -300,6 +309,8 @@ export class DirectConnection implements ClientApi {
     this.harnessFetch = options.harnessFetch;
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
     this.checkAppUpdate = options.checkAppUpdate ?? (() => checkForUpdate({ install: readInstall() }));
+    this.updateApp = options.updateApp ?? updateRelease;
+    this.rollbackApp = options.rollbackApp ?? rollbackRelease;
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
@@ -703,6 +714,10 @@ export class DirectConnection implements ClientApi {
     let stopped = false;
     let polling = false;
     this.startScheduling();
+    const onUpdateFrame = (frame: ShellFrame): void => {
+      if (!stopped && !this.closed) onItem(frame);
+    };
+    this.updateListeners.add(onUpdateFrame);
     const poll = async (): Promise<void> => {
       if (stopped || this.closed || polling) return;
       polling = true;
@@ -764,6 +779,7 @@ export class DirectConnection implements ClientApi {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      this.updateListeners.delete(onUpdateFrame);
       for (const threadId of answering) {
         const count = (this.researchResponders.get(threadId) ?? 1) - 1;
         if (count) this.researchResponders.set(threadId, count);
@@ -964,6 +980,18 @@ export class DirectConnection implements ClientApi {
    * whatever arrived on the wire — and decoding is also where defaults
    * (runtime mode, interaction mode) are applied.
    */
+  /**
+   * What an update here needs: progress goes to shell subscribers tagged with the command's id, and the version
+   * this server runs is never pruned (an update elsewhere could not know it, which is why this runs in the server).
+   */
+  private updateOptions(commandId: string | undefined): UpdateOptions {
+    const onProgress = (progress: UpdateProgress): void => {
+      const frame: ShellFrame = { kind: "event", event: { type: "app.update-progress", payload: { commandId: commandId ?? null, progress } } };
+      for (const listener of this.updateListeners) listener(frame);
+    };
+    return { onProgress, runningVersions: async () => [readInstall().version] };
+  }
+
   async dispatch<T extends CommandType>(command: CommandOf<T>): Promise<CommandResult<T>> {
     if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
     const decoded = decodeCommand(command);
@@ -1073,6 +1101,10 @@ export class DirectConnection implements ClientApi {
       case "thread.permission.respond":
         await this.permissionRespond(command.threadId, command.requestId, command.decision);
         return accepted;
+      case "app.update.apply":
+        return await this.updateApp(this.updateOptions(command.commandId));
+      case "app.update.rollback":
+        return await this.rollbackApp(this.updateOptions(command.commandId));
       case "thread.handover": {
         const { type: _type, commandId: _id, wait, ...request } = command;
         const result = await handover(await this.context(), request);

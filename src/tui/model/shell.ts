@@ -45,6 +45,8 @@ export function applyShellFrame(state: ShellState, frame: unknown): ShellState {
     };
   }
   if (kind === "synchronized") return { ...state, synchronized: true };
+  // Events (an update's progress) are for the client that asked for them, not part of the shell state.
+  if (kind === "event") return state;
 
   const sequence = typeof record.sequence === "number" ? record.sequence : state.snapshotSequence;
   const thread = asRecord(record.thread);

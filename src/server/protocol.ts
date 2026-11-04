@@ -20,7 +20,7 @@
  * in the tree uses `effect/Schema` today; a discriminated union plus these
  * decoders costs less and breaks in more obvious ways.
  */
-import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
+import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
@@ -241,6 +241,14 @@ export type CommandBody =
   | { readonly type: "thread.conversation.revert"; readonly threadId: string; readonly turnCount: number; readonly restoreFiles?: boolean }
   /** A new thread for a prompt: project policy, local vs worktree, model from config and flags. */
   | ({ readonly type: "thread.handover"; readonly wait?: boolean } & HandoverRequest)
+  /**
+   * Download, test and switch to the latest release (`moxen self-update`). It acts on the server machine's own
+   * program files, so the transport refuses it to a remote client (`LOCAL_ONLY_COMMANDS`). Stages stream as
+   * `app.update-progress` shell events carrying this command's `commandId`; the result is the final answer.
+   */
+  | { readonly type: "app.update.apply" }
+  /** Go back to the version `current` replaced (`moxen self-update --rollback`). Local clients only, like `app.update.apply`. */
+  | { readonly type: "app.update.rollback" }
   /** A task run in a child thread of the same project. The task id is the child thread id. */
   | ({ readonly type: "thread.delegate" } & DelegateRequest)
   | { readonly type: "research.proposal.answer"; readonly proposalId: string; readonly choice: "start"; readonly plan: ResearchPlan }
@@ -371,6 +379,12 @@ export type Command = CommandBody & { readonly commandId?: string };
 
 export type CommandType = CommandBody["type"];
 
+/**
+ * Commands that replace this machine's own program files. The transport refuses them to a remote client by
+ * name, before the command is decoded or reaches the connection, so what a client sends cannot talk its way past.
+ */
+export const LOCAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<CommandType>(["app.update.apply", "app.update.rollback"]);
+
 /** `accepted` means the server took the command, not that the work finished. */
 interface Accepted {
   readonly accepted: true;
@@ -403,6 +417,8 @@ export interface CommandResults {
   "thread.user-input.dismiss": Accepted;
   "thread.permission.respond": Accepted;
   "thread.conversation.revert": RevertResult & Accepted;
+  "app.update.apply": UpdateResult;
+  "app.update.rollback": RollbackResult;
   "thread.handover": Omit<Handover, "started"> & { readonly started: StartedTurnSummary | null };
   "thread.delegate": Delegation;
   "research.proposal.answer": Accepted;
@@ -723,7 +739,15 @@ export type ShellFrame =
         readonly researchProposals?: readonly ResearchProposal[];
       };
     }
-  | { readonly kind: "synchronized" };
+  | { readonly kind: "synchronized" }
+  /**
+   * Where an update is, for the client that started it: `commandId` is the `app.update.apply` or
+   * `app.update.rollback` command's own. Sent to shell subscribers on this machine's server only while one runs.
+   */
+  | {
+      readonly kind: "event";
+      readonly event: { readonly type: "app.update-progress"; readonly payload: { readonly commandId: string | null; readonly progress: UpdateProgress } };
+    };
 
 export type ThreadFrame =
   | { readonly kind: "snapshot"; readonly snapshot: { readonly snapshotSequence: number; readonly thread: ThreadEnvelope } }
@@ -1103,6 +1127,9 @@ export function decodeCommand(value: unknown): Command {
       }
       return { ...meta, type, threadId: threadId(), turnCount, ...optionalBoolean(record, "restoreFiles") };
     }
+    case "app.update.apply":
+    case "app.update.rollback":
+      return { ...meta, type };
     case "thread.handover":
       return {
         ...meta,

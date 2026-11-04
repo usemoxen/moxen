@@ -199,7 +199,9 @@ try {
   assert.deepEqual(readdirSync(layout.versions), [manifest.version], "a wrong checksum left something in versions");
   console.log("ok: a wrong checksum leaves current alone");
 
-  const updated = await updateRelease(updateOptions(serve(fakeSum)));
+  const stages: string[] = [];
+  const updated = await updateRelease({ ...updateOptions(serve(fakeSum)), onProgress: (progress) => void (stages.at(-1) === progress.stage || stages.push(progress.stage)) });
+  assert.deepEqual(stages, ["checking", "downloading", "verifying", "unpacking", "testing", "switching", "done"], "the update reported its stages out of order");
   assert.equal(updated.action, "updated");
   assert.equal(updated.version, higher);
   assert.equal(current(), higher);

@@ -21,6 +21,7 @@ import net from "node:net";
 
 import { CliError } from "../../core/errors.js";
 import type { ClientApi } from "../api.js";
+import { LOCAL_ONLY_COMMANDS } from "../protocol.js";
 import { isNamedPipe, probe } from "./endpoint.js";
 import {
   encode,
@@ -197,6 +198,12 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
     }
     if (!greeted) {
       send({ id, error: toWireError(new CliError("PROTOCOL_HELLO_REQUIRED", "Send hello before any request.")) });
+      return undefined;
+    }
+
+    // Refused by name before anything else reads it: a remote client must never replace this machine's program files.
+    if (context.remote && (method === "dispatch" || method === "query") && typeof params.type === "string" && LOCAL_ONLY_COMMANDS.has(params.type)) {
+      send({ id, error: toWireError(new CliError("REMOTE_LOCAL_ONLY", `${params.type} changes this machine's own Moxen install, so a remote client cannot ask for it; run it on the machine itself.`, { details: { command: params.type } })) });
       return undefined;
     }
 

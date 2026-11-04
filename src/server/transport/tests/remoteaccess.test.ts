@@ -44,9 +44,9 @@ async function devices(): Promise<DeviceRegistry> {
   return new DeviceRegistry({ file: path.join(dir, "devices.json"), tokens });
 }
 
-async function remoteAccess(): Promise<{ remote: RemoteAccess; fingerprint: string }> {
+async function remoteAccess(connection: Partial<ConstructorParameters<typeof DirectConnection>[0]> = {}): Promise<{ remote: RemoteAccess; fingerprint: string }> {
   const harness = await testHarness();
-  const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+  const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config, ...connection });
   const identity = tlsIdentity(createTlsKey());
   const remote = new RemoteAccess({ api, identity: async () => identity, addresses: () => [LOOPBACK], devices: await devices() });
   teardown.push(() => api.close(), () => remote.close());
@@ -229,6 +229,38 @@ describe("remote access listener", () => {
     expect(replies.find((reply) => reply.id === 3)).toMatchObject({ error: { code: "REMOTE_SHUTDOWN_REFUSED" } });
     // Still listening: the refused shutdown stopped nothing.
     expect(remote.status().listening).toEqual([LOOPBACK]);
+  });
+
+  it("refuses update and rollback to a paired device whatever it sends, and never reaches the update", async () => {
+    const calls: string[] = [];
+    const { remote, fingerprint } = await remoteAccess({
+      checkAppUpdate: async () => ({ install: { version: "0.1.0", kind: "source", folder: null, target: null }, status: "no-release", reason: null, latest: null, updatable: false }),
+      updateApp: async () => {
+        calls.push("update");
+        throw new Error("must not run");
+      },
+      rollbackApp: async () => {
+        calls.push("rollback");
+        throw new Error("must not run");
+      },
+    });
+    const port = await freePort();
+    await remote.apply({ enabled: true, port });
+    const device = await paired(remote, port, fingerprint);
+    const refused = [
+      { id: 2, method: "dispatch", params: { type: "app.update.apply" } },
+      { id: 3, method: "dispatch", params: { type: "app.update.apply", commandId: "x", extra: { nested: true } } },
+      { id: 4, method: "dispatch", params: { type: "app.update.rollback" } },
+      { id: 5, method: "query", params: { type: "app.update.rollback" } },
+    ];
+    const { replies } = await exchange(port, fingerprint, [hello({ device }), ...refused]);
+    for (const request of refused) {
+      expect(replies.find((reply) => reply.id === request.id)).toMatchObject({ error: { code: "REMOTE_LOCAL_ONLY", details: { command: request.params.type } } });
+    }
+    // The read-only check is still allowed to a paired device.
+    const check = await exchange(port, fingerprint, [hello({ device }), { id: 2, method: "query", params: { type: "app.update.check" } }]);
+    expect(check.replies.find((reply) => reply.id === 2)).not.toHaveProperty("error");
+    expect(calls).toEqual([]);
   });
 
   it("fails clearly when there is nothing to bind, leaving nothing listening", async () => {

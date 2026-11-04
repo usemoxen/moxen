@@ -395,14 +395,23 @@ reads `current` on every start and runs `bun versions/<version>/dist/cli/index.j
 with the arguments untouched. It works only from an unpacked `release` install:
 a source checkout exits 1 with `SELF_UPDATE_SOURCE_INSTALL` before anything is
 written. It is local only: with `--server` it exits 2 with `SELF_UPDATE_REMOTE`,
-and no server command does it, so a paired client cannot reach it. A version
+and no server command does it (it runs from an unpacked archive, before Moxen is
+installed), so a paired client cannot reach it. A version
 already installed is left alone; run from inside `versions/`, it only sets
 `current` and rewrites the launcher. It prints how to put `app/bin` on PATH and
 edits no profile. `--json` data: `{ version, folder, current, launcher, bin,
 alreadyInstalled, pathHint }`.
 
 `moxen self-update` with no flag updates this install to the latest release.
-It downloads the platform's archive and its `.sha256` from GitHub over https (no
+It runs in the moxen server (the `app.update.apply` command; `--rollback` is
+`app.update.rollback`), which is started if none is running, like for any
+command, and which never deletes the version it runs itself. In text mode it
+prints each stage on stderr as it goes (checking, downloading with how much,
+verifying, unpacking, testing, switching, done); with `--json` stdout holds only
+the final envelope. The server sends the stages as `app.update-progress` shell
+events tagged with the command's `commandId`, which only the CLI that asked for
+them reads. A paired remote client is refused both commands by the server's
+transport with `REMOTE_LOCAL_ONLY`, whatever it sends. It downloads the platform's archive and its `.sha256` from GitHub over https (no
 credential is sent; a release missing either file is refused), checks the
 archive's SHA-256 before unpacking, and unpacks into a temp folder inside
 `versions/`. It checks that the archive holds one `moxen-<version>-<os>-<arch>`
@@ -412,14 +421,13 @@ the folder take its name `versions/<version>/`, the old `current` is recorded in
 `<app>/previous`, and `current` changes. Any failure before that (download,
 checksum, unpack, start, wrong version) exits 1, removes the temp folder and
 changes nothing. Old versions are then deleted, keeping `current`, `previous`,
-the version the command itself runs from and the version this machine's server
-runs. If the server doesn't answer, none are deleted. One that cannot be deleted
+and the version the server running the update runs from. One that cannot be deleted
 (on Windows, a folder in use) is a warning, never a failed update. An install that
 is already the latest exits 0 and writes nothing. A source checkout
 (`SELF_UPDATE_SOURCE_INSTALL`), a release not yet under `versions/`
 (`SELF_UPDATE_NOT_INSTALLED`, which says to run `--install`) and a second update
 running at once (`SELF_UPDATE_BUSY`) are refused before anything changes; with
-`--server` it exits 2 with `SELF_UPDATE_REMOTE`. It restarts nothing: threads
+`--server` it exits 2 with `SELF_UPDATE_REMOTE` (before anything is sent; the server refuses it too). It restarts nothing: threads
 that are running keep their version until the moxen server restarts. `--json`
 data: `{ action: "updated" | "already-current", version, from, previous, folder,
 current, warnings }`.

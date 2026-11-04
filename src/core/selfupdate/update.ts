@@ -10,8 +10,9 @@
  * `.sha256`, unpacked into a temp folder inside `versions/`, and started with `--version` before the folder
  * takes its name and `current` changes. Any failure before that removes the temp folder and changes nothing.
  *
- * Like the installer this acts on this machine's own files and is deliberately not a server command, so a paired
- * remote client can never reach it. Nothing here restarts anything: running threads keep their version.
+ * This acts on this machine's own files. It runs in the server (`app.update.apply`, `app.update.rollback`), and the
+ * transport refuses both commands to a remote client, so a paired client can never reach it. Nothing here restarts
+ * anything: running threads keep their version.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -27,7 +28,9 @@ import { RELEASE_MARKER, listCommand, releaseBaseName, releaseMarker, releaseTar
 import { checkForUpdate } from "./check.js";
 import { readInstall, type ReadInstallOptions } from "./install.js";
 import { appLayout, SAFE_VERSION, TEMP_PREFIX, type AppLayout } from "./installer.js";
-import type { InstallInfo, ReleaseAsset, UpdateCheck } from "./vocabulary.js";
+import type { InstallInfo, ReleaseAsset, RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "./vocabulary.js";
+
+export type { RollbackResult, UpdateAction, UpdateProgress, UpdateResult, UpdateStage } from "./vocabulary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +40,8 @@ const UNPACK_TIMEOUT_MS = 5 * 60_000;
 /** A release archive is tens of megabytes; this only stops a download that never ends. */
 const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 4096;
+/** A download reports at most once per this many bytes. */
+const PROGRESS_STEP_BYTES = 512 * 1024;
 const ENTRY = ["dist", "cli", "index.js"];
 
 export interface UpdateOptions extends ReadInstallOptions {
@@ -50,37 +55,23 @@ export interface UpdateOptions extends ReadInstallOptions {
   readonly execPath?: string;
   readonly downloadTimeoutMs?: number;
   readonly startTimeoutMs?: number;
-  /** The versions other processes here run (the server). Null when that can't be told, which keeps every old version. */
+  /** More versions to keep besides the one running this code (the server's own, which is what this runs in). Null when that can't be told, which keeps every old version. */
   readonly runningVersions?: () => Promise<readonly string[] | null>;
   /** Deletes an old version folder (tests make it fail, as a folder in use does on Windows). */
   readonly removeFolder?: (folder: string) => Promise<void>;
+  /** Told where the update is, stage by stage. A throw here never fails the update. */
+  readonly onProgress?: (progress: UpdateProgress) => void;
 }
 
-export type UpdateAction = "updated" | "already-current";
-
-export interface UpdateResult {
-  readonly action: UpdateAction;
-  /** The version `current` names afterwards. */
-  readonly version: string;
-  /** The version `current` named before; null when it named none. */
-  readonly from: string | null;
-  /** The version `--rollback` goes back to; null when there is none. */
-  readonly previous: string | null;
-  /** `<app>/versions/<version>`. */
-  readonly folder: string;
-  readonly current: string;
-  /** Old versions that could not be deleted. They never fail an update. */
-  readonly warnings: readonly string[];
-}
-
-export interface RollbackResult {
-  readonly action: "rolled-back";
-  readonly version: string;
-  readonly from: string;
-  readonly previous: string;
-  readonly folder: string;
-  readonly current: string;
-  readonly warnings: readonly string[];
+/** Calls `onProgress`, which must never be able to fail the update. */
+function reporter(options: UpdateOptions): (progress: UpdateProgress) => void {
+  return (progress) => {
+    try {
+      options.onProgress?.(progress);
+    } catch {
+      // A broken listener is not the update's problem.
+    }
+  };
 }
 
 const fail = (code: string, message: string, cause?: unknown): CliError => new CliError(code, message, { exitCode: 1, ...(cause === undefined ? {} : { cause }) });
@@ -228,16 +219,25 @@ async function readChecksum(doFetch: typeof fetch, asset: ReleaseAsset, archiveN
 }
 
 /** Streams the archive to `file`, hashing as it goes. */
-async function downloadArchive(doFetch: typeof fetch, asset: ReleaseAsset, file: string, timeoutMs: number): Promise<string> {
+async function downloadArchive(doFetch: typeof fetch, asset: ReleaseAsset, file: string, timeoutMs: number, report: (progress: UpdateProgress) => void, version: string): Promise<string> {
   const response = await request(doFetch, asset, timeoutMs);
   if (response.body === null) throw fail("SELF_UPDATE_DOWNLOAD_FAILED", `${asset.name} arrived empty.`);
   const hash = createHash("sha256");
+  const declared = Number(response.headers.get("content-length"));
+  const total = Number.isFinite(declared) && declared > 0 ? declared : asset.size;
   let bytes = 0;
+  let reported = 0;
+  report({ stage: "downloading", version, bytes: 0, total });
   const meter = new Transform({
     transform(chunk: Buffer, _encoding, done) {
       bytes += chunk.length;
       if (bytes > MAX_ARCHIVE_BYTES) return done(new Error("the archive is larger than any Moxen release"));
       hash.update(chunk);
+      // By bytes, not by time: a report per chunk would flood a client, and a timer would make this depend on the clock.
+      if (bytes - reported >= PROGRESS_STEP_BYTES) {
+        reported = bytes;
+        report({ stage: "downloading", version, bytes, total });
+      }
       done(null, chunk);
     },
   });
@@ -246,6 +246,7 @@ async function downloadArchive(doFetch: typeof fetch, asset: ReleaseAsset, file:
   } catch (cause) {
     throw fail("SELF_UPDATE_DOWNLOAD_FAILED", `Downloading ${asset.name} failed.`, cause);
   }
+  report({ stage: "downloading", version, bytes, total: bytes });
   return hash.digest("hex");
 }
 
@@ -346,13 +347,19 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
   requireInstalledRelease(install, layout);
   const target = releaseTargetOf(install.target!.os, install.target!.arch);
   const doFetch = options.fetch ?? fetch;
+  const report = reporter(options);
 
+  report({ stage: "checking" });
   const check = await (options.checkUpdate ?? ((info) => checkForUpdate(options.fetch === undefined ? { install: info } : { install: info, fetch: options.fetch })))(install);
   const alreadyCurrent = (version: string): UpdateResult => {
     const current = readVersionFile(layout.current);
     return { action: "already-current", version, from: current, previous: readVersionFile(layout.previous), folder: path.join(layout.versions, current ?? version), current: layout.current, warnings: [] };
   };
-  if (check.status === "up-to-date") return alreadyCurrent(check.latest?.version ?? install.version);
+  const finished = (result: UpdateResult): UpdateResult => {
+    report({ stage: "done", version: result.version });
+    return result;
+  };
+  if (check.status === "up-to-date") return finished(alreadyCurrent(check.latest?.version ?? install.version));
   if (check.status === "no-release") throw fail("SELF_UPDATE_NO_RELEASE", "No Moxen release has been published yet.");
   if (check.status !== "available" || check.latest === null) throw fail("SELF_UPDATE_CHECK_FAILED", `Could not check for an update: ${check.reason ?? "unknown reason"}.`);
   const { latest } = check;
@@ -362,7 +369,7 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
   }
   const version = latest.version;
   // `current` may already name the release (a server that has not restarted still runs the older one).
-  if (readVersionFile(layout.current) === version && usable(layout, version)) return alreadyCurrent(version);
+  if (readVersionFile(layout.current) === version && usable(layout, version)) return finished(alreadyCurrent(version));
 
   return await withLock(layout, async () => {
     await mkdir(layout.versions, { recursive: true });
@@ -372,12 +379,16 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
     try {
       const archiveFile = path.join(scratch, path.basename(latest.archive!.name));
       const expected = await readChecksum(doFetch, latest.checksum!, latest.archive!.name, options.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS);
-      const actual = await downloadArchive(doFetch, latest.archive!, archiveFile, options.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS);
+      const actual = await downloadArchive(doFetch, latest.archive!, archiveFile, options.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS, report, version);
+      report({ stage: "verifying", version });
       if (actual !== expected) throw fail("SELF_UPDATE_CHECKSUM_MISMATCH", `The downloaded ${latest.archive!.name} does not match its SHA-256, so it was discarded.`);
+      report({ stage: "unpacking", version });
       const unpacked = await unpackArchive(target, archiveFile, path.join(scratch, "unpacked"), version);
+      report({ stage: "testing", version });
       await startTest(unpacked, version, options, scratch);
 
       // It works. Give the folder its name, then record what it replaces, and only then change `current`.
+      report({ stage: "switching", version });
       const finalFolder = path.join(layout.versions, version);
       const replaced = path.join(scratch, "replaced");
       const hadFolder = existsSync(finalFolder);
@@ -398,7 +409,7 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
       // A server that has not restarted can be several updates behind, and it still reads its own folder.
       const running = options.runningVersions === undefined ? [] : await options.runningVersions().catch(() => null);
       const warnings = running === null ? ["Could not tell which version the server runs, so old versions were kept."] : await prune(layout, new Set([...keep, ...running]), options.removeFolder ?? removeFully);
-      return { action: "updated", version, from, previous, folder: finalFolder, current: layout.current, warnings } satisfies UpdateResult;
+      return finished({ action: "updated", version, from, previous, folder: finalFolder, current: layout.current, warnings });
     } finally {
       await removeFully(scratch).catch(() => undefined);
     }
@@ -419,15 +430,19 @@ export async function rollbackRelease(options: UpdateOptions = {}): Promise<Roll
     if (from === null) throw fail("SELF_UPDATE_NO_PREVIOUS", "No current version is recorded, so there is nothing to roll back from.");
     const scratch = path.join(layout.versions, `${TEMP_PREFIX}rollback-${process.pid}-${Date.now()}`);
     await mkdir(scratch, { recursive: true });
+    const report = reporter(options);
     try {
       // The version being returned to must still start.
+      report({ stage: "testing", version: previous });
       await startTest(folder, previous, options, scratch);
     } finally {
       await removeFully(scratch).catch(() => undefined);
     }
     // The version left becomes the new previous, so a rollback can itself be rolled back.
+    report({ stage: "switching", version: previous });
     await recordPrevious(layout, from);
     await writeAtomic(layout.current, `${previous}\n`);
+    report({ stage: "done", version: previous });
     return { action: "rolled-back", version: previous, from, previous: from, folder, current: layout.current, warnings: [] } satisfies RollbackResult;
   });
 }

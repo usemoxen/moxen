@@ -16,7 +16,7 @@ import { RemoteConnection } from "../../server/transport/remote.js";
 import { serve } from "../../server/transport/serve.js";
 import { testEndpoint } from "../../server/transport/tests/endpoint.js";
 import { setClientFactory, useRemoteServer } from "../infra/client.js";
-import { describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "../selfupdate.js";
+import { describeProgress, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "../selfupdate.js";
 
 const golden = (name: string): string => path.join(__dirname, "envelopes", `${name}.json`);
 const json = (data: unknown): string => `${JSON.stringify({ ok: true, data }, null, 2)}\n`;
@@ -45,10 +45,10 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-async function overTheWire(answer: UpdateCheck): Promise<void> {
+async function overTheWire(answer: UpdateCheck, extra: Partial<ConstructorParameters<typeof DirectConnection>[0]> = {}): Promise<void> {
   const root = mkdtempSync(path.join(os.tmpdir(), "moxen-selfupdate-"));
   const endpoint = testEndpoint();
-  const api = new DirectConnection({ storeRoot: root, checkAppUpdate: async () => answer });
+  const api = new DirectConnection({ storeRoot: root, checkAppUpdate: async () => answer, ...extra });
   const server = await serve({ endpoint, api, onClose: () => api.close() });
   const connections: RemoteConnection[] = [];
   setClientFactory(async () => {
@@ -81,6 +81,38 @@ describe("moxen self-update", () => {
     const report = await selfUpdateCheck(DEFAULT_CONFIG);
     expect(report.remote).toBe("winbox");
     expect(describeSelfUpdate(report)).toMatch(/^Remote server winbox: Moxen 0\.1\.2, release install/);
+  });
+
+  it("the plain command and --rollback run in the server: its stages reach only the caller, and the result is unchanged", async () => {
+    const result = { action: "updated", version: "0.2.0", from: "0.1.2", previous: "0.1.2", folder: "/app/versions/0.2.0", current: "/app/current", warnings: [] } as const;
+    const rolled = { action: "rolled-back", version: "0.1.2", from: "0.2.0", previous: "0.2.0", folder: "/app/versions/0.1.2", current: "/app/current", warnings: [] } as const;
+    const kept: Array<readonly string[] | null> = [];
+    await overTheWire(available, {
+      updateApp: async (options) => {
+        kept.push((await options.runningVersions?.()) ?? null);
+        options.onProgress?.({ stage: "checking" });
+        options.onProgress?.({ stage: "downloading", version: "0.2.0", bytes: 5, total: 10 });
+        options.onProgress?.({ stage: "done", version: "0.2.0" });
+        return result;
+      },
+      rollbackApp: async (options) => {
+        options.onProgress?.({ stage: "switching", version: "0.1.2" });
+        return rolled;
+      },
+    });
+    const stages: Array<{ stage: string; bytes?: number }> = [];
+    expect(await selfUpdateRun(DEFAULT_CONFIG, (progress) => stages.push({ stage: progress.stage, ...(progress.bytes === undefined ? {} : { bytes: progress.bytes }) }))).toEqual(result);
+    expect(stages).toEqual([{ stage: "checking" }, { stage: "downloading", bytes: 5 }, { stage: "done" }]);
+    // The server names the version it runs itself, so pruning never needs a question from the CLI.
+    expect(kept).toEqual([[expect.stringMatching(/^\d+\.\d+\.\d+/)]]);
+    // With no listener there is no subscription at all, and the result is the same.
+    expect(await selfUpdateRollback(DEFAULT_CONFIG)).toEqual(rolled);
+  });
+
+  it("describes each stage in a line, and a download with its size", () => {
+    expect(describeProgress({ stage: "checking" })).toBe("Checking for the latest release...");
+    expect(describeProgress({ stage: "downloading", version: "0.2.0", bytes: 1024 * 1024, total: 4 * 1024 * 1024 })).toBe("Downloading Moxen 0.2.0: 1.0 MiB of 4.0 MiB");
+    expect(describeProgress({ stage: "downloading", bytes: 2 * 1024 * 1024, total: null })).toBe("Downloading Moxen: 2.0 MiB");
   });
 
   it("says what each answer means in text", () => {
@@ -121,11 +153,11 @@ describe("moxen self-update", () => {
     process.env.MOXEN_STORE_ROOT = store;
     try {
       useRemoteServer("winbox");
-      for (const run of [selfUpdateInstall, selfUpdateRun, selfUpdateRollback]) await expect(run()).rejects.toMatchObject({ code: "SELF_UPDATE_REMOTE", exitCode: 2 });
+      for (const run of [() => selfUpdateInstall(), () => selfUpdateRun(DEFAULT_CONFIG), () => selfUpdateRollback(DEFAULT_CONFIG)]) await expect(run()).rejects.toMatchObject({ code: "SELF_UPDATE_REMOTE", exitCode: 2 });
       useRemoteServer(null);
       await expect(selfUpdateInstall()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
-      await expect(selfUpdateRun()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
-      await expect(selfUpdateRollback()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
+      await expect(selfUpdateRun(DEFAULT_CONFIG)).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
+      await expect(selfUpdateRollback(DEFAULT_CONFIG)).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
       expect(readdirSync(store)).toEqual([]);
     } finally {
       if (previous === undefined) delete process.env.MOXEN_STORE_ROOT;

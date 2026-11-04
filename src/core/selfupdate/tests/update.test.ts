@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RELEASE_MARKER, archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseMarker, releaseTarget } from "../../release.js";
 import { LATEST_RELEASE_URL } from "../check.js";
 import { appLayout, type AppLayout } from "../installer.js";
-import { escapingEntries, parseChecksum, rollbackRelease, unsafeEntries, updateRelease, type UpdateOptions } from "../update.js";
+import { escapingEntries, parseChecksum, rollbackRelease, unsafeEntries, updateRelease, type UpdateOptions, type UpdateProgress } from "../update.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -301,6 +301,42 @@ describe("updateRelease", () => {
       expect(result.action).toBe("updated");
       expect(result.warnings).toHaveLength(1);
       expect(readdirSync(w.layout.versions).sort()).toEqual(["0.8.0", "1.0.0", "1.1.0"]);
+    });
+  });
+
+  describe("progress", () => {
+    it("reports each stage in order, a download's bytes and total, and a listener that throws does not fail the update", async () => {
+      const archive = buildArchive("1.1.0");
+      const w = world(["1.0.0"], "1.0.0", null, "1.0.0", network("1.1.0", archive));
+      const seen: UpdateProgress[] = [];
+      const result = await updateRelease(
+        w.options({
+          onProgress: (progress) => {
+            seen.push(progress);
+            throw new Error("a broken listener");
+          },
+        }),
+      );
+      expect(result.action).toBe("updated");
+      expect([...new Set(seen.map((progress) => progress.stage))]).toEqual(["checking", "downloading", "verifying", "unpacking", "testing", "switching", "done"]);
+      const downloads = seen.filter((progress) => progress.stage === "downloading");
+      expect(downloads[0]).toMatchObject({ bytes: 0 });
+      expect(downloads.at(-1)).toMatchObject({ bytes: archive.bytes.length, total: archive.bytes.length });
+      expect(seen.at(-1)).toEqual({ stage: "done", version: "1.1.0" });
+    });
+
+    it("reports only the check and done when already current, and testing, switching and done for a rollback", async () => {
+      const w = world(["1.0.0"], "1.0.0", null, "1.0.0", network("1.0.0", buildArchive("1.0.0")));
+      const stages: string[] = [];
+      await updateRelease(w.options({ onProgress: (progress) => stages.push(progress.stage) }));
+      expect(stages).toEqual(["checking", "done"]);
+
+      const archive = buildArchive("1.1.0");
+      const second = world(["1.0.0"], "1.0.0", null, "1.0.0", network("1.1.0", archive));
+      await updateRelease(second.options());
+      const rolled: string[] = [];
+      await rollbackRelease(second.options({ onProgress: (progress) => rolled.push(progress.stage) }));
+      expect(rolled).toEqual(["testing", "switching", "done"]);
     });
   });
 
