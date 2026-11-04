@@ -37,9 +37,26 @@ export type ThreadTitleSource = "seed" | "provider" | "user";
 
 export type ResearchRole = "researcher" | "critic" | "finalizer";
 
+export interface ResearchSize {
+  readonly researchers: number;
+  readonly critics: number;
+}
+
+export interface ResearchMessage {
+  readonly id: string;
+  readonly threadId: string;
+  readonly kind: "handoff" | "report" | "verdict" | "followup" | "final";
+  readonly text: string;
+  readonly findings: number;
+  readonly round?: number;
+  readonly createdAt: string;
+}
+
 /** Kept atomically with the lead, while each role keeps its own turn and usage ledgers. */
 export interface StoredResearchRun {
   readonly leadThreadId: string;
+  readonly size?: ResearchSize;
+  readonly messages?: readonly ResearchMessage[];
   readonly roles: readonly { readonly threadId: string; readonly role: ResearchRole; readonly question: string }[];
   readonly state: "running" | "completed" | "failed" | "interrupted";
   readonly createdAt: string;

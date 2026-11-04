@@ -77,7 +77,7 @@ import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
 import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
-import type { StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
+import type { ResearchMessage, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
 import type { ThreadInspection, ThreadListStatus, ThreadReadView, ThreadReading } from "../core/threads/views.js";
 import type {
   InteractionMode,
@@ -229,6 +229,7 @@ export type CommandBody =
   /** A task run in a child thread of the same project. The task id is the child thread id. */
   | ({ readonly type: "thread.delegate" } & DelegateRequest)
   | ({ readonly type: "research.role.start" } & ResearchRoleRequest)
+  | { readonly type: "research.message.submit"; readonly threadId: string; readonly text: string }
   | { readonly type: "research.role.cancel"; readonly leadThreadId: string; readonly taskId: string }
   | { readonly type: "thread.image.generate"; readonly parentThreadId: string; readonly prompt: string; readonly references?: readonly string[] }
   | { readonly type: "skills.import"; readonly projectId?: string; readonly source: SkillSource; readonly from: string }
@@ -386,6 +387,7 @@ export interface CommandResults {
   "thread.handover": Omit<Handover, "started"> & { readonly started: StartedTurnSummary | null };
   "thread.delegate": Delegation;
   "research.role.start": Delegation;
+  "research.message.submit": ResearchMessage;
   "research.role.cancel": CancelledTask;
   "thread.image.generate": Delegation;
   "skills.import": SkillAddress;
@@ -463,6 +465,7 @@ export type Query =
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
   | { readonly type: "research.run"; readonly threadId: string }
+  | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
   /**
    * Resolves once the turn is no longer running or queued. A read that
@@ -620,6 +623,7 @@ export interface QueryResults {
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
   "research.run": ResearchRunView | null;
+  "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
@@ -1102,6 +1106,8 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
     case "research.role.start":
       return { ...meta, type, leadThreadId: requireThreadId(record.leadThreadId), role: requireEnum(record.role, type, "role", ["researcher", "critic", "finalizer"] as const), question: requireField(record.question, type, "question"), ...decodeModelRequest(record, type) };
+    case "research.message.submit":
+      return { ...meta, type, threadId: requireThreadId(record.threadId), text: requireField(record.text, type, "text") };
     case "research.role.cancel":
       return { ...meta, type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
     case "thread.delegate":
@@ -1423,6 +1429,7 @@ export function decodeQuery(value: unknown): Query {
         ...optionalBoolean(record, "lastTurn"),
       };
     case "research.run":
+    case "research.messages":
       return { type, threadId: requireThreadId(record.threadId) };
     case "research.role.report":
       return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };

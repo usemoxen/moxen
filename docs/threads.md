@@ -61,8 +61,24 @@ tools; ordinary delegated tasks still cannot delegate. Shell snapshots expose
 `researchRuns` for run discovery and membership changes. The `research.run`
 query returns the lead and roles with current thread/task state and reports;
 clients use the existing per-thread subscriptions for each role's live chat.
-Role access to run messages, procedure caps and the finalizer gate are separate
-follow-up work.
+The run also stores its size (1–8 researchers and 1–3 critics, defaulting to
+8 and 3) and an ordered message log. `research_messages` reads that log for the
+calling session's run only; neither it nor `research_message_submit` accepts a
+target run. Both the role's membership and the lead's ownership are checked.
+Submissions are explicit: researchers publish reports, critics publish verdicts,
+the lead publishes follow-ups, and the finalizer publishes a final report. Chat
+answers alone do not count as submitted reports or verdicts. Starting a role
+records its question as a hand-off. The `research.run` query includes this log.
+
+Each researcher report creates a new findings revision. A critic's first,
+second and third verdict on that revision are its three review rounds; independent
+critics can each participate in those rounds. A fourth verdict is refused until
+new findings are submitted. Finalization requires at least one critic and a
+verdict from every started critic on the current revision. There is one finalizer.
+The chosen researcher count limits running researchers (a settled turn frees a
+slot); the chosen critic count limits critic agents across the run, not just
+those currently running. Caps are checked under the lead's lock before creating
+a role thread, so a refused or concurrent over-cap start leaves no orphan thread.
 
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds

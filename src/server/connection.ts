@@ -123,6 +123,8 @@ import {
   startResearchRole,
   requireResearchRole,
   readResearchRun,
+  readResearchMessages,
+  submitResearchMessage,
   type DelegateRequest,
   recordChecklist,
   describeTask,
@@ -147,7 +149,7 @@ import { backfillNativeSubagents, subagentTranscript } from "../core/threads/sub
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
-import type { CheckpointFileStat, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
+import type { CheckpointFileStat, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
 import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
@@ -366,7 +368,8 @@ export class DirectConnection implements ClientApi {
    * environment (some do), and the tools must reach the same threads.
    */
   private async moxenToolsFor(threadId: string, delegated = false, webFetch = true, memory: MemoryAccess = "write"): Promise<McpServerSpec> {
-    const researchLead = (await readResearchRun(await this.context(), threadId))?.leadThreadId === threadId;
+    const researchRun = await readResearchRun(await this.context(), threadId);
+    const researchLead = researchRun?.leadThreadId === threadId;
     const imageGeneration = !delegated && (await this.imageAvailability(threadId)).available;
     const handoff = await pendingHandoff(await this.context(), threadId);
     // Hosted in this process: Claude calls the tools in-process, the other
@@ -393,7 +396,7 @@ export class DirectConnection implements ClientApi {
       name: MOXEN_MCP_SERVER_NAME,
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
-      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead }),
+      tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: researchRun !== null }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
       checklist,
@@ -471,8 +474,8 @@ export class DirectConnection implements ClientApi {
   }
 
   /** Internal until MXN-243 adds the orchestrator's public choice. */
-  async startResearchRun(request: DelegateRequest) {
-    return await delegate(await this.context(), { ...request, interactionMode: "research" }, { fullResearchRun: true });
+  async startResearchRun(request: DelegateRequest, size?: ResearchSize) {
+    return await delegate(await this.context(), { ...request, interactionMode: "research" }, { fullResearchRun: true, ...(size ? { researchSize: size } : {}) });
   }
 
   /**
@@ -1010,6 +1013,8 @@ export class DirectConnection implements ClientApi {
       }
       case "research.role.start":
         return await startResearchRole(await this.context(), command);
+      case "research.message.submit":
+        return await submitResearchMessage(await this.context(), command.threadId, command.text);
       case "research.role.cancel": {
         const ctx = await this.context();
         await requireResearchRole(ctx, command.leadThreadId, command.taskId);
@@ -1579,6 +1584,8 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "research.messages":
+        return await readResearchMessages(ctx, query.threadId);
       case "research.role.report":
         await requireResearchRole(ctx, query.leadThreadId, query.taskId);
         return await describeTask(ctx, query.leadThreadId, query.taskId);

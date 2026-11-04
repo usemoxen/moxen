@@ -91,7 +91,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
-import type { ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -277,6 +277,7 @@ async function sessionSetup(
     env: thread.env,
     delegation,
     researchLead: thread.researchRun !== undefined,
+    ...(thread.researchRole ? { researchRole: thread.researchRole.role } : {}),
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: reach.orchestration && builtin.some((server) => server.name === "moxen"),
@@ -2199,13 +2200,17 @@ function taskOf(child: ThreadEnvelope, taskId = child.id): TaskView {
  *
  * Waiting awaits the run itself; this used to be a 200ms ledger poll.
  */
-export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean; readonly fullResearchRun?: boolean; readonly researchRole?: ResearchRole } = {}): Promise<Delegation> {
+export async function delegate(ctx: OperationContext, request: DelegateRequest, options: { readonly hidden?: boolean; readonly fullResearchRun?: boolean; readonly researchSize?: ResearchSize; readonly researchRole?: ResearchRole } = {}): Promise<Delegation> {
   const parentThreadId = requireThreadId(request.parentThreadId);
   if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
   else if ((await ctx.store.readThreadRecord(parentThreadId))?.researchRole || await delegationOf(ctx.store, parentThreadId) !== null) {
     throw new CliError("DELEGATION_REFUSED", "A delegated task cannot delegate again.");
   }
   if (options.fullResearchRun && request.interactionMode !== "research") throw new CliError("INVALID_THREAD_OPTION", "A full research run must use Research mode.");
+  const size = options.researchSize ?? { researchers: 8, critics: 3 };
+  if (options.fullResearchRun && (!Number.isInteger(size.researchers) || size.researchers < 1 || size.researchers > 8 || !Number.isInteger(size.critics) || size.critics < 1 || size.critics > 3)) {
+    throw new CliError("INVALID_THREAD_OPTION", "Research size requires researchers 1 to 8 and critics 1 to 3.");
+  }
   const task = request.task.trim();
   if (!task) throw new CliError("PROMPT_REQUIRED", "A non-empty delegated task is required.", { exitCode: 2 });
   const timeoutMs = request.timeoutMs ?? DELEGATE_DEFAULT_TIMEOUT_MS;
@@ -2292,8 +2297,21 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       })
     : null;
   let created: StoredThread;
-  try {
-    created = await createThread(ctx.store, {
+  const now = ctx.store.nowIso();
+  const recordDelegation = async (): Promise<void> => {
+    await ctx.store.appendDelegation({
+      id: randomUUID(), parentThreadId, childThreadId, prompt: task, status: "running",
+      ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
+      ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
+      createdAt: now, updatedAt: now,
+    }).catch((cause: unknown) => {
+      if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
+    });
+  };
+  const createChild = async (): Promise<StoredThread> => {
+    const lead = options.researchRole === undefined ? null : await requireResearchLead(ctx, parentThreadId);
+    if (lead) await checkResearchStart(ctx, lead.researchRun, options.researchRole!);
+    let child = await createThread(ctx.store, {
       id: childThreadId,
       ...(options.hidden === true ? { hidden: true } : {}),
       projectId: parent.projectId,
@@ -2304,6 +2322,27 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       interactionMode,
       env: worktree ? { mode: "worktree", path: worktree.path, branch: worktree.branch } : { ...parentEnv },
     });
+    if (options.fullResearchRun || options.researchRole !== undefined) {
+      child = { ...child,
+        ...(options.fullResearchRun ? { researchRun: { leadThreadId: child.id, size, messages: [], roles: [], state: "running" as const, createdAt: now, updatedAt: now } } : {}),
+        ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
+      };
+      await ctx.store.writeThreadRecord(child);
+      if (lead) {
+        // Publish membership only once clients can describe this delegated task.
+        await recordDelegation();
+        const run = lead.researchRun;
+        await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run,
+          roles: [...run.roles, { threadId: child.id, role: options.researchRole!, question: task }],
+          messages: [...(run.messages ?? []), { id: randomUUID(), threadId: child.id, kind: "handoff", text: task, findings: findingsOf(run), createdAt: now }], updatedAt: now,
+        } });
+        ctx.store.emit(parentThreadId, "research-role-started");
+      }
+    }
+    return child;
+  };
+  try {
+    created = options.researchRole === undefined ? await createChild() : await ctx.store.withThreadLock(parentThreadId, createChild);
   } catch (cause) {
     if (worktree) {
       await runProcess("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentEnv.path }).catch(() => undefined);
@@ -2317,41 +2356,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   }
   // Recorded before the child's session starts: that start reads it to tell
   // the child it is a delegated task (`core/threads/instructions.ts`).
-  const now = new Date().toISOString();
-  if (options.fullResearchRun || options.researchRole !== undefined) {
-    created = {
-      ...created,
-      ...(options.fullResearchRun ? { researchRun: { leadThreadId: created.id, roles: [], state: "running" as const, createdAt: now, updatedAt: now } } : {}),
-      ...(options.researchRole === undefined ? {} : { researchRole: { leadThreadId: parentThreadId, role: options.researchRole } }),
-    };
-    await ctx.store.writeThreadRecord(created);
-    if (options.researchRole !== undefined) {
-      const role = options.researchRole;
-      await ctx.store.withThreadLock(parentThreadId, async () => {
-        const lead = await requireResearchLead(ctx, parentThreadId);
-        await ctx.store.writeThreadRecord({
-          ...lead,
-          researchRun: { ...lead.researchRun, roles: [...lead.researchRun.roles, { threadId: created.id, role, question: task }], updatedAt: now },
-        });
-        ctx.store.emit(parentThreadId, "research-role-started");
-      });
-    }
-  }
-  await ctx.store
-    .appendDelegation({
-      id: randomUUID(),
-      parentThreadId,
-      childThreadId: created.id,
-      prompt: task,
-      status: "running",
-      ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
-      ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
-      createdAt: now,
-      updatedAt: now,
-    })
-    .catch((cause: unknown) => {
-      if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
-    });
+  if (options.researchRole === undefined) await recordDelegation();
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
     throw new CliError(
       "THREAD_START_FAILED",
@@ -2406,6 +2411,71 @@ export interface ResearchRoleRequest extends ModelRequest {
   readonly leadThreadId: string;
   readonly role: ResearchRole;
   readonly question: string;
+}
+
+function findingsOf(run: StoredResearchRun): number {
+  return (run.messages ?? []).filter((message) => message.kind === "report").length;
+}
+
+/** Called with the lead lock held, before creating a child. Missing turns reserve a slot too. */
+async function checkResearchStart(ctx: OperationContext, run: StoredResearchRun, role: ResearchRole): Promise<void> {
+  const size = run.size ?? { researchers: 8, critics: 3 };
+  if (role === "researcher") {
+    let active = 0;
+    for (const entry of run.roles.filter((entry) => entry.role === role)) {
+      const turns = await ctx.store.readTurns(entry.threadId);
+      if (!turns.length || turns.some((turn) => turn.status === "running" || turn.status === "queued")) active++;
+    }
+    const cap = Math.min(8, size.researchers);
+    if (active >= cap) throw new CliError("RESEARCH_CAP", `Researcher running cap is ${cap} (maximum 8).`);
+  }
+  if (role === "critic") {
+    const cap = Math.min(3, size.critics);
+    if (run.roles.filter((entry) => entry.role === role).length >= cap) throw new CliError("RESEARCH_CAP", `Critic agent cap is ${cap} (maximum 3).`);
+  }
+  if (role === "finalizer") {
+    const critics = run.roles.filter((entry) => entry.role === "critic");
+    if (!critics.length || critics.some((critic) => !(run.messages ?? []).some((message) => message.kind === "verdict" && message.threadId === critic.threadId && message.findings === findingsOf(run)))) {
+      throw new CliError("RESEARCH_CAP", "Finalizer requires at least one verdict from every started critic on the current findings, and at least one critic.");
+    }
+    if (run.roles.some((entry) => entry.role === role)) throw new CliError("RESEARCH_CAP", "Finalizer agent cap is 1.");
+  }
+}
+
+async function researchMembership(ctx: OperationContext, threadId: string): Promise<string> {
+  const thread = await ctx.store.readThreadRecord(requireThreadId(threadId));
+  const leadId = thread?.researchRole?.leadThreadId ?? threadId;
+  const lead = await requireResearchLead(ctx, leadId);
+  if (threadId !== leadId && !lead.researchRun.roles.some((entry) => entry.threadId === threadId && entry.role === thread?.researchRole?.role)) {
+    throw new CliError("RESEARCH_ROLE_REQUIRED", "Only a member of this research run may read or submit its messages.");
+  }
+  return leadId;
+}
+
+export async function readResearchMessages(ctx: OperationContext, threadId: string): Promise<{ leadThreadId: string; messages: readonly ResearchMessage[] }> {
+  const leadThreadId = await researchMembership(ctx, threadId);
+  const lead = await requireResearchLead(ctx, leadThreadId);
+  return { leadThreadId, messages: lead.researchRun.messages ?? [] };
+}
+
+/** Explicit submissions, not arbitrary transcript text, become reports and verdicts. */
+export async function submitResearchMessage(ctx: OperationContext, threadId: string, text: string): Promise<ResearchMessage> {
+  if (typeof text !== "string" || !text.trim()) throw new CliError("INVALID_TOOL_INPUT", "A non-empty research message is required.");
+  const leadId = await researchMembership(ctx, threadId);
+  return await ctx.store.withThreadLock(leadId, async () => {
+    const lead = await requireResearchLead(ctx, leadId);
+    const run = lead.researchRun;
+    const role = run.roles.find((entry) => entry.threadId === threadId)?.role;
+    const kind = role === "critic" ? "verdict" : role === "finalizer" ? "final" : threadId === leadId ? "followup" : "report";
+    // Only researchers change the findings under review; a final report does not reopen review.
+    const findings = findingsOf(run) + (role === "researcher" ? 1 : 0);
+    const round = kind === "verdict" ? (run.messages ?? []).filter((message) => message.kind === "verdict" && message.threadId === threadId && message.findings === findings).length + 1 : undefined;
+    if (round !== undefined && round > 3) throw new CliError("RESEARCH_CAP", "Critic round cap is 3 per set of findings.");
+    const message: ResearchMessage = { id: randomUUID(), threadId, kind, text: text.trim(), findings, ...(round === undefined ? {} : { round }), createdAt: ctx.store.nowIso() };
+    await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run, messages: [...(run.messages ?? []), message], updatedAt: message.createdAt } });
+    ctx.store.emit(leadId, "research-message-submitted");
+    return message;
+  });
 }
 
 export async function startResearchRole(ctx: OperationContext, request: ResearchRoleRequest): Promise<Delegation> {

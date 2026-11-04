@@ -26,7 +26,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { APP_DISPLAY_NAME, APP_NAME } from "../config.js";
-import type { ThreadEnv } from "./types.js";
+import type { ResearchRole, ThreadEnv } from "./types.js";
 import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.js";
 import { buildWebGuidance, type WebGuidanceInput } from "./webguidance.js";
 import { UI_BLOCK_LANGUAGE, UI_BLOCK_LIMITS, UI_BLOCK_VERSION, UI_COLORS, UI_STATES } from "./uiblock.js";
@@ -49,6 +49,7 @@ export interface RuntimeInstructionsInput {
   /** True when the session has Moxen's delegation tools (not a delegated task itself, and Moxen's tools not switched off for the provider). */
   readonly delegationTools?: boolean;
   readonly researchLead?: boolean;
+  readonly researchRole?: ResearchRole;
   /** True only while the built-in Moxen MCP server reaches this session. */
   readonly knowledge?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
@@ -317,6 +318,9 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
         ? "You lead a full research run. Use research_role_start to start a researcher, critic or finalizer with a self-contained question, provider, model and effort; research_role_report to read its report; research_role_cancel to stop it. These roles cannot delegate. You have no delegation tools. Merge the roles' findings into your final answer: that answer is the single report returned to the orchestrator."
         : NO_REDELEGATION_GUIDANCE,
     ];
+    if (input.researchLead || input.researchRole) {
+      lines.push("Use research_messages to read only your own run's hand-offs, reports, verdicts and follow-ups. Use research_message_submit to publish your output to the run: a researcher report creates a new findings revision; a critic submission is an explicit verdict, with at most three rounds per findings revision; a finalizer publishes the final report; the lead publishes follow-ups. A finalizer can start only after every started critic has submitted a verdict on the current findings. A final answer in your chat alone is not a submitted report or verdict.");
+    }
     if (input.env.mode === "worktree" && input.env.branch) {
       lines.push(
         `You work in your own git worktree at ${input.env.path}, on branch ${input.env.branch}` +
