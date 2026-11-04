@@ -269,6 +269,17 @@ describe("fetchPage without a browser", () => {
   });
 });
 
+it("says why when the browser could not read a scripted page, instead of only reporting an empty one", async () => {
+  routes.set("/spa-no-browser", (_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end('<html><head><title>App</title></head><body><div id="root"></div><script src="/a.js"></script><script src="/b.js"></script><script src="/c.js"></script></body></html>');
+  });
+  // A file that exists but is no program: the browser fails at once, on every platform.
+  const result = await fetchPage(`${base}/spa-no-browser`, {}, context({ browser: { mode: "auto", path: __filename } }));
+  expect(result.isError).toBeFalsy();
+  expect(result.content).toContain("the browser could not read it");
+}, 60_000);
+
 // -- the browser tier, against a real Chromium when this machine has one -------------------------------------------
 
 const browserPath = findBrowser({ mode: "auto" });

@@ -147,11 +147,13 @@ export async function fetchPage(rawUrl: string, options: { readonly render?: boo
   const body = textOf(response);
   if (/html/.test(type) || (type === "" && /^\s*<(?:!doctype|html)/i.test(body))) {
     const page = extractText(body, finalUrl);
+    let browserFailed = "";
     if (page.looksScripted && executable) {
       const rendered = await throughBrowser(url, executable, context);
       if (!rendered.isError) return rendered;
+      browserFailed = `\n(This page builds its content with scripts, and the browser could not read it: ${rendered.content})`;
     }
-    const hint = page.looksScripted ? (executable ? "" : "\n(This page builds its content with scripts and little is readable without a browser; install Chrome or Chromium to read it.)") : "";
+    const hint = page.looksScripted ? (executable ? browserFailed : "\n(This page builds its content with scripts and little is readable without a browser; install Chrome or Chromium to read it.)") : "";
     return wrap(url, finalUrl, page.title, `${note}${hint}`.trim(), page.text, context.artifactDir);
   }
   return wrap(url, finalUrl, "", note, body, context.artifactDir);
