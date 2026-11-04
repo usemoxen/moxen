@@ -165,6 +165,21 @@ describe("a change of instructions on a thread with history", () => {
   const send = (connection: DirectConnection, threadId: string, text: string) =>
     connection.dispatch({ type: "thread.turn.start", threadId, message: { text }, wait: true });
 
+  it("tells Codex its model and effort, and tells it again when a turn changes them", async () => {
+    const { harness, starts, prompts, open } = await world();
+    const connection = open();
+    const codex = (model: string, effort: string) => ({ instanceId: "codex", model, options: [{ id: "effort", value: effort }] });
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "codex", model: "gpt-a", thinkingEffort: "medium" });
+      expect(String(starts.at(-1)?.instructions)).toContain("You are running on the model gpt-a at medium effort.");
+      await connection.dispatch({ type: "thread.turn.start", threadId: created.threadId, message: { text: "two" }, wait: true, modelSelection: codex("gpt-b", "high") });
+      expect(prompts.at(-1)).toContain(UPDATE);
+      expect(prompts.at(-1)).toContain("You are running on the model gpt-b at high effort.");
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("keeps the system prompt it began with on every resume, and appends the change once, ahead of the next prompt", async () => {
     const { harness, starts, prompts, open, setInstructions } = await world();
     const first = open();

@@ -7,7 +7,7 @@ import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, pars
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { runningModelOf, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -18,6 +18,23 @@ const LINUX = { platform: "linux" as const, shells: ["bash", "sh"] as readonly S
 const SHELL_TEXT = buildShellGuidance({ ...LINUX, harness: "Claude Code" });
 
 describe("runtime instructions", () => {
+  it("names the model only for providers whose prompt is Moxen's, and only for the instance running it", () => {
+    const options = [{ id: "effort", value: "high" }];
+    expect(runningModelOf({ instanceId: "codex", model: "gpt-6.1-sol", options }, "codex")).toEqual({ model: "gpt-6.1-sol", effort: "high" });
+    expect(runningModelOf({ instanceId: "harness/colab", model: "qwen" }, "harness/colab")).toEqual({ model: "qwen" });
+    expect(runningModelOf({ instanceId: "claudeAgent", model: "claude-opus-5-5" }, "claudeAgent")).toBeNull();
+    expect(runningModelOf({ instanceId: "opencode/anthropic", model: "m" }, "opencode/anthropic")).toBeNull();
+    expect(runningModelOf({ instanceId: "claudeAgent", model: "claude-opus-5-5" }, "codex")).toBeNull();
+  });
+
+  it("tells a session its model and effort only when asked to, so Codex can sign its work", () => {
+    const running = buildRuntimeInstructions({ instanceId: "codex", env: LOCAL, shell: LINUX, running: { model: "gpt-6.1-sol", effort: "medium" } });
+    expect(running).toContain("You are running on the model gpt-6.1-sol at medium effort.");
+    const noEffort = buildRuntimeInstructions({ instanceId: "codex", env: LOCAL, shell: LINUX, running: { model: "gpt-6.1-sol" } });
+    expect(noEffort).toContain("You are running on the model gpt-6.1-sol.");
+    expect(buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX })).not.toContain("You are running on the model");
+  });
+
   it("points to knowledge only when its tools are present, including in delegated worktrees", () => {
     const input = { instanceId: CLAUDE, env: WORKTREE, shell: LINUX, delegation: { parentTitle: "Parent", baseBranch: "main" } };
     expect(buildRuntimeInstructions(input)).not.toContain("# Moxen knowledge base");

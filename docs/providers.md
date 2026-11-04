@@ -144,6 +144,10 @@ Moxen replaces Codex's own base prompt (`baseInstructions`, built in
 instructions. `bun scripts/system-prompt.ts --provider codex` prints both. Resumed
 threads send the new base prompt too, so their cached prefix is read afresh once.
 
+That base prompt doesn't state a model, and neither does the Moxen Harness's, so
+the runtime instructions tell Codex and Harness sessions their model and effort.
+A change mid-thread reaches them as an instructions update on the next turn.
+
 Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
 with Automatic, Concise and Off also available. Moxen preserves the reported
 sections and renders their markdown; the amount of reasoning exposed remains

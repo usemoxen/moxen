@@ -62,7 +62,7 @@ import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -275,8 +275,10 @@ async function sessionSetup(
   const nativeConfig = nativeKind === null ? undefined : ctx.config.providers?.[nativeKind];
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
+  const running = runningModelOf(thread.modelSelection, instanceId);
   const current = buildRuntimeInstructions({
     instanceId: thread.modelSelection.instanceId,
+    ...(running ? { running } : {}),
     env: thread.env,
     delegation,
     researchLead: isResearchRunActive(thread.researchRun),
@@ -364,7 +366,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     return;
   }
   const selection = turn.modelSelection ?? thread.modelSelection;
-  const turnThread: StoredThread = { ...thread, interactionMode: turn.interactionMode };
+  const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
   let driver: TurnDriver;
   let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
@@ -1173,7 +1175,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
-  const turnThread: StoredThread = { ...sent.thread, interactionMode: sent.turn.interactionMode };
+  const turnThread: StoredThread = { ...sent.thread, modelSelection: turnModel, interactionMode: sent.turn.interactionMode };
   let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
   let startFailure: unknown = null;
   try {

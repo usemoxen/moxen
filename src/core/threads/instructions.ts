@@ -12,15 +12,17 @@
  *
  * Every session gets one line saying it runs through moxen, in its own
  * harness — so an agent asked where it is answers truthfully, while still
- * being the Claude Code / OpenCode it is. It names no model: the model can
- * change mid-thread, and each harness already states its own. Every session
- * is also told to research before it guesses. The other sections appear
+ * being the Claude Code / OpenCode it is. Claude Code and OpenCode state their
+ * own model, so it names none for them. Codex's and the Harness's prompts are
+ * Moxen's and state none, so those sessions are told their model and effort
+ * here; a change mid-thread reaches them as an update. Every session is also
+ * told to research before it guesses. The other sections appear
  * only when they apply. Project rules files (`AGENTS.md`,
  * `CLAUDE.md`) are the providers' business — each already reads its own;
  * this is for what only moxen knows. (What happens when one is edited while a
  * conversation lives is `rulefiles.ts`'s: a patch, not a resend.)
  */
-import { driverKindOfInstance } from "../types.js";
+import { driverKindOfInstance, type ModelSelection } from "../types.js";
 import { UNTRUSTED_NOTE } from "../untrusted.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -31,9 +33,19 @@ import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.
 import { buildWebGuidance, type WebGuidanceInput } from "./webguidance.js";
 import { UI_BLOCK_LANGUAGE, UI_BLOCK_LIMITS, UI_BLOCK_VERSION, UI_COLORS, UI_STATES } from "./uiblock.js";
 
+/** What to tell a session about its model: only where the prompt is Moxen's, and only for the instance that runs `selection`. */
+export function runningModelOf(selection: ModelSelection, instanceId: string): { model: string; effort?: string } | null {
+  const kind = driverKindOfInstance(instanceId);
+  if ((kind !== "codex" && kind !== "harness") || selection.instanceId !== instanceId) return null;
+  const effort = selection.options?.find((option) => option.id === "effort")?.value;
+  return { model: selection.model, ...(effort === undefined ? {} : { effort: String(effort) }) };
+}
+
 export interface RuntimeInstructionsInput {
   /** The model selection's instance id (`claudeAgent`, `opencode/…`): names the harness. */
   readonly instanceId: string;
+  /** The model and effort of a session whose prompt states neither (`runningModelOf`). */
+  readonly running?: { readonly model: string; readonly effort?: string };
   /** Where the session runs. A worktree gets told what that means. */
   readonly env: ThreadEnv;
   /** Set when this thread is a delegated task of another thread. */
@@ -280,6 +292,10 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
     `In case you're asked: you are running in ${APP_DISPLAY_NAME}, a terminal app that runs coding agents as threads. ` +
       "No need to mention this otherwise.",
   ];
+  if (input.running) {
+    const effort = input.running.effort ? ` at ${input.running.effort} effort` : "";
+    environment.push(`You are running on the model ${input.running.model}${effort}. Use this when you name yourself or sign your work; never guess it.`);
+  }
   if (!delegation && input.env.mode === "worktree" && input.env.branch) {
     environment.push(
       `This session runs in a dedicated git worktree at ${input.env.path}, on branch ${input.env.branch}. ` +
