@@ -2636,6 +2636,27 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   };
 }
 
+/**
+ * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
+ * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
+ * same for a real id and a fake one, when that thread did not delegate it.
+ */
+async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
+  const rows = await ctx.store.readDelegations();
+  const owned = rows.find((row) => row.parentThreadId === parentThreadId && row.childThreadId === requireThreadId(rawTaskId));
+  if (!owned) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
+  }
+  // A task that carried on in a new thread is that thread now.
+  let row = owned;
+  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+    const next = rows.find((candidate) => candidate.parentThreadId === parentThreadId && candidate.childThreadId === row.continuedIn);
+    if (!next) break;
+    row = next;
+  }
+  return row;
+}
+
 export type CancelledTaskStatus = DelegatedTaskStatus | "cancelled" | "cancel_requested";
 
 export interface CancelledTask extends Omit<DescribedTask, "task"> {
@@ -2646,9 +2667,14 @@ export interface CancelledTask extends Omit<DescribedTask, "task"> {
   readonly stateAfter: string | null;
 }
 
-/** Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended. */
+/**
+ * Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended.
+ * Only the thread that delegated the task (or the continuation its running tasks were re-pointed to) may.
+ */
 export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<CancelledTask> {
-  const described = await describeTask(ctx, rawParentThreadId, rawTaskId);
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
+  const described = await describeTask(ctx, parentThreadId, row.childThreadId);
   const { child } = described;
   if (!isThreadActive(child)) {
     const terminal = child.latestTurn?.state;
@@ -2725,18 +2751,7 @@ export async function sendTaskMessage(
   const parentThreadId = requireThreadId(rawParentThreadId);
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
-  const rows = await ctx.store.readDelegations();
-  const owned = rows.find((row) => row.parentThreadId === parentThreadId && row.childThreadId === requireThreadId(rawTaskId));
-  if (!owned) {
-    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
-  }
-  // A task that carried on in a new thread is that thread now.
-  let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
-    const next = rows.find((candidate) => candidate.parentThreadId === parentThreadId && candidate.childThreadId === row.continuedIn);
-    if (!next) break;
-    row = next;
-  }
+  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
   const caller = await ctx.store.readThreadRecord(parentThreadId);
   const target = await ctx.store.readThreadRecord(row.childThreadId);
   if (!caller || !target) throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3 });

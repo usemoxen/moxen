@@ -119,6 +119,8 @@ moxen threads task-status --thread <parent-id> --task <child-thread-id>
 moxen threads task-cancel --thread <parent-id> --task <child-thread-id>
 ```
 
+`task-cancel` (and the `task_cancel` tool) stop only a task that `--thread` delegated, or that the thread it continued from delegated and was handed to it on `thread.continue`; any other thread id, real or not, fails with `TASK_NOT_FOUND`. `task-status` is unchanged.
+
 `delegate` sends only the task prompt as the child's first turn and waits for its latest turn to reach `completed`, `interrupted`, or `error` (default budget 600000ms via `--timeout-ms`; `--no-wait` returns after acceptance). A wait timeout exits 0 with `data.task.waitTimedOut: true` and never cancels the child — re-poll with `task-status`. `task-cancel` interrupts the live provider run through the store and marks the turn interrupted.
 
 Thread targeting uses exit code `3` for a missing target and `4` for a lifecycle/confirmation refusal.

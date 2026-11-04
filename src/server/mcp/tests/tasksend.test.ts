@@ -228,3 +228,44 @@ describe("task_send: research runs and delegated tasks", () => {
     }
   }, 30_000);
 });
+
+describe("task_cancel: whose task it is", () => {
+  it("refuses a thread that did not delegate the task, and leaves the task running", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
+      const refused = await callMoxenTool(t.connection, stranger.threadId, "task_cancel", { taskId });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("TASK_NOT_FOUND");
+      // A thread that is not a task of anyone's gets the same answer as an id that does not exist.
+      const other = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: stranger.threadId });
+      expect(other.isError).toBe(true);
+      expect(other.text).toContain("TASK_NOT_FOUND");
+      expect((await t.store.readTurns(taskId)).map((turn) => turn.status)).toEqual(["running"]);
+      expect((await t.store.readTurns(stranger.threadId)).some((turn) => turn.status === "interrupted")).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("lets the delegating thread cancel, and after the orchestrator continues only the continuation", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const first = await t.delegate();
+      const second = await t.delegate(undefined, "second");
+      const cancelled = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: first });
+      expect(cancelled.isError).toBe(false);
+      expect(JSON.parse(cancelled.text)).toMatchObject({ taskId: first, cancelRequested: true });
+
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: second })).text).toContain("TASK_NOT_FOUND");
+      expect((await t.store.readTurns(second)).map((turn) => turn.status)).toEqual(["running"]);
+      const fromContinuation = await callMoxenTool(t.connection, continued.threadId, "task_cancel", { taskId: second });
+      expect(fromContinuation.isError).toBe(false);
+      expect(JSON.parse(fromContinuation.text)).toMatchObject({ taskId: second, cancelRequested: true });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+});
