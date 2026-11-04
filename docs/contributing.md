@@ -118,7 +118,7 @@ To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
 ## Releases
 
 A release is a `v<version>` tag, where the version is `package.json`'s (the one source of truth, which
-`APP_VERSION` reads). To make one: bump `version`, merge, then push the tag `v<version>`.
+`APP_VERSION` reads). To make one: bump `version`, run `bun scripts/build-knowledge.ts` (the shipped knowledge carries it), merge, then push the tag `v<version>`.
 `.github/workflows/release.yml` then, on `macos-latest` and `windows-latest`: checks the tag against
 `package.json` (a mismatch fails), runs `bun run check`, builds and packs the archive, smoke-tests it and
 uploads it as a workflow artifact. A `publish` job, only on a tag and only once both platforms pass, creates
