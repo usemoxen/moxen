@@ -84,6 +84,12 @@ try {
   assert.ok(realpathSync.native(library).startsWith(realpathSync.native(folder) + path.sep), `${target.nativePackage} resolved outside the archive: ${library}`);
   console.log(`ok: layout, version ${manifest.version}, ${target.nativePackage}`);
 
+  if (args.includes("--embeddings")) {
+    const verify = spawnSync(process.execPath, [path.join(checkout, "scripts", "verify-memory-embeddings.ts"), "--dist", path.join(folder, "dist")], { stdio: "inherit", cwd: scratch, env: process.env });
+    assert.equal(verify.status, 0, "memory embeddings failed against the archive");
+    console.log("ok: memory embeddings");
+  }
+
   // Install from the unpacked folder into a throwaway store (its path holds a space, as a Windows user folder can),
   // start through the launcher from a working directory with a space, then delete the source: the copy must stand alone.
   const installStore = path.join(scratch, "install store");
@@ -128,12 +134,6 @@ try {
   assert.equal(inside.status, 0, `install from inside versions failed: ${inside.stdout}${inside.stderr}`);
   assert.deepEqual(readdirSync(path.join(installStore, "app", "versions")), [manifest.version]);
   console.log("ok: install from the installed copy");
-
-  if (args.includes("--embeddings")) {
-    const verify = spawnSync(process.execPath, [path.join(checkout, "scripts", "verify-memory-embeddings.ts"), "--dist", path.join(folder, "dist")], { stdio: "inherit", cwd: scratch, env: process.env });
-    assert.equal(verify.status, 0, "memory embeddings failed against the archive");
-    console.log("ok: memory embeddings");
-  }
 } finally {
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
