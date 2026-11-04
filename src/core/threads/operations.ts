@@ -998,6 +998,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
   }
   const notifyParent = await carryDelegation(store, source.id, created.id);
+  await endContinuedSession(ctx, source);
   const adopted = await adoptRunningTasks(store, source.id, created.id);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
@@ -1022,6 +1023,33 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   });
   store.emit(source.id, "thread-continued");
   return { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null };
+}
+
+/**
+ * The thread that was continued is done: its provider session ends, so a
+ * background task (a CI watcher, a Monitor) cannot finish later and start a
+ * turn in it with no message from the user — the new thread carries the work
+ * on, and two threads must not act on the same news. A turn still open on it
+ * is left to finish (stopping the session would cut it off), so only the
+ * tasks the provider lets us name are stopped then. Nothing here touches the
+ * delegations: running children were re-pointed (`adoptRunningTasks`) and
+ * finished ones stay reachable. A thread that merely finished a turn never
+ * comes through here, so its wake-ups stay.
+ */
+async function endContinuedSession(ctx: OperationContext, source: StoredThread): Promise<void> {
+  try {
+    const driver = ctx.driverFor(source.modelSelection.instanceId);
+    const open = openTurn(await ctx.store.readTurns(source.id)) !== null;
+    if (open) {
+      for (const task of driver.backgroundTasks?.(source.id) ?? []) {
+        if (driver.stopBackgroundTask) await Effect.runPromise(driver.stopBackgroundTask(source.id, task.taskId)).catch(() => undefined);
+      }
+      return;
+    }
+    if (driver.stopSession) await Effect.runPromise(driver.stopSession(source.id));
+  } catch {
+    // Best effort: the continuation is made whether or not the old session could be ended.
+  }
 }
 
 /**

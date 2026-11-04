@@ -593,6 +593,16 @@ background work. Background work lives in the session, so it outlasts a
 turn only where the session does: in a shared server, or a client that
 stays open.
 
+A thread that has only finished a turn keeps those wake-ups: an orchestrator
+relies on a watcher to wake it. A thread that was continued in a new one does
+not. Continuing ends its provider session (`endContinuedSession` in
+`core/threads/operations.ts`), which stops its background tasks and closes the
+way they could start a turn there, so the old thread and the new one never act
+on the same news. If a turn is still open on it, the session is left to finish
+and only the tasks the provider can name are stopped. Sending the old thread a
+message resumes it from its cursor, without its old background work. Delegated
+tasks are separate and unchanged by this.
+
 ## Live updates
 
 The instructions a conversation began with are kept, not rewritten. What

@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../threads.js";
@@ -109,5 +110,58 @@ describe("an orchestrator continued in a new thread", () => {
 
   it("adds no note when no task is running", () => {
     expect(runningTasksNote([])).toBe("");
+  });
+});
+
+describe("a thread continued in a new one", () => {
+  /** The codex test driver, with the calls that end a session or a background task recorded. */
+  function watch(w: Awaited<ReturnType<typeof world>>, tasks: readonly string[] = []) {
+    const driver = w.ctx.driverFor("codex") as TurnDriver & { stopSession?: unknown; backgroundTasks?: unknown; stopBackgroundTask?: unknown };
+    const stopped: string[] = [];
+    const taskStops: string[] = [];
+    driver.stopSession = (threadId: string) => Effect.sync(() => void stopped.push(threadId));
+    driver.backgroundTasks = () => tasks.map((taskId) => ({ taskId, taskType: "local_bash", description: taskId }));
+    driver.stopBackgroundTask = (threadId: string, taskId: string) => Effect.sync(() => void taskStops.push(`${threadId}:${taskId}`));
+    return { stopped, taskStops };
+  }
+
+  it("ends its session so a background task cannot wake it, and leaves every other thread's session alone", async () => {
+    const w = await world();
+    const old = await w.make("old");
+    const other = await w.make("still live");
+    for (const thread of [old, other]) {
+      const turn = (await sendTurn(w.store, thread.id, { prompt: "Work" })).turn;
+      await completeTurn(w.store, thread.id, turn.id, { text: "Done." });
+    }
+    const calls = watch(w);
+    const continued = await continueThread(w.ctx, { threadId: old.id });
+    expect(calls.stopped).toEqual([old.id]);
+    expect(calls.stopped).not.toContain(other.id);
+    expect(calls.stopped).not.toContain(continued.threadId);
+  });
+
+  it("stops the background tasks it can name, and keeps the session, while a turn is still open on it", async () => {
+    const w = await world();
+    const old = await w.make("old");
+    await sendTurn(w.store, old.id, { prompt: "Work" });
+    const calls = watch(w, ["watcher"]);
+    await continueThread(w.ctx, { threadId: old.id });
+    expect(calls.taskStops).toEqual([`${old.id}:watcher`]);
+    expect(calls.stopped).toEqual([]);
+  });
+
+  it("ends the orchestrator's session but not a running child's, which moves to the new thread", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    await sendTurn(w.store, child.id, { prompt: "Build it" });
+    const turn = (await sendTurn(w.store, parent.id, { prompt: "Plan" })).turn;
+    await completeTurn(w.store, parent.id, turn.id, { text: "Delegated." });
+    const calls = watch(w);
+    const continued = await continueThread(w.ctx, { threadId: parent.id });
+    expect(calls.stopped).toEqual([parent.id]);
+    expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(continued.threadId);
   });
 });
