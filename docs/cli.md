@@ -411,9 +411,10 @@ folder with nothing outside it, then starts the new version with `--version`
 the folder take its name `versions/<version>/`, the old `current` is recorded in
 `<app>/previous`, and `current` changes. Any failure before that (download,
 checksum, unpack, start, wrong version) exits 1, removes the temp folder and
-changes nothing. Old versions are then deleted, keeping `current`, `previous`
-and the version the command itself runs from; one that cannot be deleted (on
-Windows, a folder in use) is a warning, never a failed update. An install that
+changes nothing. Old versions are then deleted, keeping `current`, `previous`,
+the version the command itself runs from and the version this machine's server
+runs. If the server doesn't answer, none are deleted. One that cannot be deleted
+(on Windows, a folder in use) is a warning, never a failed update. An install that
 is already the latest exits 0 and writes nothing. A source checkout
 (`SELF_UPDATE_SOURCE_INSTALL`), a release not yet under `versions/`
 (`SELF_UPDATE_NOT_INSTALLED`, which says to run `--install`) and a second update

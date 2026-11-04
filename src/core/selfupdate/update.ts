@@ -50,6 +50,8 @@ export interface UpdateOptions extends ReadInstallOptions {
   readonly execPath?: string;
   readonly downloadTimeoutMs?: number;
   readonly startTimeoutMs?: number;
+  /** The versions other processes here run (the server). Null when that can't be told, which keeps every old version. */
+  readonly runningVersions?: () => Promise<readonly string[] | null>;
   /** Deletes an old version folder (tests make it fail, as a folder in use does on Windows). */
   readonly removeFolder?: (folder: string) => Promise<void>;
 }
@@ -393,7 +395,9 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
 
       const keep = new Set<string>([version, install.version]);
       if (previous !== null) keep.add(previous);
-      const warnings = await prune(layout, keep, options.removeFolder ?? removeFully);
+      // A server that has not restarted can be several updates behind, and it still reads its own folder.
+      const running = options.runningVersions === undefined ? [] : await options.runningVersions().catch(() => null);
+      const warnings = running === null ? ["Could not tell which version the server runs, so old versions were kept."] : await prune(layout, new Set([...keep, ...running]), options.removeFolder ?? removeFully);
       return { action: "updated", version, from, previous, folder: finalFolder, current: layout.current, warnings } satisfies UpdateResult;
     } finally {
       await removeFully(scratch).catch(() => undefined);

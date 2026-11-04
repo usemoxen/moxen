@@ -9,6 +9,8 @@ import { installRelease, type InstallResult } from "../core/selfupdate/installer
 import { rollbackRelease, updateRelease, type RollbackResult, type UpdateResult } from "../core/selfupdate/update.js";
 import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
 import type { CliConfig } from "../core/types.js";
+import { defaultEndpoint, probe } from "../server/transport/endpoint.js";
+import { RemoteConnection } from "../server/transport/remote.js";
 import { activeRemoteServer, cliClient } from "./infra/client.js";
 
 /** The `--json` data: the server's answer, plus which server that was (null: this machine's). */
@@ -43,10 +45,22 @@ export async function selfUpdateInstall(): Promise<InstallResult> {
   return await installRelease();
 }
 
+/** The version this machine's server runs, so an update doesn't delete it. Asks only a server that is up: this must not start one. */
+async function localServerVersions(): Promise<readonly string[]> {
+  const endpoint = defaultEndpoint();
+  if (!(await probe(endpoint))) return [];
+  const connection = await RemoteConnection.connect(endpoint, { reconnect: false });
+  try {
+    return [(await connection.query({ type: "app.update.check" })).install.version];
+  } finally {
+    await connection.close();
+  }
+}
+
 /** The plain command: download, test and switch to the latest release. This machine only. */
 export async function selfUpdateRun(): Promise<UpdateResult> {
   requireLocal("Updating");
-  return await updateRelease();
+  return await updateRelease({ runningVersions: localServerVersions });
 }
 
 /** `--rollback`: back to the recorded previous version. This machine only. */

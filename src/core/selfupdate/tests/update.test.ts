@@ -286,6 +286,22 @@ describe("updateRelease", () => {
       expect(result.warnings[0]).toContain("0.8.0");
       expect(text(w.layout.current)).toBe("1.1.0\n");
     });
+
+    it("keeps the version a server still runs, however many updates behind it is", async () => {
+      const archive = buildArchive("1.1.0");
+      const w = world(["0.8.0", "0.9.0", "1.0.0"], "1.0.0", "0.9.0", "1.0.0", network("1.1.0", archive));
+      await updateRelease(w.options({ runningVersions: async () => ["0.8.0"] }));
+      expect(readdirSync(w.layout.versions).sort()).toEqual(["0.8.0", "1.0.0", "1.1.0"]);
+    });
+
+    it("deletes no old version when it can't tell what the server runs, and the update still succeeds", async () => {
+      const archive = buildArchive("1.1.0");
+      const w = world(["0.8.0", "1.0.0"], "1.0.0", null, "1.0.0", network("1.1.0", archive));
+      const result = await updateRelease(w.options({ runningVersions: async () => { throw new Error("no answer"); } }));
+      expect(result.action).toBe("updated");
+      expect(result.warnings).toHaveLength(1);
+      expect(readdirSync(w.layout.versions).sort()).toEqual(["0.8.0", "1.0.0", "1.1.0"]);
+    });
   });
 
   describe("concurrency", () => {
