@@ -21,6 +21,8 @@ import { ChangelogModal } from "../features/experience/experiencemodal.js";
 import { OnboardingPage } from "../features/experience/onboardingpage.js";
 import { useExperience } from "../features/experience/useExperience.js";
 import { StatsModal } from "../features/stats/statsmodal.js";
+import { UpdateModal } from "../features/update/updatemodal.js";
+import { useAppUpdate } from "../features/update/useAppUpdate.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import type { ActiveServer } from "../features/remote/server.js";
 import { useRemote } from "../features/remote/useRemote.js";
@@ -220,6 +222,8 @@ export function App({
   // what was fetched once is fetched again then (the server may be a new one).
   const serverLink = useServerLink(client);
   const reconnects = useReconnects(serverLink);
+  // Held here, not in the screen: an update goes on when the screen is closed, and the screen finds it when reopened.
+  const appUpdate = useAppUpdate(client, serverLink.status === "connected");
   const remoteAccess = useRemote({ client, server, onSwitchServer, push: toasts.push, ...(pairedServers ? { pairedServers } : {}) });
   /** Composer is drafting the first message of a new thread, not a reply. */
   const [creating, setCreating] = useState(launchView !== "thread");
@@ -416,7 +420,10 @@ export function App({
   useEffect(() => {
     return client.subscribeShell(
       {},
-      (item) => setShell((current) => applyShellFrame(current, item)),
+      (item) => {
+        appUpdate.onFrame(item);
+        setShell((current) => applyShellFrame(current, item));
+      },
       (cause) => setError(String(cause).slice(0, 120)),
     );
   }, [client]);
@@ -1785,6 +1792,7 @@ export function App({
       rows: [
         { key: "moxen:onboarding", label: t("guide.open"), onPick: () => { experience.setStep(0); setPicker("onboarding"); } },
         { key: "moxen:changelog", label: t("guide.changelog"), onPick: () => setPicker("changelog") },
+        { key: "moxen:update", label: t("palette.update"), onPick: () => { appUpdate.open(); setPicker("update"); } },
       ],
     });
     const queueRows = [
@@ -3331,6 +3339,17 @@ export function App({
           top={backgroundGeometry.top}
           width={backgroundGeometry.width}
           height={backgroundGeometry.height}
+          onClose={() => setPicker(null)}
+        />
+      ) : picker === "update" ? (
+        <UpdateModal
+          view={appUpdate.view}
+          serverName={server?.name ?? null}
+          screenWidth={width}
+          screenHeight={height}
+          onInstall={appUpdate.install}
+          onRollback={appUpdate.rollback}
+          onCheck={appUpdate.check}
           onClose={() => setPicker(null)}
         />
       ) : picker === "stats" ? (

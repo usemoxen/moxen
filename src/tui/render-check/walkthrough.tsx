@@ -60,6 +60,7 @@ import { runServerLink } from "./scenarios/serverLink.js";
 import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
 import { runExperience } from "./scenarios/experience.js";
+import { runUpdateScreen } from "./scenarios/updateScreen.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
 
@@ -153,6 +154,7 @@ export async function runWalkthrough(): Promise<void> {
   await runKnowledge();
   await runAsyncQuestions();
   await runExperience();
+  await runUpdateScreen();
   await runModalInput();
   await runWorkQueueModal();
 

@@ -59,6 +59,21 @@ background follows Animated / Static / Off, and it supports English and Spanish.
 The step list and Back/Continue stay visible while an inline editor is open;
 its own back link returns one level within setup, then to the guide step.
 
+## Updating Moxen
+
+**Update Moxen** in the command palette opens the update screen, which asks GitHub once
+when it opens (or when you press `c`) and never in the background. It shows the installed
+and the available version, the release's notes (they scroll with Page Up/Down) and, before
+anything is installed, that running threads and connected clients keep their version until
+the Moxen server restarts and that nothing restarts by itself. `u` installs, `r` (twice) goes
+back to the previous version, `c` checks again. An update shows each stage, with the
+download's progress; closing the screen does not cancel it, and reopening shows where it is.
+When it ends the screen says a restart is needed. A failure says why and that your running
+version is untouched. If the connection to the server drops mid-update the screen says it lost
+track and offers to check again. A source checkout is told to update with git, and a paired
+server's versions are shown with no way to install: both are changed on the machine itself.
+Another update already running (for example from `moxen self-update`) is reported as such.
+
 ## What's new
 
 **What's new** in the command palette opens the bundled release history.
@@ -73,8 +88,7 @@ Later leaves it unread.
 The unread-release notice hides while the viewer is open and returns after Later.
 
 Release notes are bundled and work offline. No update check, download or
-installation is performed here; the in-app updater is a separate feature
-(MXN-197).
+installation is performed here; that is the update screen above.
 
 Completion and read acknowledgements live in `experience.json` under the
 connected server's store root. They are shared by clients using that store,

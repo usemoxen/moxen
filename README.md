@@ -30,7 +30,7 @@ starts the version `current` names. The builds are not signed or notarized.
 To update an installed Moxen, run `moxen self-update`: it downloads the latest release, verifies its checksum, starts
 it once to be sure it works, and only then switches to it. `moxen self-update --rollback` goes back to the version
 before. Running threads keep their version until the moxen server restarts; the update restarts nothing.
-`moxen self-update --check` only looks.
+`moxen self-update --check` only looks. The same is in the TUI: **Update Moxen** in the command palette.
 
 ### From a checkout
 

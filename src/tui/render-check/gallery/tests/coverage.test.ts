@@ -28,7 +28,7 @@ function componentsIn(folder: string): string[] {
 const NOT_YET: string[] = [];
 
 describe("component gallery", () => {
-  const drawn = ["gallery/ui.tsx", "gallery/features.tsx", "gallery/settings.tsx", "gallery/scenes.tsx", "gallery/sidepanel.tsx", "gallery/editors.tsx", "gallery/panels.tsx"].map((file) => readFileSync(path.join(tui, "render-check", file), "utf8")).join("\n");
+  const drawn = ["gallery/ui.tsx", "gallery/features.tsx", "gallery/settings.tsx", "gallery/scenes.tsx", "gallery/sidepanel.tsx", "gallery/editors.tsx", "gallery/panels.tsx", "gallery/update.tsx"].map((file) => readFileSync(path.join(tui, "render-check", file), "utf8")).join("\n");
   const all = [...componentsIn("ui"), ...componentsIn("features")];
 
   it("draws every component, or names it as not yet drawn", () => {

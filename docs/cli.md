@@ -440,6 +440,10 @@ gone or no longer starts, it exits 1 with `SELF_UPDATE_NO_PREVIOUS` (or
 `--json` data: `{ action: "rolled-back", version, from, previous, folder,
 current, warnings }`.
 
+The TUI's **Update Moxen** screen (command palette, see [Getting started](getting-started.md#updating-moxen))
+is a client of the same server commands and the `--check` query: it follows the stages by `commandId`, offers no
+install or rollback on a source checkout or a paired server, and never checks in the background.
+
 Changed on purpose: the plain `moxen self-update` used to exit 1 with
 `SELF_UPDATE_UNAVAILABLE`; it now updates.
 

@@ -18,6 +18,7 @@ export type PickerName =
   | "onboarding"
   | "changelog"
   | "stats"
+  | "update"
   | "schedule"
   | "work-queue"
   | "queue-schedule"
