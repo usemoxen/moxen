@@ -722,14 +722,15 @@ function SpeakerHeader({
   background: string;
 }) {
   return (
-    <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-      <text fg={color} bg={background}>{label}</text>
-      <text fg={COLOR.faint} bg={background}>{time.length === 0 ? "" : `  ·  ${time}`}</text>
+    // Each part keeps its width and the row clips on the right: in a narrow column, shrinking them would blank each one.
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, overflow: "hidden" }}>
+      <text style={{ flexShrink: 0 }} fg={color} bg={background}>{label}</text>
+      <text style={{ flexShrink: 0 }} fg={COLOR.faint} bg={background}>{time.length === 0 ? "" : `  ·  ${time}`}</text>
       {mode === undefined ? null : (
-        <text fg={MODE_COLOR[mode.mode]} bg={background}>{`  ·  ${tx(interactionModeLabel(mode.mode))}${mode.oneOff ? ` ${tr("timeline.modeOnce")}` : ""}`}</text>
+        <text style={{ flexShrink: 0 }} fg={MODE_COLOR[mode.mode]} bg={background}>{`  ·  ${tx(interactionModeLabel(mode.mode))}${mode.oneOff ? ` ${tr("timeline.modeOnce")}` : ""}`}</text>
       )}
       {extra === undefined || extra.length === 0 ? null : (
-        <text fg={extraColor ?? COLOR.faint} bg={background}>{`  ·  ${extra}`}</text>
+        <text style={{ flexShrink: 0 }} fg={extraColor ?? COLOR.faint} bg={background}>{`  ·  ${extra}`}</text>
       )}
     </box>
   );
@@ -1145,14 +1146,14 @@ function WorkFold({
 
   return (
     <box
-      style={{ flexDirection: "row", marginLeft: GUTTER, marginTop: 1, height: 1, flexShrink: 0 }}
+      style={{ flexDirection: "row", marginLeft: GUTTER, marginTop: 1, height: 1, flexShrink: 0, overflow: "hidden" }}
       onMouseDown={onToggle}
       {...handlers}
     >
-      <text fg={foldFg} selectable={false}>
+      <text style={{ flexShrink: 0 }} fg={foldFg} selectable={false}>
         {`${expanded ? "▾" : "▸"} ${tr(open ? "timeline.workingFor" : "timeline.workedFor", { time: formatDuration(durationMs) })}`}
       </text>
-      <text fg={COLOR.faint} selectable={false}>
+      <text style={{ flexShrink: 0 }} fg={COLOR.faint} selectable={false}>
         {`  ·  ${tr("timeline.steps", { count: steps })}  ·  ${clockTime(group.startedAt, now)}`}
       </text>
     </box>
