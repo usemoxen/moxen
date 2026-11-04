@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeCommand } from "../protocol.js";
+import { decodeCommand, decodeQuery } from "../protocol.js";
 
 describe("provider.update on the wire", () => {
   it("takes only a provider that can update", () => {
@@ -9,5 +9,11 @@ describe("provider.update on the wire", () => {
     for (const provider of ["grok", "", undefined, 3]) {
       expect(() => decodeCommand({ type: "provider.update", provider })).toThrow(/provider to be one of claude, opencode, codex/);
     }
+  });
+});
+
+describe("app.update.check on the wire", () => {
+  it("is a query with no arguments", () => {
+    expect(decodeQuery({ type: "app.update.check" })).toEqual({ type: "app.update.check" });
   });
 });

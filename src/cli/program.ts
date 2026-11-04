@@ -26,6 +26,7 @@ import {
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
+import { describeSelfUpdate, requireCheck, selfUpdateCheck } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
@@ -579,6 +580,19 @@ program
       const context = await commandContext();
       const { update, text } = await updateCommand(context.config, parseUpdatable(provider));
       writeSuccess(update, context, text);
+    }),
+  );
+
+program
+  .command("self-update")
+  .description("Show which Moxen is installed (release or source checkout) and whether a newer GitHub release exists. Installing is not available yet.")
+  .option("--check", "Look for a newer release. Read-only; asks GitHub once.")
+  .action((options: { check?: boolean }) =>
+    action(async () => {
+      const context = await commandContext();
+      requireCheck(options.check);
+      const report = await selfUpdateCheck(context.config);
+      writeSuccess(report, context, describeSelfUpdate(report));
     }),
   );
 

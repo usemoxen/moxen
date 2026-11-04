@@ -128,11 +128,15 @@ does everything except publish, so use it to try a change to the release itself.
 - `bun scripts/package-release.ts [--out dir]` packs one archive for the platform it runs on:
   `moxen-<version>-<os>-<arch>.tar.gz` (macOS) or `.zip` (Windows), one top-level folder, plus `.sha256`.
   It builds into a clean folder with `scripts/build.ts --outdir`, never from `dist/` (which keeps old chunks for
-  a day and may be in use). The folder holds `dist/`, `mods/`, `package.json`, `README.md`, `LICENSE`,
+  a day and may be in use). The folder holds `dist/`, `mods/`, `package.json`, `release.json`, `README.md`, `LICENSE`,
   `THIRD_PARTY_LICENSES.md` and `node_modules/@opentui/core-<platform>-<arch>`: the one package the bundle
   still loads from disk (`external` in `build.ts`). The SDK's native `claude` binary is left out, since Moxen
   always passes the user's own `claude`. If the bundle starts loading another package or file from disk,
   `package-release.ts` must copy it and `smoke-release.ts` must fail without it.
+- `release.json` (version, OS, architecture) is how an installed Moxen knows it is a release and not a source
+  checkout (`core/selfupdate/install.ts`): anything without a matching marker is `source` and is never offered an
+  update. The naming rules (`core/release.ts`) are shared by the scripts and the server's check
+  (`core/selfupdate/check.ts`, the `app.update.check` query).
 - `bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path>]` unpacks into a temp folder
   outside the checkout and checks the layout, that `--version` equals `package.json`, and that the native
   OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`

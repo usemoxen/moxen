@@ -4,7 +4,7 @@
  *   bun scripts/package-release.ts [--out <dir>]        (default: release/ in the checkout)
  *
  * writes `moxen-<version>-<os>-<arch>.tar.gz|zip` and a `.sha256` file beside it. The archive has one
- * top-level folder holding the bundle (`dist/`), `mods/`, `package.json`, the licenses, and the one
+ * top-level folder holding the bundle (`dist/`), `mods/`, `package.json`, `release.json` (the marker that makes it a release install), the licenses, and the one
  * dependency the bundle still loads from disk: this platform's native OpenTUI package. Everything else
  * the bundle needs is bundled, so the archive runs with only Bun installed (`bun dist/cli/index.js`).
  *
@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveFileName, packCommand, releaseBaseName, releaseTarget } from "./release-lib.js";
+import { archiveFileName, packCommand, RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget } from "./release-lib.js";
 
 const root = path.resolve(import.meta.dir, "..");
 const outFlag = process.argv.indexOf("--out");
@@ -42,6 +42,9 @@ try {
   for (const file of ["package.json", "README.md", "LICENSE", "THIRD_PARTY_LICENSES.md"]) {
     cpSync(path.join(root, file), path.join(folder, file));
   }
+
+  // What tells an installed copy it is a release (and not a checkout): the app reads this, and treats anything without it as source.
+  writeFileSync(path.join(folder, RELEASE_MARKER), `${JSON.stringify(releaseMarker(manifest.version, target), null, 2)}\n`);
 
   // The native library is found in node_modules beside the bundle at runtime, so it travels as it is.
   const native = path.join(root, "node_modules", ...target.nativePackage.split("/"));

@@ -1,0 +1,99 @@
+/**
+ * `moxen self-update --check`: the `--json` data is pinned byte for byte (goldens in `envelopes/`), over the wire
+ * and in-process, and the text says what a person needs. The server's answer is injected; the check itself is
+ * pinned in `core/selfupdate/tests`.
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { DEFAULT_CONFIG } from "../../core/config.js";
+import type { UpdateCheck } from "../../core/selfupdate/vocabulary.js";
+import { DirectConnection } from "../../server/connection.js";
+import { RemoteConnection } from "../../server/transport/remote.js";
+import { serve } from "../../server/transport/serve.js";
+import { testEndpoint } from "../../server/transport/tests/endpoint.js";
+import { setClientFactory, useRemoteServer } from "../infra/client.js";
+import { describeSelfUpdate, requireCheck, selfUpdateCheck } from "../selfupdate.js";
+
+const golden = (name: string): string => path.join(__dirname, "envelopes", `${name}.json`);
+const json = (data: unknown): string => `${JSON.stringify({ ok: true, data }, null, 2)}\n`;
+
+const install = { version: "0.1.2", kind: "release", folder: "/opt/moxen-0.1.2-macos-arm64", target: { os: "macos", arch: "arm64" } } as const;
+const available: UpdateCheck = {
+  install,
+  status: "available",
+  reason: null,
+  updatable: true,
+  latest: {
+    version: "0.2.0",
+    tag: "v0.2.0",
+    url: "https://github.com/usemoxen/moxen/releases/tag/v0.2.0",
+    notes: "## What's Changed",
+    archive: { name: "moxen-0.2.0-macos-arm64.tar.gz", url: "https://github.com/usemoxen/moxen/releases/download/v0.2.0/moxen-0.2.0-macos-arm64.tar.gz", size: 1234 },
+    checksum: { name: "moxen-0.2.0-macos-arm64.tar.gz.sha256", url: "https://github.com/usemoxen/moxen/releases/download/v0.2.0/moxen-0.2.0-macos-arm64.tar.gz.sha256", size: 90 },
+  },
+};
+const noRelease: UpdateCheck = { install: { ...install, kind: "source", folder: "/work/moxen" }, status: "no-release", reason: null, latest: null, updatable: false };
+
+const cleanup: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  setClientFactory(null);
+  useRemoteServer(null);
+  for (const step of cleanup.splice(0).reverse()) await step();
+});
+
+async function overTheWire(answer: UpdateCheck): Promise<void> {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moxen-selfupdate-"));
+  const endpoint = testEndpoint();
+  const api = new DirectConnection({ storeRoot: root, checkAppUpdate: async () => answer });
+  const server = await serve({ endpoint, api, onClose: () => api.close() });
+  const connections: RemoteConnection[] = [];
+  setClientFactory(async () => {
+    const connection = await RemoteConnection.connect(endpoint);
+    connections.push(connection);
+    return connection;
+  });
+  cleanup.push(async () => {
+    for (const connection of connections) await connection.close();
+    await server.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+}
+
+describe("moxen self-update", () => {
+  it("--json: an available update on a release install", async () => {
+    await overTheWire(available);
+    const report = await selfUpdateCheck(DEFAULT_CONFIG);
+    await expect(json(report)).toMatchFileSnapshot(golden("self-update-check-available"));
+  });
+
+  it("--json: no release yet, on a source checkout", async () => {
+    await overTheWire(noRelease);
+    await expect(json(await selfUpdateCheck(DEFAULT_CONFIG))).toMatchFileSnapshot(golden("self-update-check-no-release"));
+  });
+
+  it("labels a paired server's answer as remote", async () => {
+    await overTheWire(available);
+    useRemoteServer("winbox");
+    const report = await selfUpdateCheck(DEFAULT_CONFIG);
+    expect(report.remote).toBe("winbox");
+    expect(describeSelfUpdate(report)).toMatch(/^Remote server winbox: Moxen 0\.1\.2, release install/);
+  });
+
+  it("says what each answer means in text", () => {
+    const text = (check: UpdateCheck) => describeSelfUpdate({ remote: null, ...check });
+    expect(text(available)).toContain("Update available: 0.2.0");
+    expect(text({ ...available, install: { ...install, kind: "source" }, updatable: false })).toContain("source checkout (never updated by moxen)");
+    expect(text({ ...available, install: { ...install, kind: "source" }, updatable: false })).toContain("not updated by moxen");
+    expect(text(noRelease)).toContain("No release has been published yet.");
+    expect(text({ ...noRelease, status: "unavailable", reason: "could not reach GitHub" })).toContain("Could not check: could not reach GitHub.");
+  });
+
+  it("refuses to install: without --check it exits non-zero", () => {
+    expect(() => requireCheck(undefined)).toThrow(expect.objectContaining({ code: "SELF_UPDATE_UNAVAILABLE", exitCode: 1 }));
+    expect(() => requireCheck(true)).not.toThrow();
+  });
+});

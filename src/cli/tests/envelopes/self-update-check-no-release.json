@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "data": {
+    "remote": null,
+    "install": {
+      "version": "0.1.2",
+      "kind": "source",
+      "folder": "/work/moxen",
+      "target": {
+        "os": "macos",
+        "arch": "arm64"
+      }
+    },
+    "status": "no-release",
+    "reason": null,
+    "latest": null,
+    "updatable": false
+  }
+}

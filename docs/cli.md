@@ -370,6 +370,22 @@ Provider updates run on the server machine: `moxen update claude`,
 `moxen update opencode`, or `moxen update codex`. They use each provider’s
 own updater and report the version before and after.
 
+`moxen self-update --check` says which Moxen the server is: its version, whether
+it is a `release` install (unpacked from a release archive, which carries a
+`release.json`) or a `source` checkout, its folder and platform, and whether
+the latest GitHub release of `usemoxen/moxen` is newer. `status` is
+`up-to-date`, `available`, `no-release` (nothing published yet; not an error)
+or `unavailable` (offline, rate limited or an unreadable answer, with a
+`reason`). `updatable` is true only for a release install with an available
+release that has this platform's archive and checksum; a source checkout never
+is. It only reads, asks GitHub once with no credential and ignores
+`updates.checkLatest` (an explicit check always runs). With `--server <name>`
+it shows that paired server's install, with `remote` set to its name. Without
+`--check` it exits 1: installing an update is not available yet.
+`--json` data: `{ remote, install: { version, kind, folder, target }, status,
+reason, latest: { version, tag, url, notes, archive, checksum } | null,
+updatable }`.
+
 `moxen memory list` lists the current project's and global memories. Agents
 can also use the read-only `memory_search` MCP tool to search names,
 descriptions and bodies by keyword, including entries omitted from the

@@ -20,6 +20,7 @@
  * in the tree uses `effect/Schema` today; a discriminated union plus these
  * decoders costs less and breaks in more obvious ways.
  */
+import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
 import type { SubagentTranscript } from "../core/threads/subagents.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
@@ -577,6 +578,12 @@ export type Query =
   /** The newest Claude Code and OpenCode the registry offers (read when `updates.checkLatest` is on). */
   | { readonly type: "provider.latest" }
   /**
+   * What this server is (version, release or source install, folder, platform) and whether GitHub Releases has a
+   * newer Moxen for it. Always asks when called: `updates.checkLatest` governs the settings page's own reads, not
+   * this explicit one. Read-only; a source install is never `updatable`.
+   */
+  | { readonly type: "app.update.check" }
+  /**
    * The Git panel's whole first paint for a thread's working directory:
    * status, branches and one branch's commits. Keyed by thread rather
    * than a path so a worktree thread reads its own checkout and no client
@@ -676,6 +683,7 @@ export interface QueryResults {
   "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
+  "app.update.check": UpdateCheck;
   "git.overview": GitOverview;
   "workspace.git": { readonly stdout: string };
   "workspace.read": { readonly content: string };
@@ -1539,6 +1547,7 @@ export function decodeQuery(value: unknown): Query {
     case "experience.read":
     case "config.read":
     case "provider.latest":
+    case "app.update.check":
       return { type };
     case "handoff.pending":
       return { type, threadId: requireField(record.threadId, type, "threadId") };

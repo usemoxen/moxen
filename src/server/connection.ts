@@ -38,6 +38,9 @@ import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
 import { latestVersions } from "../core/providers/latest.js";
+import { checkForUpdate } from "../core/selfupdate/check.js";
+import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
+import { readInstall } from "../core/selfupdate/install.js";
 import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
@@ -209,6 +212,8 @@ export interface DirectConnectionOptions {
   readonly updateProvider?: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   /** Reads the newest provider versions (tests); defaults to the npm registry. */
   readonly latestVersions?: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
+  /** Checks GitHub Releases for a newer Moxen (tests); defaults to the real check of the running install. */
+  readonly checkAppUpdate?: () => Promise<UpdateCheck>;
   /** The `fetch` the harness test and probe use; tests hand in a fake server. */
   readonly harnessFetch?: typeof fetch;
 }
@@ -240,6 +245,7 @@ export class DirectConnection implements ClientApi {
   private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
+  private readonly checkAppUpdate: () => Promise<UpdateCheck>;
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
@@ -293,6 +299,7 @@ export class DirectConnection implements ClientApi {
     void this.applyEmbeddingPolicy().catch(() => undefined);
     this.harnessFetch = options.harnessFetch;
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
+    this.checkAppUpdate = options.checkAppUpdate ?? (() => checkForUpdate({ install: readInstall() }));
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
@@ -1726,6 +1733,8 @@ export class DirectConnection implements ClientApi {
         }
         return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
       }
+      case "app.update.check":
+        return await this.checkAppUpdate();
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
       case "usage.protection":

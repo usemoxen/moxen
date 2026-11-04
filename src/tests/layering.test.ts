@@ -66,6 +66,8 @@ const KERNEL_PREFIXES = [
   "src/core/catalog/permissions",
   "src/core/catalog/selection",
   "src/core/catalog/update",
+  // What an install is and whether a newer release exists: shapes and version order the server answers with and `moxen self-update` draws.
+  "src/core/selfupdate/vocabulary",
   // Static starting points for the guided add flows (server types, MCP servers): data, not an operation.
   "src/core/providers/harness/presets",
   "src/core/threads/views",

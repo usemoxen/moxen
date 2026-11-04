@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { releaseBaseName, releaseTarget, unpackCommand } from "./release-lib.js";
+import { RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
 
 const checkout = path.resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
@@ -46,9 +46,11 @@ try {
   const remove = flagValue("--remove");
   if (remove) rmSync(path.join(folder, remove), { recursive: true, force: true });
 
-  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "mods/agent-skills", "package.json", "README.md", "LICENSE", "node_modules"]) {
+  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
     assert.ok(existsSync(path.join(folder, ...entry.split("/"))), `${entry} is missing from the archive`);
   }
+
+  assert.deepEqual(JSON.parse(readFileSync(path.join(folder, RELEASE_MARKER), "utf8")), releaseMarker(manifest.version, target), `${RELEASE_MARKER} does not describe this release`);
 
   // A throwaway store, and no way back to the checkout's packages.
   const env: NodeJS.ProcessEnv = {
