@@ -4,6 +4,7 @@
  * client may look at it and that is all; installing is not offered here yet, and never escalates.
  */
 import { CliError } from "../core/errors.js";
+import { installRelease, type InstallResult } from "../core/selfupdate/installer.js";
 import type { UpdateCheck } from "../core/selfupdate/vocabulary.js";
 import type { CliConfig } from "../core/types.js";
 import { activeRemoteServer, cliClient } from "./infra/client.js";
@@ -16,6 +17,20 @@ export interface SelfUpdateReport extends UpdateCheck {
 export async function selfUpdateCheck(config: CliConfig): Promise<SelfUpdateReport> {
   const check = await (await cliClient(config)).query({ type: "app.update.check" });
   return { remote: activeRemoteServer(), ...check };
+}
+
+/** `--install`: this machine only, never a paired server, and never from a source checkout (the installer refuses that first). */
+export async function selfUpdateInstall(): Promise<InstallResult> {
+  const remote = activeRemoteServer();
+  if (remote !== null) {
+    throw new CliError("SELF_UPDATE_REMOTE", `Installing is done on the machine itself, not through a paired server (${remote}). Run moxen self-update --install there.`, { exitCode: 2 });
+  }
+  return await installRelease();
+}
+
+export function describeInstall(result: InstallResult): string {
+  const did = result.alreadyInstalled ? `Moxen ${result.version} was already installed; it is now the current version.` : `Installed Moxen ${result.version}.`;
+  return [did, `Version folder: ${result.folder}`, `Current: ${result.current}`, `Launcher: ${result.launcher}`, "", result.pathHint].join("\n");
 }
 
 export function requireCheck(check: boolean | undefined): void {

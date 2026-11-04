@@ -144,6 +144,12 @@ does everything except publish, so use it to try a change to the release itself.
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.
+- `moxen self-update --install` (`core/selfupdate/installer.ts`) installs a release under `<store root>/app` (`versions/<version>/`,
+  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). `smoke-release.ts` also runs it from the unpacked folder into a
+  throwaway store whose path has a space, starts the launcher with `--version` from a working directory with a space,
+  deletes the unpacked folder and starts it again, then repeats the install. On Windows it runs the `.cmd` through
+  `cmd.exe /d /s /c` with verbatim arguments, so the launcher path is quoted once and Node adds no backslash escapes.
+  The installer is in the layering test's kernel list because it must never be a server command.
 - Not signed or notarized, no Intel Mac build, and Bun is not bundled.
 
 ## Boundaries

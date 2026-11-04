@@ -26,7 +26,7 @@ import {
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
 import { parseUpdatable, updateCommand } from "./update.js";
-import { describeSelfUpdate, requireCheck, selfUpdateCheck } from "./selfupdate.js";
+import { describeInstall, describeSelfUpdate, requireCheck, selfUpdateCheck, selfUpdateInstall } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
@@ -585,11 +585,18 @@ program
 
 program
   .command("self-update")
-  .description("Show which Moxen is installed (release or source checkout) and whether a newer GitHub release exists. Installing is not available yet.")
+  .description("Show which Moxen is installed (release or source checkout) and whether a newer GitHub release exists, or install this release under ~/.moxen/app. Updating is not available yet.")
   .option("--check", "Look for a newer release. Read-only; asks GitHub once.")
-  .action((options: { check?: boolean }) =>
+  .option("--install", "From an unpacked release: copy it to the app folder's versions, make it current and write the launcher. This machine only.")
+  .action((options: { check?: boolean; install?: boolean }) =>
     action(async () => {
       const context = await commandContext();
+      if (options.install === true) {
+        if (options.check === true) throw new CliError("INVALID_ARGUMENT", "Use --check or --install, not both.", { exitCode: 2 });
+        const result = await selfUpdateInstall();
+        writeSuccess(result, context, describeInstall(result));
+        return;
+      }
       requireCheck(options.check);
       const report = await selfUpdateCheck(context.config);
       writeSuccess(report, context, describeSelfUpdate(report));

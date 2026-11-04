@@ -381,10 +381,25 @@ release that has this platform's archive and checksum; a source checkout never
 is. It only reads, asks GitHub once with no credential and ignores
 `updates.checkLatest` (an explicit check always runs). With `--server <name>`
 it shows that paired server's install, with `remote` set to its name. Without
-`--check` it exits 1: installing an update is not available yet.
+`--check` or `--install` it exits 1: installing an update is not available yet.
 `--json` data: `{ remote, install: { version, kind, folder, target }, status,
 reason, latest: { version, tag, url, notes, archive, checksum } | null,
 updatable }`.
+
+`moxen self-update --install` sets a release up under Moxen's app folder
+(`<store root>/app`; by default `~/.moxen/app`, or `$MOXEN_STORE_ROOT/app`):
+`versions/<version>/` holds the unpacked release, `current` is a plain text file
+naming the active version (replaced by a temp-file rename, so never half
+written), and `bin/moxen` (a POSIX `sh` script; `bin/moxen.cmd` on Windows)
+reads `current` on every start and runs `bun versions/<version>/dist/cli/index.js`
+with the arguments untouched. It works only from an unpacked `release` install:
+a source checkout exits 1 with `SELF_UPDATE_SOURCE_INSTALL` before anything is
+written. It is local only: with `--server` it exits 2 with `SELF_UPDATE_REMOTE`,
+and no server command does it, so a paired client cannot reach it. A version
+already installed is left alone; run from inside `versions/`, it only sets
+`current` and rewrites the launcher. It prints how to put `app/bin` on PATH and
+edits no profile. `--json` data: `{ version, folder, current, launcher, bin,
+alreadyInstalled, pathHint }`.
 
 `moxen memory list` lists the current project's and global memories. Agents
 can also use the read-only `memory_search` MCP tool to search names,

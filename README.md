@@ -17,12 +17,15 @@ Intel Macs are not built yet.
 
 ```bash
 tar -xzf moxen-<version>-macos-arm64.tar.gz     # Windows: tar -xf moxen-<version>-windows-x64.zip
-bun moxen-<version>-macos-arm64/dist/cli/index.js --version
+bun moxen-<version>-macos-arm64/dist/cli/index.js self-update --install
 ```
 
 Check the download against its `.sha256` first (`shasum -a 256 -c <file>.sha256` on macOS; on Windows compare
-`Get-FileHash` with the file's contents). Then point a `moxen` command at `dist/cli/index.js` inside the
-unpacked folder, as shown below for a checkout. The builds are not signed or notarized.
+`Get-FileHash` with the file's contents). `self-update --install` copies the release to
+`~/.moxen/app/versions/<version>/`, records it in `~/.moxen/app/current`, writes a `moxen` launcher (`moxen.cmd` on
+Windows) in `~/.moxen/app/bin`, and prints how to put that folder on your PATH. It edits no shell profile. Run
+it again any time: an installed version is left as it is. After that you can delete the unpacked folder, and `moxen`
+starts the version `current` names. The builds are not signed or notarized.
 
 ### From a checkout
 

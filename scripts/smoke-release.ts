@@ -6,11 +6,12 @@
  * It checks the folder layout, that the bundle reports the version in `package.json`, and that the native
  * OpenTUI package loads from the unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against
  * the unpacked daemon. `--remove` deletes a path first, to prove the check fails when something is missing.
+ * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below).
  * Nothing here starts a server or touches `~/.moxen`: the commands run with a throwaway store.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
@@ -82,6 +83,51 @@ try {
   const { library } = JSON.parse(native.stdout.trim().split("\n").pop()!) as { library: string };
   assert.ok(realpathSync.native(library).startsWith(realpathSync.native(folder) + path.sep), `${target.nativePackage} resolved outside the archive: ${library}`);
   console.log(`ok: layout, version ${manifest.version}, ${target.nativePackage}`);
+
+  // Install from the unpacked folder into a throwaway store (its path holds a space, as a Windows user folder can),
+  // start through the launcher from a working directory with a space, then delete the source: the copy must stand alone.
+  const installStore = path.join(scratch, "install store");
+  const installEnv: NodeJS.ProcessEnv = { ...env, MOXEN_STORE_ROOT: installStore, MOXEN_CONFIG: path.join(installStore, "config.json") };
+  const install = () => {
+    const result = run(process.execPath, [path.join(folder, "dist", "cli", "index.js"), "self-update", "--install", "--json"], { cwd: folder, env: installEnv });
+    assert.equal(result.status, 0, `--install failed: ${result.stdout}${result.stderr}`);
+    return JSON.parse(result.stdout) as { ok: true; data: { version: string; folder: string; current: string; launcher: string; alreadyInstalled: boolean } };
+  };
+  const first = install().data;
+  assert.equal(first.alreadyInstalled, false);
+  assert.equal(first.version, manifest.version);
+  assert.ok(path.resolve(first.current).startsWith(path.resolve(installStore) + path.sep), "install wrote outside the throwaway store");
+  assert.equal(readFileSync(first.current, "utf8").trim(), manifest.version, "current does not name the version");
+  // A second install from the same source is safe: the version is left as it is.
+  const second = install().data;
+  assert.equal(second.alreadyInstalled, true);
+  assert.deepEqual(readdirSync(path.join(installStore, "app", "versions")), [manifest.version]);
+  assert.equal(readFileSync(second.current, "utf8").trim(), manifest.version);
+  console.log("ok: repeat install changes nothing");
+  const workdir = path.join(scratch, "work dir");
+  mkdirSync(workdir);
+  const launch = () => {
+    if (process.platform === "win32") {
+      // /s strips the outer quotes of the command line; verbatim arguments stop Node adding backslash-escapes cmd does not read.
+      const result = spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${first.launcher}" --version"`], { encoding: "utf8", cwd: workdir, env: installEnv, timeout: 120_000, windowsVerbatimArguments: true });
+      if (result.error) throw result.error;
+      return result;
+    }
+    return run(first.launcher, ["--version"], { cwd: workdir, env: installEnv });
+  };
+  const launched = launch();
+  assert.equal(launched.status, 0, `the launcher failed: ${launched.stderr}`);
+  assert.equal(launched.stdout.trim(), manifest.version, "the launcher runs a different version");
+  rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  const alone = launch();
+  assert.equal(alone.status, 0, `the installed copy does not run without the unpacked folder: ${alone.stderr}`);
+  assert.equal(alone.stdout.trim(), manifest.version);
+  console.log(`ok: install, launcher (${path.basename(first.launcher)}) in a folder with spaces`);
+  // From inside versions it only sets current and rewrites the launcher.
+  const inside = run(process.execPath, [path.join(first.folder, "dist", "cli", "index.js"), "self-update", "--install", "--json"], { cwd: workdir, env: installEnv });
+  assert.equal(inside.status, 0, `install from inside versions failed: ${inside.stdout}${inside.stderr}`);
+  assert.deepEqual(readdirSync(path.join(installStore, "app", "versions")), [manifest.version]);
+  console.log("ok: install from the installed copy");
 
   if (args.includes("--embeddings")) {
     const verify = spawnSync(process.execPath, [path.join(checkout, "scripts", "verify-memory-embeddings.ts"), "--dist", path.join(folder, "dist")], { stdio: "inherit", cwd: scratch, env: process.env });

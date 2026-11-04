@@ -68,6 +68,8 @@ const KERNEL_PREFIXES = [
   "src/core/catalog/update",
   // What an install is and whether a newer release exists: shapes and version order the server answers with and `moxen self-update` draws.
   "src/core/selfupdate/vocabulary",
+  // Installing this release under the app folder: an act on this machine's own files that must never be a server command (a paired remote client could reach it), so the CLI runs it itself. It opens no store and starts nothing.
+  "src/core/selfupdate/installer",
   // Static starting points for the guided add flows (server types, MCP servers): data, not an operation.
   "src/core/providers/harness/presets",
   "src/core/threads/views",

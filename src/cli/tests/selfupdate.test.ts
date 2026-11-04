@@ -3,7 +3,7 @@
  * and in-process, and the text says what a person needs. The server's answer is injected; the check itself is
  * pinned in `core/selfupdate/tests`.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -16,7 +16,7 @@ import { RemoteConnection } from "../../server/transport/remote.js";
 import { serve } from "../../server/transport/serve.js";
 import { testEndpoint } from "../../server/transport/tests/endpoint.js";
 import { setClientFactory, useRemoteServer } from "../infra/client.js";
-import { describeSelfUpdate, requireCheck, selfUpdateCheck } from "../selfupdate.js";
+import { describeSelfUpdate, requireCheck, selfUpdateCheck, selfUpdateInstall } from "../selfupdate.js";
 
 const golden = (name: string): string => path.join(__dirname, "envelopes", `${name}.json`);
 const json = (data: unknown): string => `${JSON.stringify({ ok: true, data }, null, 2)}\n`;
@@ -95,5 +95,22 @@ describe("moxen self-update", () => {
   it("refuses to install: without --check it exits non-zero", () => {
     expect(() => requireCheck(undefined)).toThrow(expect.objectContaining({ code: "SELF_UPDATE_UNAVAILABLE", exitCode: 1 }));
     expect(() => requireCheck(true)).not.toThrow();
+  });
+
+  it("--install is refused on a paired server and, from this source checkout, before anything is written", async () => {
+    const store = mkdtempSync(path.join(os.tmpdir(), "moxen-selfupdate-install-"));
+    const previous = process.env.MOXEN_STORE_ROOT;
+    process.env.MOXEN_STORE_ROOT = store;
+    try {
+      useRemoteServer("winbox");
+      await expect(selfUpdateInstall()).rejects.toMatchObject({ code: "SELF_UPDATE_REMOTE" });
+      useRemoteServer(null);
+      await expect(selfUpdateInstall()).rejects.toMatchObject({ code: "SELF_UPDATE_SOURCE_INSTALL", exitCode: 1 });
+      expect(readdirSync(store)).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_STORE_ROOT;
+      else process.env.MOXEN_STORE_ROOT = previous;
+      rmSync(store, { recursive: true, force: true });
+    }
   });
 });
