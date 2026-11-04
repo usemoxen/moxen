@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import { CliError } from "../errors.js";
+import { readStatus } from "../git/history.js";
 import { driverKindOfInstance } from "../types.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
 import { startTurn, editWorkQueue, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
@@ -191,9 +192,19 @@ export class UsageProtection {
   private async stop(ctx: OperationContext, row: Row): Promise<void> {
     const turn = openTurn(await ctx.store.readTurns(row.thread.id));
     if (!turn) return;
+    const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
+    if (!pause) return;
+    const status = await readStatus(row.thread.env.path);
+    // Persist the reason with the interruption before aborting the driver: its
+    // runner can settle immediately in response to the abort.
+    const stopped = await interruptTurn(ctx.store, row.thread.id, turn.id, {
+      provider: pause.provider, windows: pause.windows ?? [], resetsAt: pause.resetsAt,
+      pausedAt: ctx.store.nowIso(),
+      hasUncommittedChanges: status === null ? null : status.staged + status.unstaged + status.untracked + status.conflicted > 0,
+    });
+    if (!stopped.interrupted) return;
     const driver = ctx.driverFor((turn.modelSelection ?? row.thread.modelSelection).instanceId);
     await Effect.runPromise(driver.interruptTurn(row.thread.id));
-    await interruptTurn(ctx.store, row.thread.id, turn.id);
   }
 
   /** One thread's failure must not stop the others being held or recovered; the next tick tries it again. */
@@ -258,9 +269,12 @@ export class UsageProtection {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
     const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
       || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
-      : [...triggering, ...windows.filter((window) => window.usedPercent >= 100)];
+      : windows.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
     const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
     const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
+    const pauseWindows = relevant.map((window) => ({
+      id: window.id, kind: window.kind, label: window.label, resetsAt: window.resetsAt,
+    }));
     const eligible = rows.filter(({ thread, turns }) =>
       !thread.archivedAt && !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)
       && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming")
@@ -270,7 +284,7 @@ export class UsageProtection {
     if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
     for (const [index, row] of eligible.entries()) await this.pause(ctx, row.thread.id, {
-      provider, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
+      provider, windows: pauseWindows, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
       ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
     }, now);
     for (const row of eligible) {
@@ -280,7 +294,7 @@ export class UsageProtection {
       if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
       catch {
-        await this.pause(ctx, row.thread.id, { provider, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
+        await this.pause(ctx, row.thread.id, { provider, windows: pauseWindows, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
       }
     }
     for (const row of eligible) {

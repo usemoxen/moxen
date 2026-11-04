@@ -8,7 +8,7 @@ import { callMoxenTool, availableMoxenTools } from "../mcp/tools.js";
 import type { ClientApi } from "../api.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../core/usage/limits.js";
 import { DirectConnection } from "../connection.js";
-import { decodeCommand, decodeQuery } from "../protocol.js";
+import { decodeCommand, decodeQuery, type ThreadFrame } from "../protocol.js";
 import type { UsageProtection } from "../../core/usage/protection.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -39,15 +39,22 @@ it("logs each distinct scheduler failure once instead of silently retrying every
 it("holds explicitly queued client input across reconnection and never accepts the coordinator bypass over the wire", async () => {
   const w = await testHarness();
   const thread = await createThread(w.store, { projectId: "p", title: "Protected", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, env: { mode: "local", path: w.work, branch: null } });
-  await sendTurn(w.store, thread.id, { prompt: "Finish the work" });
+  const started = await sendTurn(w.store, thread.id, { prompt: "Finish the work" });
   recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: null }]);
   const first = new DirectConnection({ storeRoot: w.root, drivers: w.drivers });
   try {
+    expect((await first.query({ type: "thread.inspect", threadId: thread.id })).thread.turnUsagePauses).toBeUndefined();
     await first.dispatch(decodeCommand({ type: "usage.wrap", provider: "codex" }));
     expect(await first.query(decodeQuery({ type: "usage.protection" }))).toMatchObject({ queue: [{ threadId: thread.id, phase: "pending" }] });
   } finally { await first.close(); }
   const second = new DirectConnection({ storeRoot: w.root, drivers: w.drivers });
+  let unsubscribe: (() => void) | undefined;
   try {
+    const expected = { [started.turn.id]: { provider: "codex", windows: [{ id: "session", kind: "session", label: "Session", resetsAt: null }], resetsAt: null, hasUncommittedChanges: false } };
+    expect(await second.query({ type: "thread.read", threadId: thread.id })).toMatchObject({ thread: { turnUsagePauses: expected, latestTurn: { state: "interrupted" } } });
+    const frames: ThreadFrame[] = [];
+    unsubscribe = second.subscribeThread(thread.id, {}, (frame) => frames.push(frame), (error) => { throw error; });
+    await vi.waitFor(() => expect(frames.find((frame) => frame.kind === "snapshot")).toMatchObject({ snapshot: { thread: { turnUsagePauses: expected } } }), { timeout: 10_000 });
     await second.dispatch(decodeCommand({ type: "thread.turn.start", threadId: thread.id, message: { text: "Additional request" }, delivery: "queue", usageControl: true }));
     expect(openTurn(await w.store.readTurns(thread.id))).toBeNull();
     expect((await w.store.readTurns(thread.id)).at(-1)?.status).toBe("queued");
@@ -57,7 +64,8 @@ it("holds explicitly queued client input across reconnection and never accepts t
     await second.dispatch({ type: "usage.queue", threadId: thread.id, direction: "cancel" });
     expect(await second.query({ type: "usage.protection" })).toMatchObject({ queue: [] });
     expect(openTurn(await w.store.readTurns(thread.id))).toBeNull();
-  } finally { await second.close(); }
+    expect((await second.query({ type: "thread.inspect", threadId: thread.id })).thread.turnUsagePauses).toMatchObject(expected);
+  } finally { unsubscribe?.(); await second.close(); }
 });
 
 it("accepts handoffs only for the bound request and ignores arbitrary final response prose", async () => {

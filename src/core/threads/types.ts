@@ -16,6 +16,7 @@ import type {
   InteractionMode,
   ModelSelection,
   RuntimeMode,
+  TurnUsagePause,
 } from "../types.js";
 
 export type ThreadStatus = "active" | "settled" | "snoozed";
@@ -140,6 +141,7 @@ export interface StoredThread {
 }
 
 export interface UsagePause {
+  readonly windows?: TurnUsagePause["windows"];
   readonly recoveryTurnId?: string;
   readonly provider: string;
   readonly phase: "pending" | "wrapping" | "waiting" | "resuming";
@@ -172,6 +174,7 @@ export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "f
 export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "injected" | "background";
 
 export interface StoredTurn {
+  readonly usagePause?: TurnUsagePause;
   readonly queue?: QueuePolicy;
   readonly handoff?: {
     readonly requestId: string;

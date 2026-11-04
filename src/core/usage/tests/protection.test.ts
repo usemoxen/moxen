@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import * as Effect from "effect/Effect";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeDriver } from "../../providers/claude/driver.js";
@@ -46,6 +48,60 @@ async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId
 }
 
 describe("usage protection", () => {
+  it.each(["clean", "dirty", "no checkout"] as const)("records a durable protection pause with %s working directory state", async (workingTree) => {
+    const w = await world();
+    const id = await w.make("unfinished work");
+    const original = openTurn(await w.store.readTurns(id))!;
+    if (workingTree === "dirty") await writeFile(path.join(w.work, "unfinished.txt"), "part-done");
+    if (workingTree === "no checkout") {
+      const folder = path.join(w.root, "plain folder");
+      await mkdir(folder);
+      const thread = (await w.store.readThreadRecord(id))!;
+      await w.store.writeThreadRecord({ ...thread, env: { ...thread.env, path: folder } });
+    }
+    const reset = Date.now() + 60_000;
+    const resetsAt = workingTree === "no checkout" ? null : new Date(reset).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt }]);
+    try {
+      // A driver callback racing the coordinator must not erase its pause reason.
+      vi.spyOn(w.ctx.driverFor("codex"), "interruptTurn").mockImplementation(() => Effect.promise(async () => {
+        await interruptTurn(w.store, id, original.id);
+      }));
+      await w.guard.tick();
+      const paused = (await w.store.readTurns(id)).find((turn) => turn.id === original.id)!;
+      expect(paused).toMatchObject({ status: "interrupted", usagePause: {
+        provider: "codex", windows: [{ id: "session", kind: "session", label: "Session", resetsAt }], resetsAt,
+        hasUncommittedChanges: workingTree === "no checkout" ? null : workingTree === "dirty",
+      } });
+      expect(paused.usagePause?.pausedAt).toBeTruthy();
+      const reopened = await openThreadStore(w.root);
+      expect((await reopened.readTurns(id)).find((turn) => turn.id === original.id)?.usagePause).toEqual(paused.usagePause);
+      if (resetsAt !== null) {
+        await w.guard.tick(reset + 6000);
+        await settleStartedTurns(w, id);
+        await w.guard.tick(reset + 7000);
+        expect((await w.store.readThreadRecord(id))?.usagePause).toBeNull();
+        expect((await w.store.readTurns(id)).find((turn) => turn.id === original.id)?.usagePause).toEqual(paused.usagePause);
+      }
+    } finally { w.guard.close(); }
+  });
+
+  it("does not mark normal wrap-up completion or a user interruption as paused", async () => {
+    const w = await world();
+    const id = await w.make("wrap-up finishes");
+    const userStopped = await w.make("user stopped");
+    await interruptTurn(w.store, userStopped);
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: null }]);
+    try {
+      await w.guard.tick();
+      await settleStartedTurns(w, id);
+      const turns = await w.store.readTurns(id);
+      expect(turns[0]?.usagePause).toBeDefined();
+      expect(turns.find((turn) => turn.status === "completed")).not.toHaveProperty("usagePause");
+      expect((await w.store.readTurns(userStopped))[0]).not.toHaveProperty("usagePause");
+    } finally { w.guard.close(); }
+  });
+
   it.each(["native", "moxen"])("settles Claude's held-back %s wrap-up result by stopping its shell, and prevents a late shell wake", async (mode) => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
@@ -611,6 +667,9 @@ describe("usage protection", () => {
     ]);
     await w.guard.tick(now);
     expect(w.sent).toEqual([]);
+    expect((await w.store.readTurns(id))[0]?.usagePause).toMatchObject({
+      windows: [{ id: "session" }, { id: "weekly" }], resetsAt: new Date(now + 86400_000).toISOString(),
+    });
     await w.guard.tick(now + 10_000);
     expect((await w.store.readThreadRecord(id))?.usagePause?.phase).toBe("waiting");
     expect(w.sent).toEqual([]);

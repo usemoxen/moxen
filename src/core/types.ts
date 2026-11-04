@@ -542,6 +542,16 @@ export interface TurnInteractionMode {
   oneOff?: true;
 }
 
+export interface TurnUsagePause {
+  readonly provider: string;
+  readonly windows: readonly { readonly id: string; readonly kind: string; readonly label: string; readonly resetsAt: string | null }[];
+  /** Allowance reset, not a promise of immediate admission to the recovery queue. */
+  readonly resetsAt: string | null;
+  readonly pausedAt: string;
+  /** null means no readable git checkout, rather than a clean checkout. */
+  readonly hasUncommittedChanges: boolean | null;
+}
+
 export interface ThreadEnvelope {
   id: string;
   /** Internal tasks are omitted from thread lists, not archived or deleted. */
@@ -586,6 +596,8 @@ export interface ThreadEnvelope {
   turnInteractionModes?: Record<string, TurnInteractionMode>;
   /** Completed turns' output tokens per wall-clock second, supplied in thread subscriptions. */
   turnThroughput?: Record<string, number>;
+  /** Historical protection interruptions, keyed by turn id; absent on older/unpaused turns. */
+  turnUsagePauses?: Record<string, TurnUsagePause>;
   /**
    * Messages waiting their turn, oldest first: queued behind the running
    * turn, or scheduled for later (`scheduledFor`). Absent when there are none.

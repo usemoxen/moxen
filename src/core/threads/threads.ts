@@ -493,11 +493,13 @@ async function interruptTurnLocked(
   thread: StoredThread,
   turn: StoredTurn,
   now: string,
+  usagePause?: StoredTurn["usagePause"],
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
+    ...(usagePause ? { usagePause } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -929,6 +931,7 @@ export async function interruptTurn(
   store: ThreadStore,
   rawThreadId: string,
   rawTurnId?: string,
+  usagePause?: StoredTurn["usagePause"],
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -943,7 +946,7 @@ export async function interruptTurn(
     if (!target || (target.status !== "running" && target.status !== "queued")) {
       return { thread, turn: target, interrupted: false };
     }
-    const updated = await interruptTurnLocked(store, thread, target, now);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
     await promoteQueuedLocked(store, threadId, now);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);

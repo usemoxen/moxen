@@ -254,6 +254,27 @@ edits already on disk remain. Provider telemetry can lag or be missing, and
 other clients can spend the same allowance, so this cannot guarantee staying
 below a limit.
 
+Protection interruptions keep `StoredTurn.status = "interrupted"` for existing
+readers and add `StoredTurn.usagePause` in the turns ledger. This records
+`provider`, `windows` (each window's `id`, `kind`, `label`, and `resetsAt`),
+`resetsAt` (the latest required allowance reset, or `null` when unknown),
+`pausedAt`, and `hasUncommittedChanges` (`true`/`false` for a readable git
+checkout, `null` when git status is unavailable, including a non-git folder).
+It is a snapshot at interruption, not the current working tree or recovery
+schedule. Sequential recovery and queue conditions can delay actual resumption.
+A normally completed wrap-up and an ordinary user interrupt do not get this
+field. Recovery or cancellation does not erase it from the old turn.
+
+Clients read historical markers from `ThreadEnvelope.turnUsagePauses[turnId]`
+on `ClientApi.subscribeThread` snapshot frames (`snapshot.thread`), or from
+`query({ type: "thread.read", threadId })` (`result.thread`) and
+`query({ type: "thread.inspect", threadId })` (`result.thread`). The map is
+optional and absent when no turn has pause metadata; a missing entry means no
+recorded protection pause, including turns stored by older versions. Join it
+to transcript messages and activities by `turnId`; do not infer it from the
+latest turn or the thread's temporary recovery hold. The marker renderer is a
+client concern. Existing turn state values and CLI JSON goldens are unchanged.
+
 The forecast learns active thread-time and dollars per percentage point from the
 cumulative gains since each window's first observed sample, starting over at reset;
 session and weekly windows are learned separately. User-input and approval waits

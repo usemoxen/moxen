@@ -141,6 +141,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
       scheduleReason: turn.scheduleReason ?? null,
     }));
   const turnModes: Record<string, TurnInteractionMode> = {};
+  const turnUsagePauses = Object.fromEntries(turns.flatMap((turn) => turn.usagePause ? [[turn.id, turn.usagePause]] : []));
   for (const turn of turns) {
     // A queued message that follows the thread takes its mode when it starts (MXN-223): until then it has none to show.
     if (turn.interactionMode === "default" || (turn.status === "queued" && turn.interactionModeExplicit !== true)) continue;
@@ -181,6 +182,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     ),
     // Only when a turn ran in Research or Orchestrate, so older envelopes stay byte-for-byte as they were.
     ...(Object.keys(turnModes).length > 0 ? { turnInteractionModes: turnModes } : {}),
+    ...(Object.keys(turnUsagePauses).length > 0 ? { turnUsagePauses } : {}),
     // Only when there are any, so envelopes of threads without a queue stay byte-for-byte as they were.
     ...(queued.length > 0 ? { queuedTurns: queued } : {}),
     // Likewise: only threads that ever ran a native subagent carry the list.
