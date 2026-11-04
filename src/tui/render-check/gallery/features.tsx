@@ -14,7 +14,7 @@ import { encodeRgbaPng } from "../../model/imageshrink.js";
 import { MessageBody, Timeline } from "../../features/timeline/timeline.js";
 import { groupTurns } from "../../model/turns.js";
 import type { TimelineEntry } from "../../model/thread.js";
-import type { TurnInteractionMode } from "../../../core/types.js";
+import type { TurnInteractionMode, TurnUsagePause } from "../../../core/types.js";
 import { useRef } from "react";
 import { closeImageViewer, ImageViewer, ImageViewerDim, openImageViewer } from "../../features/timeline/imageviewer.js";
 import { AttachmentReaderContext, AttachmentRow, type AttachmentReader } from "../../features/timeline/attachmentrow.js";
@@ -84,6 +84,49 @@ const MODE_ENTRIES: TimelineEntry[] = MODE_TURNS.flatMap((turn, index): Timeline
     { ...base, id: `${turn.id}-a`, at: at(1), kind: "assistant", text: turn.reply },
   ];
 });
+/** MXN-247: a turn usage protection cut off ends on a progress note; a later turn is untouched. Fixture in the stored `turnUsagePauses` shape. */
+const PAUSE_ENTRIES: TimelineEntry[] = [
+  { id: "p1-u", at: "2026-11-03T17:00:00.000Z", turnId: "p1", kind: "user", text: "Refactor the retry runner." },
+  { id: "p1-a", at: "2026-11-03T17:04:00.000Z", turnId: "p1", kind: "assistant", text: "Moved the backoff into its own module; next I'll update the callers." },
+  { id: "p2-u", at: "2026-11-03T17:30:00.000Z", turnId: "p2", kind: "user", text: "Now fix the typo in the README." },
+  { id: "p2-a", at: "2026-11-03T17:31:00.000Z", turnId: "p2", kind: "assistant", text: "Fixed." },
+].map((entry) => ({ streaming: false, tone: null, activityKind: null, message: null, activity: null, checkpoint: null, editStats: null, proposedPlan: null, ...entry }) as TimelineEntry);
+const WINDOW_5H = { id: "claude:five_hour", kind: "session", label: "Claude 5h", resetsAt: "2026-11-03T21:00:00.000Z" };
+const PAUSES: Record<string, TurnUsagePause> = {
+  p1: { provider: "claude", windows: [WINDOW_5H], resetsAt: "2026-11-03T21:00:00.000Z", pausedAt: "2026-11-03T17:05:00.000Z", hasUncommittedChanges: false },
+};
+const PAUSES_UNCOMMITTED: Record<string, TurnUsagePause> = {
+  p1: { provider: "claude", windows: [WINDOW_5H, { ...WINDOW_5H, id: "claude:weekly", kind: "weekly", label: "Claude weekly" }], resetsAt: null, pausedAt: "2026-11-03T17:05:00.000Z", hasUncommittedChanges: true },
+};
+function PauseTimeline({ width, height, pauses }: { width: number; height: number; pauses: Record<string, TurnUsagePause> }) {
+  const scrollRef = useRef(null);
+  return (
+    <Timeline
+      groups={groupTurns(PAUSE_ENTRIES)}
+      title="Retry logic"
+      subtitle="idle"
+      modelForTurn={() => ({ name: "Claude Opus 5", color: null })}
+      usagePauseForTurn={(turnId) => pauses[turnId]}
+      modelLabel={(model) => ({ name: model, color: null })}
+      homeDir={undefined}
+      expandedTurn={null}
+      expandedWork={new Map()}
+      scrollRef={scrollRef}
+      onFocus={noop}
+      onOpenDiff={noop}
+      onToggleWork={noop}
+      onOpenMessageActions={noop}
+      onOpenUrl={noop}
+      focused
+      width={width}
+      sessionStatus="idle"
+      now={Date.UTC(2026, 10, 3, 18, 0)}
+      turnStartedAt={null}
+      turnFileDiffs={new Map()}
+      gitFiles={[]}
+    />
+  );
+}
 function ModeTimeline({ width, height }: { width: number; height: number }) {
   const scrollRef = useRef(null);
   return (
@@ -903,6 +946,42 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     element: () => (
       <Stage width={30} height={16}>
         <UiBlockView block={UI_DATA} />
+      </Stage>
+    ),
+  },
+  {
+    id: "timeline-usage-pause-wide",
+    group: "timeline",
+    title: "Usage-protection pause closing a turn (wide); the next turn is untouched",
+    width: 90,
+    height: 30,
+    element: () => (
+      <Stage width={90} height={30}>
+        <PauseTimeline width={90} height={30} pauses={PAUSES} />
+      </Stage>
+    ),
+  },
+  {
+    id: "timeline-usage-pause-narrow",
+    group: "timeline",
+    title: "Usage-protection pause in a narrow column (wraps, never clips)",
+    width: 34,
+    height: 34,
+    element: () => (
+      <Stage width={34} height={34}>
+        <PauseTimeline width={34} height={34} pauses={PAUSES} />
+      </Stage>
+    ),
+  },
+  {
+    id: "timeline-usage-pause-uncommitted",
+    group: "timeline",
+    title: "Usage-protection pause with uncommitted changes and an unknown reset (narrow)",
+    width: 34,
+    height: 38,
+    element: () => (
+      <Stage width={34} height={38}>
+        <PauseTimeline width={34} height={38} pauses={PAUSES_UNCOMMITTED} />
       </Stage>
     ),
   },

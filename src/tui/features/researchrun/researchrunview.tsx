@@ -179,6 +179,7 @@ function AgentColumn({
           const selection = turnModelSelection({ modelSelection: thread?.modelSelection, turnModelSelections: thread?.turnModelSelections }, turnId);
           return { ...labelFor(selection), ...(selection ? { provider: selection.instanceId } : {}) };
         }}
+        usagePauseForTurn={(turnId) => thread?.turnUsagePauses?.[turnId]}
         modelLabel={(reference) => {
           const slash = reference.indexOf("/");
           return slash < 0 ? { name: reference, color: null } : labelFor({ instanceId: reference.slice(0, slash), model: reference.slice(slash + 1) });

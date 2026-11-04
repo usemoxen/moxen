@@ -22,6 +22,8 @@ import { describeActivity, fileRowCounts, formatMs, memoryLabel, memoryTitle, re
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { renderMessage } from "../../model/message.js";
 import { isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
+import { usagePauseLines } from "../../model/usagepause.js";
+import type { TurnUsagePause } from "../../../core/types.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
 import { readOpenRequestPrompt, requestNoun, type OpenRequestAsk } from "../../model/gitpanel.js";
@@ -878,6 +880,20 @@ export function UsageProtectionNotice({ entry, now }: { entry: TimelineEntry; no
   );
 }
 
+/** Closes a turn usage protection cut off; the text wraps so a narrow column never clips it. */
+function UsagePauseNotice({ pause, now }: { pause: TurnUsagePause; now: number }) {
+  return (
+    <box border={["left"]} borderStyle="heavy" borderColor={COLOR.warn} backgroundColor={SURFACE.panel}
+      style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}>
+      {/* Not SpeakerHeader: it clips on one row, and this marker must wrap in a narrow column. */}
+      <text fg={COLOR.warn} bg={SURFACE.panel} style={{ flexShrink: 0 }}>{`${tr("timeline.usagePaused")}  ·  ${clockTime(pause.pausedAt, now)}`}</text>
+      {usagePauseLines(pause, now).map((line, index) => (
+        <text key={index} fg={COLOR.dim} bg={SURFACE.panel} style={{ flexShrink: 0 }}>{line}</text>
+      ))}
+    </box>
+  );
+}
+
 /** Recovery reads as a quiet line; the model's maintenance instructions stay private. */
 function ContinueNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
   return (
@@ -1295,6 +1311,7 @@ function WorkSegment({
 
 function TurnBlock({  group,
   mode,
+  usagePause,
   model,
   modelColor,
   modelLabel,
@@ -1313,6 +1330,8 @@ function TurnBlock({  group,
   group: TurnGroup;
   /** The mode this turn ran in (Research or Orchestrate); absent for Build. */
   mode?: TurnInteractionMode | undefined;
+  /** Set when usage protection paused this turn (joined by turn id). */
+  usagePause?: TurnUsagePause | undefined;
   model: string;
   modelColor?: string | null | undefined;
   /** Names an `instance/model` reference, for delegated-task notices. */
@@ -1531,6 +1550,7 @@ function TurnBlock({  group,
           onOpen={onOpenDiff}
         />
       )}
+      {usagePause === undefined ? null : <UsagePauseNotice pause={usagePause} now={now} />}
     </box>
   );
 }
@@ -1612,6 +1632,7 @@ export function Timeline({
   subtitle,
   modelForTurn,
   modeForTurn,
+  usagePauseForTurn,
   modelLabel,
   homeDir,
   readAttachment,
@@ -1641,6 +1662,8 @@ export function Timeline({
   modelForTurn: (turnId: string | null) => { name: string; color: string | null; provider?: string };
   /** The mode a given turn ran in (Research or Orchestrate, and whether for that message only); undefined for Build. */
   modeForTurn?: (turnId: string) => TurnInteractionMode | undefined;
+  /** The usage-protection pause that cut a given turn off, if any (`turnUsagePauses[turnId]`). */
+  usagePauseForTurn?: (turnId: string) => TurnUsagePause | undefined;
   /** Names an `instance/model` reference (a delegated task's model). */
   modelLabel: (model: string) => { name: string; color: string | null };
   homeDir: string | undefined;
@@ -1773,6 +1796,7 @@ export function Timeline({
             <TurnBlock
               group={group}
               mode={group.turnId === null ? undefined : modeForTurn?.(group.turnId)}
+              usagePause={group.turnId === null ? undefined : usagePauseForTurn?.(group.turnId)}
               model={turnModel.name}
               modelColor={turnModel.color}
               modelLabel={modelLabel}
