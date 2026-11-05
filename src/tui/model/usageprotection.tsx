@@ -21,6 +21,9 @@ export function usageQueueStatus(entry: UsageQueueEntry, now: number): { phase: 
   const phase = entry.phase === "pending" ? t("protection.pending") : entry.phase === "wrapping" ? t("protection.wrapping")
     : entry.phase === "waiting" ? t("protection.waiting") : running ? t("protection.resumed") : t("protection.resuming");
   if (running) return { phase, detail: t("protection.resumedDetail"), running, actions: [] };
+  // A forced hold waits on no reset and the server rejects cancelling it, so it
+  // names its real exit and offers no Cancel recovery. Moves stay: reorder allows them.
+  if (entry.forced) return { phase, detail: t("protection.forcedDetail"), running, actions: ["first", "last"] };
   const resetsAt = entry.resetsAt === null ? null : Date.parse(entry.resetsAt);
   const detail = entry.error ?? (resetsAt === null || Number.isNaN(resetsAt) ? t("protection.noReset")
     : resetsAt <= now ? t("protection.resetDone") : t("protection.reset", { time: formatDuration(resetsAt - now, "minutes") }));

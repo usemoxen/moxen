@@ -33,6 +33,12 @@ describe("usage recovery status", () => {
     expect(notice({ resetsAt: new Date(NOW + 60_000).toISOString() }).actions.map((action) => action.label)).toEqual(["Move first", "Move last", "Cancel recovery"]);
   });
 
+  it("names the manual hold and offers no Cancel recovery for a forced entry", () => {
+    const forced = notice({ forced: true, phase: "waiting" });
+    expect(detailText({ forced: true, phase: "waiting" })).toBe("Manually protected. Send a message to end it.");
+    expect(forced.actions.map((action) => action.label)).toEqual(["Move first", "Move last"]);
+  });
+
   it("names a running recovery in the work queue as the banner does", () => {
     expect(queueEntryState(work({ status: "running" }))).toBe("resumed");
     expect(queueEntryState(work({ status: "running", policy: { ...work({ status: "running" }).policy, automatic: false, requestId: "x" } }))).toBe("running");

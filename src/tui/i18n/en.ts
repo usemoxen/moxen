@@ -163,6 +163,7 @@ export const en = {
   "protection.resumedDetail": "The usage window reset and the work picked up where it stopped.",
   "protection.queued": "{position}. {title} · {phase}",
   "protection.noReset": "No reset time reported; automatic recovery is held.",
+  "protection.forcedDetail": "Manually protected. Send a message to end it.",
   "protection.reset": "Resets in {time} · messages wait in this thread's queue",
   "protection.resetDone": "Usage has reset · recovery starts shortly · messages wait in this thread's queue",
   "protection.first": "Move first",

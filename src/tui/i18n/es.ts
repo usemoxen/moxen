@@ -157,6 +157,7 @@ export const es: Catalog = {
   "protection.resumedDetail": "El uso se restableció y el trabajo continuó donde se había detenido.",
   "protection.queued": "{position}. {title} · {phase}",
   "protection.noReset": "El proveedor no indica cuándo se restablece; la recuperación está en espera.",
+  "protection.forcedDetail": "Protegido manualmente. Envía un mensaje para quitarla.",
   "protection.reset": "Se restablece en {time} · los mensajes esperan en la cola del hilo",
   "protection.resetDone": "El uso ya se restableció · la recuperación empieza enseguida · los mensajes esperan en la cola del hilo",
   "protection.first": "Mover al inicio",
