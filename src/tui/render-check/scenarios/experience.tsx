@@ -9,7 +9,7 @@ import { RELEASES } from "../../../core/experience/experience.js";
 import { APP_VERSION } from "../../../core/version.js";
 import { applyLanguage } from "../../i18n/index.js";
 import { THEMES } from "../../themes.js";
-import { OnboardingPage } from "../../features/experience/onboardingpage.js";
+import { GUIDE_STEPS, OnboardingPage } from "../../features/experience/onboardingpage.js";
 import { ChangelogModal } from "../../features/experience/experiencemodal.js";
 import { useSettings } from "../../features/settings/useSettings.js";
 import { ExperienceField } from "../../features/experience/field.js";
@@ -73,9 +73,18 @@ export async function runExperience(): Promise<void> {
     await setup.flush();
   };
   const next = async () => click("Continue");
+  // "Back" also starts "Backdrop": the footer's button is the one on the row with Later.
+  const back = async () => {
+    await see("Later");
+    const lines = readFrame().split("\n");
+    const y = lines.findIndex((line) => line.includes("Later") && line.includes("Back"));
+    if (y < 0) fail(`no Back button on the footer\n${readFrame()}`);
+    await act(async () => setup.mockMouse.click(lines[y]!.indexOf("Back") + 1, y));
+    await setup.flush();
+  };
   const inlineNavigation = () => {
     const frame = readFrame();
-    if ((frame.match(/← /g) ?? []).length !== 1 || !frame.includes("Back") || !frame.includes("Continue") || !frame.includes("YOUR WORKSPACE")) fail(`inline setup lost its navigation or duplicated its back link\n${frame}`);
+    if ((frame.match(/← /g) ?? []).length !== 1 || !frame.includes("Back") || !frame.includes("Continue") || !/\d of 6/.test(frame)) fail(`inline setup lost its navigation or duplicated its back link\n${frame}`);
   };
   const settledModal = async (target: TestRendererSetup = setup) => {
     await new Promise<void>((resolve) => {
@@ -91,9 +100,55 @@ export async function runExperience(): Promise<void> {
     });
     await target.flush();
   };
+  // Scrolls the open page with Page Down until the text is on screen.
+  const scrollTo = async (text: string, target: TestRendererSetup = setup) => {
+    for (let attempt = 0; attempt < 8 && !target.captureCharFrame().includes(text); attempt += 1) {
+      await act(async () => target.mockInput.pressKey("\x1b[6~"));
+      await target.flush();
+    }
+    if (!target.captureCharFrame().includes(text)) fail(`could not scroll to ${text}\n${target.captureCharFrame()}`);
+  };
+  const press = async (name: string) => {
+    await act(async () => { if (name === "left" || name === "right") setup.mockInput.pressArrow(name); else if (name === "escape") setup.mockInput.pressEscape(); else setup.mockInput.pressKey(name); });
+    await setup.flush();
+  };
+  // The dots under "N of 6": the progress row is found by its label, then the glyphs by position.
+  const clickDot = async (index: number) => {
+    const lines = readFrame().split("\n");
+    const y = lines.findIndex((line) => / of 6/.test(line));
+    const columns = [...lines[y]!.matchAll(/[●○]/g)].map((match) => match.index!);
+    if (y < 0 || columns.length !== GUIDE_STEPS.length) fail(`progress dots not found\n${readFrame()}`);
+    await act(async () => setup.mockMouse.click(columns[index]!, y));
+    await setup.flush();
+  };
+  await see("Welcome to Moxen");
+  await see("1 of 6");
+  if (visible("Back")) fail("the first step offered Back");
+  await clickDot(2);
+  await see("Choose who you work with");
+  await see("3 of 6");
+  await clickDot(0);
+  await see("Welcome to Moxen");
+  // Later leaves the guide; the palette brings it back.
+  await click("Later");
+  await until(() => !visible("Welcome to Moxen"), "Later did not close the guide");
+  if (state.onboardingCompleted) fail("Later completed onboarding");
+  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+  await click("Getting started");
   await see("Welcome to Moxen");
   await next();
   await see("Make it yours");
+  await back();
+  await see("Welcome to Moxen");
+  await press("]");
+  await see("Make it yours");
+  // The theme row has focus on arrival: Right applies the next theme, Left restores it.
+  const before = config.ui?.theme;
+  await press("right");
+  await until(() => config.ui?.theme !== before && config.ui?.theme !== undefined, "the arrow key did not apply the next theme");
+  const advanced = config.ui?.theme;
+  await press("left");
+  await until(() => config.ui?.theme !== advanced, "the arrow key did not step back to the previous theme");
   if (visible("Threads ─")) fail("onboarding was drawn over the working view");
   await click("Catppuccin Latte");
   await until(() => config.ui?.theme === "catppuccin-latte", "appearance was not persisted");
@@ -189,18 +244,49 @@ export async function runExperience(): Promise<void> {
   await settledModal();
   const releasePanel = setup.renderer.root.findDescendantById("modal-panel");
   if (visible("There’s something new in Moxen")) fail("release notice remained above the open viewer");
-  console.log("--- changelog, highlights ---");
+  if (visible("Highlights") || visible("RELEASE HISTORY")) fail("the viewer still shows tabs or its history column");
+  await see("1 of 2");
+  console.log("--- changelog, one release ---");
   console.log(setup.captureCharFrame());
-  await click("All changes");
-  await see("The CLI and release viewer report the same package version.");
+  await scrollTo("The CLI and release viewer report the same package version.");
+  if (!visible("ALL CHANGES") && !visible("Improved")) fail("the full notes do not follow the highlights on the same page");
+  // The history opens only when asked for, and Escape returns to the release.
+  await press("h");
   await see("RELEASE HISTORY");
-  if (setup.renderer.root.findDescendantById("modal-panel") !== releasePanel || releasePanel?.opacity !== 1) fail("changing release tabs restarted the modal fade");
-  console.log("--- changelog, detailed changes ---");
+  await see("Earlier release");
+  if (setup.renderer.root.findDescendantById("modal-panel") !== releasePanel || releasePanel?.opacity !== 1) fail("opening the history restarted the modal fade");
+  console.log("--- changelog, history ---");
   console.log(setup.captureCharFrame());
-  await click("Highlights");
-  await act(async () => setup.mockInput.pressKey("\x1b[6~"));
-  await setup.flush();
-  await see("one in the guide or Settings");
+  await press("escape");
+  await until(() => !visible("RELEASE HISTORY"), "Escape in the history did not return to the release");
+  await see("A place to start");
+  await press("h");
+  await click("Earlier release");
+  await see("2 of 2");
+  await see("An earlier detailed change.");
+  if (visible("RELEASE HISTORY")) fail("choosing a release left the history open");
+  await press("left");
+  await see("Make yourself at home");
+  // Mouse: the header's arrow moves on, too.
+  {
+    const lines = readFrame().split("\n");
+    const y = lines.findIndex((line) => line.includes("1 of 2"));
+    await act(async () => setup.mockMouse.click(lines[y]!.lastIndexOf("→"), y));
+    await setup.flush();
+  }
+  await see("An earlier detailed change.");
+  await press("left");
+  await see("Make yourself at home");
+  // Try it opens the guide from the viewer.
+  await click("Try it");
+  await see("Welcome to Moxen");
+  await press("escape");
+  await until(() => !visible("Welcome to Moxen"), "Escape did not leave the guide");
+  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+  await click("What’s new");
+  await see("Make yourself at home");
+  await settledModal();
+  await scrollTo("Add one in the guide or");
   console.log("--- changelog, inline tools copy ---");
   console.log(setup.captureCharFrame());
   await click("Later");
@@ -211,12 +297,12 @@ export async function runExperience(): Promise<void> {
   await act(async () => setup.mockInput.pressArrow("right"));
   await see("Earlier release");
   await see("An earlier detailed change.");
-  await click("Mark read and close");
+  await click("Mark read");
   await until(() => state.seenReleases.includes("0.1.1"), "older release was not acknowledged");
   if (state.seenReleases.includes(RELEASES[0]!.version)) fail("reading an older release also acknowledged the latest one");
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await click("What’s new");
-  await click("Mark read and close");
+  await click("Mark read");
   await until(() => state.seenReleases.includes(RELEASES[0]!.version), "release was not acknowledged");
   setup.renderer.destroy();
 
@@ -253,8 +339,7 @@ export async function runExperience(): Promise<void> {
   const spanishRelease = await testRender(<ChangelogModal snapshot={state} error={null} saving={false} screenWidth={180} screenHeight={47}
     onSettings={() => {}} onRead={() => {}} onGuide={() => {}} onClose={() => {}} />, { width: 180, height: 47, exitOnCtrlC: false });
   await settledModal(spanishRelease);
-  await act(async () => spanishRelease.mockInput.pressKey("\x1b[6~"));
-  await spanishRelease.flush();
+  await scrollTo("desde la guía o Ajustes", spanishRelease);
   console.log("--- changelog, Spanish inline tools copy ---");
   const releaseFrame = spanishRelease.captureCharFrame();
   if (!releaseFrame.includes("desde la guía o Ajustes")) fail(`Spanish release copy lost inline MCP setup\n${releaseFrame}`);

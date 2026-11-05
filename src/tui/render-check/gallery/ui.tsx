@@ -36,6 +36,19 @@ const clickExperience = async (setup: TestRendererSetup, label: string) => {
   await setup.flush();
 };
 
+const EARLIER_RELEASE = { ...RELEASES[0]!, version: "0.1.1", title: { en: "Earlier release", es: "Versión anterior" }, highlights: [], sections: [{ title: { en: "Fixes", es: "Correcciones" }, entries: [{ en: "An earlier detailed change.", es: "Un cambio detallado anterior." }] }] };
+const onboardingEntry = (id: string, title: string, step: number, width: number, height: number): GalleryEntry => ({
+  id, group: "experience", title, width, height, settleMs: 180,
+  element: () => <OnboardingPage step={step} onStep={noop}
+    settings={{ snapshot: { path: "config.json", exists: true, settings: describeSettings({ ...DEFAULT_CONFIG, memoryEmbeddings: true }) },
+      saving: null, error: null, set: async () => true, duplicate: noop, run: null, test: noop, testMcp: noop, probe: noop,
+      discover: async () => ({ ok: false, host: null, message: "preview" }), exportProfile: noop, importProfile: noop, notice: null }}
+    providers={SETTINGS_PROVIDERS} selection={{ instanceId: "claudeAgent", model: "claude-opus-5" }} projects={[{ id: "moxen", title: "Moxen", workspaceRoot: "moxen", defaultModelSelection: null }]} projectId="moxen" client={client}
+    error={null} saving={false} motion="static" screenWidth={width} screenHeight={height} onMemory={noop} onModel={noop} onProject={noop}
+    onRefresh={noop} onComplete={noop} onClose={noop}
+  />,
+});
+
 const notice = (key: string, title: string, actions: string[]): Notice => ({
   key,
   glyph: "◔",
@@ -63,19 +76,9 @@ export const UI_GALLERY: GalleryEntry[] = [
       </Stage>
     ),
   },
-  ...Array.from({ length: 6 }, (_, step): GalleryEntry => ({
-    id: `experience-onboarding-${step + 1}`,
-    group: "experience", title: `Getting started: step ${step + 1}`,
-    width: 180, height: 47, settleMs: 180,
-    element: () => <OnboardingPage step={step} onStep={noop}
-      settings={{ snapshot: { path: "config.json", exists: true, settings: describeSettings({ ...DEFAULT_CONFIG, memoryEmbeddings: true }) },
-        saving: null, error: null, set: async () => true, duplicate: noop, run: null, test: noop, testMcp: noop, probe: noop,
-        discover: async () => ({ ok: false, host: null, message: "preview" }), exportProfile: noop, importProfile: noop, notice: null }}
-      providers={SETTINGS_PROVIDERS} selection={{ instanceId: "claudeAgent", model: "claude-opus-5" }} projects={[{ id: "moxen", title: "Moxen", workspaceRoot: "moxen", defaultModelSelection: null }]} projectId="moxen" client={client}
-      error={null} saving={false} motion="static" screenWidth={180} screenHeight={47} onMemory={noop} onModel={noop} onProject={noop}
-      onRefresh={noop} onComplete={noop} onClose={noop}
-    />,
-  })),
+  ...Array.from({ length: 6 }, (_, step): GalleryEntry => onboardingEntry(`experience-onboarding-${step + 1}`, `Getting started: step ${step + 1}`, step, 180, 47)),
+  // A small terminal: the body scrolls, the progress row and the footer stay put.
+  ...[1, 2, 3].map((step): GalleryEntry => onboardingEntry(`experience-onboarding-narrow-${step + 1}`, `Getting started: step ${step + 1}, small terminal`, step, 80, 24)),
   ...[2, 4].map((step): GalleryEntry => ({
     id: step === 2 ? "experience-model-server-inline" : "experience-mcp-inline", group: "experience", title: "Inline connection setup", width: 180, height: 47,
     element: () => UI_GALLERY.find((entry) => entry.id === `experience-onboarding-${step + 1}`)!.element(),
@@ -86,10 +89,10 @@ export const UI_GALLERY: GalleryEntry[] = [
       if (step === 2) { await act(async () => setup.mockInput.pressEnter()); await setup.flush(); }
     },
   })),
-  ...[false, true].map((details): GalleryEntry => ({
-    id: details ? "experience-changelog-details" : "experience-changelog", group: "experience", title: details ? "All changes" : "Highlights", width: 180, height: 47, settleMs: 180,
-    element: () => <ChangelogModal snapshot={{ version: APP_VERSION, releases: RELEASES, onboardingCompleted: true, seenReleases: [] }} error={null} saving={false} screenWidth={180} screenHeight={47} onSettings={noop} onRead={noop} onGuide={noop} onClose={noop} />,
-    ...(details ? { drive: async (setup) => { await act(async () => setup.mockInput.pressKey("d")); await setup.flush(); } } : {}),
+  ...([["experience-changelog", "Release notes", 180, 47, false], ["experience-changelog-narrow", "Release notes, small terminal", 80, 24, false], ["experience-changelog-history", "Release history", 180, 47, true]] as const).map(([id, title, width, height, history]): GalleryEntry => ({
+    id, group: "experience", title, width, height, settleMs: 180,
+    element: () => <ChangelogModal snapshot={{ version: APP_VERSION, releases: [...RELEASES, EARLIER_RELEASE], onboardingCompleted: true, seenReleases: [EARLIER_RELEASE.version] }} error={null} saving={false} screenWidth={width} screenHeight={height} onSettings={noop} onRead={noop} onGuide={noop} onClose={noop} />,
+    ...(history ? { drive: async (setup) => { await act(async () => setup.mockInput.pressKey("h")); await setup.flush(); } } : {}),
   })),
   { id: "experience-field", group: "experience", title: "Welcome thread field", width: 100, height: 30,
     element: () => <Stage width={100} height={30}><ExperienceField width={100} height={30} stage={3} motion="static" /></Stage> },

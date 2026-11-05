@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useKeyboard } from "@opentui/react";
-import { TextAttributes, type BoxRenderable, type ScrollBoxRenderable } from "@opentui/core";
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import path from "node:path";
 
 import type { ClientApi, QueryResult } from "../../../server/api.js";
@@ -51,31 +51,25 @@ export function OnboardingPage({
   const scroll = useRef<ScrollBoxRenderable | null>(null);
   const providerScroll = useRef<ScrollBoxRenderable | null>(null);
   const modelScroll = useRef<ScrollBoxRenderable | null>(null);
-  const bodyRef = useRef<BoxRenderable | null>(null);
-  // The panes take whatever height the body has left once the description and
-  // the connect row are paid for; measured, because the frame is capped and
-  // the terminal can be shorter than it.
-  const [bodyHeight, setBodyHeight] = useState(0);
   const controls: Control[] = [];
   const disabled = saving || settings.saving !== null || addingProject;
   const memoryStatus = useMemoryRuntime(client, step === 3);
 
-  // One framed surface floats on the field: the animation only lives in the
-  // margin, and no text ever sits on top of it. It stays close to the size of
-  // the Settings panel rather than filling the terminal.
-  const width = Math.min(108, Math.max(0, screenWidth - 10));
+  // One centred panel floats on the field: the animation only lives in the
+  // margin, and no text ever sits on top of it. Every step shares its size,
+  // so Later, Back and Continue never move.
+  const width = Math.min(92, Math.max(0, screenWidth - 6));
   const left = Math.max(0, Math.floor((screenWidth - width) / 2));
-  const height = Math.min(34, Math.max(0, screenHeight - 2));
+  const height = Math.min(38, Math.max(0, screenHeight - 2));
   const top = Math.max(0, Math.floor((screenHeight - height) / 2));
-  const showRail = width >= 104 && height >= 22;
-  const railWidth = showRail ? 24 : 0;
-  const gap = showRail ? 3 : 0;
-  const inner = Math.max(0, width - 6 - railWidth - gap);
-  const rule = "─".repeat(Math.max(0, width - 6));
-  // The key legend is the first thing to go: it must still leave room for
-  // "Later", "Back" and the primary action beside it.
+  // Panel text width: the frame and its padding are paid for, and the body
+  // keeps two more columns clear so no text runs into the scrollbar.
+  const textArea = Math.max(0, width - 8);
+  const inner = Math.max(0, textArea - 3);
   const footerLabel = t(step === GUIDE_STEPS.length - 1 ? "guide.finish" : "guide.next");
-  const showKeys = inner >= textWidth(`${t("guide.later")} ${t("guide.pageKeys")} ${t("guide.back")} ${footerLabel}`) + 8;
+  // The key legend is the first thing to go: it must still fit on its line.
+  const compact = height < 30;
+  const showKeys = textArea >= textWidth(t("guide.pageKeys")) && !compact;
 
   const currentProvider = providers?.find((provider) => provider.instanceId === providerId) ?? providers?.find((provider) => provider.enabled && provider.installed) ?? providers?.[0];
   useEffect(() => { if (providerId === null && selection) setProviderId(selection.instanceId); }, [providerId, selection]);
@@ -137,22 +131,34 @@ export function OnboardingPage({
     const at = controls.push({ run }) - 1;
     return <GuideChoice key={label} id={`guide-control-${at}`} label={label} detail={options.detail} choice={options.chosen !== undefined} chosen={options.chosen ?? false} active={focus === at} tone={options.tone ?? COLOR.accent} width={options.width ?? inner} onPick={() => { setFocus(at); if (!disabled) run(); }} />;
   };
-  const enumControl = (key: string): ReactNode => {
+  // One row per setting: its label, then its choices as radios. A long list
+  // (the themes) flows down two columns instead of wrapping into a ragged block.
+  const enumControl = (key: string, labelWidth: number): ReactNode => {
     const entry = view(key);
     if (entry?.descriptor.kind.type !== "enum") return null;
     const choices = entry.descriptor.kind.choices;
     const chosen = Math.max(0, choices.findIndex((choice) => choice.value === value(key)));
     const pick = (at: number) => { if (!disabled) void settings.set(key, choices[at]!.value); };
     const at = controls.push({ run: () => pick(chosen), move: (delta) => pick((chosen + delta + choices.length) % choices.length) }) - 1;
-    return <box key={key} id={`guide-control-${at}`} style={{ flexDirection: "column", marginBottom: 2, flexShrink: 0, paddingLeft: 1, border: ["left"] }}
-      borderColor={focus === at ? COLOR.accent : SURFACE.panel}>
-      <text fg={focus === at ? COLOR.bright : COLOR.dim} attributes={focus === at ? TextAttributes.BOLD : TextAttributes.NONE}>{tx(entry.descriptor.label)}</text>
-      <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 1, marginTop: 1 }}>
-        {choices.map((choice, index) => <HoverButton key={choice.value} label={` ${index === chosen ? "●" : "○"} ${tx(choice.label)} `}
-          fg={index === chosen ? SURFACE.base : COLOR.text}
-          bg={index === chosen ? COLOR.accent : SURFACE.raised}
-          hoverBg={index === chosen ? COLOR.bright : SURFACE.hover}
-          onClick={() => { setFocus(at); pick(index); }} />)}
+    const labels = choices.map((choice) => tx(choice.label));
+    const widest = Math.max(...labels.map((label) => textWidth(label))) + 4;
+    const area = inner - labelWidth;
+    const oneRow = choices.length <= 4 && labels.reduce((sum, label) => sum + textWidth(label) + 6, 0) <= area;
+    const columns = oneRow ? choices.length : Math.max(1, Math.min(choices.length > 4 ? 2 : choices.length, Math.floor(area / (widest + 2))));
+    const rows = Math.ceil(choices.length / columns);
+    const focused = focus === at;
+    return <box key={key} id={`guide-control-${at}`} style={{ flexDirection: "row", marginBottom: 1, flexShrink: 0 }}>
+      <text fg={focused ? COLOR.accent : COLOR.dim} attributes={focused ? TextAttributes.BOLD : TextAttributes.NONE} wrapMode="none" style={{ width: labelWidth, flexShrink: 0 }}>{`${focused ? "▸" : " "} ${tx(entry.descriptor.label)}`}</text>
+      <box style={{ flexDirection: "row", gap: oneRow ? 1 : 2 }}>
+        {Array.from({ length: columns }, (_, column) => <box key={column} style={{ flexDirection: "column", flexShrink: 0 }}>
+          {choices.slice(column * rows, column * rows + rows).map((choice, offset) => {
+            const index = column * rows + offset;
+            return <HoverButton key={choice.value} label={` ${index === chosen ? "●" : "○"} ${labels[index]!} `}
+              fg={index === chosen ? COLOR.accent : COLOR.text} hoverFg={COLOR.bright}
+              {...(index === chosen ? { bg: SURFACE.raised } : {})}
+              onClick={() => { setFocus(at); pick(index); }} />;
+          })}
+        </box>)}
       </box>
     </box>;
   };
@@ -168,30 +174,15 @@ export function OnboardingPage({
   };
   const listView = list === null ? null : view(list);
   const entries = providers ?? [];
-  const providerWidth = Math.min(30, Math.max(20, Math.floor(inner * 0.3)));
+  const providerWidth = Math.min(28, Math.max(18, Math.floor(inner * 0.3)));
   const twoPane = inner >= 70;
   const modelWidth = twoPane ? inner - providerWidth - 2 : inner;
-  // The panes fit without a page scroll only when there is room below them for
-  // the connect row and its status; shorter terminals keep one page scroll.
-  const panned = height >= 28;
-  const showHint = bodyHeight >= 19;
-  const paneBudget = Math.max(5, Math.min(10, bodyHeight - (showHint ? 11 : 10)));
-  useEffect(() => {
-    if (!panned) return;
-    // The box is laid out after this render, so read its size on the next turn.
-    const timer = setTimeout(() => {
-      const node = bodyRef.current;
-      if (node === null) return;
-      setBodyHeight((previous) => previous === node.height ? previous : node.height);
-    }, 0);
-    return () => clearTimeout(timer);
-  });
+  // The lists take what the body has left once the connect rows are paid for;
+  // a short terminal keeps them small and the body scrolls.
+  const bodyRows = height - 15;
+  const listRows = Math.max(3, Math.min(8, bodyRows - 11));
   const providerMatches = entries.filter((provider) => `${provider.displayName ?? ""} ${provider.instanceId} ${provider.driver}`.toLowerCase().includes(providerQuery.toLowerCase()));
   const models = (currentProvider?.models ?? []).filter((model) => !model.isHidden && `${model.name} ${model.slug}`.toLowerCase().includes(modelQuery.toLowerCase()));
-  // As tall as the longer list needs, within the room the body has: a short
-  // list does not reserve empty rows, a long one scrolls.
-  const listRows = Math.max(1, Math.min(paneBudget - 3, Math.max(providerMatches.length, models.length)));
-  const paneRows = listRows + 3;
   const providerStatus = currentProvider
     ? [currentProvider.installed ? t("guide.cliDetected") : t("guide.cliMissing"), tx(currentProvider.status ?? ""), tx(currentProvider.authStatus ?? "")].filter((part) => part !== "").join("  ·  ")
     : t("guide.noModel");
@@ -221,100 +212,71 @@ export function OnboardingPage({
       <HoverButton label={`↻  ${t("guide.refreshProviders")}`} width={inner} fg={focus === at ? COLOR.bright : COLOR.accent} bg={focus === at ? SURFACE.hover : SURFACE.panel} hoverBg={SURFACE.hover} onClick={() => { setFocus(at); onRefresh(); }} />
     </box>;
   };
-  const providersPane = (paneWidth: number, rows: number) => <box style={{ width: paneWidth, ...(panned ? { height: rows } : {}), flexDirection: "column", flexShrink: 0 }}>
-    <text fg={COLOR.dim} style={{ flexShrink: 0 }}>{`${t("guide.providersLabel")}  ·  ${providerMatches.length}`}</text>
-    {searchControl("providers")}
-    {panned
-      ? <scrollbox ref={providerScroll} style={{ height: Math.max(1, rows - 3) }} contentOptions={{ paddingRight: 1 }}
-        verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
-        {providerMatches.length === 0 ? <text fg={COLOR.dim}>{t("guide.noProvidersMatch")}</text> : null}
-        {providerMatches.map(providerRow)}
-      </scrollbox>
-      : <box style={{ flexDirection: "column", flexShrink: 0 }}>
-        {providerMatches.length === 0 ? <text fg={COLOR.dim}>{t("guide.noProvidersMatch")}</text> : null}
-        {providerMatches.map(providerRow)}
-      </box>}
+  const pane = (kind: "providers" | "models", paneWidth: number, count: number, rows: ReactNode, empty: string) => <box style={{ width: paneWidth, flexDirection: "column", flexShrink: 0 }}>
+    <text fg={COLOR.dim} style={{ flexShrink: 0 }}>{`${t(kind === "providers" ? "guide.providersLabel" : "guide.modelsNav")}  ·  ${count}`}</text>
+    {searchControl(kind)}
+    <scrollbox ref={kind === "providers" ? providerScroll : modelScroll} style={{ height: Math.max(1, Math.min(listRows, Math.max(count, 1))), flexShrink: 0 }} contentOptions={{ paddingRight: 1 }}
+      verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
+      {count === 0 ? <text fg={COLOR.dim}>{empty}</text> : null}
+      {rows}
+    </scrollbox>
   </box>;
-  const modelsPane = (paneWidth: number, rows: number) => <box style={{ width: paneWidth, ...(panned ? { height: rows } : {}), flexDirection: "column", flexShrink: 0 }}>
-    <text fg={COLOR.dim} style={{ flexShrink: 0 }}>{`${t("guide.modelsNav")}  ·  ${models.length}`}</text>
-    {searchControl("models")}
-    {panned
-      ? <scrollbox ref={modelScroll} style={{ height: Math.max(1, rows - 3) }} contentOptions={{ paddingRight: 1 }}
-        verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
-        {models.length === 0 ? <text fg={COLOR.dim}>{t("guide.noModelsMatch")}</text> : null}
-        {models.map(modelRow)}
-      </scrollbox>
-      : <box style={{ flexDirection: "column", flexShrink: 0 }}>
-        {models.length === 0 ? <text fg={COLOR.dim}>{t("guide.noModelsMatch")}</text> : null}
-        {models.map(modelRow)}
-      </box>}
-  </box>;
-  const stepTwo = <>
-    <text fg={COLOR.dim} style={{ marginTop: 1, marginBottom: 1, flexShrink: 0 }}>{t(DESCRIPTIONS[2]!)}</text>
+  // A function: building it registers focus controls, so only the step that shows it may.
+  const stepTwo = () => <>
     {twoPane
       ? <box style={{ flexDirection: "row", gap: 2, flexShrink: 0 }}>
-        {providersPane(providerWidth, paneRows)}
-        {modelsPane(modelWidth, paneRows)}
+        {pane("providers", providerWidth, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
+        {pane("models", modelWidth, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
       </box>
       : <box style={{ flexDirection: "column", flexShrink: 0 }}>
-        {providersPane(inner, Math.min(paneRows, 8))}
+        {pane("providers", inner, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
         <box style={{ height: 1, flexShrink: 0 }} />
-        {modelsPane(inner, paneRows)}
+        {pane("models", inner, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
       </box>}
     <box style={{ flexDirection: "column", marginTop: 1, flexShrink: 0 }}>
       {button(t("guide.addModelServer"), () => openList("providers.harness.profiles"), { detail: t("guide.addModelServerBody"), width: inner })}
       {refreshControl()}
       <text fg={COLOR.dim}>{providerStatus}</text>
-      {showHint ? <text fg={COLOR.dim}>{t("guide.loginHint")}</text> : null}
+      <text fg={COLOR.dim}>{t("guide.loginHint")}</text>
     </box>
   </>;
+  const appearanceLabels = ["ui.theme", "ui.backdrop", "ui.language"].map((key) => { const entry = view(key); return entry ? textWidth(tx(entry.descriptor.label)) : 0; });
+  const labelWidth = Math.max(...appearanceLabels) + 4;
 
-  const content = listView && list !== null ? <>
-    <ListEditor key={list} descriptor={listView.descriptor} items={listView.items ?? []} screen={screen} onScreen={setScreen}
+  const body = listView && list !== null ? <ListEditor key={list} descriptor={listView.descriptor} items={listView.items ?? []} screen={screen} onScreen={setScreen}
       heading={heading} onHeading={setHeading} saving={settings.saving} onSet={settings.set}
       onDuplicate={(id, newId) => settings.duplicate(list, id, newId)} run={settings.run}
       onTest={(id, model) => list === "mcpServers" ? settings.testMcp(id) : settings.test(id, model)} onProbe={settings.probe}
       onDiscover={settings.discover} onExport={settings.exportProfile} onImport={settings.importProfile} notice={settings.notice}
       width={inner} onExit={closeList} exitLabel={t("guide.backToStep")} mcpRunner={(value("mcpRunner") ?? "npx") as "npx" | "bunx" | "pnpm" | "yarn"} />
-  </> : step === 2 ? (panned
-    ? <box ref={bodyRef} style={{ flexGrow: 1, flexDirection: "column", overflow: "hidden" }}>{stepTwo}</box>
-    : <scrollbox ref={scroll} style={{ flexGrow: 1 }} contentOptions={{ paddingRight: 1 }}
-      verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>{stepTwo}</scrollbox>)
-  : <scrollbox ref={scroll} style={{ flexGrow: 1 }} contentOptions={{ paddingRight: 1 }}
-    // Memory setup arrives asynchronously. Reserve its gutter from the first
-    // layout so a newly visible native thumb cannot paint at the body origin.
-    verticalScrollbarOptions={{ ...(step === 3 ? { visible: true } : {}), showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
-    <text fg={COLOR.dim} style={{ marginTop: 1, marginBottom: 1, flexShrink: 0 }}>{t(DESCRIPTIONS[step]!)}</text>
-    {step === 0 ? <>
-      <text fg={COLOR.text} style={{ marginBottom: 2 }}>{t("guide.welcomeDetail")}</text>
-      {([["guide.previewAppearance", COLOR.accent], ["guide.previewMemory", MODE_COLOR.research], ["guide.previewTools", COLOR.added]] as const).map(([key, tone]) => <box key={key} style={{ flexDirection: "row", height: 1, flexShrink: 0, gap: 2, marginBottom: 1 }}>
+    : step === 0 ? <>
+      <text fg={COLOR.text} textAlign="center" style={{ width: inner, marginBottom: 2 }}>{t("guide.welcomeDetail")}</text>
+      {([["guide.previewAppearance", COLOR.accent], ["guide.previewMemory", MODE_COLOR.research], ["guide.previewTools", COLOR.added]] as const).map(([key, tone]) => <box key={key} style={{ flexDirection: "row", height: 1, flexShrink: 0, gap: 2, justifyContent: "center", width: inner, marginBottom: 1 }}>
         <text fg={tone}>{"✦"}</text><text fg={COLOR.text}>{t(key as "guide.previewAppearance")}</text>
       </box>)}
-    </> : null}
-    {step === 1 ? <>
-      {["ui.theme", "ui.backdrop", "ui.language"].map(enumControl)}
-      <text fg={COLOR.dim}>{t("guide.selectControl")}</text>
-    </> : null}
-    {step === 3 ? <>
-      <text fg={COLOR.dim} style={{ marginBottom: 2 }}>{t("guide.memoryMode")}</text>
+    </>
+    : step === 1 ? <>
+      {["ui.theme", "ui.backdrop", "ui.language"].map((key) => enumControl(key, labelWidth))}
+      <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.selectControl")}</text>
+    </>
+    : step === 2 ? stepTwo()
+    : step === 3 ? <>
       {memoryLabels.map((label, index) => {
         const at = controls.push({ run: () => { if (!disabled) onMemory(memoryValues[index]!); } }) - 1;
         return <GuideChoice key={label} id={`guide-control-${at}`} label={label} detail={memoryBodies[index]}
-          choice chosen={memory === index} active={focus === at} tone={memoryTones[index] ?? COLOR.accent} width={inner - 1} detailRows={2} inset={0}
+          choice chosen={memory === index} active={focus === at} tone={memoryTones[index] ?? COLOR.accent} width={inner} detailRows={2} inset={0}
           onPick={() => { setFocus(at); if (!disabled) onMemory(memoryValues[index]!); }} />;
       })}
       {showMemorySetup ? <box id="guide-memory-setup" style={{ flexDirection: "column", flexShrink: 0 }}><MemoryRuntimePanel status={memoryStatus} saving={settings.saving === "memoryEmbeddings"}
         onSetup={() => onMemory("embeddings")} onKeyword={() => onMemory("plain")}
         onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }} /></box> : null}
-      <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.memoryControl")}</text>
-    </> : null}
-    {step === 4 ? <>
-      <text fg={COLOR.dim} style={{ marginBottom: 2 }}>{t("guide.mcpExamples")}</text>
+      <text fg={COLOR.dim}>{t("guide.memoryControl")}</text>
+    </>
+    : step === 4 ? <>
       {(view("mcpServers")?.items ?? []).map((server) => button(server.id, () => { setScreen({ profile: server.id, model: null }); setList("mcpServers"); }, { chosen: true, tone: COLOR.added, detail: t("guide.connectedConfig") }))}
       {button(t("guide.addMcp"), () => openList("mcpServers"), { detail: t("guide.mcpInline") })}
       <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.optionalTools")}</text>
-    </> : null}
-    {step === 5 ? <>
+    </> : <>
       {button(t("guide.noProjectChoice"), () => onProject("__no-project__"), { chosen: projectId === "__no-project__", detail: t("guide.scratchProject") })}
       {projects.filter((project) => !project.scratch).map((project) => button(String(project.title), () => onProject(project.id), { chosen: projectId === project.id, detail: String(project.workspaceRoot ?? "") }))}
       {folder ? <box style={{ flexDirection: "column", marginTop: 1 }}>
@@ -323,41 +285,35 @@ export function OnboardingPage({
         <HoverButton label={t("guide.cancelFolder")} fg={COLOR.dim} onClick={() => setFolder(false)} />
       </box> : button(t("guide.addFolder"), () => setFolder(true))}
       <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.readySummary", { model: selection?.model ?? t("guide.noModel"), memory: memoryLabels[memory]! })}</text>
-    </> : null}
-  </scrollbox>;
+    </>;
   const backIndex = step > 0 ? controls.push({ run: () => changeStep(step - 1) }) - 1 : -1;
   const nextIndex = controls.push({ run: next }) - 1;
   const laterIndex = controls.push({ run: onClose }) - 1;
+  const explanation = <box style={{ width: compact ? inner : textArea, alignItems: "center", marginTop: compact ? 0 : 1, marginBottom: compact ? 1 : 0, flexShrink: 0 }}>
+    <text fg={COLOR.dim} textAlign="center" style={{ width: Math.min(compact ? inner : textArea, 68) }}>{t(DESCRIPTIONS[step]!)}</text>
+  </box>;
+  const message = localError ?? error ?? settings.error;
 
   return <box style={{ width: screenWidth, height: screenHeight, flexDirection: "column" }} backgroundColor={SURFACE.base}>
     <ExperienceField width={screenWidth} height={screenHeight} stage={step} motion={motion} ink={stageInk} />
     <box border borderStyle="rounded" borderColor={SURFACE.border} backgroundColor={SURFACE.panel}
-      style={{ position: "absolute", left, top, width, height, flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, zIndex: 1 }}>
-      <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0 }}>
-        <text fg={COLOR.bright} attributes={TextAttributes.BOLD}>{t("guide.pageBrand")}</text>
-        <text fg={COLOR.dim}>{t("guide.stepCount", { n: step + 1, total: GUIDE_STEPS.length })}</text>
+      style={{ position: "absolute", left, top, width, height, flexDirection: "column", paddingLeft: 3, paddingRight: 3, paddingTop: 1, paddingBottom: 1, zIndex: 1 }}>
+      <box id="guide-progress" style={{ flexDirection: "row", justifyContent: "center", gap: 1, height: 1, flexShrink: 0 }}>
+        {GUIDE_STEPS.map((key, index) => <HoverButton key={key} label={index <= step ? "●" : "○"} fg={index === step ? COLOR.accent : index < step ? COLOR.added : COLOR.dim} hoverFg={COLOR.bright}
+          onClick={() => changeStep(index)} />)}
+        <text fg={COLOR.dim}>{`  ${t("guide.stepCount", { n: step + 1, total: GUIDE_STEPS.length })}`}</text>
       </box>
-      <text fg={SURFACE.border} style={{ marginTop: 1, flexShrink: 0 }}>{rule}</text>
-      <box style={{ flexDirection: "row", flexGrow: 1, marginTop: 1, marginBottom: 1, gap }}>
-        {showRail ? <box style={{ width: railWidth, flexDirection: "column", paddingRight: 2, border: ["right"], borderColor: SURFACE.border, flexShrink: 0 }}>
-          <text fg={COLOR.dim} style={{ marginBottom: 2 }}>{t("guide.yourWorkspace")}</text>
-          {GUIDE_STEPS.map((key, index) => <box key={key} style={{ height: 1, marginBottom: 1, flexShrink: 0 }}>
-            <HoverButton label={`${index < step ? "✓" : String(index + 1).padStart(2, "0")}  ${t(key === "guide.provider" ? "guide.modelsNav" : key === "guide.memory" ? "guide.memoryPlain" : key === "guide.project" ? "guide.projectNav" : key === "guide.appearance" ? "guide.appearanceNav" : key === "guide.tools" ? "guide.toolsNav" : "guide.welcomeNav")}`} width={railWidth - 3} fg={index === step ? COLOR.accent : index < step ? COLOR.added : COLOR.dim} bg={index === step ? SURFACE.hover : SURFACE.panel} onClick={() => changeStep(index)} />
-          </box>)}
-          <box style={{ flexGrow: 1 }} />
-          <text fg={COLOR.dim}>{t("guide.changesSaved")}</text>
-        </box> : null}
-        <box style={{ flexGrow: 1, flexDirection: "column", overflow: "hidden" }}>
-          <text fg={COLOR.bright} attributes={TextAttributes.BOLD}>{t(GUIDE_STEPS[step]!)}</text>
-          {content}
-          {localError || error || settings.error ? <text fg={COLOR.danger} style={{ flexShrink: 0 }}>{localError ?? error ?? settings.error}</text> : null}
-          {disabled ? <text fg={COLOR.dim} style={{ flexShrink: 0 }}>{t("guide.saving")}</text> : null}
-        </box>
-      </box>
-      <text fg={SURFACE.border} style={{ flexShrink: 0 }}>{rule}</text>
+      <text fg={COLOR.bright} attributes={TextAttributes.BOLD} textAlign="center" style={{ width: textArea, marginTop: 1, flexShrink: 0 }}>{t(GUIDE_STEPS[step]!)}</text>
+      {compact ? null : explanation}
+      <scrollbox ref={scroll} style={{ flexGrow: 1, flexShrink: 1, marginTop: 1, minHeight: 3 }} contentOptions={{ paddingRight: 2, alignItems: "center" }}
+        verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
+        <box style={{ ...(step === 1 && list === null ? {} : { width: inner }), flexDirection: "column", flexShrink: 0 }}>{compact ? explanation : null}{body}</box>
+      </scrollbox>
+      {message ? <text fg={COLOR.danger} style={{ flexShrink: 0 }}>{message}</text> : null}
+      {disabled ? <text fg={COLOR.dim} style={{ flexShrink: 0 }}>{t("guide.saving")}</text> : null}
+      {list === null && showKeys ? <text fg={COLOR.dim} textAlign="center" style={{ width: textArea, flexShrink: 0 }}>{t("guide.pageKeys")}</text> : null}
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1, flexShrink: 0, marginTop: 1 }}>
         <HoverButton label={t("guide.later")} fg={focus === laterIndex ? COLOR.accent : COLOR.dim} {...(focus === laterIndex ? { bg: SURFACE.hover } : {})} onClick={() => { if (!disabled) onClose(); }} />
-        {list === null && showKeys ? <text fg={COLOR.dim}>{t("guide.pageKeys")}</text> : <box />}
         <box style={{ flexDirection: "row", gap: 3 }}>
           {step > 0 ? <HoverButton label={t("guide.back")} fg={focus === backIndex ? COLOR.accent : COLOR.dim} {...(focus === backIndex ? { bg: SURFACE.hover } : {})} onClick={() => changeStep(step - 1)} /> : null}
           <HoverButton label={` ${footerLabel}  → `} fg={SURFACE.base} bg={focus === nextIndex ? COLOR.bright : COLOR.accent} hoverBg={COLOR.bright} onClick={() => { if (!disabled) next(); }} />

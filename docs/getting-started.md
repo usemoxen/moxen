@@ -4,8 +4,9 @@ The TUI offers a short guide the first time you connect to a Moxen store.
 It recognises existing settings rather than replacing them. Use **Getting
 started** in the command palette (`ctrl+p`) to reopen it at any time.
 
-The guide is a page of its own, with a step list, a quiet animated field of
-threads, and a fixed navigation bar. It covers appearance, a provider and
+The guide is a page of its own: one centred column per step, with a progress
+indicator (`● ● ○ ○ ○ ○  2 of 6`), a quiet animated field of
+threads in the margin, and Later, Back and Continue in the same place on every step. It covers appearance, a provider and
 model, memory, MCP servers, and the project for your next thread. Appearance
 choices are visible together and apply immediately. Models and projects are
 selected inline for the thread you are about to start; choosing one does not
@@ -54,9 +55,9 @@ next launch until you finish. Settings already saved stay saved.
 Use the mouse, or Up/Down and Tab to focus a control and Enter to activate
 it. Left/Right adjust the focused choice; on the memory slider they preview
 the choice, and Enter applies it. Click a slider label to apply it directly.
-Use Continue/Back, the step list, or `[` / `]` to change pages. The guide's own
+Use Continue/Back, the dots in the progress indicator, or `[` / `]` to change pages. The guide's own
 background follows Animated / Static / Off, and it supports English and Spanish.
-The step list and Back/Continue stay visible while an inline editor is open;
+The progress indicator and Back/Continue stay visible while an inline editor is open;
 its own back link returns one level within setup, then to the guide step.
 
 ## Updating Moxen
@@ -78,13 +79,14 @@ Another update already running (for example from `moxen self-update`) is reporte
 
 **What's new** in the command palette opens the bundled release history.
 After onboarding, an unobtrusive notice offers unread release notes.
-Choose a version from the history. **Highlights** showcases features with
-optional actions; **All changes** shows the release's complete change list,
-grouped into sections supplied by that release. A release can contain only
-the detailed change list without feature highlights. Left/Right browse
-versions, `d` switches views, and Page Up/Down scroll the content. **Mark read and
-close** acknowledges only the displayed release; closing with Escape or
-Later leaves it unread.
+The viewer shows one release per page: its highlights as plain sections
+(each with an optional **Try it** action), then the release's complete
+change list grouped into sections that release supplies. A release can
+contain only the change list. Left/Right (or the arrows in the header)
+move between releases, `h` opens the release history only when you ask for
+it (Escape or `h` returns to the release), and Page Up/Down scroll the page.
+**Mark read** acknowledges only the displayed release; closing with Escape
+or Later leaves it unread.
 The unread-release notice hides while the viewer is open and returns after Later.
 
 Release notes are bundled and work offline. No update check, download or
