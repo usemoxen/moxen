@@ -108,6 +108,12 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
           type: "string",
           description: "Short name for the subagent's thread, a few words (\"fix login redirect\"). It also names its worktree branch, moxen/<name>.",
         },
+        idempotencyKey: {
+          type: "string",
+          description:
+            "A UUID you generate for this task (one per new task). If this call fails with a transport error, retry with the SAME key: " +
+            "the retry returns the original task instead of starting a duplicate.",
+        },
         provider: { type: "string", description: "Provider instance id (claudeAgent, opencode/<provider>…); defaults to yours. The models tool lists them." },
         model: { type: "string", description: "Model slug on that provider; defaults to yours." },
         effort: { type: "string", description: "Reasoning effort for that model (one of its efforts in the models tool); defaults to the model's own." },
@@ -969,6 +975,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   // fork, whose copied conversation lives with the parent's checkout.
   const isolation = isolationArg ?? (fork ? "shared" : parent.thread.branch ? "worktree" : "shared");
   const title = argString(args, "title", true)!;
+  const idempotencyKey = argString(args, "idempotencyKey");
   const provider = argString(args, "provider");
   const model = argString(args, "model");
   const effort = argString(args, "effort");
@@ -979,6 +986,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     wait: false,
     isolation,
     title,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { thinkingEffort: effort } : {}),

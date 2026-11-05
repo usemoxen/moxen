@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import type { RuntimeMode } from "../../../types.js";
+import type { McpServerSpec } from "../../../mcp.js";
 import { userInputActivityRow } from "../../../threads/requestactivity.js";
 import { answersFor, OpenCodeDriver, opencodeCompactionThreshold, opencodeContextOf, parseOpencodeModel } from "../driver.js";
 import { translateTimeline } from "../translate.js";
@@ -1334,6 +1335,46 @@ describe("opencode MCP injection", () => {
       expect(await Effect.runPromise(driver.hasSession("thread-2"))).toBe(true);
       // Not remembered as added, so the second start tried again.
       expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(2);
+    } finally {
+      await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  });
+
+  it("hands the moxen entry back to the parent after a same-directory child replaced it, and stays quiet when it already serves the parent", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
+    const moxenInProcess = (thread: string): McpServerSpec => ({
+      name: "moxen",
+      type: "in-process",
+      tools: [],
+      call: async () => ({ text: "", isError: false as const }),
+      fallback: { name: "moxen", type: "stdio", command: "moxen-mcp", args: ["--thread", thread], env: {} },
+    });
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "parent", workingDirectory: "/repo", mcpServers: [moxenInProcess("parent")] }));
+      // A same-directory child's session start replaces the entry: the parent's in-flight call dies with `Connection closed`.
+      await Effect.runPromise(driver.startSession({ threadId: "child", workingDirectory: "/repo", mcpServers: [moxenInProcess("child")] }));
+      const added = () =>
+        transport.servers[0]!.callsTo("mcp.add").map((call) => (call.args as { config: { command: string[] } }).config.command);
+      expect(added()).toEqual([
+        ["moxen-mcp", "--thread", "parent"],
+        ["moxen-mcp", "--thread", "child"],
+      ]);
+      // The child settles: the parent's entry is re-registered, healing the parent's later calls.
+      await driver.restoreMcpServers("parent");
+      expect(added()).toEqual([
+        ["moxen-mcp", "--thread", "parent"],
+        ["moxen-mcp", "--thread", "child"],
+        ["moxen-mcp", "--thread", "parent"],
+      ]);
+      // Already serving the parent: no gratuitous `mcp.add` restarts a healthy entry.
+      await driver.restoreMcpServers("parent");
+      expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(3);
+      // Unknown and closed threads are a quiet no-op.
+      await driver.restoreMcpServers("elsewhere");
+      await Effect.runPromise(driver.stopSession("parent"));
+      await driver.restoreMcpServers("parent");
+      expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(3);
     } finally {
       await Effect.runPromise(driver.stopAll()).catch(() => undefined);
     }

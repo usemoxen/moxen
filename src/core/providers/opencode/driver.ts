@@ -55,7 +55,7 @@ import type {
   TokenUsageDelta,
   TurnId,
 } from "../spi.js";
-import { mcpSignature, outOfProcess, outOfProcessWithChecklist, type McpServerSpec } from "../../mcp.js";
+import { mcpSignature, outOfProcess, outOfProcessWithChecklist, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../../mcp.js";
 import { opencodeContextBreakdown } from "./context.js";
 import {
   isContextOverflowText,
@@ -309,6 +309,37 @@ function canonicalToolList(names: string | readonly string[] | undefined): strin
 const INSTRUCTIONS_KEY = "moxen";
 
 /**
+ * The name agents see moxen's tools under (`MOXEN_MCP_SERVER_NAME` in
+ * `src/server/mcp/main.ts`, which core cannot import — the layering test
+ * pins that direction). Kept as the literal here so the driver can tell a
+ * same-directory child's replacement of the entry from any other server's.
+ */
+const MOXEN_MCP_SERVER_NAME = "moxen";
+
+/**
+ * The `mcp.add` payload for one out-of-process server, in the `name:config`
+ * key form `registerMcpServers` dedupes by.
+ */
+function mcpRegistration(server: OutOfProcessMcpServerSpec): { key: string; config: OpencodeMcpConfig } {
+  const config: OpencodeMcpConfig =
+    server.type === "http"
+      ? { type: "remote", url: server.url, ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}) }
+      : {
+          type: "local",
+          command: [server.command, ...server.args],
+          ...(Object.keys(server.env).length > 0 ? { environment: server.env } : {}),
+        };
+  return { key: `${server.name}:${JSON.stringify(config)}`, config };
+}
+
+/** This session's `moxen` entry key, or null when the thread has no `moxen` server. */
+function moxenRegistrationKey(servers: readonly McpServerSpec[], checklist: boolean): string | null {
+  const moxen = servers.find((server) => server.name === MOXEN_MCP_SERVER_NAME);
+  if (!moxen) return null;
+  return mcpRegistration((checklist ? outOfProcessWithChecklist : outOfProcess)(moxen)).key;
+}
+
+/**
  * The turn's answer: the text of its last assistant message. OpenCode opens
  * one assistant message per model step, so a turn that calls tools leaves
  * interim notes in the earlier steps; joining every step's text put that
@@ -501,6 +532,34 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   };
 
   /**
+   * Hand the directory's `moxen` entry back to this thread after a session
+   * sharing its provider server replaced it. A same-directory delegated
+   * task's session start registers the child's `moxen` config over the
+   * parent's (OpenCode keys servers by name per directory), killing the
+   * in-flight call with `Connection closed`; once that child settles, the
+   * parent's later calls would otherwise keep landing on the child's entry.
+   * A no-op when the entry already serves this thread (tracked per
+   * connection, so a gratuitous `mcp.add` never restarts a healthy entry),
+   * when the thread has no live server, or when it has no `moxen` server.
+   * Best-effort: never throws.
+   */
+  readonly restoreMcpServers = async (threadId: ThreadId): Promise<void> => {
+    try {
+      const session = this.sessions.get(threadId);
+      if (!session || session.closed) return;
+      const connection = this.liveConnections.get(session.workingDirectory);
+      if (!connection) return;
+      const wanted = moxenRegistrationKey(session.mcpServers, session.checklist);
+      if (wanted === null || this.moxenEntry.get(connection) === wanted) return;
+      const done = this.mcpRegistered.get(connection);
+      if (done) for (const key of [...done]) if (key.startsWith(`${MOXEN_MCP_SERVER_NAME}:`)) done.delete(key);
+      await this.registerMcpServers(connection, session.mcpServers, session.checklist);
+    } catch {
+      // Best effort: the entry heals on the next session start.
+    }
+  };
+
+  /**
    * The tools to leave off, for a session already running: what the setting says now. The server was started with
    * the set of its day, so a difference waits for it to be quiet and then restarts it. Not for an external server,
    * whose config is not ours.
@@ -574,6 +633,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly liveConnections = new Map<string, OpencodeServerConnection>();
   /** `name:config` already registered per server connection (see `registerMcpServers`). */
   private readonly mcpRegistered = new WeakMap<OpencodeServerConnection, Set<string>>();
+  /** The `moxen` entry key each connection's live entry last registered with (see `restoreMcpServers`). */
+  private readonly moxenEntry = new WeakMap<OpencodeServerConnection, string>();
   /** When each server (by working directory) last had its OpenCode Go usage read. */
   private readonly goUsageReadAt = new Map<string, number>();
   private readonly pumps = new Map<string, { controller: AbortController; ready: Promise<void>; done: Promise<void> }>();
@@ -675,20 +736,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     }
     // v2 has no `todowrite`: moxen's server lends its checklist tool.
     for (const server of servers.map(checklist ? outOfProcessWithChecklist : outOfProcess)) {
-      const config: OpencodeMcpConfig =
-        server.type === "http"
-          ? { type: "remote", url: server.url, ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}) }
-          : {
-              type: "local",
-              command: [server.command, ...server.args],
-              ...(Object.keys(server.env).length > 0 ? { environment: server.env } : {}),
-            };
-      const key = `${server.name}:${JSON.stringify(config)}`;
+      const { key, config } = mcpRegistration(server);
       if (done.has(key)) continue;
       try {
         await connection.addMcpServer(server.name, config);
         registerOpencodeMcpServer(server.name);
         done.add(key);
+        if (server.name === MOXEN_MCP_SERVER_NAME) this.moxenEntry.set(connection, key);
       } catch {
         // Retried on the next session start.
       }

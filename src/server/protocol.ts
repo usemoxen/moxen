@@ -1217,6 +1217,7 @@ export function decodeCommand(value: unknown): Command {
         parentThreadId: requireThreadId(record.parentThreadId),
         task: typeof record.task === "string" ? record.task : "",
         ...optionalString(record, "title"),
+        ...optionalString(record, "idempotencyKey"),
         ...decodeModelRequest(record, type),
         ...optionalBoolean(record, "wait"),
         ...optionalNumber(record, "timeoutMs", type),

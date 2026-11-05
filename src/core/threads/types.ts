@@ -348,6 +348,8 @@ export interface StoredDelegation {
   readonly continuedIn?: string;
   /** The task id the parent first knew, when this row is a handoff's continuation. */
   readonly continuesTaskId?: string;
+  /** The client's idempotency key for this delegation, when it passed one: a retry with the same key returns this row's task. */
+  readonly idempotencyKey?: string;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

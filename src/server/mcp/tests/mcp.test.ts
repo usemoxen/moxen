@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -124,6 +125,33 @@ describe("moxen MCP server", () => {
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
       expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "web_fetch", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "web_fetch", "memory_read", "memory_search"]);
+    } finally {
+      await mcp.close();
+      await connection.close();
+    }
+  });
+
+  it("returns the original task when a delegate call is retried with the same idempotency key", async () => {
+    const { connection, parentThreadId, starts } = await setup();
+    const mcp = mcpSession(connection, parentThreadId);
+    try {
+      const key = randomUUID();
+      const call = async () => {
+        const reply = await mcp.request("tools/call", {
+          name: "delegate",
+          arguments: { task: "Write the changelog", title: "Write changelog", isolation: "shared", idempotencyKey: key },
+        });
+        const result = reply.result as { content: Array<{ text: string }>; isError: boolean };
+        expect(result.isError).toBe(false);
+        return JSON.parse(result.content[0]!.text) as { taskId: string };
+      };
+      const first = await call();
+      const again = await call();
+      expect(again.taskId).toBe(first.taskId);
+      // The retry started no duplicate: one child session behind the parent's.
+      const children = starts.filter((input) => input.threadId !== parentThreadId);
+      expect(children).toHaveLength(1);
+      expect(children[0]!.threadId).toBe(first.taskId);
     } finally {
       await mcp.close();
       await connection.close();

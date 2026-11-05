@@ -237,6 +237,7 @@ interface ThreadDelegateCommandOptions extends PromptOptions {
   timeoutMs?: string;
   dryRun?: boolean;
   isolation?: "shared" | "worktree";
+  idempotencyKey?: string;
   mode?: "build" | "research";
   researchSize?: string;
   researchModels?: string;
@@ -1543,6 +1544,7 @@ threads
   .option("--no-wait", "Return after dispatching without waiting for the child's terminal turn.")
   .option("--timeout-ms <ms>", "Wait budget in milliseconds (default 600000). Expiring it ends the wait without cancelling the child.")
   .option("--dry-run", "Build the child thread commands without dispatching them.")
+  .option("--idempotency-key <uuid>", "Client-generated key: repeating the delegation with the same key returns the original task instead of starting a duplicate.")
   .addOption(
     new Option("--isolation <mode>", "shared: the parent's checkout (default). worktree: the child's own git worktree, on a branch cut from the parent's.")
       .choices(["shared", "worktree"]),
@@ -1572,6 +1574,7 @@ threads
         ...(options.open ? { openMode: options.open } : {}),
         ...(options.dryRun ? { dryRun: true } : {}),
         ...(options.isolation ? { isolation: options.isolation } : {}),
+        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
       });
       const task = result.task as { status: string; waitTimedOut: boolean };
       writeSuccess(

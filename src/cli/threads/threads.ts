@@ -349,6 +349,7 @@ export interface ThreadDelegateOptions {
   openMode?: OpenMode;
   dryRun?: boolean;
   isolation?: "shared" | "worktree";
+  idempotencyKey?: string;
   interactionMode?: "default" | "research";
   researchSize?: string;
   researchModels?: string;
@@ -385,6 +386,7 @@ export async function delegateTask(config: CliConfig, options: ThreadDelegateOpt
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
     ...(options.isolation !== undefined ? { isolation: options.isolation } : {}),
+    ...(options.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
     ...modelRequestOf(options),
   });
   const createdAt = new Date().toISOString();

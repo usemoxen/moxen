@@ -111,6 +111,16 @@ export interface TurnDriver extends ProviderSessionTitles {
    */
   updateMcpServers?(threadId: string, servers: readonly McpServerSpec[]): Promise<void>;
   /**
+   * Re-register this thread's own MCP servers after a session sharing its
+   * provider server replaced the entry out from under it. OpenCode keys
+   * servers by name per directory, and `mcp.add` restarts the server on
+   * every call, so a delegated task's session start flips the directory's
+   * single `moxen` entry to the child and the in-flight call dies with
+   * `Connection closed`. Absent where a session's servers cannot change
+   * after it starts. Best-effort: never throws.
+   */
+  restoreMcpServers?(threadId: string): Promise<void>;
+  /**
    * The provider tools to leave off, as the setting says now, for a session already running. OpenCode's are part of
    * its server's config, so it restarts the server once nothing runs on it. Absent where a live session cannot
    * change them (Claude Code reads them when the session starts).

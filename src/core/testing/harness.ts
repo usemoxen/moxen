@@ -58,6 +58,7 @@ class HarnessDriver implements TurnDriver {
     private readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void,
     steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
     sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>,
+    private readonly onRestoreMcpServers?: (threadId: string) => void,
   ) {
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
     if (steer) {
@@ -77,6 +78,11 @@ class HarnessDriver implements TurnDriver {
   /** Like the drivers that can: a session already running is given the servers of the day. */
   async updateMcpServers(threadId: string, servers: readonly McpServerSpec[]): Promise<void> {
     if (this.sessions.has(threadId)) this.onUpdateMcpServers?.(threadId, servers);
+  }
+
+  /** Like the driver that re-registers after a same-directory child replaced the entry. */
+  async restoreMcpServers(threadId: string): Promise<void> {
+    if (this.sessions.has(threadId)) this.onRestoreMcpServers?.(threadId);
   }
 
   hasSession(threadId: string): Effect.Effect<boolean, CliError> {
@@ -162,6 +168,8 @@ export interface TestHarnessOptions {
   readonly onSendTurn?: (input: SentTurn) => void;
   /** Sees the MCP servers a live session is given at each send (`updateMcpServers`). */
   readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void;
+  /** Sees the threads whose own servers are re-registered after a same-directory child replaced them (`restoreMcpServers`). */
+  readonly onRestoreMcpServers?: (threadId: string) => void;
   /** Which providers' drivers take input mid-turn (they have `steerTurn`): `delivers`, or `fails` when asked. The others have none. */
   readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
   /** Sees each steer a driver accepted. */
@@ -175,7 +183,7 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
-    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion);
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onRestoreMcpServers);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),

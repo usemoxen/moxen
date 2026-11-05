@@ -2015,6 +2015,13 @@ export interface DelegateRequest extends ModelRequest {
   readonly timeoutMs?: number;
   readonly dryRun?: boolean;
   /**
+   * A client-generated idempotency key: repeating the same delegation with
+   * the same key returns the original task instead of starting a duplicate.
+   * For a retry after the call's transport died (which cannot double-spend):
+   * generate one UUID per new task, and reuse it only when retrying that task.
+   */
+  readonly idempotencyKey?: string;
+  /**
    * `shared` (the default) runs the child in the parent's checkout.
    * `worktree` gives it its own git worktree on a new branch cut from the
    * parent's, so two agents never edit the same files at once.
@@ -2109,6 +2116,26 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
     });
     if (held) await deliverTaskNotifications(ctx, parentThreadId, [childThreadId]);
   });
+}
+
+/**
+ * Hand the directory's `moxen` entry back to the parent once a shared child
+ * is done. The child's session start registered the child's entry over the
+ * parent's on their shared OpenCode server (`mcp.add` restarts the server
+ * on every call), which also killed the in-flight delegate call with
+ * `Connection closed`; without this, the parent's later calls keep landing
+ * on the child's entry until the server turns over. A child with more work
+ * queued keeps the entry until it is truly done. Best-effort: never throws.
+ */
+async function restoreParentMcpEntry(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
+  try {
+    if (!(await taskHasSettledForGood(ctx, childThreadId))) return;
+    const parent = await ctx.store.readThreadRecord(parentThreadId);
+    if (!parent) return;
+    await ctx.driverFor(parent.modelSelection.instanceId).restoreMcpServers?.(parentThreadId);
+  } catch {
+    // Best effort: the entry heals on the next session start.
+  }
 }
 
 /**
@@ -2422,6 +2449,32 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     };
   }
 
+  // An idempotent retry's answer: the original task as it stands now, without
+  // starting anything new. The first attempt's reply carried the child's
+  // first message; a retry only needs where the task stands.
+  const describeDelegation = async (childId: string, row: StoredDelegation): Promise<Delegation> => {
+    const existing = await threadWithLedger(ctx.store, childId);
+    const status = delegatedStatusOf(existing);
+    return {
+      ...shape,
+      child: { id: existing.id, projectId: existing.projectId, title: existing.title },
+      task: { ...taskOf(existing), waitTimedOut: status === "running" },
+      messageId: null,
+      ...(existing.worktreePath && row.baseBranch
+        ? { worktree: { path: existing.worktreePath, branch: existing.branch ?? null, baseBranch: row.baseBranch } }
+        : {}),
+    };
+  };
+
+  const idempotencyKey = request.idempotencyKey?.trim() || undefined;
+  if (idempotencyKey !== undefined) {
+    const prior = [...(await ctx.store.readDelegations())].reverse().find(
+      (row) => row.parentThreadId === parentThreadId && row.idempotencyKey === idempotencyKey && row.continuedIn === undefined,
+    );
+    // A retry whose original child is gone (deleted thread) falls through and delegates anew.
+    if (prior && (await ctx.store.readThreadRecord(prior.childThreadId))) return await describeDelegation(prior.childThreadId, prior);
+  }
+
   // A fork starts from a copy of the parent's own conversation, made before
   // anything is created so a provider that cannot fork leaves nothing behind.
   const forked = request.fork === true ? await forkParentSession(ctx, parentThreadId, modelSelection, parentEnv.path) : null;
@@ -2446,6 +2499,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       id: randomUUID(), parentThreadId, childThreadId, prompt: task, status: "running",
       ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
       ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
       createdAt: now, updatedAt: now,
     }).catch((cause: unknown) => {
       if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
@@ -2499,12 +2553,26 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // the child it is a delegated task (`core/threads/instructions.ts`).
   if (options.researchRole === undefined) await recordDelegation();
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
+    // The child's session start may have flipped the directory's `moxen`
+    // entry before failing: hand it back, since this child will never run.
+    if (worktree === null) void restoreParentMcpEntry(ctx, parentThreadId, created.id);
     throw new CliError(
       "THREAD_START_FAILED",
       `Created delegated thread ${created.id} but could not start its task turn. The child thread was left untouched.`,
       { cause, details: { threadId: created.id } },
     );
   });
+
+  // A shared child runs on the parent's OpenCode server, whose single
+  // `moxen` entry the child's session start flipped to the child (killing
+  // the in-flight call with `Connection closed` when it came over MCP).
+  // Hand the entry back once the child settles, so the parent's later calls
+  // land on the parent again. Worktree children have their own server, and
+  // a child with more work queued keeps the entry until it is truly done.
+  if (worktree === null) {
+    const settled = started.run ?? Promise.resolve();
+    void settled.then(() => restoreParentMcpEntry(ctx, parentThreadId, created.id));
+  }
 
   // A delegation nobody waits on reports back by itself once the task
   // settles: the parent gets a message instead of having to poll for it.
