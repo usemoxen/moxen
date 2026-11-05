@@ -198,7 +198,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
   }
   const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
-  const modelSummary = options.modelSummary ?? (options.preferModelSummary ? summaryBlock?.replies.at(-1)?.text.trim() : null);
+  const modelSummary = options.modelSummary ?? (options.preferModelSummary ? summaryBlock?.replies.map((reply) => reply.text.trim()).join("\n\n") : null);
   if (modelSummary) return [...head, "", "## Model's wrap-up", "", modelSummary, "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
   const tail = [
     "",

@@ -186,9 +186,14 @@ function promptWithUpdate(prompt: string, setup: PendingUpdates): string {
   return withInstructionsUpdate(withMode, setup.instructionsUpdate?.text ?? null);
 }
 
-async function withProtectedBackground(ctx: OperationContext, thread: StoredThread, prompt: string): Promise<string> {
+async function withUsageProtectionContext(ctx: OperationContext, thread: StoredThread, prompt: string): Promise<string> {
   if (!thread.usagePause) return prompt;
   const tasks = (await ctx.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background" && row.payload?.order === thread.usagePause!.order);
+  const wrapTurnId = thread.usagePause.turnId;
+  const replies = wrapTurnId ? (await ctx.store.readMessages(thread.id)).filter((row) => row.turnId === wrapTurnId && row.role === "assistant" && row.text.trim()) : [];
+  // An interrupted provider session may not retain its final streamed text.
+  // Give recovery the durable notes even when resuming that same session.
+  if (replies.length) prompt += `\n\n## Usage-protection wrap-up notes\n\n${replies.map((row) => row.text).join("\n\n")}`;
   if (!tasks.length) return prompt;
   const notes = tasks.map(({ payload }) => ({ taskId: payload!.taskId, description: payload!.description, status: payload!.status, output: Array.isArray(payload!.output) ? payload!.output.slice(-40) : null }));
   return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
@@ -400,7 +405,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     driver,
     threadId,
     storeTurnId: turn.id,
-    prompt: promptWithUpdate(await withProtectedBackground(ctx, thread, message.text), setup),
+    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, message.text), setup),
     ...(steps.length > 0 ? { afterSend: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
     interactionMode: turn.interactionMode,
     ...(images.length > 0 ? { images } : {}),
@@ -1250,7 +1255,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     driver,
     threadId: thread.id,
     storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(await withProtectedBackground(ctx, thread, driverPrompt ?? input.prompt.trim()), setup), rules?.text ?? null),
+    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, driverPrompt ?? input.prompt.trim()), setup), rules?.text ?? null),
     ...(delivered.length > 0 ? { afterSend: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
     ...(images.length > 0 ? { images } : {}),
     // Always the turn's own model, so a live session switches when the

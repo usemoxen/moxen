@@ -1,9 +1,14 @@
 import { testRender } from "../testrender.js";
+import { act } from "react";
 
 import type { MessageEnvelope, ThreadEnvelope } from "../../../core/types.js";
 import type { ClientApi, ShellFrame, ThreadFrame } from "../../../server/api.js";
 import { App, client } from "../fixtures.js";
 import { fail } from "../helpers.js";
+import { Timeline } from "../../features/timeline/timeline.js";
+import { emptyThreadState, timeline } from "../../model/thread.js";
+import { groupTurns } from "../../model/turns.js";
+import { toMessageEnvelope } from "../../../core/threads/project.js";
 
 /**
  * Each turn keeps the model that ran it. The thread is on Claude Opus 5 now,
@@ -130,5 +135,44 @@ export async function runTurnModels(): Promise<void> {
     if (gap !== 1) fail(`consecutive turns are separated by ${gap} blank rows, expected 1`);
   } finally {
     setup.renderer.destroy();
+  }
+}
+
+/** The maintenance prompt is private, but both kinds of wrap-up keep their notes and existing notices. */
+export async function runWrapUpNotes(): Promise<void> {
+  const createdAt = "2026-09-25T14:00:00.000Z";
+  const at = (seconds: number) => new Date(Date.parse(createdAt) + seconds * 1000).toISOString();
+  const groups = groupTurns(timeline({
+    ...emptyThreadState(),
+    messages: [
+      toMessageEnvelope({ id: "request", threadId: "t", turnId: "moxen-wrap", role: "user", text: "Private stopping instructions", origin: "usage-protection", createdAt }),
+      toMessageEnvelope({ id: "notes", threadId: "t", turnId: "moxen-wrap", role: "assistant", text: "Moxen wrap-up: the saved edits still need tests.", createdAt: at(1) }),
+      toMessageEnvelope({ id: "native-request", threadId: "t", turnId: "native-wrap", role: "user", text: "Finish the feature", createdAt: at(2) }),
+      toMessageEnvelope({ id: "native-notes", threadId: "t", turnId: "native-wrap", role: "assistant", text: "Native wrap-up: inspect the unfinished edits before continuing.", createdAt: at(4) }),
+    ],
+    activities: [{ id: "native-wrap-up", kind: "usage.wrap-up", summary: "Usage limit reached, wrapping up", tone: "info", turnId: "native-wrap", createdAt: at(3), payload: { provider: "claude", resetsAt: null } }],
+  }));
+  const noop = () => {};
+  const setup = await testRender(<Timeline groups={groups} title="Wrap-up notes" subtitle="" modelForTurn={() => ({ name: "Claude Opus 5", color: null })}
+    modelLabel={(model) => ({ name: model, color: null })} homeDir={undefined} expandedTurn={null} expandedWork={new Map()} scrollRef={{ current: null }}
+    onFocus={noop} onOpenDiff={noop} onToggleWork={noop} onOpenMessageActions={noop} onOpenUrl={noop} focused width={100}
+    sessionStatus="idle" now={Date.parse(at(5))} turnStartedAt={null} turnFileDiffs={new Map()} gitFiles={[]} />, { width: 100, height: 45, exitOnCtrlC: false });
+  try {
+    let frame = "";
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      await setup.flush();
+      frame = setup.captureCharFrame();
+      if (frame.includes("Moxen wrap-up: the saved edits") && frame.includes("Native wrap-up: inspect the unfinished edits")) break;
+      if (Date.now() >= deadline) fail("wrap-up notes did not finish rendering");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    }
+    console.log("--- usage-protection wrap-up notes ---");
+    console.log(frame);
+    if (frame.includes("Private stopping instructions")) fail("wrap-up instructions leaked into the transcript");
+    if (!frame.includes("Usage protection") || !frame.includes("Moxen wrap-up: the saved edits still need tests.")) fail("Moxen wrap-up lost its notice or notes");
+    if (!frame.includes("Usage-protection wrap-up") || !frame.includes("Native wrap-up: inspect the unfinished edits")) fail("native wrap-up lost its label or notes");
+  } finally {
+    await act(async () => setup.renderer.destroy());
   }
 }

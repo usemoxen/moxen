@@ -15,6 +15,7 @@ export const en = {
   "composer.improvementFailed": "Could not improve the prompt: {why}",
   "timeline.preparingHandoff": "Preparing a handoff",
   "timeline.usageProtection": "Usage protection",
+  "timeline.wrapUpNotes": "Usage-protection wrap-up",
   "timeline.usageProtectionDetail": "Shared usage is nearly exhausted. Wrapping up safely before waiting for recovery.",
   "timeline.usagePaused": "Paused by usage protection",
   "timeline.usagePausedWindow": "This turn was cut off because {window} ran low.",

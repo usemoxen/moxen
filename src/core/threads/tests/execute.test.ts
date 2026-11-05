@@ -16,6 +16,7 @@ import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, 
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
+import { buildHandoff } from "../handoff.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -38,6 +39,44 @@ describe("driverForInstance", () => {
 });
 
 describe("executeTurn", () => {
+  it.each(["completed", "interrupted", "aborted", "failed", "empty-result", "late-result"] as const)("keeps streamed wrap-up notes in history when the turn is %s", async (status) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-wrap-notes-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "Wrap up", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, env: { mode: "local", path: root, branch: null } });
+    const sent = await sendTurn(store, thread.id, { prompt: "Private stopping instructions", origin: "usage-protection", usageControl: true });
+    const queue = await Effect.runPromise(Queue.unbounded<ProviderRuntimeEvent>());
+    cleanup.push(async () => { await Effect.runPromise(Queue.shutdown(queue)); });
+    let received!: () => void;
+    const streamed = new Promise<void>((resolve) => { received = resolve; });
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true), startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void, streamEvents: Stream.fromQueue(queue),
+      awaitTurn: async () => {
+        await Effect.runPromise(Queue.offer(queue, { type: "message.part.updated", provider: "codex", threadId: thread.id, turnId: "native-turn", messageId: "earlier", text: "Edits are on disk; inspect them before continuing." }));
+        await Effect.runPromise(Queue.offer(queue, { type: "assistant.note", provider: "codex", threadId: thread.id, turnId: "native-turn", messageId: "earlier", text: "Edits are on disk; inspect them before continuing." }));
+        await Effect.runPromise(Queue.offer(queue, { type: "message.part.updated", provider: "codex", threadId: thread.id, turnId: "native-turn", messageId: "retracted", text: "Discarded attempt" }));
+        await Effect.runPromise(Queue.offer(queue, { type: "message.retracted", provider: "codex", threadId: thread.id, turnId: "native-turn", messageIds: ["retracted"], toolUseIds: [] }));
+        await Effect.runPromise(Queue.offer(queue, { type: "message.part.updated", provider: "codex", threadId: thread.id, turnId: "native-turn", messageId: "notes", text: "Stopping here; " }));
+        await Effect.runPromise(Queue.offer(queue, { type: "message.part.updated", provider: "codex", threadId: thread.id, turnId: "native-turn", messageId: "notes", text: "tests remain unfinished." }));
+        await streamed;
+        if (status === "aborted") {
+          await interruptTurn(store, thread.id, sent.turn.id);
+          throw new CliError("TURN_ABORTED", "Interrupted before result");
+        }
+        if (status === "late-result") await interruptTurn(store, thread.id, sent.turn.id);
+        return { status: status === "empty-result" || status === "late-result" ? "completed" : status, text: status === "completed" || status === "late-result" ? "Stopping here; tests remain unfinished." : "", usage: null, error: null };
+      },
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: sent.turn.id, prompt: "Private stopping instructions", onEvent: (event) => { if (event.type === "message.part.updated" && event.text.includes("tests remain")) received(); } });
+    const reopened = await openThreadStore(root);
+    expect((await reopened.readMessages(thread.id)).filter((row) => row.role === "assistant").map((row) => row.text)).toEqual(["Edits are on disk; inspect them before continuing.", "Stopping here; tests remain unfinished."]);
+    expect(await buildHandoff(reopened, thread.id)).toContain("Stopping here; tests remain unfinished.");
+    expect(await buildHandoff(reopened, thread.id, { preferModelSummary: true })).toContain("Stopping here; tests remain unfinished.");
+    expect(await buildHandoff(reopened, thread.id, { preferModelSummary: true })).toContain("Edits are on disk; inspect them before continuing.");
+  });
+
   it.each([false, true])("a late interrupted runner never interrupts the replacement wrap-up (throws=%s)", async (throws) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupt-race-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

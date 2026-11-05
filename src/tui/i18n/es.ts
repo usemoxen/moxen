@@ -9,6 +9,7 @@ export const es: Catalog = {
   "composer.improvementFailed": "No se ha podido mejorar el prompt: {why}",
   "timeline.preparingHandoff": "Preparando el traspaso",
   "timeline.usageProtection": "Protección de uso",
+  "timeline.wrapUpNotes": "Cierre por protección de uso",
   "timeline.usageProtectionDetail": "El uso compartido está casi agotado. Cerrando el trabajo de forma segura antes de esperar la recuperación.",
   "timeline.usagePaused": "Pausado por la protección de uso",
   "timeline.usagePausedWindow": "Este turno se ha cortado porque {window} se estaba agotando.",

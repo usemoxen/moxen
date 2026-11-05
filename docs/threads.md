@@ -240,6 +240,14 @@ Before interrupting any turn, Moxen persists a hold on every affected thread.
 It then asks the model for a safe stopping point, one thread at a time, without
 requesting a full summary. The transcript marks this request with a **Usage
 protection** notification card, distinct from the later recovery notice.
+The stopping instructions themselves stay hidden; the model's stopping notes
+remain in the transcript and thread history. Text already streamed is saved even
+if protection interrupts the turn before its result arrives. This also applies
+to Claude Code's native wrap-up. Recovery receives those saved notes explicitly,
+including when it resumes the same provider conversation; a handoff keeps every
+message from the wrap-up, not just its last reply.
+Native wrap-up turns keep a **Usage-protection wrap-up** label visible even when
+their work is folded.
 Continuation is in the same conversation unless the
 user explicitly chooses a new thread in Work queue. Sending an immediate user
 message after protection releases that thread's hold, cancels its automatic

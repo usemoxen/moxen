@@ -1381,6 +1381,7 @@ function TurnBlock({  group,
     return first;
   }, [group]);
   const renderPrompt = (entry: TimelineEntry) => {
+    // Show the wrap-up notice, never the maintenance prompt itself.
     if (isUsageProtection(entry.message)) return <UsageProtectionNotice key={entry.id} entry={entry} now={now} />;
     if (isUsageContinue(entry.message) || entry.message?.origin === "handoff-summary") return <ContinueNotice key={entry.id} entry={entry} now={now} />;
     const ask = entry.message?.role === "user" ? readOpenRequestPrompt(entry.message.text) : null;
@@ -1476,6 +1477,9 @@ function TurnBlock({  group,
     // wrapper margin here stacked with the next prompt's into a double gap.
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
       {group.prompts.filter((entry) => !nudges.includes(entry) && !lateNotices.includes(entry)).map(renderPrompt)}
+      {group.usageWrapUp && !group.prompts.some((entry) => isUsageProtection(entry.message)) ? (
+        <text fg={COLOR.warn} style={{ marginTop: 1, paddingLeft: 1, flexShrink: 0 }}>{tr("timeline.wrapUpNotes")}</text>
+      ) : null}
 
       <WorkFold group={group} open={open} now={now} expanded={workExpanded} onToggle={() => onToggleWork(group.id)} />
       {lateNotices.map(renderPrompt)}

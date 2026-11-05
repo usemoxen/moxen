@@ -864,7 +864,7 @@ function recordTurnActivity(
   storeTurnId: string,
   modelSelection: ModelSelection | null,
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
-): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; noteFailure: () => void } {
+): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; saveUnfinishedText: () => Promise<void>; noteFailure: () => void } {
   const written = new Map<string, string>();
   let limitRecorded = false;
   // Appends are chained rather than fired in parallel: the ledger is an
@@ -885,8 +885,16 @@ function recordTurnActivity(
     chain = chain.then(() => store.appendLedger(threadId, "activity", row).catch(() => undefined));
   };
   const notes = new Set<string>();
+  const unfinished = new Map<string, { text: string; createdAt: string }>();
   const switches = new Map<string, "refusal-fallback" | "auto">();
   const onEvent = (event: ProviderRuntimeEvent): void => {
+    if (event.type === "message.part.updated") {
+      const id = event.messageId ?? "message";
+      const message = unfinished.get(id) ?? { text: "", createdAt: store.nowIso() };
+      message.text += event.text;
+      unfinished.set(id, message);
+      return;
+    }
     if (event.type === "reasoning.updated") {
       // One row as it starts and one as it ends; both carry the same
       // `toolCallId`, so the transcript folds them into one card that goes
@@ -911,6 +919,7 @@ function recordTurnActivity(
       return;
     }
     if (event.type === "message.retracted") {
+      for (const id of event.messageIds) unfinished.delete(id);
       // The provider took back a refused attempt's output. Ledgers are
       // append-only, so this is a tombstone the transcript filters by.
       append("message.retracted", "Output retracted", {
@@ -983,6 +992,7 @@ function recordTurnActivity(
       // can show it between the tool calls it narrates.
       if (notes.has(event.messageId) || !event.text.trim()) return;
       notes.add(event.messageId);
+      unfinished.delete(event.messageId);
       const createdAt = store.nowIso();
       const row = {
         id: noteMessageId(storeTurnId, event.messageId),
@@ -1075,7 +1085,19 @@ function recordTurnActivity(
     });
     onUsageLimit?.(storeTurnId, standing.resetsAt);
   };
-  return { onEvent, flush: () => chain, noteFailure };
+  const saveUnfinishedText = (): Promise<void> => {
+    // No result arrives on an abort, and protection may already have marked
+    // the turn interrupted. Keep the streamed messages independently of its
+    // terminal state, using the same ids as the live transcript.
+    for (const [id, message] of unfinished) {
+      if (!message.text.trim() || notes.has(id)) continue;
+      const row = { id: noteMessageId(storeTurnId, id), threadId, turnId: storeTurnId, role: "assistant", ...message };
+      chain = chain.then(() => store.appendLedger(threadId, "messages", row).catch(() => undefined));
+    }
+    unfinished.clear();
+    return chain;
+  };
+  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure };
 }
 
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -1116,6 +1138,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   // Pre-turn capture first: the diff base must predate any provider write.
   const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
   const controller = new AbortController();
+  let completedWithText = false;
   store.trackRunning(storeTurnId, () => controller.abort());
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
@@ -1142,8 +1165,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     const outcome = await driver.awaitTurn(threadId, sent.turnId, controller.signal);
     await recordContextUsage(store, driver, threadId, storeTurnId);
     if (outcome.status === "failed") recordTools.noteFailure();
+    if (outcome.status !== "completed" || !outcome.text) await recordTools.saveUnfinishedText();
     await settleTurn(store, args, outcome, cwd, pre);
+    completedWithText = outcome.status === "completed" && !!outcome.text;
   } catch (cause) {
+    await recordTools.saveUnfinishedText();
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
       await settleCheckpoints(store, args, cwd, pre);
@@ -1162,6 +1188,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     controller.signal.removeEventListener("abort", onAbort);
     store.untrackRunning(storeTurnId);
     unsubscribe();
+    if (!completedWithText) await recordTools.saveUnfinishedText();
     const recording = (recordingTurns.get(threadId) ?? 1) - 1;
     if (recording > 0) recordingTurns.set(threadId, recording);
     else recordingTurns.delete(threadId);

@@ -16,6 +16,7 @@ import { CliError } from "../../errors.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../limits.js";
 import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../protection.js";
 import { UsageForecaster, usageCost } from "../forecast.js";
+import { buildHandoff } from "../../threads/handoff.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -136,6 +137,8 @@ describe("usage protection", () => {
       expect(openTurn(await w.store.readTurns(thread.id))).toBeNull();
       expect(await Effect.runPromise(driver.hasSession(thread.id))).toBe(false);
       expect(query.closed).toBe(true);
+      expect((await w.store.readMessages(thread.id)).filter((row) => row.role === "assistant").map((row) => row.text)).toEqual(["Stopping here."]);
+      expect(await buildHandoff(w.store, thread.id, { preferModelSummary: true })).toContain("Stopping here.");
       expect((await w.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background")).toMatchObject([{ payload: { taskId: "watcher", status: "stopped" } }]);
       query.push(system({ subtype: "init" }));
       query.push(successResult("CI finished", 0.01, { origin: { kind: "task-notification" } }));
@@ -168,11 +171,16 @@ describe("usage protection", () => {
         { payload: { taskId: "build", status: supported ? "stopped" : "detached", output: ["compiled 12 modules"] } },
         { payload: { taskId: "watcher", status: supported ? "stopped" : "detached", output: ["compiled 12 modules"] } },
       ]);
+      const held = (await w.store.readThreadRecord(id))!;
+      const stoppedTurn = (await w.store.readTurns(id))[0]!;
+      await w.store.appendLedger(id, "messages", { id: w.store.newId(), threadId: id, turnId: stoppedTurn.id, role: "assistant", text: "The build is unfinished; inspect the saved edits.", createdAt: w.store.nowIso() });
+      await w.store.writeThreadRecord({ ...held, usagePause: { ...held.usagePause!, turnId: stoppedTurn.id } });
       const resumed = await startTurn(w.ctx, { threadId: id, prompt: "Continue after reset", usageControl: true, origin: "usage-continue" });
       await resumed.run;
       expect(w.prompts.at(-1)).toContain('"status":"' + (supported ? "stopped" : "detached") + '"');
       expect(w.prompts.at(-1)).toContain("compiled 12 modules");
       expect(w.prompts.at(-1)).toContain("Check it again");
+      expect(w.prompts.at(-1)).toContain("## Usage-protection wrap-up notes\n\nThe build is unfinished; inspect the saved edits.");
     } finally {
       w.guard.close();
     }
@@ -516,19 +524,23 @@ describe("usage protection", () => {
     w.guard.close();
   });
 
-  it("does not lose native wrap-up when its turn settles before the next scheduler tick", async () => {
+  it("does not lose native wrap-up or its recovery notes when its turn settles before the next scheduler tick", async () => {
     const w = await world("claude");
     w.ctx.config.providers = { claude: { usageWrapUp: "provider" } };
     const id = await w.make("already stopped");
     await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "safe stopping point" });
+    const reset = Date.now() + 3600_000;
     recordUsageWindows("claude", [{
       id: "session", label: "Session", usedPercent: 100, exhausted: true,
-      resetsAt: new Date(Date.now() + 3600_000).toISOString(),
+      resetsAt: new Date(reset).toISOString(),
     }]);
     w.guard.observe({ type: "thread.state.changed", provider: "claude", threadId: id, state: "usage-wrap-up" });
     await w.guard.tick();
     expect(w.guard.read().queue[0]).toMatchObject({ threadId: id, phase: "waiting", native: true });
     expect((await w.store.readThreadRecord(id))?.usagePause?.recoveryTurnId).toBeTruthy();
+    await w.guard.tick(reset + 6000);
+    await settleStartedTurns(w, id);
+    expect(w.prompts.at(-1)).toContain("## Usage-protection wrap-up notes\n\nsafe stopping point");
     w.guard.close();
   });
 

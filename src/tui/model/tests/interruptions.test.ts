@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
+import { toMessageEnvelope } from "../../../core/threads/project.js";
 import { applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
 function activity(id: string, kind: string, payload: Record<string, unknown>, turnId = "turn-1"): ActivityEnvelope {
@@ -250,6 +251,16 @@ describe("continuing after a usage limit", () => {
     ({ ...message(id, text), role: "user", turnId, ...(origin === undefined ? {} : { origin }) }) as MessageEnvelope;
   const thread = (queued: Array<{ turnId: string; messageId: string }>) =>
     ({ id: "t", queuedTurns: queued.map((row) => ({ ...row, scheduledFor: "2026-09-25T15:13:00.000Z", scheduleReason: "usage-reset" })) }) as unknown as ThreadState["thread"];
+
+  it.each(["usage-protection", "usage-continue", "native"] as const)("does not hide %s wrap-up notes after the settled snapshot replaces their stream", (origin) => {
+    const createdAt = "2026-09-25T14:00:00.000Z";
+    const notes = toMessageEnvelope({ id: "turn-1:notes", threadId: "t", turnId: "turn-1", role: "assistant", text: "Stopping here; tests remain unfinished.", createdAt });
+    const request = toMessageEnvelope({ id: "request", threadId: "t", turnId: "turn-1", role: "user", text: origin === "native" ? "Fix the feature" : "The provider's shared usage allowance is nearly exhausted. Stop expanding the task.", createdAt, ...(origin === "native" ? {} : { origin }) });
+    const previous = state({ messages: [request, { ...notes, streaming: true }] });
+    const settled = applyThreadFrame(previous, { kind: "snapshot", snapshot: { snapshotSequence: 2, thread: { id: "t", latestTurn: { turnId: "turn-1", state: "interrupted" }, messages: [request, notes], activities: origin === "native" ? [activity("native-wrap", "usage.wrap-up", { provider: "claude" })] : [], checkpoints: [] } } });
+    expect(timeline(settled).filter((row) => row.kind === "assistant").map((row) => row.text)).toEqual([notes.text]);
+    expect(settled.messages.find((row) => row.id === notes.id)?.streaming).toBe(false);
+  });
 
   it("keeps the limit in force while the continue waits, and hides the waiting continue", () => {
     const scheduled = activity("s1", "turn.scheduled", { scheduledFor: "2026-09-25T15:13:00.000Z", reason: "usage-reset" }, "turn-2");

@@ -580,6 +580,7 @@ describe("groupTurns: a turn a usage limit cut off", () => {
       entry({ id: "l1", kind: "activity", activityKind: "usage.limit", at: "2026-09-16T02:00:02.000Z" }),
     ]);
     expect(groups[0]?.limited).toBe(true);
+    expect(groups[0]?.usageWrapUp).toBe(false);
     // A wrap-up finishes the turn on a small allowance: it still has an answer.
     const wrapped = groupTurns([
       entry({ id: "u1", kind: "user", text: "go" }),
@@ -587,5 +588,6 @@ describe("groupTurns: a turn a usage limit cut off", () => {
       entry({ id: "a1", kind: "assistant", text: "Done.", at: "2026-09-16T02:00:01.000Z" }),
     ]);
     expect(wrapped[0]?.limited).toBe(false);
+    expect(wrapped[0]?.usageWrapUp).toBe(true);
   });
 });

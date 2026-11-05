@@ -26,7 +26,7 @@ import { runSidePanelButton } from "./scenarios/sidePanelButton.js";
 import { runStatsModal } from "./scenarios/statsModal.js";
 import { runActivityRows } from "./scenarios/activityRows.js";
 import { runLifecycleRows } from "./scenarios/lifecycleRows.js";
-import { runTurnModels } from "./scenarios/turnModels.js";
+import { runTurnModels, runWrapUpNotes } from "./scenarios/turnModels.js";
 import { runBackgroundWork } from "./scenarios/backgroundWork.js";
 import { runProviderInterruptions } from "./scenarios/providerInterruptions.js";
 import { runQuestionPreview } from "./scenarios/questionPreview.js";
@@ -115,6 +115,7 @@ export async function runWalkthrough(): Promise<void> {
   // timing-sensitive assertions of the shared scenarios.
   await runBootGate();
   await runTurnModels();
+  await runWrapUpNotes();
   await runQuestionPreview();
   await runComposerScrollbar();
   await runTasksPanel();
