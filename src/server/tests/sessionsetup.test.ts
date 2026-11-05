@@ -645,6 +645,95 @@ describe("session setup", () => {
   });
 });
 
+describe("delegating into a worktree from a thread with no saved branch (MXN-270)", () => {
+  /** The way the TUI creates one: `thread.create` sends no branch, so the record has none. */
+  async function localThread(connection: DirectConnection, cwd: string): Promise<string> {
+    const project = await connection.dispatch({ type: "project.ensure", cwd });
+    return (await connection.dispatch({ type: "thread.create", projectId: project.project.id })).threadId;
+  }
+
+  it("finds the checked-out branch when the record has none, and cuts the worktree from it", async () => {
+    const { harness, connection } = await connected();
+    const git = (args: string[]) => runProcess("git", args, { cwd: harness.work });
+    try {
+      // Not main, and with its own commit, so only asking git can name it.
+      await git(["checkout", "-b", "feature"]);
+      await writeFile(path.join(harness.work, "feature.txt"), "feature\n");
+      await git(["add", "-A"]);
+      await git(["-c", "user.email=test@example.com", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-m", "feature"]);
+      const parent = await localThread(connection, harness.work);
+      expect((await harness.store.readThreadRecord(parent))?.env.branch).toBeNull();
+
+      // The plan names the resolved branch too, and provisions nothing.
+      const plan = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent, task: "Sub task", isolation: "worktree", dryRun: true });
+      expect(plan.branch).toBe("feature");
+      expect(plan.worktree).toEqual({ path: null, branch: null, baseBranch: "feature" });
+
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent, task: "Sub task", isolation: "worktree" });
+      const worktree = delegated.worktree!;
+      expect(delegated.branch).toBe("feature");
+      expect(worktree.baseBranch).toBe("feature");
+      expect(worktree.branch).toMatch(/^moxen\//);
+      expect(existsSync(worktree.path!)).toBe(true);
+      expect((await harness.store.readThreadRecord(delegated.child.id))?.env).toEqual({
+        mode: "worktree",
+        path: worktree.path,
+        branch: worktree.branch,
+      });
+      // Cut from the branch the parent's checkout is on, not from main.
+      const [parentHead, worktreeHead] = await Promise.all([git(["rev-parse", "feature"]), git(["rev-parse", worktree.branch!])]);
+      expect(worktreeHead.stdout.trim()).toBe(parentHead.stdout.trim());
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("finds the branch for a continuation that copied the null branch from its source", async () => {
+    const { harness, connection } = await connected();
+    try {
+      const source = await localThread(connection, harness.work);
+      const continued = await connection.dispatch({ type: "thread.continue", threadId: source });
+      expect((await harness.store.readThreadRecord(continued.threadId))?.env).toMatchObject({ mode: "local", branch: null });
+
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: continued.threadId, task: "Sub task", isolation: "worktree" });
+      expect(delegated.worktree?.baseBranch).toBe("main");
+      expect((await harness.store.readThreadRecord(delegated.child.id))?.env).toMatchObject({
+        mode: "worktree",
+        path: delegated.worktree?.path,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("still refuses worktree isolation on a detached HEAD", async () => {
+    const { harness, connection } = await connected();
+    try {
+      await runProcess("git", ["checkout", "--detach"], { cwd: harness.work });
+      const parent = await localThread(connection, harness.work);
+      await expect(
+        connection.dispatch({ type: "thread.delegate", parentThreadId: parent, task: "Sub task", isolation: "worktree" }),
+      ).rejects.toMatchObject({ code: "WORKTREE_UNAVAILABLE" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("still refuses worktree isolation in a folder that is not a git repository", async () => {
+    const { harness, connection } = await connected();
+    try {
+      const plain = path.join(harness.root, "plain");
+      await mkdir(plain);
+      const parent = await localThread(connection, plain);
+      await expect(
+        connection.dispatch({ type: "thread.delegate", parentThreadId: parent, task: "Sub task", isolation: "worktree" }),
+      ).rejects.toMatchObject({ code: "WORKTREE_UNAVAILABLE" });
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
 describe("Moxen's skills, no longer shipped (MXN-138)", () => {
   const handover = (connection: DirectConnection, cwd: string) =>
     connection.dispatch({ type: "thread.handover", cwd, prompt: "go", wait: true, threadEnvMode: "local" });

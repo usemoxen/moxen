@@ -17,7 +17,9 @@ credentials, only whether a login exists.
   runs in its own folder, `<storeRoot>/scratch/<thread id>/`, under one
   shared "No project" entry, and deleting the thread deletes the folder.
 - Delegated work runs in a **worktree**: its own git checkout, so an agent
-  works on its own copy of the code. Its branch is `moxen/<title>`.
+  works on its own copy of the code. Its branch is `moxen/<title>`, cut from
+  the branch the delegating thread's checkout is on — read from git when the
+  thread's record has no branch.
   Archiving or deleting the thread removes the checkout (gitignored build
   output included, so they do not pile up) and keeps the branch; a checkout
   with uncommitted work is left alone. The running server also tidies up

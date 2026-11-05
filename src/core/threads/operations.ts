@@ -92,6 +92,7 @@ import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type L
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
+import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
 import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
@@ -2377,14 +2378,20 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const interactionMode: InteractionMode = request.interactionMode ?? "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
-  if (isolated && !parentEnv.branch) {
+  // A thread created without a branch (and a continuation that copied it) can
+  // still run in a checkout on a real branch: ask the checkout instead of
+  // trusting the record.
+  const parentBranch = isolated && !parentEnv.branch
+    ? ((await readStatus(parentEnv.path))?.branch ?? null)
+    : parentEnv.branch;
+  if (isolated && !parentBranch) {
     throw new CliError(
       "WORKTREE_UNAVAILABLE",
       `Thread ${parentThreadId} is not on a git branch, so its task cannot get its own worktree. Delegate with isolation "shared".`,
       { exitCode: 4, details: { threadId: parentThreadId } },
     );
   }
-  const shape = { project, parent, modelSelection, runtimeMode, interactionMode, branch: parent.branch ?? null };
+  const shape = { project, parent, modelSelection, runtimeMode, interactionMode, branch: parentBranch };
   if (request.fork === true && isolated) {
     // A native session belongs to the directory it runs in (Claude keeps its
     // transcripts per project directory, OpenCode per server), so a copy
@@ -2399,7 +2406,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     const childThreadId = randomUUID();
     return {
       ...shape,
-      ...(isolated ? { worktree: { path: null, branch: null, baseBranch: parentEnv.branch! } } : {}),
+      ...(isolated ? { worktree: { path: null, branch: null, baseBranch: parentBranch! } } : {}),
       child: { id: childThreadId, projectId: parent.projectId, title },
       task: {
         taskId: childThreadId,
@@ -2424,7 +2431,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const worktree = isolated
     ? await provisionWorktree({
         projectCwd: parentEnv.path,
-        baseBranch: parentEnv.branch!,
+        baseBranch: parentBranch!,
         startFromOrigin: false,
         threadId: childThreadId,
         storeRoot: ctx.storeRoot,
