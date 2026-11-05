@@ -204,6 +204,19 @@ export async function runWorkQueueModal(): Promise<void> {
     await until(setup, () => closes(state) === 1, "esc did not close the list");
   }
 
+  // ── Removing with no arrow first: focus moves to the entry after the removed one, not the running one ──
+  {
+    const { setup, fixture } = await open();
+    await visible(setup, "Work queue");
+    await press(setup, "x");
+    await until(setup, () => fixture.read().find((entry) => entry.turnId === "turn-queue")?.policy.removed === true, "x with no arrow first did not remove");
+    await label(setup, "work queue: removed with no arrow first");
+    const after = frame(setup);
+    // The row with the focus marker, not the headline above it that names the same entry.
+    if (!after.split("\n").some((row) => row.includes("▌") && row.includes("Review the settings changes"))) fail(`work queue: focus did not move to the entry after the removed one\n${after}`);
+    mustNot(after, ["This work is running now."], "focus after removing with no arrow first");
+  }
+
   // ── Conditions: every branch of the `c` list to the end ─────────────────────────────
   {
     const { setup, fixture, state } = await open();

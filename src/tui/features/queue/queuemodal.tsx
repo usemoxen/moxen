@@ -101,7 +101,8 @@ export function WorkQueueModal({ client, threads, screenWidth, screenHeight, onC
     if (action === "restore") { const removed = targets.filter((target) => target.policy.removed); if (removed.length) void queue.edit(removed, "restore"); }
     else if (action === "remove") {
       if (!live.length) return;
-      const at = rows.findIndex((row) => rowId(row) === focusId);
+      // Start from the row that is drawn focused: before any arrow, that is the fallback row, not focusId.
+      const at = rows.findIndex((row) => row === focusRow);
       const next = rows.slice(at + 1).concat(rows.slice(0, at).reverse()).find((row) => row.kind === "entry" && !live.some((target) => target.turnId === row.entry.turnId));
       if (next) setFocusId(rowId(next));
       setSelection(null);
