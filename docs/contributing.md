@@ -73,7 +73,7 @@ exceptions.
 - `mods/` — Claude Code mods shipped in the package and loaded into Claude sessions as local plugins: `agent-skills` (serves the user's own `.agents/skills`, which Claude Code does not read itself). Check one with `claude plugin validate mods/<name>` and `claude plugin test mods/<name>`.
 - `parsers-config.json` / `parsers-build.json` — the tree-sitter grammars under `src/core/syntax/`: the first lists grammars with a published wasm, the second those built from a pinned source (`bun scripts/build-tree-sitter-grammars.ts`, needs the `tree-sitter` CLI). `bun run update:tree-sitter-assets` also rewrites every `LICENSE` there and `THIRD_PARTY_LICENSES.md`.
 - `docs/` — Moxen docs plus `external/`, mirrors of the Claude Code and OpenCode v2 docs we check behavior against. `bun run update:docs` refreshes the mirrors (`claude`, `opencode`, `--dry-run`, `--prune`); `git diff docs` after a run is the changelog.
-- `upstream/` — read-only depth-1 clones of the reference implementations we check behavior against (OpenCode's plugin/loader contracts, compaction rules). Gitignored. Verify there before copying upstream behavior — never guess it.
+- `reference/` — read-only clones of the reference implementations we check behavior against (OpenCode's plugin/loader contracts, compaction rules). Gitignored. Verify there before copying upstream behavior — never guess it.
 
 ## Workflow
 

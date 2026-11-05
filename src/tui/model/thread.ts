@@ -1533,9 +1533,7 @@ export function retractedIds(activities: readonly ActivityEnvelope[]): { message
 }
 
 /**
- * Mirrors the desktop `shouldOfferResumeCompaction`
- * (`upstream/apps/web/src/components/chat/ContextWindowMeter.logic.ts`):
- * the "Resume with less context" banner is a plain staleness check, not a
+ * The "Resume with less context" banner is a plain staleness check, not a
  * wire event — idle Claude threads whose context snapshot holds >= 100k
  * tokens and hasn't refreshed in >= 70 minutes get the banner. 70 minutes
  * is a guess at the prompt cache having expired (its 1-hour TTL plus
