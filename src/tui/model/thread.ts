@@ -280,6 +280,13 @@ function snapshotContextUsage(snapshot: Record<string, unknown>, thread: Record<
  * text still streaming — and the next delta re-added just a fragment. Keep
  * a streaming message while its turn is still running and nothing stored
  * has taken its id; a stored note arrives under the same id and replaces it.
+ *
+ * The turn's closing reply is stored under the store's own id, never the
+ * stream's (`noteMessageId` uses the turn and the provider's message id), so
+ * nothing replaces the streamed copy and it stayed beside the reply until
+ * the next message. Once the reply is listed, the stream it copied — the one
+ * that started before it was stored — goes with it; a message that began
+ * streaming after it is still being written and stays.
  */
 function withLiveStreams(
   stored: readonly MessageEnvelope[],
@@ -290,8 +297,16 @@ function withLiveStreams(
   const running = latest !== null && latest.state === "running" && typeof latest.turnId === "string" ? latest.turnId : null;
   if (running === null) return [...stored];
   const ids = new Set(stored.map((message) => message.id));
-  const live = previous.filter((message) => message.streaming && message.turnId === running && !ids.has(message.id));
-  return [...stored, ...live];
+  const streams = previous.filter((message) => message.streaming && message.turnId === running && !ids.has(message.id));
+  const notePrefix = `${running}:`;
+  const reply = stored
+    .filter(
+      (message) =>
+        message.role === "assistant" && message.turnId === running && !message.id.startsWith(notePrefix),
+    )
+    .at(-1);
+  if (reply === undefined) return [...stored, ...streams];
+  return [...stored, ...streams.filter((stream) => stream.createdAt >= reply.createdAt)];
 }
 
 function applySnapshot(state: ThreadState, snapshot: Record<string, unknown>): ThreadState {

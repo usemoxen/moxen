@@ -2185,6 +2185,17 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       open.status = status;
       open.error = status === "completed" ? null : detail;
       if (status !== "completed") open.text = open.text || detail;
+      // The other drivers announce the end of a turn; this one used to only
+      // resolve its waiter. Without the event the live text buffered for the
+      // turn (`trackLiveText`) was never cleared, so a later subscription
+      // replayed a finished reply as though it were still streaming.
+      this.publish({
+        type: status === "completed" ? "turn.completed" : status === "failed" ? "turn.failed" : "turn.interrupted",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: open.id,
+        ...(status === "failed" ? { raw: { error: open.error } } : {}),
+      });
     }
     const waiters = open ? (session.waiters.get(open.id) ?? []) : [];
     if (open) session.waiters.delete(open.id);

@@ -887,11 +887,16 @@ export class DirectConnection implements ClientApi {
     // subscription existed, through the same path live events take, so the
     // message keeps its place (`firstAt`) and the thought its text.
     const replayLiveText = (driver: Parameters<typeof liveTurnText>[0]): void => {
+      // Buffered text belongs to a turn that is still running. With none, it is
+      // a finished turn's reply, already in the snapshot just sent: replaying
+      // it after that snapshot left the reply on screen twice — the streamed
+      // copy under the provider's id, the stored one under the store's — and
+      // nothing changes the store afterwards to take the stray copy away.
+      if (runningTurnId === null) return;
       const live = liveTurnText(driver, threadId);
       if (!live) return;
       for (const message of live.messages) {
-        const turnId = runningTurnId ?? message.turnId;
-        if (!turnId) continue;
+        const turnId = runningTurnId;
         firstSeen.set(noteMessageId(turnId, message.id), message.firstAt);
         onEvent({ type: "message.part.updated", provider: live.provider, threadId, turnId, messageId: message.id, text: message.text } as ProviderRuntimeEvent);
       }
@@ -911,6 +916,10 @@ export class DirectConnection implements ClientApi {
         const store = await this.store();
         const thread = await store.readThreadRecord(threadId).catch(() => null);
         if (!thread) return;
+        // The last poll's idea of the running turn can be a poll behind; the
+        // replay below must not present a settled turn's text as live.
+        const running = (await store.readTurns(threadId).catch(() => [])).find((turn) => turn.status === "running") ?? null;
+        runningTurnId = running?.id ?? null;
         const driver = this.driverFor(thread.modelSelection.instanceId);
         const hasSession = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
         if (!hasSession || stopped || this.closed) return;

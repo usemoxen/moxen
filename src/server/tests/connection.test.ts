@@ -673,6 +673,54 @@ describe("DirectConnection subscriptions", () => {
     }
   });
 
+  it("does not replay a finished turn's text as live output", async () => {
+    // The stored reply is in the snapshot; the live buffer still holds the
+    // text the turn streamed. Replaying it once the turn has settled showed
+    // the reply twice — the streamed copy under the provider's id, the stored
+    // one under the store's — until the next message changed the store.
+    const harness = await testHarness();
+    const transport = new FakeOpencodeTransport();
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { opencode: () => new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } }) },
+      shellPollMs: 30,
+      threadPollMs: 30,
+    });
+    const frames: unknown[] = [];
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await createThread(harness.store, {
+        id: "thread-settled",
+        projectId: ensured.project.id,
+        title: "Settled",
+        modelSelection: { instanceId: "opencode/anthropic", model: "claude-opus-4-6" },
+      });
+      await connection.dispatch({ type: "thread.turn.start", threadId: "thread-settled", message: { text: "hi" } });
+      await waitFor("prompt on the wire", async () => transport.servers[0]?.callsTo("session.prompt").length === 1);
+      await transport.servers[0]?.push({
+        type: "message.part.updated",
+        properties: { sessionID: "opencode-session-1", part: { id: "p-1", messageID: "msg-1", type: "text", text: "the answer" } },
+      });
+      await transport.servers[0]?.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+      await waitFor("the turn to settle", async () => {
+        const read = await readThread(harness.store, "thread-settled");
+        return read.turns.every((turn) => turn.status !== "running") && read.messages.some((message) => message.role === "assistant" && message.text === "the answer");
+      });
+      const unsubscribe = connection.subscribeThread("thread-settled", {}, (item) => frames.push(item), () => undefined);
+      try {
+        await waitFor("the stored reply", async () => frames.some((frame) => JSON.stringify(frame).includes("the answer")));
+        // Let the lazily attached bridge replay whatever it still buffers.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(frames.filter((frame) => JSON.stringify(frame).includes("thread.message-sent"))).toEqual([]);
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("records a tool call once, with its payload, while the TUI watches", async () => {
     // The turn runner owns tool rows. This path used to record its own
     // payload-less row per event as well, so a tool-using turn run with the

@@ -79,6 +79,62 @@ describe("live in-between messages", () => {
     expect(rows[0]!.streaming).toBe(false);
   });
 
+  it("keeps one reply once OpenCode's stored copy lands under its own id", () => {
+    // The store writes the reply before the turn's status flips, so a snapshot
+    // can still call the turn running with the reply already listed. The
+    // streamed copy (the provider's id) is not the stored one, so nothing
+    // replaced it: it used to stay beside the reply until the next message.
+    const reply = {
+      id: "f2a751df-8263-4e90-9639-a197d57608d6",
+      role: "assistant",
+      text: "The answer.",
+      turnId: "turn-1",
+      streaming: false,
+      createdAt: T(3),
+      updatedAt: T(3),
+    };
+    let state: ThreadState = applyThreadFrame(emptyThreadState(), snapshot({ messages: [prompt] }));
+    state = applyThreadFrame(state, streamed("turn-1:msg_opencode_1", "The answer.", 2));
+    state = applyThreadFrame(state, snapshot({ messages: [prompt, reply] }));
+    expect(state.messages.map((message) => [message.id, message.streaming])).toEqual([
+      ["u1", false],
+      [reply.id, false],
+    ]);
+    const [running] = groupTurns(timeline(state));
+    expect(running!.reply?.text).toBe("The answer.");
+    expect(running!.live).toBeNull();
+    // The turn's own settle snapshot changes nothing: still one reply.
+    state = applyThreadFrame(state, snapshot({ messages: [prompt, reply], running: false }));
+    expect(timeline(state).filter((entry) => entry.kind === "assistant")).toHaveLength(1);
+  });
+
+  it("keeps a note stored mid-turn, and the message streaming after it", () => {
+    // A note is written when the next message starts speaking, so it is stored
+    // after that message's first delta — but under the stream's own id, so it
+    // replaces only its own stream. The message after it is still being
+    // written and must stay.
+    const note = { id: "turn-1:m1", role: "assistant", text: "Checking the config.", turnId: "turn-1", createdAt: T(3) };
+    let state: ThreadState = applyThreadFrame(emptyThreadState(), snapshot({ messages: [prompt] }));
+    state = applyThreadFrame(state, streamed("turn-1:m1", "Checking the config.", 1));
+    state = applyThreadFrame(state, streamed("turn-1:m2", "Now fixing it.", 2));
+    state = applyThreadFrame(state, snapshot({ messages: [prompt, note], activities: [tool("c1", 2)] }));
+    expect(state.messages.map((message) => [message.id, message.streaming, message.text])).toEqual([
+      ["u1", false, "Fix the build"],
+      ["turn-1:m1", false, "Checking the config."],
+      ["turn-1:m2", true, "Now fixing it."],
+    ]);
+  });
+
+  it("keeps a message that starts streaming after the reply is stored", () => {
+    const reply = { id: "reply-1", role: "assistant", text: "First answer.", turnId: "turn-1", createdAt: T(2) };
+    let state: ThreadState = applyThreadFrame(emptyThreadState(), snapshot({ messages: [prompt] }));
+    state = applyThreadFrame(state, streamed("turn-1:m1", "First answer.", 1));
+    state = applyThreadFrame(state, snapshot({ messages: [prompt, reply] }));
+    state = applyThreadFrame(state, streamed("turn-1:m2", "Also this.", 3));
+    state = applyThreadFrame(state, snapshot({ messages: [prompt, reply] }));
+    expect(state.messages.find((message) => message.id === "turn-1:m2")).toMatchObject({ streaming: true, text: "Also this." });
+  });
+
   it("drops leftover stream text once the turn is over", () => {
     let state: ThreadState = applyThreadFrame(emptyThreadState(), snapshot({ messages: [prompt] }));
     state = applyThreadFrame(state, streamed("turn-1:m9", "partial", 1));
