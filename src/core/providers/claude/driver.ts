@@ -84,6 +84,7 @@ import { claudeModelName } from "./catalog.js";
 import { assertClaudeCodeVersion } from "./version.js";
 import { isOfferedClaudeCommand } from "./commands.js";
 import { isolationViolation, type WorktreeIsolation } from "../../threads/isolation.js";
+import { SIDE_QUESTION_RULES } from "../sidequestion.js";
 import {
   effectiveEffortChoice,
   effortFlagSettings,
@@ -268,19 +269,11 @@ interface ClaudeSession {
 const REFUSAL_FALLBACK_DIALOG = "refusal_fallback_prompt";
 
 /**
- * Appended to a side question's system prompt. It has no tools, and a
- * model asked to "check" something will otherwise write tool calls as
- * text — Claude Code's own `/btw` fixed exactly that — so it is told to
- * answer from what the conversation already holds, and to say so when it
- * cannot.
+ * Appended to a side question's system prompt. The preset still names
+ * Claude Code's tools, and calling one ends the reply with nothing, so they
+ * are ruled out by name.
  */
-const SIDE_QUESTION_INSTRUCTIONS = [
-  "This is a side question asked while the main conversation continues elsewhere.",
-  "You have no tools in this reply, none: not Read, Bash, Grep, ToolSearch, Skill or any other, and calling one fails and ends the reply with nothing.",
-  "Do not call a tool or write a tool call, and do not plan to look anything up.",
-  "Answer now, in plain text, from what the conversation above already contains, briefly.",
-  "If the answer needs a file read or a command, say so plainly instead of attempting it.",
-].join(" ");
+const SIDE_QUESTION_INSTRUCTIONS = `${SIDE_QUESTION_RULES} No tool is on offer here: not Read, Bash, Grep, ToolSearch, Skill or any other, and calling one fails and ends the reply with nothing.`;
 
 /** SDK messages remembered for retraction; far more than one turn's worth. */
 const SDK_MESSAGE_INDEX_LIMIT = 2_000;

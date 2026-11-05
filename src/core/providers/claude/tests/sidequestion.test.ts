@@ -1,3 +1,4 @@
+import { SIDE_QUESTION_RULES } from "../../sidequestion.js";
 import { describe, expect, it } from "vitest";
 
 import { ClaudeDriver } from "../driver.js";
@@ -43,8 +44,9 @@ describe("Claude side questions", () => {
       maxTurns: 3,
       model: "claude-opus-5",
     });
-    // Told it has no tools, so it answers rather than writing fake tool calls.
-    expect(query.options.systemPrompt).toMatchObject({ append: expect.stringMatching(/no tools/i) });
+    // Told it has no tools, so it answers rather than writing fake tool calls,
+    // and that this is a copy, so it doesn't report the running work as stopped.
+    expect(query.options.systemPrompt).toMatchObject({ append: expect.stringContaining(SIDE_QUESTION_RULES) });
     expect(query.prompts).toEqual(["Which auth scheme did we settle on?"]);
     expect(query.closed).toBe(true);
   });

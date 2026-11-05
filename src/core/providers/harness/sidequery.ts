@@ -5,13 +5,10 @@
  * `tool_choice: "none"` so the server's cache for the conversation applies.
  * The helpers here are pure; the driver sends the request.
  */
+import { SIDE_QUESTION_RULES } from "../sidequestion.js";
 import type { TranscriptMessage } from "./types.js";
 
-export const SIDE_QUESTION_INSTRUCTION = [
-  "The user has a side question, asked in passing while the main work goes on elsewhere.",
-  "Answer it in a few sentences from the conversation above. You have no tools for this reply, so do not offer to run commands or change files, and do not describe anything as done that you did not do.",
-  "If the conversation does not hold the answer, say so plainly.",
-].join(" ");
+export const SIDE_QUESTION_INSTRUCTION = SIDE_QUESTION_RULES;
 
 export const SIDE_QUESTION_NO_CONTEXT = [
   "You are Moxen Harness, a coding agent. The user has a quick side question and there is no conversation to draw on.",

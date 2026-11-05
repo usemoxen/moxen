@@ -68,6 +68,7 @@ import {
   type CodexSettings,
 } from "./config.js";
 import { approvalKindForMethod, staticPolicyForRuntimeMode, type CodexApprovalKind } from "./permissions.js";
+import { SIDE_QUESTION_RULES } from "../sidequestion.js";
 import {
   asRecord,
   asString,
@@ -1457,7 +1458,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     const overrides = {
       cwd: input.workingDirectory, ephemeral: true, approvalPolicy: "never", sandbox: "read-only",
       ...(input.model ? { model: input.model } : {}),
-      developerInstructions: "Answer the side question from the conversation. Do not use tools or change anything. Return only the answer.",
+      developerInstructions: `${SIDE_QUESTION_RULES} Return only the answer.`,
       config: { "features.shell_tool": false, "features.multi_agent": false, "features.memories": false, "web_search": "disabled", "features.view_image": false, "apps._default.enabled": false, "features.apps": false, "features.plugins": false, "features.browser_use": false, "features.computer_use": false, "features.image_generation": false, "features.sleep_tool": false, "features.goals": false, ...Object.fromEntries(Object.keys(mcp).map((name) => [`mcp_servers.${name}.enabled`, false])) },
     };
     const result = await peer.request(input.cursor ? "thread/fork" : "thread/start", { ...overrides, ...(input.cursor ? { threadId: input.cursor, excludeTurns: true } : {}) });

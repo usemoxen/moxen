@@ -1,3 +1,4 @@
+import { SIDE_QUESTION_RULES } from "../../sidequestion.js";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -908,6 +909,7 @@ describe("Codex lifecycle boundaries", () => {
     await expect.poll(() => transport.sessions[0]?.server.requestsTo("turn/start").length).toBe(1);
     const server = transport.sessions[0]!.server;
     expect(server.requestsTo("thread/fork")[0]!.params).toMatchObject({ threadId: "parent", ephemeral: true, excludeTurns: true, sandbox: "read-only", approvalPolicy: "never", config: { "features.shell_tool": false, "features.multi_agent": false, "mcp_servers.private.enabled": false, "apps._default.enabled": false } });
+    expect(server.requestsTo("thread/fork")[0]!.params).toMatchObject({ developerInstructions: expect.stringContaining(SIDE_QUESTION_RULES) });
     server.notify("item/agentMessage/delta", { threadId: "fork-1", itemId: "m", delta: "Because." });
     server.notify("turn/completed", { threadId: "fork-1", turn: { status: "completed" } });
     await expect(answer).resolves.toEqual({ text: "Because.", withContext: true });

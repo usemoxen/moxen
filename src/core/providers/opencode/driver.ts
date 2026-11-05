@@ -64,6 +64,7 @@ import {
   type OpencodeSettings,
 } from "./config.js";
 import { isFreeOpencodeModel, providerEnvNames, readStoredAuthTypes, storedAuthTypeFor } from "./catalog.js";
+import { SIDE_QUESTION_RULES } from "../sidequestion.js";
 import {
   newOpencodeMessageId,
   SpawnOpencodeTransport,
@@ -947,7 +948,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    */
   readonly sideQuestion = async (input: SideQuestionInput): Promise<SideAnswer> => {
     const connection = await this.connectionForSession(`btw:${input.cursor ?? "none"}` as ThreadId, input.workingDirectory);
-    const text = await connection.generate(input.cursor, input.question);
+    const prompt = input.cursor ? `${SIDE_QUESTION_RULES}\n\nQuestion: ${input.question}` : input.question;
+    const text = await connection.generate(input.cursor, prompt);
     if (!text) throw new CliError("SIDE_QUESTION_FAILED", "The side question came back empty.");
     return { text, withContext: input.cursor !== null };
   };

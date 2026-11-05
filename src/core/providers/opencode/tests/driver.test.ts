@@ -1,3 +1,4 @@
+import { SIDE_QUESTION_RULES } from "../../sidequestion.js";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -841,7 +842,7 @@ describe("opencode driver", () => {
     drivers.push(driver);
     const answer = await driver.sideQuestion({ cursor: "ses_old", workingDirectory: "/repo", question: "why?" });
     expect(answer).toEqual({ text: "Because of the second step.", withContext: true });
-    expect(transport.servers[0]!.callsTo("session.generate")).toMatchObject([{ args: { sessionID: "ses_old", prompt: "why?" } }]);
+    expect(transport.servers[0]!.callsTo("session.generate")).toMatchObject([{ args: { sessionID: "ses_old", prompt: `${SIDE_QUESTION_RULES}\n\nQuestion: why?` } }]);
     expect(transport.servers[0]!.callsTo("session.fork")).toEqual([]);
 
     const bare = await driver.sideQuestion({ cursor: null, workingDirectory: "/repo", question: "hi" });
