@@ -17,14 +17,23 @@ restores the original while the improved draft is unchanged. It never sends the
 prompt or creates a thread. You can keep typing; a response for an older draft
 or destination is discarded rather than overwriting your work.
 
-The improver uses Claude Haiku 5.5 through your Claude Code login, regardless of
-the coding model selected for the draft. It requires access to that model and sends
-only the draft, ancestor `AGENTS.md` rules (`CLAUDE.md` where there is no
-`AGENTS.md`), and global, destination-provider, project `moxen.json` and Harness
-profile custom instructions. Reference context is bounded to 48,000 characters.
-The improver has no tools and sees no conversation history or attachment contents;
-attachment markers are preserved. Its instructions ask it to retain your language,
-wording and intent without inventing requirements. Errors leave the draft intact.
+The improver uses Claude Haiku 5.5 through your Claude Code login by default,
+regardless of the coding model selected for the draft. To use another model,
+change **Prompt improver** on the **Agent context** settings page: its
+**Provider** and **Model** (`promptImprover.provider` and
+`promptImprover.model`). Only providers that can complete a request with no
+tools are offered, which today means Claude Code and OpenCode. A model on any
+other provider is refused rather than run; the draft stays intact and the
+error names the model and the setting to change. There is no silent fallback.
+
+The improver requires access to the chosen model and sends only the draft,
+ancestor `AGENTS.md` rules (`CLAUDE.md` where there is no `AGENTS.md`), and
+global, destination-provider, project `moxen.json` and Harness profile custom
+instructions. Reference context is bounded to 48,000 characters. The improver
+has no tools and sees no conversation history or attachment contents;
+attachment markers are preserved. Its instructions ask it to retain your
+language, wording and intent without inventing requirements. Errors leave the
+draft intact.
 
 ## Lifecycle
 

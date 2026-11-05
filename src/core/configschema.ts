@@ -51,6 +51,10 @@ import { driverKindOfInstance, type CliConfig } from "./types.js";
 /** The TCP port remote access listens on unless `remote.port` says otherwise. */
 export const DEFAULT_REMOTE_PORT = 47_317;
 
+/** What the prompt improver uses when its own settings are unset: Claude Haiku 5.5 on Claude Code. */
+export const DEFAULT_PROMPT_IMPROVER_PROVIDER = "claudeAgent";
+export const DEFAULT_PROMPT_IMPROVER_MODEL = "claude-haiku-5-5";
+
 /** Where a setting shows up. Order is the order a settings page renders. */
 export const SETTING_SECTIONS = [
   "general",
@@ -124,6 +128,10 @@ export type SettingKind =
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
       readonly providerKind?: "claude" | "codex" | "opencode" | "harness";
+      /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
+      readonly providerKey?: string;
+      /** With `source` provider or model: offer only providers with these drivers. */
+      readonly providerKinds?: readonly ("claude" | "codex" | "opencode" | "harness")[];
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`
@@ -303,7 +311,7 @@ export type SettingFallback =
   | { readonly text: string }
   | { readonly resolver: FallbackResolver };
 
-export type FallbackResolver = "handoffMode" | "handoffLine" | "compactionMode" | "compactLine" | "providerModel" | "webBrowser" | "privateNetwork" | "moxenTools";
+export type FallbackResolver = "handoffMode" | "handoffLine" | "compactionMode" | "compactLine" | "providerModel" | "promptImproverProvider" | "promptImproverModel" | "webBrowser" | "privateNetwork" | "moxenTools";
 
 /** What is in force for an unset setting, worked out in core so a client only draws it. */
 export interface SettingEffective {
@@ -844,6 +852,26 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     kind: { type: "string", placeholder: "Appended to every session", multiline: true },
     defaultValue: undefined,
     appliesAt: "next-session",
+  },
+  {
+    key: "promptImprover.provider",
+    label: "Provider",
+    description: "The provider the composer's improve action uses to rewrite a draft. Only providers that can complete a request with no tools are offered, because the improver reads untrusted project text and must never act.",
+    section: "agent",
+    group: "Prompt improver",
+    kind: { type: "string", placeholder: "claude", source: "provider", providerKinds: ["claude", "opencode"] },
+    defaultValue: undefined,
+    fallback: { resolver: "promptImproverProvider" },
+  },
+  {
+    key: "promptImprover.model",
+    label: "Model",
+    description: "The model the composer's improve action uses. Its provider is the one above; a model belongs to one provider, so changing the provider asks for one of its models.",
+    section: "agent",
+    group: "Prompt improver",
+    kind: { type: "string", placeholder: "claude-haiku-5-5", source: "model", providerKey: "promptImprover.provider", providerKinds: ["claude", "opencode"] },
+    defaultValue: undefined,
+    fallback: { resolver: "promptImproverModel" },
   },
   {
     key: "memory",
@@ -1997,6 +2025,17 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     const kind = /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
+  },
+  /** The improver's provider, unset: Claude Code, the provider it has always used. */
+  promptImproverProvider() {
+    return { value: DEFAULT_PROMPT_IMPROVER_PROVIDER, label: "Claude Code" };
+  },
+  /** The improver's model, unset: Claude Haiku 5.5 while the improver runs on Claude Code; another provider has no default. */
+  promptImproverModel(config) {
+    const provider = config.promptImprover?.provider?.trim() || DEFAULT_PROMPT_IMPROVER_PROVIDER;
+    return driverKindOfInstance(provider) === "claude"
+      ? { value: DEFAULT_PROMPT_IMPROVER_MODEL, label: DEFAULT_PROMPT_IMPROVER_MODEL }
+      : { value: undefined, label: "Choose a model for this provider" };
   },
   /** The shared browser setting, unset: the Harness's older key when the file has it (`webPolicy`), else When needed. */
   webBrowser(config, descriptor) {

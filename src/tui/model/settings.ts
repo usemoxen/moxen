@@ -2,7 +2,7 @@ import { driverKindOfInstance, type CliConfig } from "../../core/types.js";
 import { configuredModel } from "../../core/catalog/selection.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { updateState, versionNumber, type UpdatableProvider } from "../../core/catalog/update.js";
-import type { SettingDescriptor, SettingEffective, SettingEnds, SettingSection, SettingValue, SettingView } from "../../core/configschema.js";
+import type { SettingDescriptor, SettingEffective, SettingEnds, SettingKind, SettingSection, SettingValue, SettingView } from "../../core/configschema.js";
 import { defaultEffortId, describeEffort } from "./display.js";
 import { numberLabel } from "./numberlabel.js";
 import { handoffModelsFromText, handoffModelsToText } from "./autohandoff.js";
@@ -304,24 +304,31 @@ function mcpAccessControl(descriptor: SettingDescriptor, value: SettingValue, se
 }
 
 function catalogOptions(
-  source: "provider" | "model" | "effort",
+  kind: Extract<SettingKind, { type: "string" }>,
   settings: readonly SettingView[],
   providers: readonly ProviderSummary[],
-  providerKind?: "claude" | "codex" | "opencode" | "harness",
   effective?: SettingEffective,
 ): SettingOption[] {
-  const available = offered(providers);
-  const providerId = valueOf(settings, "provider");
-  // A provider's own page lists that provider's models; the global one follows the default provider.
+  const source = kind.source;
+  if (source === undefined) return [];
+  const available = offered(providers).filter((provider) => {
+    const driver = driverKindOfInstance(provider.instanceId);
+    return kind.providerKinds === undefined || (driver !== null && kind.providerKinds.includes(driver));
+  });
+  // A setting that names its provider follows that one even while it is unset, through its default.
+  const ownProvider = kind.providerKey === undefined ? undefined : settings.find((view) => view.descriptor.key === kind.providerKey)?.effective?.value;
+  const providerId = kind.providerKey === undefined ? valueOf(settings, "provider") : valueOf(settings, kind.providerKey) ?? (ownProvider === undefined ? undefined : String(ownProvider));
+  // A provider's own page lists that provider's models; a setting that names
+  // its provider follows that one; the global one follows the default provider.
   const scoped =
-    providerKind !== undefined
-      ? available.filter((provider) => driverKindOfInstance(provider.instanceId) === providerKind)
+    kind.providerKind !== undefined
+      ? available.filter((provider) => driverKindOfInstance(provider.instanceId) === kind.providerKind)
       : providerId === undefined
         ? available
         : available.filter((provider) => provider.instanceId === providerId);
   if (source === "provider") {
     return [
-      option("", t("settings.firstAvailable"), effective?.label ?? t("settings.claudeWhenInstalled")),
+      kind.providerKinds === undefined ? option("", t("settings.firstAvailable"), effective?.label ?? t("settings.claudeWhenInstalled")) : defaultOption(effective),
       ...available.map((provider) => option(provider.instanceId, provider.displayName ?? provider.instanceId)),
     ];
   }
@@ -456,7 +463,7 @@ export function settingControl(
       if (kind.source === "model-overrides") return modelOverridesControl(descriptor, value, settings, providers, kind.providerKind);
       if (kind.source === undefined) return { kind: "text", multiline: kind.multiline === true, ...(effective ? { effective } : {}) };
       // No catalog yet (still loading): the list would be empty, not wrong.
-      options = catalogOptions(kind.source, settings, providers ?? [], kind.providerKind, effective);
+      options = catalogOptions(kind, settings, providers ?? [], effective);
       break;
   }
   const current = value === undefined || value === "" ? "" : String(value);

@@ -188,6 +188,11 @@ export interface OpencodeServerConnection {
    * `generate.text` answers with no context.
    */
   generate(sessionID: string | null, prompt: string): Promise<string>;
+  /**
+   * `generate.text`: one stateless reply on `model`, with no session, transcript,
+   * tools or MCP servers. The request carries only a prompt and a model.
+   */
+  generateText(prompt: string, model: OpencodeModelRef, signal?: AbortSignal): Promise<string>;
   /** `session.compact`, on the session's own model (v2 takes none: switch it first). */
   summarizeSession(sessionID: string): Promise<void>;
   replyToPermission(sessionID: string, requestID: string, reply: "once" | "always" | "reject"): Promise<void>;
@@ -605,6 +610,17 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
         ? await request("session.generate", () => this.client.session.generate({ sessionID, prompt }))
         : await request("generate.text", () => this.client.generate.text({ prompt }));
     return asString(asRecord(data)?.text)?.trim() ?? "";
+  }
+
+  async generateText(prompt: string, model: OpencodeModelRef, signal?: AbortSignal): Promise<string> {
+    const data = await request("generate.text", () =>
+      this.client.generate.text(
+        { prompt, model: { id: model.modelID, providerID: model.providerID, ...(model.variant ? { variant: model.variant } : {}) } },
+        { ...(signal ? { signal } : {}) },
+      ),
+    );
+    const text = asRecord(data)?.text;
+    return typeof text === "string" ? text : "";
   }
 
   async summarizeSession(sessionID: string): Promise<void> {

@@ -23,6 +23,28 @@ describe("prompt improvement", () => {
     });
   });
 
+  it("uses the model and provider configured for the improver, not the draft's destination", async () => {
+    const h = await testHarness();
+    const config = normalizeConfig({ promptImprover: { provider: "opencode/anthropic", model: "anthropic/claude-sonnet-4-5" } });
+    const complete = vi.fn<Parameters<typeof improvePrompt>[2]>(async () => "Improved.");
+    await expect(improvePrompt(config, { directory: h.work, prompt: "Improve this.", modelSelection: { instanceId: "codex", model: "gpt-6.1-terra" } }, complete)).resolves.toMatchObject({ provider: "opencode", model: "anthropic/claude-sonnet-4-5" });
+    expect(complete.mock.calls[0]![0].model).toBe("anthropic/claude-sonnet-4-5");
+    expect(complete.mock.calls[0]![1]).toMatchObject({ instanceId: "opencode/anthropic", provider: "opencode", model: "anthropic/claude-sonnet-4-5" });
+  });
+
+  it("asks for a model instead of keeping Haiku when another provider is chosen", async () => {
+    const h = await testHarness();
+    const complete = vi.fn<Parameters<typeof improvePrompt>[2]>(async () => "unused");
+    await expect(improvePrompt({ ...h.config, promptImprover: { provider: "opencode/anthropic" } }, { directory: h.work, prompt: "Fix it." }, complete)).rejects.toThrow(/No model is set.*promptImprover\.model/s);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("names the failed model and the setting to change, and leaves the draft alone", async () => {
+    const h = await testHarness();
+    const complete = vi.fn<Parameters<typeof improvePrompt>[2]>(async () => { throw new Error("rate limit for this model"); });
+    await expect(improvePrompt({ ...h.config, promptImprover: { provider: "claudeAgent", model: "claude-opus-5" } }, { directory: h.work, prompt: "Keep me." }, complete)).rejects.toThrow(/claude-opus-5.*promptImprover\.model/s);
+  });
+
   it("includes ancestor rules and Harness profile instructions within a bounded context", async () => {
     const h = await testHarness();
     const child = path.join(h.work, "src");

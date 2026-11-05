@@ -39,10 +39,10 @@ const CATALOG = [
   provider("grok", [{ slug: "grok-5", name: "Grok 5" }], false),
 ];
 
-function control(key: string, config: CliConfig = DEFAULT_CONFIG) {
+function control(key: string, config: CliConfig = DEFAULT_CONFIG, catalog: ProviderSummary[] = CATALOG) {
   const settings = describeSettings(config);
   const view = settings.find((entry) => entry.descriptor.key === key)!;
-  return settingControl(view.descriptor, view.value, settings, CATALOG);
+  return settingControl(view.descriptor, view.value, settings, catalog);
 }
 
 describe("settingControl", () => {
@@ -53,6 +53,21 @@ describe("settingControl", () => {
     expect(allModels.kind === "pick" && allModels.options.map((entry) => entry.value)).toEqual(["", "claude-opus-5-5", "gpt-6"]);
     const claudeModels = control("model", { ...DEFAULT_CONFIG, provider: "claudeAgent" });
     expect(claudeModels.kind === "pick" && claudeModels.options.map((entry) => entry.value)).toEqual(["", "claude-opus-5-5"]);
+  });
+
+  it("keeps First available on the global Provider, whose unset value is not a default", () => {
+    const global = control("provider");
+    expect(global.kind === "pick" && global.options[0]?.label).toBe("First available");
+  });
+
+  it("offers only providers that can improve a draft without tools, and their models", () => {
+    const opencode = provider("opencode/opencode", [{ slug: "opencode/muse", name: "Muse" }]);
+    const providers = control("promptImprover.provider", DEFAULT_CONFIG, [...CATALOG, opencode]);
+    expect(providers.kind === "pick" && providers.options.map((entry) => entry.value)).toEqual(["", "claudeAgent", "opencode/opencode"]);
+    const byDefault = control("promptImprover.model", DEFAULT_CONFIG, [...CATALOG, opencode]);
+    expect(byDefault.kind === "pick" && byDefault.options.map((entry) => entry.value)).toEqual(["", "claude-opus-5-5"]);
+    const onOpencode = control("promptImprover.model", { ...DEFAULT_CONFIG, promptImprover: { provider: "opencode/opencode" } }, [...CATALOG, opencode]);
+    expect(onOpencode.kind === "pick" && onOpencode.options.map((entry) => entry.value)).toEqual(["", "opencode/muse"]);
   });
 
   it("offers the default model's efforts", () => {

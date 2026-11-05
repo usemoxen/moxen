@@ -35,6 +35,8 @@ export interface CliConfig {
   sessionTtl: string;
   provider?: string;
   model?: string;
+  /** The provider and model the composer's improve action rewrites a draft with. */
+  promptImprover?: PromptImproverConfig;
   speedMode?: SpeedMode;
   thinkingEffort?: string;
   /** MCP servers injected into every provider session (`core/mcp.ts`). */
@@ -79,6 +81,14 @@ export interface CliConfig {
   updates?: UpdatesConfig;
   /** The server, reached from other machines (`server/transport/remoteaccess.ts`). */
   remote?: RemoteConfig;
+}
+
+/** The prompt improver's own selection, kept apart from the model a draft's thread will run on. */
+export interface PromptImproverConfig {
+  /** A provider instance id (`claudeAgent`, `opencode/<provider>`, …). Unset: Claude Code. */
+  provider?: string;
+  /** The model on that provider. Unset: Claude Haiku 5.5, and only on Claude Code. */
+  model?: string;
 }
 
 export interface RemoteConfig {

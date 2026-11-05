@@ -50,6 +50,7 @@ import type {
   SideAnswer,
   SideQuestionInput,
   SubagentHistoryItem,
+  TextCompletionInput,
   ThreadId,
   TokenUsageDelta,
   TurnId,
@@ -952,6 +953,22 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const text = await connection.generate(input.cursor, prompt);
     if (!text) throw new CliError("SIDE_QUESTION_FAILED", "The side question came back empty.");
     return { text, withContext: input.cursor !== null };
+  };
+
+  /**
+   * A prompt improvement request: OpenCode's stateless `generate.text`,
+   * which takes a prompt and a model and nothing else — no session, history,
+   * agent, MCP server or tool. The model is the `provider/model` address the
+   * catalog lists.
+   */
+  readonly completeText = async (input: TextCompletionInput): Promise<string> => {
+    input.signal?.throwIfAborted();
+    const model = parseOpencodeModel({ instanceId: "opencode", model: input.model });
+    if (model === null) throw new CliError("TEXT_COMPLETION_FAILED", `OpenCode needs a model address like provider/model; "${input.model}" is not one.`);
+    const connection = await this.connectionForSession(`complete:${input.workingDirectory}` as ThreadId, input.workingDirectory);
+    const text = await connection.generateText(`${input.instructions}\n\n${input.prompt}`, model, input.signal);
+    if (text.trim() === "") throw new CliError("TEXT_COMPLETION_FAILED", "Text completion came back empty.");
+    return text;
   };
 
   readonly sessionTitle = async (cursor: string, workingDirectory: string): Promise<string | null> =>

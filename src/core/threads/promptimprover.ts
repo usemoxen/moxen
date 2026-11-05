@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 
+import { DEFAULT_PROMPT_IMPROVER_MODEL, DEFAULT_PROMPT_IMPROVER_PROVIDER } from "../configschema.js";
 import { CliError } from "../errors.js";
 import { driverKindOfInstance, type CliConfig, type ModelSelection } from "../types.js";
 import type { TextCompletionInput } from "../providers/spi.js";
@@ -27,20 +28,41 @@ export interface ImprovePromptInput {
   readonly protectedText?: readonly string[];
 }
 
+/** The provider and model the improver runs on, resolved from its own settings. */
+export interface PromptImproverSelection {
+  readonly instanceId: string;
+  readonly provider: "claude" | "codex" | "opencode" | "harness";
+  readonly model: string;
+}
+
+/** The improver's own model, never the draft destination's. Unset: Haiku 5.5 on Claude Code. */
+export function promptImproverSelection(config: CliConfig): PromptImproverSelection {
+  const instanceId = config.promptImprover?.provider?.trim() || DEFAULT_PROMPT_IMPROVER_PROVIDER;
+  const kind = driverKindOfInstance(instanceId);
+  if (kind === null) {
+    throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `The prompt improver's provider ${instanceId} is not a provider. Choose one in the prompt improver settings (promptImprover.provider).`);
+  }
+  // Only Claude has today's default; another provider needs its model named.
+  const model = config.promptImprover?.model?.trim() || (kind === "claude" ? DEFAULT_PROMPT_IMPROVER_MODEL : "");
+  if (model === "") {
+    throw new CliError("PROMPT_IMPROVER_NO_MODEL", `No model is set for the prompt improver on ${instanceId}. Choose one in the prompt improver settings (promptImprover.model).`);
+  }
+  return { instanceId, provider: kind, model };
+}
+
 /** A draft edit only: never starts a thread, sends a turn, or reads its transcript. */
 export async function improvePrompt(
   config: CliConfig,
   input: ImprovePromptInput,
-  complete: (input: TextCompletionInput) => Promise<string>,
+  complete: (input: TextCompletionInput, selection: PromptImproverSelection) => Promise<string>,
 ): Promise<{ text: string; provider: string; model: string }> {
   if (!input.prompt.trim() || input.prompt.length > MAX_PROMPT) throw new CliError("INVALID_PROMPT", `Use a non-empty draft of at most ${MAX_PROMPT} characters.`);
   if (input.protectedText && (input.protectedText.length > 128 || input.protectedText.some((text) => !text || text.length > MAX_PROMPT))) throw new CliError("INVALID_PROMPT", "Invalid protected draft text.");
   if (!path.isAbsolute(input.directory)) throw new CliError("WORKSPACE_NOT_FOUND", "The draft requires an absolute project directory.");
   const directory = path.resolve(input.directory);
   if (!await stat(directory).then((info) => info.isDirectory(), () => false)) throw new CliError("WORKSPACE_NOT_FOUND", "The draft's project directory is unavailable.");
-  // Claude Code exposes an empty tool set; Codex's app-server has no deny-all policy.
-  const provider = "claude";
-  const model = "claude-haiku-5-5";
+  const selection = promptImproverSelection(config);
+  const { provider, model } = selection;
   const destination = input.modelSelection?.instanceId ?? config.provider;
   const kind = destination ? driverKindOfInstance(destination) : null;
   const providerInstructions = kind ? config.providers?.[kind]?.instructions : undefined;
@@ -55,7 +77,14 @@ export async function improvePrompt(
   const customInstructions = [config.instructions, providerInstructions, project, profileInstructions].map(bounded).filter(Boolean);
   const projectRules = [...rules].map(([file, text]) => ({ file: path.relative(directory, file), text: bounded(text) })).filter((rule) => rule.text !== "");
   const request = JSON.stringify({ draft: input.prompt, customInstructions, projectRules, protectedText: input.protectedText ?? [] });
-  const reply = await complete({ workingDirectory: directory, model, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) });
+  let reply: string;
+  try {
+    reply = await complete({ workingDirectory: directory, model, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) }, selection);
+  } catch (cause) {
+    if (cause instanceof CliError && cause.code === "PROMPT_IMPROVER_UNAVAILABLE") throw cause;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new CliError("PROMPT_IMPROVEMENT_FAILED", `The prompt improver could not use ${provider}/${model}: ${detail} Your original draft is unchanged. Change the model, or the provider, in the prompt improver settings (promptImprover.model, promptImprover.provider).`, { cause });
+  }
   const text = input.protectedText?.length ? reply : reply.trim();
   if (!text.trim() || text.length > MAX_PROMPT) throw new CliError("PROMPT_IMPROVEMENT_FAILED", "The prompt improver returned an empty or oversized draft. Your original draft is unchanged.");
   const images = (value: string): string => JSON.stringify(value.match(IMAGE_TOKEN) ?? []);

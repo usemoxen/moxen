@@ -849,6 +849,25 @@ describe("opencode driver", () => {
     expect(bare.withContext).toBe(false);
   });
 
+  it("completes text through generate.text with only a prompt and model, so no tool exists to run", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    drivers.push(driver);
+    const text = await driver.completeText!({
+      workingDirectory: "/repo",
+      model: "anthropic/claude-haiku-4-5",
+      prompt: "{\"draft\":\"Fix it\"}",
+      instructions: "Edit only.",
+    });
+    expect(text).toBe("Because of the second step.");
+    const calls = transport.servers[0]!.callsTo("generate.text");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toEqual({ prompt: "Edit only.\n\n{\"draft\":\"Fix it\"}", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" } });
+    expect(calls[0]!.args).not.toHaveProperty("tools");
+    expect(transport.servers[0]!.callsTo("session.prompt")).toEqual([]);
+    expect(transport.servers[0]!.callsTo("session.create")).toEqual([]);
+  });
+
   it("leaves a session on the user's own agent alone in default mode", async () => {
     const transport = new FakeOpencodeTransport({ sessionState: { agent: "reviewer" } });
     const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });

@@ -22,6 +22,7 @@ import type {
   OpencodeProviderConfig,
   OpenMode,
   ProjectPolicy,
+  PromptImproverConfig,
   RuntimeMode,
   ProvidersConfig,
   SpeedMode,
@@ -185,6 +186,8 @@ export function normalizeConfig(raw: unknown): CliConfig {
   }
   if (input.provider !== undefined) result.provider = asString(input.provider, "provider");
   if (input.model !== undefined) result.model = asString(input.model, "model");
+  const promptImprover = normalizeSection<PromptImproverConfig>(input.promptImprover, "promptImprover", ["provider", "model"]);
+  if (promptImprover) result.promptImprover = promptImprover;
   if (input.speedMode !== undefined) {
     const value = asString(input.speedMode, "speedMode") as SpeedMode;
     if (!speedModes.has(value)) throw new CliError("INVALID_CONFIG", "speedMode must be standard or fast.");

@@ -1233,9 +1233,9 @@ export class DirectConnection implements ClientApi {
       case "thread.side-question":
         return await this.sideQuestion(command);
       case "prompt.improve":
-        return await improvePrompt(await this.loadConfig(), command, async (input) => {
-          const driver = this.driverFor("claude");
-          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", "Prompt improvement requires Claude Code with access to Haiku 5.5.");
+        return await improvePrompt(await this.loadConfig(), command, async (input, selection) => {
+          const driver = this.driverFor(selection.instanceId);
+          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `${selection.provider}/${selection.model} cannot run a completion without tools, so it cannot improve a draft. Your original draft is unchanged. Choose a Claude Code or OpenCode model in the prompt improver settings (promptImprover.provider, promptImprover.model).`);
           return await driver.completeText(input);
         });
       case "remote.pairing.start":

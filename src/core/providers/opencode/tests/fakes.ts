@@ -119,6 +119,12 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     return this.generated;
   }
 
+  async generateText(prompt: string, model: OpencodeModelRef, _signal?: AbortSignal): Promise<string> {
+    this.calls.push({ method: "generate.text", args: { prompt, model } });
+    this.failChecked("generate.text");
+    return this.generated;
+  }
+
   async sessionTitle(sessionID: string): Promise<string | null> {
     this.calls.push({ method: "session.title", args: { sessionID } });
     return this.title;
