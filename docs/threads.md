@@ -841,6 +841,15 @@ provider's tab, then the global Long threads tab, then the built-in default (han
 background turns included (`actOnLongThread` in `core/threads/operations.ts`),
 so a thread no client has open is looked after too.
 
+**Reading the number.** The composer shows the thread's latest context
+reading: tokens used, window size and the share of it. An agent sees the same
+figure with the `context_usage` tool (on the `moxen` server, a delegated task
+included), which returns those totals and when the reading was taken, never an
+estimate. A thread with no reading yet is told so; a reading from before a
+compaction comes back marked not current, with its time, rather than passed off
+as the figure now. An agent told to hand off at a size can therefore measure
+instead of guessing.
+
 **Hand off.** `ask` (the default) draws a card over the composer with **Hand
 off** and **Not now**; `auto` has the server continue the thread itself (the
 same handoff document as "Continue in a new thread", and a `thread.continued`

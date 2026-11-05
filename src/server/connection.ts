@@ -182,6 +182,7 @@ import {
   type Query,
   type QueryOf,
   type QueryResult,
+  type QueryResults,
   type QueryType,
   type ShellFrame,
   type StartedTurnSummary,
@@ -1755,6 +1756,8 @@ export class DirectConnection implements ClientApi {
         const driver = await this.sessionDriver(query.threadId);
         return driver ? { live: true, tasks: driver.backgroundTasks?.(query.threadId) ?? [] } : { live: false, tasks: [] };
       }
+      case "thread.context-reading":
+        return await readContextReading(await this.store(), query.threadId);
       case "thread.context": {
         const driver = await this.sessionDriver(query.threadId);
         if (!driver) return { live: false, breakdown: null };
@@ -1990,4 +1993,30 @@ async function latestContextUsage(store: ThreadStore, threadId: string): Promise
     if (typeof used === "number") return { usedTokens: used, maxTokens: typeof max === "number" ? max : null };
   }
   return null;
+}
+
+/**
+ * The latest reading the turn runner recorded, with when it was taken, for
+ * `thread.context-reading`. A compaction reported after that reading (every
+ * driver publishes one, for a `/compact` turn or its own threshold) makes it
+ * out of date: the old figure still stands in the store until the next
+ * reading lands, so it is marked rather than dropped. The times are compared
+ * rather than the row order, since tool activity is written through a chain
+ * and a notice can land after a reading it was emitted before.
+ */
+async function readContextReading(store: ThreadStore, threadId: string): Promise<QueryResults["thread.context-reading"]> {
+  const activities = await store.readActivities(threadId).catch(() => []);
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.kind !== "context-window.updated") continue;
+    const used = activity.payload?.["usedTokens"];
+    if (typeof used !== "number") continue;
+    const max = activity.payload?.["maxTokens"];
+    const compactedSince = activities.some((later, at) => {
+      if (later.kind !== "notice" || later.payload?.["notice"] !== "compacted") return false;
+      return later.createdAt === activity.createdAt ? at > index : later.createdAt > activity.createdAt;
+    });
+    return { reading: { usedTokens: used, maxTokens: typeof max === "number" ? max : null, takenAt: activity.createdAt, compactedSince } };
+  }
+  return { reading: null };
 }

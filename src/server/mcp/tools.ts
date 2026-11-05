@@ -161,6 +161,16 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     annotations: { readOnlyHint: true },
   },
   {
+    name: "context_usage",
+    description:
+      "How full your own context window is: tokens used, the window size, the percent used, and when that reading was taken. " +
+      "It is the same number the user's Moxen screen shows for this thread, taken from the latest reading Moxen recorded. " +
+      "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
+      "Use it before deciding to compact or hand off instead of guessing. It takes no argument: always your own thread.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: "web_fetch",
     description:
       "Reads a web page or file by address and returns it as text: pages become readable text with their links, JSON and text files come back as they are. " +
@@ -622,6 +632,8 @@ export async function callMoxenTool(
         return ok(await statusTool(api, parentThreadId, args, sleep));
       case "models":
         return ok(await modelsTool(api, args));
+      case "context_usage":
+        return ok(await contextUsageTool(api, parentThreadId));
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
@@ -945,4 +957,31 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
     throw new CliError("PROVIDER_NOT_FOUND", `No enabled provider "${only}". Call models without provider to see them.`);
   }
   return { providers: rows };
+}
+
+/**
+ * `context_usage`: the calling thread's latest recorded reading
+ * (`thread.context-reading`), the same figure the TUI's composer shows.
+ * Totals only, never an estimate. A reading from before a compaction is
+ * returned with its time and `current: false`, so an old number is not
+ * passed off as the one now.
+ */
+async function contextUsageTool(api: ClientApi, parentThreadId: string) {
+  const { reading } = await api.query({ type: "thread.context-reading", threadId: parentThreadId });
+  if (reading === null) {
+    return { reading: null, note: "No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates." };
+  }
+  const percentUsed = reading.maxTokens === null || reading.maxTokens <= 0 ? null : Math.round((reading.usedTokens / reading.maxTokens) * 100);
+  return {
+    reading: {
+      usedTokens: reading.usedTokens,
+      maxTokens: reading.maxTokens,
+      percentUsed,
+      takenAt: reading.takenAt,
+      current: !reading.compactedSince,
+    },
+    ...(reading.compactedSince
+      ? { note: "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that." }
+      : {}),
+  };
 }

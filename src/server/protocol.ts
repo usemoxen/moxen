@@ -561,6 +561,13 @@ export type Query =
    */
   | { readonly type: "thread.context"; readonly threadId: string }
   /**
+   * The latest context reading Moxen recorded for a thread
+   * (`context-window.updated`), with when it was taken — the number the TUI's
+   * composer shows. `compactedSince` is true when a compaction happened after
+   * it, so it no longer describes the conversation. Totals only.
+   */
+  | { readonly type: "thread.context-reading"; readonly threadId: string }
+  /**
    * One native subagent's own conversation (Claude's Agent tool), read from
    * the transcript the provider keeps for it; `available: false` when it
    * keeps none this machine can read.
@@ -693,6 +700,15 @@ export interface QueryResults {
   "memory.read": Memory;
   "memory.search": MemorySearch;
   "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
+  "thread.context-reading": {
+    readonly reading: {
+      readonly usedTokens: number;
+      readonly maxTokens: number | null;
+      readonly takenAt: string;
+      /** A compaction happened after this reading, so it is no longer current. */
+      readonly compactedSince: boolean;
+    } | null;
+  };
   "thread.subagent": SubagentTranscript;
   "usage.stats": UsageStats;
   "usage.card": UsageCard;
@@ -1696,6 +1712,7 @@ export function decodeQuery(value: unknown): Query {
         ...optionalNumber(record, "limit", type),
       };
     case "thread.context":
+    case "thread.context-reading":
       return { type, threadId: requireThreadId(record.threadId) };
     case "thread.subagent":
       return { type, threadId: requireThreadId(record.threadId), agentId: requireField(record.agentId, type, "agentId") };

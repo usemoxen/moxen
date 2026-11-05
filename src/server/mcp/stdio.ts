@@ -25,10 +25,11 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
+  "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +
   "web_fetch reads a web page as text; it is not part of delegating.";
 
 /** What a delegated task is told: it has no delegation tools, so only what is left is described. */
-export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
+export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full your own context window is, from the latest reading Moxen recorded. web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
 export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_search, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";

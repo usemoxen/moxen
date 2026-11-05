@@ -49,7 +49,7 @@ try {
       const reply = JSON.parse(line);
       replies.set(reply.id, reply);
     }
-    assert.deepEqual(replies.get(1)?.result.tools.map((tool: { name: string }) => tool.name), ["knowledge_search", "knowledge_read"]);
+    assert.deepEqual(replies.get(1)?.result.tools.map((tool: { name: string }) => tool.name), ["knowledge_search", "knowledge_read", "context_usage"]);
     assert.equal(replies.get(2)?.result.isError, false);
     assert.deepEqual(JSON.parse(replies.get(2).result.content[0].text), page);
   } finally {

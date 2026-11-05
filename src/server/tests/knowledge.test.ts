@@ -25,7 +25,7 @@ it("serves offline knowledge over the wire and both MCP transports without readi
     const spec = http.specFor("reader");
     const response = await fetch(spec.url, { method: "POST", headers: { "Content-Type": "application/json", ...spec.headers }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "knowledge_read", arguments: { id: "settings", section: "secrets" } } }) });
     expect(await response.json()).toMatchObject({ result: { isError: false, content: [{ type: "text", text: JSON.stringify(reading) }] } });
-    expect(moxenToolsFor({ delegated: true, webFetch: false, memory: "off" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read"]);
+    expect(moxenToolsFor({ delegated: true, webFetch: false, memory: "off" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage"]);
     expect(moxenInstructions(options)).toContain("knowledge_search");
     for (const tool of moxenToolsFor({}).filter((tool) => tool.name.startsWith("knowledge_"))) expect(tool.annotations?.readOnlyHint).toBe(true);
     expect(await callMoxenTool(remote, "reader", "knowledge_search", { query: " " })).toMatchObject({ isError: true });
