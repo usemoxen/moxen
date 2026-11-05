@@ -1027,7 +1027,7 @@ describe("opencode driver", () => {
       const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
       const server = transport.servers[0]!;
       const subagents = () => events.flatMap((event) => (event.type === "subagent.updated" ? [event] : []));
-      return { driver, server, sent, fiber, subagents };
+      return { driver, server, sent, fiber, subagents, events };
     }
 
     it("starts one as the call names its child, and stops it with the report the call returns", async () => {
@@ -1058,7 +1058,7 @@ describe("opencode driver", () => {
     });
 
     it("stops a background one when its child goes idle, with the child's last word", async () => {
-      const { server, fiber, subagents } = await running({
+      const { server, fiber, subagents, events } = await running({
         messages: [{ info: { id: "a1", role: "assistant" }, parts: [{ id: "t1", type: "text", text: "Done: /tmp/x" }] }],
       });
       await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));
@@ -1071,6 +1071,7 @@ describe("opencode driver", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(subagents()).toMatchObject([{ status: "started" }, { agentId: CHILD, status: "stopped", lastMessage: "Done: /tmp/x" }]);
       expect(server.callsTo("session.messages").at(-1)?.args).toMatchObject({ sessionID: CHILD });
+      expect(events.filter((event) => event.type === "background.wake-up")).toMatchObject([{ prompt: expect.stringContaining("Done: /tmp/x") }]);
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 

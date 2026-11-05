@@ -1044,6 +1044,9 @@ export class DirectConnection implements ClientApi {
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
+      case "thread.protect":
+        await this.usageProtection.protect(command.threadId);
+        return accepted;
       case "queue.edit":
         await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy);
         return accepted;

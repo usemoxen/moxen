@@ -444,6 +444,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued" || !candidate.queue && !candidate.scheduledFor) continue;
     const pause = row.thread.usagePause;
+    if (pause?.forced) continue;
     if (candidate.queue?.continuation && candidate.queue.continuation !== "same-thread") continue;
     const summary = candidate.queue?.summaryFor && row.turns.find((t) => t.id === candidate.queue!.summaryFor && t.handoff?.summaryTurnId === candidate.id && t.status === "queued");
     if (candidate.queue?.summaryFor && !summary) continue;
@@ -580,7 +581,8 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         }
       }
       if (action === "remove" || action === "hold" || next.continuation !== "model") summaryToStop = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.handoff?.summaryTurnId && (candidate.status === "queued" || candidate.status === "running"));
-      if (action === "remove" && (await ctx.store.readThreadRecord(threadId))?.usagePause?.recoveryTurnId === turnId) {
+      const protection = (await ctx.store.readThreadRecord(threadId))?.usagePause;
+      if (action === "remove" && !protection?.forced && protection?.recoveryTurnId === turnId) {
         cancelProtection = true;
         summaryToStop = openTurn(await ctx.store.readTurns(threadId)) ?? summaryToStop;
       }
@@ -594,7 +596,7 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     }
     if (cancelProtection) await ctx.store.withThreadLock(threadId, async () => {
       const thread = await ctx.store.readThreadRecord(threadId);
-      if (thread?.usagePause?.recoveryTurnId === turnId) await ctx.store.writeThreadRecord({ ...thread, usagePause: null });
+      if (!thread?.usagePause?.forced && thread?.usagePause?.recoveryTurnId === turnId) await ctx.store.writeThreadRecord({ ...thread, usagePause: null });
     });
   });
 }
@@ -657,7 +659,7 @@ async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, tur
   const store = ctx.store;
   const source = await store.readThreadRecord(threadId);
   let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
-  if (!source || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
+  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
     await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
@@ -2037,17 +2039,36 @@ export const TASK_NOTIFICATION_BATCH_MS = 2_000;
 
 const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; taskIds: string[] }>();
 
-/** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
-export function queueTaskNotification(ctx: OperationContext, parentThreadId: string, childThreadId: string): void {
-  const pending = pendingNotifications.get(parentThreadId);
-  if (pending) clearTimeout(pending.timer);
-  const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
-  const timer = setTimeout(() => {
+/** Move an in-flight notification batch onto a newly protected thread's durable queue. */
+export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
+  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
+    const pending = pendingNotifications.get(parentThreadId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
     pendingNotifications.delete(parentThreadId);
-    void deliverTaskNotifications(ctx, parentThreadId, taskIds).catch(() => undefined);
-  }, TASK_NOTIFICATION_BATCH_MS);
-  timer.unref?.();
-  pendingNotifications.set(parentThreadId, { timer, taskIds });
+    await deliverTaskNotifications(ctx, parentThreadId, pending.taskIds);
+  });
+}
+
+/** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
+export async function queueTaskNotification(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
+  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
+    // Serialize fact collection too: a later, faster report cannot overtake an
+    // earlier one. Register batches under the thread lock so protection's flush
+    // cannot race a report that read the old, unprotected record.
+    const held = await ctx.store.withThreadLock(parentThreadId, async () => {
+      const parent = await ctx.store.readThreadRecord(parentThreadId);
+      if (parent?.usagePause && parent.usagePause.phase !== "resuming") return true;
+      const pending = pendingNotifications.get(parentThreadId);
+      if (pending) clearTimeout(pending.timer);
+      const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
+      const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+      timer.unref?.();
+      pendingNotifications.set(parentThreadId, { timer, taskIds });
+      return false;
+    });
+    if (held) await deliverTaskNotifications(ctx, parentThreadId, [childThreadId]);
+  });
 }
 
 /**
@@ -2056,7 +2077,7 @@ export function queueTaskNotification(ctx: OperationContext, parentThreadId: str
  */
 async function notifyParentOfResumedTask(ctx: OperationContext, childThreadId: string): Promise<void> {
   const delegation = (await ctx.store.readDelegations()).find((row) => row.childThreadId === childThreadId && row.notify === true && row.continuedIn === undefined);
-  if (delegation) queueTaskNotification(ctx, delegation.parentThreadId, childThreadId);
+  if (delegation) await queueTaskNotification(ctx, delegation.parentThreadId, childThreadId);
 }
 
 /** Whether a task has nothing left to run: no turn running, and none waiting (a usage-limit resume is a queued, scheduled turn). */
@@ -2126,7 +2147,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
   for (const id of childThreadIds) {
     const parent = liveParent(id);
-    if (parent !== undefined && parent !== parentThreadId) queueTaskNotification(ctx, parent, id);
+    if (parent !== undefined && parent !== parentThreadId) await queueTaskNotification(ctx, parent, id);
   }
   const mine = childThreadIds.filter((id) => (liveParent(id) ?? parentThreadId) === parentThreadId);
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
@@ -2902,7 +2923,7 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
         done = true;
         stop();
-        queueTaskNotification(ctx, parentThreadId, childThreadId);
+        await queueTaskNotification(ctx, parentThreadId, childThreadId);
       } while (again);
     } finally {
       checking = false;

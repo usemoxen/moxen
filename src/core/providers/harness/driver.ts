@@ -987,7 +987,9 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     const base = { provider: "harness" as const, threadId: session.threadId };
     const ended = event.type === "ended";
     if (ended) {
-      session.modelNotes.push({ taskId: task.id, text: this.backgroundNote(session, task) });
+      const text = this.backgroundNote(session, task);
+      this.publish({ ...base, type: "background.wake-up", requestId: `harness-task:${task.id}`, prompt: text });
+      session.modelNotes.push({ taskId: task.id, text });
       this.scheduleWake(session);
     }
     this.publish({

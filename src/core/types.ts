@@ -547,6 +547,8 @@ export interface TurnUsagePause {
   readonly windows: readonly { readonly id: string; readonly kind: string; readonly label: string; readonly resetsAt: string | null }[];
   /** Allowance reset, not a promise of immediate admission to the recovery queue. */
   readonly resetsAt: string | null;
+  /** The user protected the thread by hand: no window ran low, nothing resets it. */
+  readonly forced?: true;
   readonly pausedAt: string;
   /** null means no readable git checkout, rather than a clean checkout. */
   readonly hasUncommittedChanges: boolean | null;
@@ -598,6 +600,8 @@ export interface ThreadEnvelope {
   turnThroughput?: Record<string, number>;
   /** Historical protection interruptions, keyed by turn id; absent on older/unpaused turns. */
   turnUsagePauses?: Record<string, TurnUsagePause>;
+  /** Present while protection holds this thread; omitted on unprotected threads. */
+  protection?: { protected: true; forced: boolean; waitingWakeUps: number };
   /**
    * Messages waiting their turn, oldest first: queued behind the running
    * turn, or scheduled for later (`scheduledFor`). Absent when there are none.

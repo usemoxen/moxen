@@ -1049,7 +1049,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           const turn: TranscriptTurn = { id: randomUUID(), serverTurnId: serverId, prompt: "", items: [], status: "running", text: "", error: null, messages: new Map() };
           session.transcript.push(turn);
           session.harness.beginTurn(turn.id);
-          this.publish({ type: "turn.started", provider: "codex", threadId: session.threadId, turnId: turn.id, origin: "background" });
+          this.publish({ type: "turn.started", provider: "codex", threadId: session.threadId, turnId: turn.id, origin: "background", wakeUpPrompt: JSON.stringify(params) });
         }
         return;
       }

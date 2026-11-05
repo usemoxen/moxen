@@ -196,6 +196,7 @@ export type CommandBody =
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
   | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
   | { readonly type: "usage.wrap"; readonly provider: string }
+  | { readonly type: "thread.protect"; readonly threadId: string }
   | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy }
   | { readonly type: "handoff.submit"; readonly threadId: string; readonly requestId: string; readonly summary: string }
   | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel" }
@@ -403,6 +404,7 @@ export interface CommandResults {
   "thread.turn.start": StartedTurnSummary & Accepted;
   "thread.turn.interrupt": Accepted;
   "usage.wrap": Accepted;
+  "thread.protect": Accepted;
   "queue.edit": Accepted;
   "handoff.submit": Accepted;
   "usage.queue": Accepted;
@@ -1024,6 +1026,8 @@ export function decodeCommand(value: unknown): Command {
       };
     case "usage.wrap":
       return { ...meta, type, provider: requireField(record.provider, type, "provider") };
+    case "thread.protect":
+      return { ...meta, type, threadId: threadId() };
     case "queue.edit":
       return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}) };
     case "handoff.submit":

@@ -289,6 +289,16 @@ export type ProviderRuntimeEvent =
       readonly threadId: ThreadId;
       readonly turnId: TurnId;
       readonly origin: "background";
+      /** Native start metadata when the provider does not expose the triggering message. */
+      readonly wakeUpPrompt?: string;
+    }
+  | {
+      /** Content of a provider-native automatic delivery, before its turn starts. */
+      readonly type: "background.wake-up";
+      readonly provider: ProviderDriverKind;
+      readonly threadId: ThreadId;
+      readonly requestId: string;
+      readonly prompt: string;
     }
   | {
       /** One background task (a `run_in_background` command, a Monitor watch, a background subagent) starting or ending. */

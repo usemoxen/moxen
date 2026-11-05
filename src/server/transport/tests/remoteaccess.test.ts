@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
+import { createThread } from "../../../core/threads/threads.js";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -229,6 +230,19 @@ describe("remote access listener", () => {
     expect(replies.find((reply) => reply.id === 3)).toMatchObject({ error: { code: "REMOTE_SHUTDOWN_REFUSED" } });
     // Still listening: the refused shutdown stopped nothing.
     expect(remote.status().listening).toEqual([LOOPBACK]);
+  });
+
+  it("allows a paired device to protect a thread and read its protected state", async () => {
+    const w = await testHarness();
+    const thread = await createThread(w.store, { projectId: "p", title: "remote protected", modelSelection: { instanceId: "codex", model: "test" }, env: { mode: "local", path: w.work, branch: null } });
+    const { remote, fingerprint } = await remoteAccess({ storeRoot: w.root });
+    const port = await freePort();
+    await remote.apply({ enabled: true, port });
+    const device = await paired(remote, port, fingerprint);
+    const protectedReply = await exchange(port, fingerprint, [hello({ device }), { id: 2, method: "dispatch", params: { type: "thread.protect", threadId: thread.id } }]);
+    expect(protectedReply.replies.find((reply) => reply.id === 2)).toMatchObject({ result: { accepted: true } });
+    const read = await exchange(port, fingerprint, [hello({ device }), { id: 2, method: "query", params: { type: "thread.inspect", threadId: thread.id } }]);
+    expect(read.replies.find((reply) => reply.id === 2)).toMatchObject({ result: { thread: { protection: { protected: true, forced: true, waitingWakeUps: 0 } } } });
   });
 
   it("refuses update and rollback to a paired device whatever it sends, and never reaches the update", async () => {

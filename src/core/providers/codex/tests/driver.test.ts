@@ -827,6 +827,8 @@ describe("Codex lifecycle boundaries", () => {
   it("interrupts only a selected native child's turn and retains command output without claiming independent stop", async () => {
     const transport = new FakeCodexTransport({ turns: [{ id: "child-turn", status: "inProgress" }] });
     const driver = new CodexDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
     await Effect.runPromise(driver.startSession(START));
     const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "work" }));
     const server = transport.sessions[0]!.server;
@@ -840,10 +842,15 @@ describe("Codex lifecycle boundaries", () => {
     await Effect.runPromise(driver.stopBackgroundTask(START.threadId, "agent:child"));
     expect(server.requestsTo("turn/interrupt").map((request) => request.params)).toEqual([{ threadId: "child", turnId: "child-turn" }]);
     server.notify("turn/completed", { threadId: "child", turn: { status: "completed" } });
+    server.notify("item/completed", { threadId: "codex-thread-1", item: { id: "cmd", type: "commandExecution", status: "completed", command: "a command" } });
     server.notify("item/agentMessage/delta", { threadId: "codex-thread-1", delta: "parent answer" });
     server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
     expect((await driver.awaitTurn(START.threadId, sent.turnId)).text).toBe("parent answer");
+    await expect.poll(() => events.filter((event) => event.type === "background.wake-up").length, { timeout: 10_000, interval: 10 }).toBe(2);
+    const command = events.find((event) => event.type === "background.wake-up" && event.requestId === "codex-task:command:cmd");
+    expect(command).toMatchObject({ prompt: expect.stringContaining('"output":"output"') });
     await Effect.runPromise(driver.stopAll());
+    await Effect.runPromise(Fiber.interrupt(fiber));
     expect(driver.backgroundTasks(START.threadId)).toEqual([]);
   });
 

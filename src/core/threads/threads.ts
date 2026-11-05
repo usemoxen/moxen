@@ -298,14 +298,14 @@ export async function sendTurn(
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
     if (usageHeld) delivery = "queue";
 
-    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled) {
+    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld) {
       throw new CliError(
         "SETTLED_THREAD_CONFIRMATION_REQUIRED",
         `Thread ${threadId} is settled. Re-run with wakeSettled to send and wake it.`,
         { exitCode: 4, details: { threadId, settledAt: thread.settledAt } },
       );
     }
-    if (thread.settledAt != null && input.wakeSettled === true) {
+    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
       thread = {
         ...thread,
         settledAt: null,
@@ -320,13 +320,21 @@ export async function sendTurn(
     let turns = await store.readTurns(threadId);
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
-      if (existing) return { thread, turn: existing, messageId: existing.messageId, delivery: existing.delivery };
+      if (existing) {
+        // The native task edge and its injected message share a run id. Keep
+        // both payloads, once, on one queued turn rather than losing either.
+        if (existing.status === "queued" && existing.queue?.wakeUp && input.queue.wakeUp && !(await store.readMessages(threadId)).some((message) => message.turnId === existing.id && message.text === prompt)) {
+          await store.appendLedger(threadId, "messages", { id: store.newId(), threadId, turnId: existing.id, role: "user", text: prompt, createdAt: now, ...withOrigin });
+          store.emit(threadId, "wake-up-updated");
+        }
+        return { thread, turn: existing, messageId: existing.messageId, delivery: existing.delivery };
+      }
     }
-    const running = openTurn(turns);
+    let running = openTurn(turns);
     // A message sent to a running turn does not carry a mode of its own (`/research` is for a prompt that starts one).
-    if (running && input.interactionMode !== undefined) throw modeLocked(threadId);
+    if (running && !manualContinuation && input.interactionMode !== undefined) throw modeLocked(threadId);
 
-    if (delivery === "auto" && running && ifBusy === "reject") {
+    if (delivery === "auto" && running && !manualContinuation && ifBusy === "reject") {
       throw new CliError(
         "THREAD_BUSY",
         "The thread has an active turn. Retry when idle or use ifBusy inject.",
@@ -343,13 +351,22 @@ export async function sendTurn(
 
     if (manualContinuation) {
       const pause = thread.usagePause!;
+      // A user send must be a normal turn, never a steer into wrap-up.
+      if (running) {
+        await interruptTurnLocked(store, thread, running, now);
+        running = null;
+        turns = await store.readTurns(threadId);
+      }
       const recovery = turns.find((turn) => (turn.id === pause.recoveryTurnId || turn.queue?.requestId === `usage:${pause.order}`) && turn.status === "queued");
       if (recovery) {
         await interruptTurnLocked(store, thread, recovery, now);
         if (recovery.queue) await store.updateTurn(threadId, recovery.id, { queue: { ...recovery.queue, removed: true } });
         turns = await store.readTurns(threadId);
       }
-      thread = { ...thread, usagePause: null, usageProtectionOverride: captureUsageProtectionOverride(pause.provider, Date.parse(now)), updatedAt: now };
+      // Only a hold that automatic protection placed is being overridden: ending
+      // a purely manual /protect leaves automatic protection armed.
+      const overridesAutomatic = !pause.forced || (pause.windows?.length ?? 0) > 0;
+      thread = { ...thread, usagePause: null, usageProtectionOverride: overridesAutomatic ? captureUsageProtectionOverride(pause.provider, Date.parse(now)) : null, updatedAt: now };
       await store.writeThreadRecord(thread);
       store.emit(threadId, "usage-protection-overridden");
     }
@@ -417,12 +434,18 @@ export async function sendTurn(
     const waitingOut = scheduledFor === null && !running && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const holdUntil = waitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    const status = input.queue || usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
+      conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
+      sequential: true, continuation: "same-thread" as const, automatic: true, wakeUp: true,
+    } : input.queue;
+    if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
+    if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
+    const status = heldQueue || usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
       status,
-      ...(input.queue ? { queue: input.queue } : {}),
+      ...(heldQueue ? { queue: heldQueue } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
         delivery === "queue" || waitingOut !== null ? (status === "queued" ? "queued" : "started")
@@ -779,7 +802,7 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
-  if (pause && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId) && !summary) return;
+  if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.

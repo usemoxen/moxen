@@ -3,14 +3,16 @@ import { CliError } from "../errors.js";
 import { readStatus } from "../git/history.js";
 import { driverKindOfInstance } from "../types.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
-import { startTurn, editWorkQueue, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
+import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
 
-export const WRAP_UP_PROMPT = "The provider's shared usage allowance is nearly exhausted. Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. You will resume in this same conversation automatically. Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.";
+const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
+export const WRAP_UP_PROMPT = wrapUpPrompt("The provider's shared usage allowance is nearly exhausted.", "You will resume in this same conversation automatically.");
+const FORCED_WRAP_UP_PROMPT = wrapUpPrompt("The user has protected this thread.", "Wait for the user's next message before resuming.");
 const RESUME_PROMPT = "The usage allowance has reset. Resume the unfinished task from your wrap-up, preserving the user's instructions. Check the working tree before continuing; do not redo completed work.";
 
 export interface UsageQueueEntry extends UsagePause { readonly threadId: string; readonly title: string }
@@ -66,6 +68,34 @@ export class UsageProtection {
 
   tick(now = Date.now()): Promise<void> { return this.serialize(() => this.step(now)); }
 
+  protect(threadId: string): Promise<void> {
+    return this.serialize(async () => {
+      const ctx = await this.context();
+      await ctx.store.withThreadLock(threadId, async () => {
+        const thread = await ctx.store.readThreadRecord(threadId);
+        if (!thread || thread.deletedAt) throw new CliError("THREAD_NOT_FOUND", "The thread does not exist.");
+        if (thread.archivedAt) throw new CliError("THREAD_ARCHIVED", "An archived thread cannot be protected.");
+        if (thread.usagePause?.forced) return;
+        const running = openTurn(await ctx.store.readTurns(threadId));
+        const provider = driverKindOfInstance((running?.modelSelection ?? thread.modelSelection).instanceId)!;
+        // A wrap-up already under way is the one wrap-up this hold gets.
+        const wrapping = thread.usagePause?.phase === "wrapping";
+        await ctx.store.writeThreadRecord({ ...thread, usageProtectionOverride: null, usagePause: {
+          ...(thread.usagePause ?? { provider, windows: [], order: Date.now(), handoff: false }),
+          forced: true, resetsAt: null, ...(wrapping ? {} : { native: false }), phase: wrapping ? "wrapping" : running ? "pending" : "waiting",
+        }, updatedAt: ctx.store.nowIso() });
+        recordUsageProtection(provider);
+        ctx.store.emit(threadId, "usage-protection");
+      });
+      const thread = (await ctx.store.readThreadRecord(threadId))!;
+      const row = { thread, turns: await ctx.store.readTurns(threadId) };
+      await flushTaskNotifications(ctx, threadId);
+      if (thread.usagePause!.phase !== "wrapping") await this.stop(ctx, row);
+      await this.stopBackgroundOrRetry(ctx, row, thread.usagePause!);
+      await this.refresh(ctx, Date.now(), await this.rows(ctx));
+    });
+  }
+
   wrap(provider: string): Promise<void> {
     return this.serialize(async () => {
       const ctx = await this.context();
@@ -85,6 +115,7 @@ export class UsageProtection {
       const row = rows.find((row) => row.thread.id === threadId && !row.thread.archivedAt);
       if (!row?.thread.usagePause) throw new CliError("USAGE_QUEUE_MISSING", "The thread is not waiting for usage.");
       if (direction === "cancel") {
+        if (row.thread.usagePause.forced) throw new CliError("THREAD_PROTECTED", "Send a message to end manual protection.");
         // Cancellation removes automatic recovery, not a request to start work now.
         if (row.thread.usagePause.phase === "wrapping") await this.stop(ctx, row);
         if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, "remove");
@@ -199,6 +230,7 @@ export class UsageProtection {
     // runner can settle immediately in response to the abort.
     const stopped = await interruptTurn(ctx.store, row.thread.id, turn.id, {
       provider: pause.provider, windows: pause.windows ?? [], resetsAt: pause.resetsAt,
+      ...(pause.forced ? { forced: true as const } : {}),
       pausedAt: ctx.store.nowIso(),
       hasUncommittedChanges: status === null ? null : status.staged + status.unstaged + status.untracked + status.conflicted > 0,
     });
@@ -249,7 +281,7 @@ export class UsageProtection {
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
     if (!(await ctx.store.readThreadRecord(threadId))?.usagePause) return;
-    if (pause.recoveryTurnId || pause.error) return;
+    if (pause.forced || pause.recoveryTurnId || pause.error) return;
     const windows = usageLimitsSnapshot()[pause.provider]?.windows ?? [];
     const recovery = await sendTurn(ctx.store, threadId, {
       prompt: RESUME_PROMPT, origin: "usage-continue",
@@ -288,6 +320,7 @@ export class UsageProtection {
       ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
     }, now);
     for (const row of eligible) {
+      await flushTaskNotifications(ctx, row.thread.id);
       const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
       if (pause) await this.stopBackgroundOrRetry(ctx, row, pause);
       if (this.nativeWrap.has(row.thread.id)) continue;
@@ -440,7 +473,8 @@ export class UsageProtection {
         // Persist before admission: a crash never repeats a partially delivered wrap-up.
         await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping" });
         try {
-          const sent = await startTurn(ctx, { threadId: row.thread.id, prompt: WRAP_UP_PROMPT, usageControl: true, origin: "usage-protection" });
+          const prompt = pause.forced ? FORCED_WRAP_UP_PROMPT : WRAP_UP_PROMPT;
+          const sent = await startTurn(ctx, { threadId: row.thread.id, prompt, usageControl: true, origin: "usage-protection" });
           await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping", turnId: sent.turn.id });
           busy.add(pause.provider);
         } catch {
@@ -449,7 +483,7 @@ export class UsageProtection {
       }
       if (pause.phase !== "waiting" || pause.error) continue;
       let waiting = pause;
-      if (pause.resetsAt === null) {
+      if (!pause.forced && pause.resetsAt === null) {
         const resets = windows.filter((window) => window.usedPercent >= 90).map((window) => window.resetsAt);
         if (resets.length && resets.every((reset) => reset !== null)) {
           waiting = { ...waiting, resetsAt: resets.sort().at(-1)! };

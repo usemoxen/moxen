@@ -301,5 +301,6 @@ describe("subagents beside each other and in the background", () => {
     const woken = requests.at(-1)!.messages.find((message) => message.role === "user" && String(message.content).includes("Background subagent"));
     expect(String(woken?.content)).toMatch(/Found it in a\.ts\./);
     expect(String(woken?.content)).toMatch(/subagent/);
+    expect(events.filter((event) => event.type === "background.wake-up")).toMatchObject([{ prompt: expect.stringContaining("Found it in a.ts.") }]);
   });
 });

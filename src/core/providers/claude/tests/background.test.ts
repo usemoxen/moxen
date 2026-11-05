@@ -84,6 +84,25 @@ describe("claude in-between notes", () => {
 });
 
 describe("claude background turns and tasks", () => {
+  it("captures native task and monitor wake-up content before output, without duplicating a task run", async () => {
+    const { driver, events, push, stop } = await started();
+    try {
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "watch" }));
+      push(system({ subtype: "task_notification", task_id: "gone-task", run_id: "run-1", status: "completed", output_file: "", summary: "exact completion report" }));
+      push({ type: "user", uuid: "00000000-0000-0000-0000-000000000001", session_id: "session-1", parent_tool_use_id: null,
+        origin: { kind: "task-notification", runId: "run-1" }, message: { role: "user", content: "task delivery" } } as SDKMessage);
+      push({ type: "user", uuid: "00000000-0000-0000-0000-000000000002", session_id: "session-1", parent_tool_use_id: null,
+        origin: { kind: "task-notification" }, message: { role: "user", content: "Monitor fired\nexact watch output" } } as SDKMessage);
+      await expect.poll(() => ofType(events, "background.wake-up"), { timeout: 10_000, interval: 10 }).toHaveLength(3);
+      const wakes = ofType(events, "background.wake-up");
+      expect(wakes[0]).toMatchObject({ requestId: "native-task:run-1" });
+      expect(wakes[0]!.prompt).toContain('"summary":"exact completion report"');
+      expect(wakes[1]).toMatchObject({ requestId: "native-task:run-1", prompt: "task delivery" });
+      expect(wakes[2]).toMatchObject({ requestId: "native-message:00000000-0000-0000-0000-000000000002", prompt: "Monitor fired\nexact watch output" });
+      expect(ofType(events, "turn.started")).toEqual([]);
+    } finally { await stop(); await Effect.runPromise(driver.stopAll()); }
+  });
+
   it("records a turn Claude Code starts itself, and settles it on its own result", async () => {
     const { driver, events, push, stop } = await started();
     const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "watch it" }));

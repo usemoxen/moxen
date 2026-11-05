@@ -479,7 +479,7 @@ describe("provider-side interruptions", () => {
     }));
   }
 
-  it("interrupts a late provider wake instead of recording a turn while usage protection holds the thread", async () => {
+  it.each([false, true])("queues a late provider wake before closing a protected session (native input available: %s)", async (captured) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-protected-wake-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const store = await openThreadStore(root);
@@ -490,12 +490,24 @@ describe("provider-side interruptions", () => {
     const close = vi.fn(() => Effect.void);
     Object.assign(driver, { interruptTurn: interrupt, stopSession: close });
     watchDriverSession(store, driver, thread.id, root);
-    await Effect.runPromise(Queue.offer((driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue, {
-      type: "turn.started", provider: "claude", threadId: thread.id, turnId: "late", origin: "background",
+    const queue = (driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue;
+    if (captured) for (const prompt of ["exact native completion report", "exact injected notification", "exact injected notification"]) await Effect.runPromise(Queue.offer(queue, {
+      type: "background.wake-up", provider: "claude", threadId: thread.id, requestId: "native-run", prompt,
+    }));
+    await Effect.runPromise(Queue.offer(queue, {
+      type: "turn.started", provider: "claude", threadId: thread.id, turnId: "late", origin: "background", wakeUpPrompt: "native start payload",
     }));
     await vi.waitFor(() => expect(close).toHaveBeenCalledWith(thread.id), { timeout: 10_000 });
     expect(interrupt).toHaveBeenCalledWith(thread.id);
-    expect(await store.readTurns(thread.id)).toEqual([]);
+    const turns = await store.readTurns(thread.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: "queued", queue: { wakeUp: true, requestId: captured ? "native-run" : "native-turn:late" } });
+    const messages = await store.readMessages(thread.id);
+    if (captured) expect(messages.map((message) => message.text)).toEqual(["exact native completion report", "exact injected notification"]);
+    else expect(messages[0]!.text).toContain("native start payload");
+    const reopened = await openThreadStore(root);
+    expect(await reopened.readMessages(thread.id)).toEqual(messages);
+    expect(await reopened.readTurns(thread.id)).toEqual(turns);
   });
 
   it("records a session-wide model fallback and moves the turn and the thread to the new model", async () => {

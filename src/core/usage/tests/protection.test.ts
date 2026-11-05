@@ -9,7 +9,7 @@ import { FakeTransport, initMessage, successResult } from "../../providers/claud
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
+import { continueThread, editWorkQueue, queueTaskNotification, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -50,6 +50,192 @@ async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId
 }
 
 describe("usage protection", () => {
+  it("keeps forced wake-ups durable and ordered across reset and restart, and runs the user's message first", async () => {
+    const w = await world();
+    const id = await w.make("protected");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    await w.guard.protect(id);
+    const first = await sendTurn(w.store, id, { prompt: "<task-notification>first: all checks passed</task-notification>", origin: "task-notification" });
+    const second = await sendTurn(w.store, id, { prompt: "second: shell exit 7\nfull output remains", origin: "background-notification" });
+    expect(first.turn.queue).toMatchObject({ wakeUp: true, automatic: true });
+    expect(second.turn.queue!.order).toBeGreaterThan(first.turn.queue!.order);
+    w.guard.close();
+    const store = await openThreadStore(w.root);
+    const ctx = { ...w.ctx, store };
+    const restarted = new UsageProtection(async () => ctx);
+    try {
+      const now = Date.now();
+      recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(now + 1000).toISOString() }]);
+      await restarted.tick(now);
+      recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 3600_000).toISOString() }]);
+      await restarted.tick(now + 7000);
+      expect(openTurn(await store.readTurns(id))).toBeNull();
+      expect((await store.readThreadRecord(id))?.usagePause).toMatchObject({ forced: true, resetsAt: null, phase: "waiting" });
+      await expect(restarted.reorder(id, "cancel")).rejects.toMatchObject({ code: "THREAD_PROTECTED" });
+      const manual = await startTurn(ctx, { threadId: id, prompt: "user goes first" });
+      await manual.run;
+      expect(manual.delivery).toBe("started");
+      expect((await store.readThreadRecord(id))?.usagePause).toBeNull();
+      for (const turn of [first.turn, second.turn]) {
+        await runWorkQueue(ctx);
+        await expect.poll(async () => (await store.readTurns(id)).find((row) => row.id === turn.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      }
+      expect(w.prompts).toEqual(["user goes first", "<task-notification>first: all checks passed</task-notification>", "second: shell exit 7\nfull output remains"]);
+    } finally { restarted.close(); }
+  });
+
+  it("interrupts a running forced thread, wraps it once, and lets a user end protection during wrap-up", async () => {
+    const w = await world();
+    const id = await w.make("running");
+    const original = openTurn(await w.store.readTurns(id))!;
+    try {
+      await w.guard.protect(id);
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === original.id)).toMatchObject({ status: "interrupted", usagePause: { resetsAt: null, forced: true } });
+      await w.guard.tick();
+      await expect.poll(async () => (await w.store.readTurns(id)).find((turn) => turn.id !== original.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      await w.guard.tick();
+      expect(w.prompts).toHaveLength(1);
+      expect(w.prompts[0]).toContain("Wait for the user's next message");
+      expect((await w.store.readThreadRecord(id))?.usagePause).toMatchObject({ forced: true, phase: "waiting" });
+      // A wrap-up still running when the user returns must not swallow their send as a steer.
+      const wrap = await sendTurn(w.store, id, { prompt: "wrap slowly", usageControl: true, origin: "usage-protection" });
+      const user = await sendTurn(w.store, id, { prompt: "new work" });
+      expect(user.delivery).toBe("started");
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === wrap.turn.id)?.status).toBe("interrupted");
+      await completeTurn(w.store, id, user.turn.id, { text: "done" });
+    } finally { w.guard.close(); }
+  });
+
+  it("does not let a removed wake-up hold back the ones behind it", async () => {
+    const w = await world();
+    const id = await w.make("protected");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    try {
+      await w.guard.protect(id);
+      const first = await sendTurn(w.store, id, { prompt: "dropped by the user", origin: "background-notification" });
+      const second = await sendTurn(w.store, id, { prompt: "kept", origin: "background-notification" });
+      await editWorkQueue(w.ctx, id, first.turn.id, "remove");
+      await startTurn(w.ctx, { threadId: id, prompt: "user" }).then((manual) => manual.run);
+      await runWorkQueue(w.ctx);
+      await expect.poll(async () => (await w.store.readTurns(id)).find((row) => row.id === second.turn.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      expect(w.prompts).toEqual(["user", "kept"]);
+    } finally { w.guard.close(); }
+  });
+
+  it("keeps automatic protection armed after a purely manual hold ends, but not after an automatic one", async () => {
+    const w = await world();
+    const manual = await w.make("manual");
+    const automatic = await w.make("automatic");
+    for (const id of [manual, automatic]) await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    try {
+      await w.guard.protect(manual);
+      const held = (await w.store.readThreadRecord(automatic))!;
+      await w.store.writeThreadRecord({ ...held, usagePause: { provider: "codex", windows: [{ id: "session", kind: "session", label: "Session", resetsAt: null }], resetsAt: null, order: 1, phase: "waiting", handoff: false } });
+      await w.guard.protect(automatic);
+      for (const id of [manual, automatic]) await startTurn(w.ctx, { threadId: id, prompt: "go on" }).then((sent) => sent.run);
+      expect((await w.store.readThreadRecord(manual))?.usageProtectionOverride ?? null).toBeNull();
+      expect((await w.store.readThreadRecord(automatic))?.usageProtectionOverride).toMatchObject({ provider: "codex" });
+    } finally { w.guard.close(); }
+  });
+
+  it("lets an automatic wrap-up finish when the user protects the thread during it", async () => {
+    const w = await world();
+    const id = await w.make("wrapping");
+    const wrap = openTurn(await w.store.readTurns(id))!;
+    try {
+      const thread = (await w.store.readThreadRecord(id))!;
+      await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "wrapping", turnId: wrap.id, handoff: false } });
+      await w.guard.protect(id);
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === wrap.id)?.status).toBe("running");
+      expect((await w.store.readThreadRecord(id))?.usagePause).toMatchObject({ forced: true, phase: "wrapping" });
+      await completeTurn(w.store, id, wrap.id, { text: "notes" });
+      await w.guard.tick();
+      await w.guard.tick();
+      expect(w.prompts).toEqual([]);
+      expect((await w.store.readThreadRecord(id))?.usagePause).toMatchObject({ forced: true, phase: "waiting" });
+    } finally { w.guard.close(); }
+  });
+
+  it.each([false, true])("persists delegated task facts before the batching timer and does not need the task at replay (batch already pending: %s)", async (pending) => {
+    const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const child = await w.make("child report");
+    await completeTurn(w.store, child, openTurn(await w.store.readTurns(child))!.id, { text: "Delivered the exact task report" });
+    try {
+      if (pending) await queueTaskNotification(w.ctx, parent, child);
+      await w.guard.protect(parent);
+      if (!pending) await queueTaskNotification(w.ctx, parent, child);
+      const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks[0]).toMatchObject({ taskId: child, title: "child report" });
+      const queued = (await w.store.readTurns(parent)).find((turn) => turn.messageId === messages[0]!.id)!;
+      expect(queued).toMatchObject({ status: "queued", queue: { wakeUp: true } });
+      const record = (await w.store.readThreadRecord(child))!;
+      await w.store.writeThreadRecord({ ...record, deletedAt: w.store.nowIso() });
+      const store = await openThreadStore(w.root);
+      expect((await store.readMessages(parent)).find((row) => row.id === messages[0]!.id)).toEqual(messages[0]);
+      const user = await sendTurn(store, parent, { prompt: "continue" });
+      await completeTurn(store, parent, user.turn.id, { text: "done" });
+      await runWorkQueue({ ...w.ctx, store });
+      await expect.poll(async () => (await store.readTurns(parent)).find((turn) => turn.id === queued.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      expect(w.prompts[0]).toContain(messages[0]!.text);
+    } finally { w.guard.close(); }
+  });
+
+  it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {
+    const w = await world();
+    const id = await w.make("put away");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    try {
+      await w.guard.protect(id);
+      const queued = await sendTurn(w.store, id, { prompt: "preserve this notification", origin: "task-notification", wakeSettled: true });
+      const thread = (await w.store.readThreadRecord(id))!;
+      const inactive = state === "settled" ? { settledAt: w.store.nowIso(), settledOverride: "settled" as const } : state === "snoozed" ? { snoozedUntil: new Date(Date.now() + 3600_000).toISOString() } : { archivedAt: w.store.nowIso() };
+      await w.store.writeThreadRecord({ ...thread, ...inactive });
+      if (state === "settled") {
+        const late = await sendTurn(w.store, id, { prompt: "late task facts", origin: "task-notification", wakeSettled: true });
+        expect(late.turn.status).toBe("queued");
+        expect(late.thread.settledAt).toBe(inactive.settledAt);
+      }
+      if (state === "archived") await expect(w.guard.protect(id)).rejects.toMatchObject({ code: "THREAD_ARCHIVED" });
+      await runWorkQueue(w.ctx);
+      expect((await w.store.readTurns(id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
+      expect(w.prompts).toEqual([]);
+    } finally { w.guard.close(); }
+  });
+
+  it("replays automatic wake-ups in order after automatic recovery, including across restart", async () => {
+    const w = await world();
+    const id = await w.make("automatic");
+    const reset = Date.now() + 60_000;
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(reset).toISOString() }]);
+    await w.guard.wrap("codex");
+    await w.guard.tick();
+    const one = await sendTurn(w.store, id, { prompt: "first notification: exact report", origin: "task-notification" });
+    const two = await sendTurn(w.store, id, { prompt: "second notification: full shell output", origin: "background-notification" });
+    // Forcing an automatic hold must win over its existing reset recovery.
+    const other = await w.make("both protections");
+    await w.guard.wrap("codex");
+    await w.guard.protect(other);
+    w.guard.close();
+    const store = await openThreadStore(w.root);
+    const ctx = { ...w.ctx, store };
+    const guard = new UsageProtection(async () => ctx);
+    try {
+      recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(reset + 3600_000).toISOString() }]);
+      for (const turn of [one.turn, two.turn]) {
+        await expect.poll(async () => {
+          await guard.tick(reset + 7000);
+          return (await store.readTurns(id)).find((row) => row.id === turn.id)?.status;
+        }, { timeout: 10_000, interval: 10 }).toBe("completed");
+      }
+      expect(w.prompts.slice(-2)).toEqual(["first notification: exact report", "second notification: full shell output"]);
+      expect((await store.readThreadRecord(other))?.usagePause).toMatchObject({ forced: true, resetsAt: null });
+      expect(openTurn(await store.readTurns(other))).toBeNull();
+    } finally { guard.close(); }
+  });
+
   it.each(["clean", "dirty", "no checkout"] as const)("records a durable protection pause with %s working directory state", async (workingTree) => {
     const w = await world();
     const id = await w.make("unfinished work");
@@ -141,6 +327,13 @@ describe("usage protection", () => {
       expect((await w.store.readMessages(thread.id)).filter((row) => row.role === "assistant").map((row) => row.text)).toEqual(["Stopping here."]);
       expect(await buildHandoff(w.store, thread.id, { preferModelSummary: true })).toContain("Stopping here.");
       expect((await w.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background")).toMatchObject([{ payload: { taskId: "watcher", status: "stopped" } }]);
+      await expect.poll(async () => (await w.store.readMessages(thread.id)).filter((row) => row.origin === "background-notification"), { timeout: 10_000, interval: 10 }).toHaveLength(1);
+      const wake = (await w.store.readMessages(thread.id)).find((row) => row.origin === "background-notification")!;
+      expect(wake.text).toContain('"task_id":"watcher"');
+      expect(wake.text).toContain('"summary":"Stopped"');
+      const disk = await openThreadStore(w.root);
+      expect((await disk.readMessages(thread.id)).find((row) => row.id === wake.id)).toEqual(wake);
+      expect((await disk.readTurns(thread.id)).find((row) => row.messageId === wake.id)).toMatchObject({ status: "queued", queue: { wakeUp: true } });
       query.push(system({ subtype: "init" }));
       query.push(successResult("CI finished", 0.01, { origin: { kind: "task-notification" } }));
       await w.guard.tick();

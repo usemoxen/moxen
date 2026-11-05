@@ -27,7 +27,10 @@ export class CodexBackground {
     const taskId = `command:${id}`;
     const output = asString(item["aggregatedOutput"]);
     if (output !== null) { this.output.delete(taskId); this.append(taskId, output); }
-    if (completed && item["status"] !== "inProgress") { this.finish(taskId); return; }
+    if (completed && item["status"] !== "inProgress") {
+      if (this.tasks.has(taskId)) this.publish({ type: "background.wake-up", provider: "codex", threadId: this.threadId, requestId: `codex-task:${taskId}`, prompt: JSON.stringify({ ...item, output: this.output.get(taskId) ?? null }) });
+      this.finish(taskId); return;
+    }
     if (this.tasks.has(taskId)) return;
     const command = asString(item["command"]) ?? "";
     this.tasks.set(taskId, { taskId, taskType: "local_bash", toolName: "Bash", command, description: command, startedAt: new Date().toISOString(), stoppable: false });
@@ -38,7 +41,10 @@ export class CodexBackground {
   agent(id: string, started: boolean, description: string | null, message: string | null): void {
     const taskId = `agent:${id}`;
     if (message !== null) { this.output.delete(taskId); this.append(taskId, message); }
-    if (!started) { this.finish(taskId); return; }
+    if (!started) {
+      if (this.tasks.has(taskId)) this.publish({ type: "background.wake-up", provider: "codex", threadId: this.threadId, requestId: `codex-task:${taskId}`, prompt: JSON.stringify({ taskId, description, output: this.output.get(taskId) ?? null }) });
+      this.finish(taskId); return;
+    }
     const previous = this.tasks.get(taskId);
     if (previous && (previous.description !== id || description === null)) return;
     this.tasks.set(taskId, { taskId, taskType: "local_agent", toolName: "Agent", description: description ?? id, command: description, startedAt: previous?.startedAt ?? new Date().toISOString() });
@@ -49,6 +55,9 @@ export class CodexBackground {
   childNotification(id: string, method: string, params: Record<string, unknown> | null): void {
     if (method === "item/agentMessage/delta") this.append(`agent:${id}`, asString(params?.["delta"]) ?? "");
     if (method === "turn/completed") {
+      this.publish({ type: "background.wake-up", provider: "codex", threadId: this.threadId,
+        requestId: `codex-child:${id}:${asRecord(params?.["turn"])?.["id"] ?? "completed"}`,
+        prompt: JSON.stringify({ taskId: id, ...params, output: this.output.get(`agent:${id}`) ?? null }) });
       this.finish(`agent:${id}`);
       this.publish({ type: "subagent.updated", provider: "codex", threadId: this.threadId, turnId: null, agentId: id, agentType: "codex", status: "stopped", lastMessage: this.output.get(`agent:${id}`) ?? null });
     }

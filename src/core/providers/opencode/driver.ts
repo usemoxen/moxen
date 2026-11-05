@@ -1628,7 +1628,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     };
     session.turns.set(turn.id, turn);
     this.armStallTimer(session, turn);
-    this.publish({ type: "turn.started", provider: this.provider, threadId: session.threadId, turnId: turn.id, origin: "background" });
+    this.publish({ type: "turn.started", provider: this.provider, threadId: session.threadId, turnId: turn.id, origin: "background", wakeUpPrompt: JSON.stringify(event) });
   }
 
   /**
@@ -1868,6 +1868,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   /** A background subagent is a background task: its edge, and the live set the side panel lists. */
   private publishBackgroundTask(child: OpenCodeChild, agentId: string, turnId: TurnId | null, status: "started" | "stopped", summary: string | null): void {
+    if (status === "stopped") this.publish({ type: "background.wake-up", provider: this.provider, threadId: child.parent.threadId,
+      requestId: `opencode-agent:${agentId}`, prompt: JSON.stringify({ taskId: agentId, description: child.description, status, summary }) });
     this.publish({
       type: "background.task",
       provider: this.provider,
@@ -1893,6 +1895,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     if (started) shells.set(shellId, { command, startedAt: new Date().toISOString() });
     else if (!shells.delete(shellId)) return;
     const exitStatus = asString(event.properties.status);
+    if (!started) this.publish({ type: "background.wake-up", provider: this.provider, threadId: session.threadId,
+      requestId: `opencode-shell:${shellId}`, prompt: JSON.stringify(event.properties) });
     this.publish({
       type: "background.task",
       provider: this.provider,

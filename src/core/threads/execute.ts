@@ -53,7 +53,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
 import { captureRuleBaseline, refreshRuleBaseline } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -647,6 +647,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
     return;
   }
   let lastTasks = "";
+  let capturedWakeUp = false;
   const lateQuestions = new Set<string>();
   let chain: Promise<void> = Promise.resolve();
   const latestTurnId = async (): Promise<string | null> => {
@@ -683,9 +684,25 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       void forgetToldModes(store, threadId);
     }
     if (event.type === "turn.started" && event.origin === "background") {
-      void runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle);
+      void chain.then(() => {
+        const captured = capturedWakeUp;
+        capturedWakeUp = false;
+        return runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle, captured, event.wakeUpPrompt);
+      });
       return;
     }
+    if (event.type === "background.wake-up") {
+      chain = chain.then(async () => {
+        const thread = await store.readThreadRecord(threadId);
+        if (!thread?.usagePause || thread.usagePause.phase === "resuming" || thread.archivedAt || thread.deletedAt) return;
+        await sendTurn(store, threadId, { prompt: event.prompt, origin: "background-notification", delivery: "queue", wakeSettled: false,
+          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: event.requestId } });
+        capturedWakeUp = true;
+      }).catch(() => undefined); // Uncaptured: a refused turn still queues its own fallback.
+      return;
+    }
+    // A capture no background start consumed must not excuse a later one.
+    if (event.type === "turn.started") chain = chain.then(() => { capturedWakeUp = false; });
     if (event.type === "background.task") {
       const verb = event.status === "started" ? "Started" : event.status === "completed" ? "Finished" : event.status === "failed" ? "Failed" : "Stopped";
       record(`background.${event.status}`, `${verb} in the background: ${event.description || event.taskId}`, {
@@ -760,6 +777,8 @@ async function runBackgroundTurn(
   driverTurnId: string,
   cwd: string,
   afterSettle?: () => Promise<void>,
+  capturedWakeUp = false,
+  wakeUpPrompt?: string,
 ): Promise<void> {
   try {
     const thread = await store.readThreadRecord(threadId);
@@ -781,6 +800,17 @@ async function runBackgroundTurn(
     });
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "USAGE_PROTECTED_BACKGROUND") {
+      if (!capturedWakeUp) {
+        // Some native loops expose only their start, not an injected input.
+        // Retain that start and the resume cursor instead of dropping the wake.
+        await persistResumeCursor(store, driver, threadId);
+        // Queueing can fail; the session must still close, or it runs on unrecorded.
+        await sendTurn(store, threadId, {
+          prompt: `A provider-native background turn was paused by thread protection. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
+          origin: "background-notification", delivery: "queue",
+          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
+        }).catch(() => undefined);
+      }
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
       return;

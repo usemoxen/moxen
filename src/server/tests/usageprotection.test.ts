@@ -13,6 +13,30 @@ import type { UsageProtection } from "../../core/usage/protection.js";
 
 afterEach(resetUsageLimitsForTests);
 
+it("exposes forced protection and its durable waiting count through the server after reconnection", async () => {
+  const w = await testHarness();
+  const thread = await createThread(w.store, { projectId: "p", title: "Manual hold", modelSelection: { instanceId: "codex", model: "test" }, env: { mode: "local", path: w.work, branch: null } });
+  const first = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });
+  try {
+    expect(decodeCommand({ type: "thread.protect", threadId: thread.id })).toMatchObject({ type: "thread.protect", threadId: thread.id });
+    await first.dispatch({ type: "thread.protect", threadId: thread.id });
+    await sendTurn(w.store, thread.id, { prompt: "background output: exact content", origin: "background-notification" });
+    await first.dispatch({ type: "thread.turn.start", threadId: thread.id, message: { text: "scheduled request" }, scheduledFor: new Date(Date.now() + 3600_000).toISOString() });
+    expect((await first.query({ type: "thread.inspect", threadId: thread.id })).thread.protection).toEqual({ protected: true, forced: true, waitingWakeUps: 2 });
+  } finally { await first.close(); }
+  const second = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });
+  try {
+    expect((await second.query({ type: "thread.read", threadId: thread.id })).thread.protection).toEqual({ protected: true, forced: true, waitingWakeUps: 2 });
+    const frames: ThreadFrame[] = [];
+    const unsubscribe = second.subscribeThread(thread.id, {}, (frame) => frames.push(frame), (error) => { throw error; });
+    try {
+      await expect.poll(() => frames.find((frame) => frame.kind === "snapshot"), { timeout: 10_000, interval: 10 }).toMatchObject({ snapshot: { thread: { protection: { protected: true, forced: true, waitingWakeUps: 2 } } } });
+    } finally { unsubscribe(); }
+    await second.dispatch({ type: "thread.turn.start", threadId: thread.id, message: { text: "run my message first" }, wait: true });
+    expect((await second.query({ type: "thread.inspect", threadId: thread.id })).thread.protection).toBeUndefined();
+  } finally { await second.close(); }
+});
+
 it("logs each distinct scheduler failure once instead of silently retrying every two seconds", async () => {
   const w = await testHarness();
   const api = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });

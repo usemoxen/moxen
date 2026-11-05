@@ -183,6 +183,10 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     // Only when a turn ran in Research or Orchestrate, so older envelopes stay byte-for-byte as they were.
     ...(Object.keys(turnModes).length > 0 ? { turnInteractionModes: turnModes } : {}),
     ...(Object.keys(turnUsagePauses).length > 0 ? { turnUsagePauses } : {}),
+    ...(thread.usagePause && (thread.usagePause.forced || thread.usagePause.phase !== "resuming") ? { protection: {
+      protected: true as const, forced: thread.usagePause.forced === true,
+      waitingWakeUps: turns.filter((turn) => turn.status === "queued" && (turn.queue?.wakeUp || turn.scheduledFor) && !turn.queue?.removed && turn.id !== thread.usagePause!.recoveryTurnId).length,
+    } } : {}),
     // Only when there are any, so envelopes of threads without a queue stay byte-for-byte as they were.
     ...(queued.length > 0 ? { queuedTurns: queued } : {}),
     // Likewise: only threads that ever ran a native subagent carry the list.

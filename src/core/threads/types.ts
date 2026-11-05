@@ -141,6 +141,8 @@ export interface StoredThread {
 }
 
 export interface UsagePause {
+  /** Manual protection has no reset; only a user message releases it. */
+  readonly forced?: boolean;
   readonly windows?: TurnUsagePause["windows"];
   readonly recoveryTurnId?: string;
   readonly provider: string;
@@ -279,7 +281,7 @@ export interface StoredMessage {
 }
 
 /** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. */
-export type MessageOrigin = "task-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message";
+export type MessageOrigin = "task-notification" | "background-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message";
 
 export interface StoredActivity {
   readonly id: string;

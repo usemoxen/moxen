@@ -1292,6 +1292,12 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         this.handleAssistant(session, message);
         return;
       case "user":
+        if (message.parent_tool_use_id === null && message.origin && message.origin.kind !== "human") {
+          const content = message.message.content;
+          const text = typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+          const requestId = message.origin.kind === "task-notification" && message.origin.runId ? `native-task:${message.origin.runId}` : `native-message:${message.uuid}`;
+          if (text.trim()) this.publish({ type: "background.wake-up", provider: "claude", threadId: session.threadId, requestId, prompt: text });
+        }
         this.handleToolResults(session, message);
         return;
       case "result":
@@ -1557,6 +1563,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         // Settled while still in the foreground: never background work, and
         // its own tool call already reports the outcome.
         if (session.foregroundTasks.delete(taskId)) return;
+        // Persist the notification itself, not a task handle that disappears on
+        // completion or when protection closes this provider session.
+        this.publish({ type: "background.wake-up", provider: "claude", threadId: session.threadId,
+          requestId: `native-task:${typeof system["run_id"] === "string" ? system["run_id"] : message.uuid}`,
+          prompt: `<task-notification>\n${JSON.stringify(system)}\n</task-notification>` });
         if (session.backgroundTasks.some((task) => task.taskId === taskId)) {
           session.backgroundTasks = session.backgroundTasks.filter((task) => task.taskId !== taskId);
           this.publishBackgroundTasks(session);

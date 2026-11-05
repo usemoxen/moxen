@@ -262,6 +262,55 @@ edits already on disk remain. Provider telemetry can lag or be missing, and
 other clients can spend the same allowance, so this cannot guarantee staying
 below a limit.
 
+The server command `thread.protect` takes `threadId` and manually protects that
+thread. A running turn is interrupted with the same durable pause reason as
+automatic protection, then gets one bounded wrap-up turn when allowance permits.
+An idle thread simply waits. Manual protection has no window reset: only sending
+an immediate user message ends it. This also wins over an existing automatic hold;
+a window reset cannot release a manually protected thread. Sending that message
+interrupts any remaining wrap-up and starts the user's normal turn first.
+Explicitly queued or scheduled user messages do not release protection.
+Ending a purely manual hold leaves automatic protection armed; ending one that
+automatic protection also placed pauses it until the next reset, as it does for
+any automatic hold. Protecting a thread during an automatic wrap-up lets that
+wrap-up finish rather than starting a second one. A turn the user's protection
+interrupts carries `StoredTurn.usagePause.forced`.
+Archived threads cannot be protected. Settled threads can be protected but remain
+settled; automatic input never unsettles them while held.
+
+While held, automatic deliveries become durable conditional queue entries rather
+than new turns or steers: delegated-task reports (including their structured
+facts), messages from a task's parent, question-answer deliveries, usage-limit
+continuations, and provider-native task/Monitor notifications. Scheduled messages
+keep their existing conditions and are held at admission. Native completion
+notifications retain the SDK payload, including the summary and output-file
+reference; replay does not look up a still-live task. Provider-native injected
+messages retain their text. Held task reports bypass the volatile batching timer;
+an existing batch is flushed when protection begins. Wake-ups retain insertion
+order and content across a server restart, then run separately through the work
+queue after automatic recovery, or after the user's releasing turn. The existing
+allowance reserves and inactive-thread checks still apply. Archived, deleted,
+settled or snoozed threads are never admitted automatically.
+
+Native sources include Claude background Bash/Monitor/subagent completions and
+injected deliveries, Harness background shells/subagents, Codex native command
+and child-thread completions, and OpenCode background shell/subagent completions.
+If a provider exposes only a self-started turn rather than its triggering input,
+Moxen queues the native start metadata and preserves its resume cursor instead of
+silently dropping the wake-up. The original native conversation remains the
+source for any trigger text the provider did not expose.
+
+Clients call `ClientApi.dispatch({ type: "thread.protect", threadId })`; it follows
+the same paired-remote access rule as ordinary thread commands. No CLI or TUI
+command is required by the server. In `ThreadEnvelope` (`src/core/types.ts`),
+`protection` is present only while held and contains `protected: true`, `forced`
+(boolean), and `waitingWakeUps` (queued automatic deliveries and scheduled
+messages, excluding the protection recovery entry and removed entries). The field
+is available on thread reads/inspection and thread subscription snapshots/updates,
+projected in `src/core/threads/project.ts`. Unprotected threads omit it, preserving
+existing JSON envelopes. `StoredThread.usagePause.forced` persists the manual hold;
+held automatic entries carry `StoredTurn.queue.wakeUp` in the existing turn ledger.
+
 Protection interruptions keep `StoredTurn.status = "interrupted"` for existing
 readers and add `StoredTurn.usagePause` in the turns ledger. This records
 `provider`, `windows` (each window's `id`, `kind`, `label`, and `resetsAt`),

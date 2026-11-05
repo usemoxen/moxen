@@ -30,6 +30,8 @@ export interface QueuePolicy {
   /** Internal state: clients cannot declare events satisfied or bypass reserves. */
   readonly latched?: readonly number[];
   readonly automatic?: boolean;
+  /** An automatic wake-up persisted while protection held its thread. */
+  readonly wakeUp?: boolean;
   readonly requestId?: string;
   readonly summaryFor?: string;
   readonly eventAfter?: string;
@@ -102,6 +104,8 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   const blocked: string[] = [];
   const latched = [...(policy?.latched ?? [])];
   const conditions = [...(policy?.conditions ?? [])];
+  if (row.thread.usagePause?.forced || row.thread.usagePause && row.thread.usagePause.phase !== "resuming" && row.thread.usagePause.recoveryTurnId !== turn.id && !policy?.summaryFor) blocked.push("Waiting for thread protection");
+  if (policy?.wakeUp && row.turns.some((previous) => previous.id !== turn.id && previous.queue?.wakeUp && previous.status === "queued" && (previous.queue.order < policy.order || previous.queue.order === policy.order && row.turns.indexOf(previous) < row.turns.indexOf(turn)))) blocked.push("Waiting for preceding wake-up");
   if (policy?.held || policy?.removed) blocked.push(policy.removed ? "Removed from queue" : "Held by you");
   if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || row.thread.snoozedUntil) blocked.push("Thread is not active");
   if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) blocked.push("Waiting for your answer or approval");
