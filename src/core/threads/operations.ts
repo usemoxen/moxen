@@ -312,7 +312,7 @@ async function sessionSetup(
   const key = driverKey(instanceId);
   const history = thread.providerSessions?.[key] !== undefined;
   const state = history ? thread.instructionState?.[key] : undefined;
-  const plan = planInstructions(state, current);
+  const plan = planInstructions(state, current, thread.id);
   const next: InstructionState = plan.next;
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {

@@ -444,10 +444,13 @@ export interface InstructionState {
 export function planInstructions(
   state: InstructionState | undefined,
   current: string,
+  threadId?: string,
 ): { systemPrompt: string; update: string | null; next: InstructionState } {
   const baseline = state?.baseline ?? current;
   const delivered = state?.delivered ?? baseline;
-  return { systemPrompt: baseline, update: current === delivered ? null : current, next: { baseline, delivered } };
+  // Thread identity is immutable session context, not shared, change-tracked guidance.
+  const systemPrompt = threadId === undefined ? baseline : `${baseline}\n\nYour Moxen thread id is ${threadId}.`;
+  return { systemPrompt, update: current === delivered ? null : current, next: { baseline, delivered } };
 }
 
 /** A prompt with the instruction update ahead of it, for the provider only — the transcript keeps what was typed. */

@@ -558,7 +558,7 @@ describe("session setup", () => {
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ instructions: "Project rule." }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const text = String(startOf(done.threadId)?.instructions ?? "");
-      expect(text.endsWith("Config rule.\n\nProject rule.")).toBe(true);
+      expect(text.endsWith(`Config rule.\n\nProject rule.\n\nYour Moxen thread id is ${done.threadId}.`)).toBe(true);
       expect(text.indexOf("Using the web tools well:")).toBeGreaterThan(text.indexOf("# Memory"));
       expect(text.indexOf("Using the web tools well:")).toBeLessThan(text.indexOf("Config rule."));
     } finally {
@@ -583,10 +583,10 @@ describe("session setup", () => {
     try {
       await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ instructions: "Project rule." }));
       const claude = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      expect(startOf(claude.threadId)?.instructions).toMatch(/\n\nConfig rule\.\n\nClaude rule\.\n\nProject rule\.$/);
+      expect(startOf(claude.threadId)?.instructions).toContain(`\n\nConfig rule.\n\nClaude rule.\n\nProject rule.\n\nYour Moxen thread id is ${claude.threadId}.`);
       // The harness's installation default is OpenCode: it gets the global and the project's, not Claude's.
       const other = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local" });
-      expect(startOf(other.threadId)?.instructions).toMatch(/\n\nConfig rule\.\n\nProject rule\.$/);
+      expect(startOf(other.threadId)?.instructions).toContain(`\n\nConfig rule.\n\nProject rule.\n\nYour Moxen thread id is ${other.threadId}.`);
       expect(startOf(other.threadId)?.instructions).not.toContain("Claude rule.");
     } finally {
       await connection.close();

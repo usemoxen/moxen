@@ -18,6 +18,17 @@ const LINUX = { platform: "linux" as const, shells: ["bash", "sh"] as readonly S
 const SHELL_TEXT = buildShellGuidance({ ...LINUX, harness: "Claude Code" });
 
 describe("runtime instructions", () => {
+  it("names its own thread without changing shared instructions or sending a repeat-turn update", () => {
+    const current = buildRuntimeInstructions({ instanceId: "codex", env: LOCAL, shell: LINUX });
+    const first = planInstructions(undefined, current, "child-id");
+    expect(first.systemPrompt).toBe(`${current}\n\nYour Moxen thread id is child-id.`);
+    expect(first.next).toEqual({ baseline: current, delivered: current });
+    expect(planInstructions(first.next, current, "child-id")).toEqual(first);
+    expect(first.update).toBeNull();
+    const continued = planInstructions(first.next, current, "continued-id");
+    expect(continued.systemPrompt.endsWith("Your Moxen thread id is continued-id.")).toBe(true);
+    expect(continued.update).toBeNull();
+  });
   it("names the model and effort for every provider, and only for the instance running it", () => {
     const options = [{ id: "effort", value: "high" }];
     expect(runningModelOf({ instanceId: "codex", model: "gpt-6.1-sol", options }, "codex")).toEqual({ model: "gpt-6.1-sol", effort: "high" });

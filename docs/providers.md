@@ -149,6 +149,13 @@ Claude Code's names the model but not the effort, so the runtime instructions te
 every session its model and effort. A change mid-thread reaches it as an
 instructions update on the next turn.
 
+Every provider also gets `Your Moxen thread id is <id>.` at the end of its
+runtime instructions. Delegated and research threads get their own id, and a
+continued thread gets its new id. This immutable session context is appended
+after instruction-update comparison; it does not change the shared instruction
+text or trigger repeat-turn updates. Instruction previews built without a
+thread id omit the line.
+
 Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
 with Automatic, Concise and Off also available. Moxen preserves the reported
 sections and renders their markdown; the amount of reasoning exposed remains
