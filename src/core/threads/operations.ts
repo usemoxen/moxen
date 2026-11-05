@@ -211,7 +211,8 @@ function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
  * on the turn): the provider never read that prompt, and the work is in it
  * (a handoff document, say). Those prompts go ahead of this one, up to the
  * last turn the provider did answer. A usage continue is only a nudge and stays out.
- * An interrupted turn is not one of these: the provider may have read it.
+ * An interrupted turn is not one of these if it ran: the provider may have read it.
+ * One stopped while it waited (no owner, so it never ran) says nothing either way.
  */
 async function withUnansweredPrompts(
   ctx: OperationContext,
@@ -231,7 +232,7 @@ async function withUnansweredPrompts(
     if (turn.unanswered) {
       const own = turn.scheduleReason === "usage-reset" ? null : turnPrompt(messages, turn);
       if (own) owed.push(own.text);
-    } else if (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted") owed = [];
+    } else if (turn.owner && (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) owed = [];
   }
   return owed.length === 0 ? prompt : `${owed.join("\n\n")}\n\n${prompt}`;
 }

@@ -85,6 +85,23 @@ describe("a prompt the provider never answered", () => {
     expect(after.providerSessions?.claude).toBeDefined();
   });
 
+  it("is still owed when the usage continue queued after it was stopped before it ran", async () => {
+    const w = await world([LIMIT, ANSWER]);
+    const { threadId } = await continueThread(w.ctx, { threadId: w.source.id });
+    await settleRuns();
+    // The real thread's second turn: the queued continue, interrupted while it waited. It never had an owner.
+    const { turn: nudge } = await sendTurn(w.store, threadId, { prompt: "The usage limit has reset.", scheduledFor: new Date(Date.now() + 3_600_000).toISOString(), scheduleReason: "usage-reset" });
+    await w.store.updateTurn(threadId, nudge.id, { status: "interrupted", completedAt: w.store.nowIso() });
+
+    await startTurn(w.ctx, { threadId, prompt: "Hey, the task finished." });
+    await settleRuns();
+
+    expect(w.prompts).toHaveLength(2);
+    expect(w.prompts[1]).toContain("<moxen-mode");
+    expect(w.prompts[1]).toContain("# Continuing: ");
+    expect(w.prompts[1]).not.toContain("The usage limit has reset.");
+  });
+
   it("says the mode once: after an answered turn the next prompt carries neither the handoff nor the block", async () => {
     const w = await world([LIMIT, ANSWER, ANSWER]);
     const { threadId } = await continueThread(w.ctx, { threadId: w.source.id });
