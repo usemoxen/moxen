@@ -216,7 +216,7 @@ describe("executeTurn", () => {
       if (Date.now() > deadline) throw new Error("prompt was never called");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    const toolPart = (status: string, output?: string) => ({
+    const toolPart = (status: string, input: Record<string, unknown> = { command: "git status" }, output?: string) => ({
       type: "message.part.updated" as const,
       properties: {
         sessionID: "opencode-session-1",
@@ -227,30 +227,36 @@ describe("executeTurn", () => {
           tool: "bash",
           state: {
             status,
-            input: { command: "git status" },
+            input,
             ...(output === undefined ? {} : { output }),
             time: { start: 1000, ...(status === "completed" ? { end: 2000 } : {}) },
           },
         },
       },
     });
+    // OpenCode announces the call before it has generated its input.
+    await transport.servers[0]?.push(toolPart("pending", {}));
     await transport.servers[0]?.push(toolPart("running"));
     // A repeat of the same state must not add a row.
     await transport.servers[0]?.push(toolPart("running"));
-    await transport.servers[0]?.push(toolPart("completed", "on branch main"));
+    await transport.servers[0]?.push(toolPart("completed", { command: "git status" }, "on branch main"));
     await transport.servers[0]?.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
     await running;
 
     const read = await readThread(store, thread.id);
     const tools = read.activities.filter((activity) => activity.kind.startsWith("tool-call."));
-    expect(tools.map((activity) => activity.kind)).toEqual(["tool-call.started", "tool-call.completed"]);
-    expect(tools[0]?.summary).toBe("$ git status");
-    // Both rows share the call id, so the transcript folds them into one card.
+    // The row that starts running carries the command; the pending one and the
+    // repeat of the same running state do not add anything else.
+    expect(tools.map((activity) => activity.kind)).toEqual(["tool-call.started", "tool-call.started", "tool-call.completed"]);
+    expect(tools.map((activity) => activity.summary)).toEqual(["$ bash", "$ git status", "$ git status"]);
+    expect((tools[0]?.payload as { data: { state: { input: unknown } } }).data.state.input).toEqual({});
+    // Every row shares the call id, so the transcript folds them into one card.
     expect(tools.map((activity) => (activity.payload as { toolCallId: string }).toolCallId)).toEqual([
       "call-1",
       "call-1",
+      "call-1",
     ]);
-    expect((tools[1]?.payload as { status: string }).status).toBe("completed");
+    expect((tools[2]?.payload as { status: string }).status).toBe("completed");
   });
 
   it("records failures without losing the prompt", async () => {

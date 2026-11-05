@@ -453,6 +453,13 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
 
   const itemType = native.itemType ?? itemTypeForTool(native.tool);
   const detail = native.output === null ? null : cutDetail(native.output);
+  const summary = summarize(native, itemType);
+  // The input's *shape*, not its values: OpenCode's call starts `pending`
+  // with no arguments and becomes `running` with them, so the field set
+  // changes exactly once; a progress update only adds metadata, which is not
+  // in the input. Values that matter to the row are in `summary` (or, for a
+  // web search, in the input itself below).
+  const inputShape = Object.keys(native.input).sort().join(",");
   const payload: Record<string, unknown> = {
     itemType,
     ...(itemType === "web_search" ? { provider: event.provider } : {}),
@@ -492,11 +499,15 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
   return {
     callId: native.callId,
     kind,
-    summary: summarize(native, itemType),
+    summary,
     payload,
     // Output length stands in for the output itself: a streaming command
     // grows it monotonically, so every real change registers without
-    // hashing kilobytes of terminal scrollback on each delta.
-    signature: `${native.status}${native.stopped === true ? "!" : ""}${native.noMatches === true ? "~" : ""}|${itemType}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}${itemType === "web_search" ? `|${JSON.stringify(native.input)}` : ""}`,
+    // hashing kilobytes of terminal scrollback on each delta. The title,
+    // summary and input shape are what the provider learns when a call
+    // starts running (OpenCode's pending row has neither the command nor
+    // its arguments), and they do not move again while it runs — which is
+    // why the row is written then, and not on every progress update.
+    signature: `${native.status}${native.stopped === true ? "!" : ""}${native.noMatches === true ? "~" : ""}|${itemType}|${native.tool}|${native.title ?? ""}|${summary}|${inputShape}|${native.exit ?? ""}|${detail?.length ?? 0}|${native.files.length}${itemType === "web_search" ? `|${JSON.stringify(native.input)}` : ""}`,
   };
 }

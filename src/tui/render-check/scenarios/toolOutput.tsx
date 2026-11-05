@@ -7,7 +7,7 @@ import { groupTurns } from "../../model/turns.js";
 import { fail } from "../helpers.js";
 import { testRender } from "../testrender.js";
 
-/** A Codex MCP failure shown as its text, a real shell failure, and a search that found nothing. */
+/** A running OpenCode shell row (the row that carries the command), a Codex MCP failure shown as its text, a real shell failure, and a search that found nothing. */
 export async function runToolOutput(): Promise<void> {
   const at = "2026-11-01T12:00:00.000Z";
   const base = { type: "tool.execute.completed", threadId: "thread", turnId: "turn" } as const;
@@ -18,8 +18,8 @@ export async function runToolOutput(): Promise<void> {
     shell("sed -n 1,20p src/a.ts; rg -n 'MISSING' src", "export const a = 1;\n\n[exit code 1]"),
     shell("rg -n 'MISSING' src; false", "[exit code 1]"),
   ];
-  const entries: TimelineEntry[] = events.map((event, index) => {
-    const row = toolActivityRow(event)!;
+  const runningShell = toolActivityRow({ ...base, type: "tool.execute.updated", provider: "opencode", tool: "shell", raw: { id: "run", callID: "run", type: "tool", tool: "shell", state: { status: "running", input: { command: "bun run check:tui" } } } })!;
+  const entries: TimelineEntry[] = [runningShell, ...events.map((event) => toolActivityRow(event)!)].map((row, index) => {
     return { id: `c${index}`, at, turnId: "turn", kind: "activity", text: "", streaming: false, tone: "tool", activityKind: row.kind, message: null, activity: { id: `c${index}`, turnId: "turn", tone: "tool", kind: row.kind, summary: row.summary, createdAt: at, payload: row.payload }, checkpoint: null, editStats: null, proposedPlan: null };
   });
   function Host() {
@@ -34,6 +34,10 @@ export async function runToolOutput(): Promise<void> {
     console.log(frame);
     if (frame.includes('"content"') || frame.includes("\\n")) fail("tool output still shows its JSON envelope");
     if (!frame.includes("Issue MXN-1 not found.") || !frame.includes("Check the identifier")) fail("Codex MCP text is hidden");
+    // A command that is still running says what it is running.
+    const runningLine = frame.split("\n").find((line) => line.includes("$ shell"));
+    if (runningLine === undefined || !runningLine.includes("running")) fail("a running command is not shown as running");
+    if (!frame.includes("bun run check:tui")) fail("a running command row lost its command");
     if (!frame.includes("[exit code 101]") || !frame.includes("exit 101")) fail("a cut command lost its exit code");
     if ((frame.match(/no matches/gu) ?? []).length !== 1) fail("only the final search that found nothing reads as no matches");
   } finally {

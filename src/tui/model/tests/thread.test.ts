@@ -448,6 +448,48 @@ describe("timeline tool-call collapsing", () => {
     const view = describeActivity(timeline(state)[0]!.activity!);
     expect(view).toMatchObject({ kind: "command", command: "ls -la", exit: 2, failed: true, running: false });
   });
+
+  it("updates one row when a call starts pending and starts again with its command", () => {
+    // OpenCode emits a second `tool-call.started` when the call begins
+    // running with its input. Both describe the same work, so the transcript
+    // must show one row that gains the command, not two.
+    const started = (id: string, summary: string, input: Record<string, unknown>) => ({
+      id,
+      tone: "tool",
+      kind: "tool-call.started",
+      summary,
+      turnId: "turn-1",
+      createdAt: "2026-11-05T10:00:00.000Z",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        toolCallId: "call-1",
+        title: "shell",
+        data: { tool: "shell", state: { status: "inProgress", input } },
+      },
+    });
+    let state = emptyThreadState();
+    state = applyThreadFrame(
+      state,
+      snapshotWith({
+        thread: {
+          id: "t1",
+          activities: [
+            started("a1", "$ shell", {}),
+            started("a2", "$ bun run check:tui", { command: "bun run check:tui" }),
+          ],
+        },
+      }),
+    );
+    const entries = timeline(state);
+    expect(entries).toHaveLength(1);
+    expect(describeActivity(entries[0]!.activity!)).toMatchObject({
+      kind: "command",
+      command: "bun run check:tui",
+      running: true,
+    });
+  });
+
   it("follows a background OpenCode subagent call through its child's start and stop", () => {
     const call = {
       id: "a1",

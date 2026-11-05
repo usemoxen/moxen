@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { answerForForm, OpencodeEventTranslator, opencodeToolName, registerOpencodeMcpServer, toolContentText, translateTimeline, type OpencodeSubscribedEvent } from "../translate.js";
+import { toolActivityRow, type ToolRuntimeEvent } from "../../../threads/toolactivity.js";
 import {
   BACKGROUND_SHELL_EVENTS,
   EXECUTION_FAILED_EVENTS,
@@ -80,6 +81,28 @@ describe("v2 event translation, against a real shell turn", () => {
     });
     expect(done.state.time.start).toBeLessThan(done.state.time.end);
     expect(tools[0]!.state.input).toEqual({});
+  });
+
+  it("writes the command when the call starts running, and no row for its progress updates", () => {
+    const tools = parts(events, "tool");
+    const rows = tools.map((part) => {
+      const status = String(part.state.status);
+      const type = status === "pending"
+        ? "tool.execute.started"
+        : status === "completed" || status === "error"
+          ? "tool.execute.completed"
+          : "tool.execute.updated";
+      return toolActivityRow({ type, provider: "opencode", threadId: "thread-1", turnId: "turn-1", tool: String(part.tool), raw: part } as ToolRuntimeEvent)!;
+    });
+    // The pending row only knows the tool's name; the row that carries the command is the one that runs.
+    expect(rows[0]!.summary).toBe("$ shell");
+    expect((rows[0]!.payload.data as { state: { input: unknown } }).state.input).toEqual({});
+    expect(rows[1]!.summary).toBe("$ echo probe-ok");
+    expect(rows[1]!.signature).not.toBe(rows[0]!.signature);
+    // `tool.called` and the progress update that only adds the shell's id — the same row, not two.
+    expect(rows[2]!.summary).toBe("$ echo probe-ok");
+    expect(rows[2]!.signature).toBe(rows[1]!.signature);
+    expect(rows[3]!.signature).not.toBe(rows[2]!.signature);
   });
 
   it("maps a permission ask to the internal field names", () => {

@@ -688,7 +688,10 @@ The ledger records lifecycle bookkeeping plus one row per tool call,
 append-only. Without the tool rows a turn that did real work would render
 as a duration over a prompt echo, so rows are written while the turn runs.
 A row is only appended when its signature changes, so streamed output does
-not flood the ledger. Parked questions land as rows too: the answer panel
+not flood the ledger. A call whose arguments arrive after it starts (OpenCode
+begins it pending and then runs it with the command) appends that second row,
+and the transcript folds the two onto one card by `toolCallId`, so the command
+is visible while it runs. Parked questions land as rows too: the answer panel
 reads open questions off the ledger, so a question that never becomes a
 row can never be answered. Tool approvals work the same way: a
 `permission.requested` row carries the tool, its command or path, and the
