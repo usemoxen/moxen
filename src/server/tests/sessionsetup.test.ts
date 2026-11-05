@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 
 import { runProcess } from "../../core/infra/process.js";
 import { testHarness } from "../../core/testing/harness.js";
-import { driverForInstance, flushTurnRunners } from "../../core/threads/execute.js";
+import { driverForInstance } from "../../core/threads/execute.js";
+import { settleRuns } from "../../core/testing/turns.js";
 import { runDueScheduledTurn } from "../../core/threads/operations.js";
 import { DirectConnection } from "../connection.js";
 
@@ -290,7 +291,7 @@ describe("Research and Orchestrate modes", () => {
       config: harness.config,
       driverFor: (instanceId) => driverForInstance(owner, instanceId, harness.drivers),
     }, threadId)).toBe(true);
-    await flushTurnRunners(2000);
+    await settleRuns();
     return (await harness.store.readTurns(threadId)).find((turn) => turn.id === turnId)!;
   }
 

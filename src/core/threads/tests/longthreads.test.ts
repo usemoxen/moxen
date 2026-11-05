@@ -5,7 +5,8 @@ import { testHarness, type SentTurn } from "../../testing/harness.js";
 import type { CliConfig } from "../../types.js";
 import { CliError } from "../../errors.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
-import { driverForInstance, flushTurnRunners, type TurnDriver } from "../execute.js";
+import { driverForInstance, type TurnDriver } from "../execute.js";
+import { settleRuns } from "../../testing/turns.js";
 import { COMPACTED_CONTINUE_PROMPT, compactHardLine, planLongThreadAction, type LongThreadSnapshot } from "../longthreads.js";
 import { actOnLongThread, compactMidTurn, readLongThreadSnapshot, startTurn, type OperationContext } from "../operations.js";
 import type { ThreadStore } from "../store.js";
@@ -119,7 +120,7 @@ describe("actOnLongThread", () => {
     const thread = await claudeThread(harness.store, harness.work);
     await finishedTurn(harness.store, thread.id, "Read the whole repo.", 170_000);
     expect(await actOnLongThread(ctx, thread.id)).toEqual({ kind: "compact", reason: "auto" });
-    await flushTurnRunners(2000);
+    await settleRuns();
     expect(sent.map((turn) => turn.prompt.trim())).toContain("/compact");
     // The compaction turn itself does not set off another one.
     expect(await actOnLongThread(ctx, thread.id)).toBeNull();
@@ -137,7 +138,7 @@ describe("actOnLongThread", () => {
     const thread = await claudeThread(harness.store, harness.work);
     await finishedTurn(harness.store, thread.id, "Read the whole repo.", 120_000);
     expect(await actOnLongThread(ctx, thread.id)).toEqual({ kind: "handoff" });
-    await flushTurnRunners(2000);
+    await settleRuns();
     const note = (await harness.store.readActivities(thread.id)).find((activity) => activity.kind === "thread.continued");
     expect(note?.payload).toMatchObject({ automatic: true });
     expect(await actOnLongThread(ctx, thread.id)).toBeNull();
@@ -197,7 +198,7 @@ describe("compacting mid-turn", () => {
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
     fake.report(thread.id);
     await vi.waitFor(() => expect(prompts.some((prompt) => prompt.includes(COMPACTED_CONTINUE_PROMPT))).toBe(true), { timeout: 5000 });
-    await flushTurnRunners(2000);
+    await settleRuns();
     const order = prompts.map((prompt) => (prompt.includes("Do a long job.") ? "job" : prompt.includes("/compact") ? "compact" : prompt.includes(COMPACTED_CONTINUE_PROMPT) ? "continue" : "other"));
     expect(order).toEqual(["job", "compact", "continue"]);
     const turns = await harness.store.readTurns(thread.id);

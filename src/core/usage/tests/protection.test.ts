@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { settleRuns } from "../../testing/turns.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as Effect from "effect/Effect";
@@ -575,7 +576,7 @@ describe("usage protection", () => {
     await w.guard.tick();
     expect(w.guard.read().queue.every((entry) => entry.resetsAt === new Date(reset).toISOString())).toBe(true);
     await w.guard.tick(reset + 6000);
-    await flushTurnRunners(1000);
+    await settleRuns();
     expect(w.sent).toHaveLength(2);
   });
 
@@ -593,7 +594,7 @@ describe("usage protection", () => {
       return Object.assign(driver, { stopSession: (threadId: string) => threadId === stuck ? Effect.fail(new CliError("CODEX_FAILED", "session would not close")) : Effect.void });
     });
     await w.guard.tick(reset + 6000);
-    await flushTurnRunners(1000);
+    await settleRuns();
     expect(w.sent).toHaveLength(2);
   });
 
@@ -664,7 +665,7 @@ describe("usage protection", () => {
     await restarted.reorder(second, "first");
     expect(restarted.read().queue[0]?.threadId).toBe(second);
     await restarted.tick(Date.parse(reset) + 6000);
-    await flushTurnRunners(1000);
+    await settleRuns();
     expect(w.sent[2]).toBe(second);
     expect((await w.store.readThreadRecord(first))?.usagePause?.phase).toBe("waiting");
   });

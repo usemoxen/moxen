@@ -6,18 +6,12 @@ import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { UsageProtection } from "../../usage/protection.js";
 import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn } from "../threads.js";
-import { flushTurnRunners, type TurnDriver } from "../execute.js";
+import type { TurnDriver } from "../execute.js";
+import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
 import { editWorkQueue, readWorkQueue, runWorkQueue, pendingHandoff, submitHandoff, type OperationContext } from "../operations.js";
 
 afterEach(resetUsageLimitsForTests);
-
-/**
- * flushTurnRunners gives up silently at its limit, and a test would then assert
- * while a run is still writing. It returns as soon as runs settle, so the limit
- * costs nothing normally; it only has to cover a slow filesystem (Windows CI).
- */
-const settleRuns = () => flushTurnRunners(8000);
 
 async function world() {
   const sent: { threadId: string; prompt: string }[] = [];
