@@ -4,7 +4,10 @@ import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
-import { QUEUE_ENTRIES, RECOVERY_ENTRY, queueFixture } from "../queueFixture.js";
+import { ChoiceList, KeyButton, KeyHints } from "../../features/queue/parts.js";
+import { QueueList, queueRows } from "../../features/queue/queuelist.js";
+import { queueGroups } from "../../model/workqueue.js";
+import { ENTRY_LONG, ENTRY_NEXT, QUEUE_ENTRIES, ENTRY_STOPPED, QUEUE_THREADS, RECOVERY_ENTRY, queueFixture } from "../queueFixture.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
@@ -157,7 +160,8 @@ function ModeTimeline({ width, height }: { width: number; height: number }) {
   );
 }
 const QUEUE_CLIENT = queueFixture().client;
-const QUEUE_ONE_CLIENT = queueFixture([QUEUE_ENTRIES[0]!, QUEUE_ENTRIES[2]!]).client;
+const QUEUE_ONE_CLIENT = queueFixture([ENTRY_NEXT, ENTRY_STOPPED]).client;
+const QUEUE_LONG_CLIENT = queueFixture([ENTRY_LONG, { ...ENTRY_NEXT, title: "Review the pull request that moves every provider setting into the shared table" }]).client;
 const QUEUE_RUNNING_CLIENT = queueFixture([RECOVERY_ENTRY]).client;
 const GALLERY_PNG = solidPng(240, 120, [64, 140, 220, 255]);
 const GALLERY_IMAGE_READER: AttachmentReader = async () => ({ mimeType: "image/png", dataUrl: `data:image/png;base64,${GALLERY_PNG.toString("base64")}` });
@@ -386,11 +390,12 @@ const composer = (width: number, mode: InteractionMode, draft: string, running: 
 );
 
 export const FEATURE_GALLERY: GalleryEntry[] = [
-  { id: "work-queue", group: "queue", title: "Work queue, several entries", width: 116, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={116} screenHeight={34} onClose={noop} /> },
-  { id: "work-queue-one", group: "queue", title: "Work queue, one entry and one stopped", width: 116, height: 30, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_ONE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={116} screenHeight={30} onClose={noop} /> },
+  { id: "work-queue", group: "queue", title: "Work queue, several entries", width: 116, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={116} screenHeight={34} onClose={noop} /> },
+  { id: "work-queue-one", group: "queue", title: "Work queue, one entry and one stopped", width: 116, height: 30, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_ONE_CLIENT} threads={QUEUE_THREADS} screenWidth={116} screenHeight={30} onClose={noop} /> },
   { id: "work-queue-running", group: "queue", title: "Work queue, recovery running", width: 116, height: 26, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_RUNNING_CLIENT} threads={[]} screenWidth={116} screenHeight={26} onClose={noop} /> },
-  { id: "work-queue-narrow", group: "queue", title: "Work queue, narrow terminal", width: 70, height: 34, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[{ id: "thread-queue", title: "Finish keyboard navigation" }]} screenWidth={70} screenHeight={34} onClose={noop} /> },
-  { id: "work-queue-schedule", group: "queue", title: "Schedule a message or new thread", width: 84, height: 28, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={[]} screenWidth={84} screenHeight={28} onClose={noop} onSchedule={noop} /> },
+  { id: "work-queue-narrow", group: "queue", title: "Work queue, 80 by 24", width: 80, height: 24, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={80} screenHeight={24} onClose={noop} /> },
+  { id: "work-queue-long", group: "queue", title: "Work queue, long titles", width: 90, height: 26, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_LONG_CLIENT} threads={QUEUE_THREADS} screenWidth={90} screenHeight={26} onClose={noop} /> },
+  { id: "work-queue-schedule", group: "queue", title: "Schedule a message or new thread", width: 84, height: 28, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={84} screenHeight={28} onClose={noop} onSchedule={noop} /> },
   {
     id: "memory-runtime",
     group: "settings",
@@ -438,6 +443,43 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         />
       </Stage>
     ),
+  },
+  {
+    id: "queue-choice-list",
+    group: "queue",
+    title: "Queue choice list and key hints",
+    width: 70,
+    height: 12,
+    element: () => (
+      <Stage width={70} height={12}>
+        <box style={{ flexDirection: "column", width: 68, height: 11 }}>
+          <ChoiceList width={68} height={8} onBack={noop} choices={[
+            { key: "a", label: "An allowance resets", onPick: noop }, { key: "b", label: "Enough allowance is left", onPick: noop },
+            { key: "h", label: "Stop waiting for", header: true }, { key: "c", label: "After Codex's next session reset", detail: "enter removes it", tone: "danger", onPick: noop },
+            { key: "d", label: "One at a time per provider", current: true, onPick: noop }, { key: "e", label: "Alongside other entries", current: false, onPick: noop },
+          ]} />
+          <KeyButton hint={{ key: "x", label: "remove", onClick: noop }} tone="danger" />
+          <KeyHints hints={[{ key: "↑↓", label: "choose" }, { key: "enter", label: "next", onClick: noop }, { key: "esc", label: "back", onClick: noop }]} />
+        </box>
+      </Stage>
+    ),
+  },
+  {
+    id: "queue-list",
+    group: "queue",
+    title: "Queue list",
+    width: 100,
+    height: 20,
+    element: () => {
+      const entries = QUEUE_ENTRIES;
+      const groups = queueGroups(entries);
+      return (
+        <Stage width={100} height={20}>
+          <QueueList groups={groups} rows={queueRows(groups, false)} focusId="turn-queue" selection={null} showRemoved={false} entries={entries} threads={QUEUE_THREADS} now={Date.now()} width={98} height={18}
+            handlers={{ focus: noop, act: noop, move: noop, toggleSelect: noop, selectAll: noop, toggleRemoved: noop, add: noop, close: noop, clearSelection: noop }} />
+        </Stage>
+      );
+    },
   },
   {
     id: "queued-panel",

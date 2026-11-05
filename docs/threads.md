@@ -419,16 +419,39 @@ dependency waits until none of that thread's turns are running or queued.
 An entry dependency follows a handoff to its destination instead of treating
 summary preparation as completion of the queued work.
 
-The work queue modal names what runs next, then lists the live entries; removed and
-stopped ones sit below behind "Removed or stopped". The focused entry shows only the
-controls that apply to it: Move up/down or Move first/last to order work,
-Hold/Release to control admission, and Remove/Add back held to withdraw or restore
-an entry without deleting its stored message or thread. With more than one live
-entry, space selects entries; changes to concurrency, continuation and conditions
-apply to the selection. A condition can wait on any provider that reports usage, in
-each window it reports (session, weekly) or all of them. Failed/interrupted managed
-entries remain visible for inspection and an explicit retry. A restarted server
-never blindly replays a provider request whose acceptance is uncertain.
+The work queue modal is one list, grouped by what is happening: **Running now**,
+**Up next** (ready or waiting for a condition) and **On hold**. A line above it
+names what runs next and what it waits for. Only the focused entry opens up: it
+says in words what will happen (the thread's title and a description, never the
+internal prompt), what it waits for as sentences, and the keys that apply to it.
+Removed and stopped entries sit below the live queue behind "Removed or stopped".
+
+Every action has a key and can be clicked:
+
+| Key | Does |
+| --- | --- |
+| `↑` `↓` | choose an entry |
+| `ctrl+↑` `ctrl+↓` | move the focused entry earlier or later among its group (held or not) |
+| `space` | start selecting; checkboxes appear only then, and the keys act on every ticked entry (`ctrl+a` ticks all, `esc` ends) |
+| `h` | hold, or release a held entry |
+| `x` | remove (the stored message or thread is kept) |
+| `r` | add a removed or stopped entry back, held |
+| `c` | conditions |
+| `o` | options ("How it runs": one at a time or alongside others of the provider; where it continues) |
+| `a` | add a thread to the queue, held, through the thread picker |
+| `esc` | back one level; closes at the top |
+
+`c` opens a plain list that reads as a sentence, "Start … when…": an allowance
+resets, enough allowance is left, a set time arrives, another thread finishes,
+another queue entry finishes, a provider is out or protected. Each choice leads to
+the next question (which provider, which allowance, how much, what must happen,
+when it counts) and the last answer adds the condition. Below the list, the
+entry's current conditions can be removed. A condition can wait on any provider
+that reports usage, in each window it reports (session, weekly) or all of them.
+Failed/interrupted managed entries remain visible for inspection and an explicit
+retry. A restarted server never blindly replays a provider request whose
+acceptance is uncertain. **Schedule work** uses the same steps on one page that
+ends in "Queue this work".
 
 The same controls are available without a TUI:
 

@@ -39,9 +39,9 @@ describe("usage recovery status", () => {
   });
 
   it("reads queue conditions as sentences with the TUI's clock format", () => {
-    expect(queueConditionText({ type: "usage", provider: "codex", window: "all", minimum: 0 })).toBe("Starts when codex has allowance left");
-    expect(queueConditionText({ type: "usage", provider: "codex", window: "weekly", minimum: 10 })).toBe("Starts when codex has at least 10% of its weekly allowance left");
-    expect(queueConditionText({ type: "at", at: new Date(NOW).toISOString() }, [], [], NOW)).toBe("Starts after 16:50");
-    expect(queueConditionText({ type: "at", at: new Date(NOW + 86_400_000).toISOString() }, [], [], NOW)).toMatch(/^Starts after \w+, 16:50$/);
+    expect(queueConditionText({ type: "usage", provider: "codex", window: "all", minimum: 0 })).toBe("When Codex has allowance left");
+    expect(queueConditionText({ type: "usage", provider: "codex", window: "weekly", minimum: 10 })).toBe("When Codex has at least 10% of its weekly allowance left");
+    expect(queueConditionText({ type: "at", at: new Date(NOW).toISOString() }, [], [], NOW)).toBe("At 16:50");
+    expect(queueConditionText({ type: "at", at: new Date(NOW + 86_400_000).toISOString() }, [], [], NOW)).toMatch(/^At \w+, 16:50$/);
   });
 });
