@@ -1,13 +1,12 @@
 import * as Effect from "effect/Effect";
 import { CliError } from "../errors.js";
 import { readStatus } from "../git/history.js";
-import { driverKindOfInstance } from "../types.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
-import { recordUsageProtection, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
+import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
@@ -77,7 +76,7 @@ export class UsageProtection {
         if (thread.archivedAt) throw new CliError("THREAD_ARCHIVED", "An archived thread cannot be protected.");
         if (thread.usagePause?.forced) return;
         const running = openTurn(await ctx.store.readTurns(threadId));
-        const provider = driverKindOfInstance((running?.modelSelection ?? thread.modelSelection).instanceId)!;
+        const provider = usageKeyForInstance((running?.modelSelection ?? thread.modelSelection).instanceId);
         // A wrap-up already under way is the one wrap-up this hold gets.
         const wrapping = thread.usagePause?.phase === "wrapping";
         await ctx.store.writeThreadRecord({ ...thread, usageProtectionOverride: null, usagePause: {
@@ -133,7 +132,7 @@ export class UsageProtection {
     const previous = new Map<string, number>();
     for (const turn of row.turns) {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
-      const provider = driverKindOfInstance(selection.instanceId);
+      const provider = usageKeyForInstance(selection.instanceId);
       if (!provider) continue;
       const fast = selection.options?.some((option) =>
         (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
@@ -310,7 +309,7 @@ export class UsageProtection {
     const eligible = rows.filter(({ thread, turns }) =>
       !thread.archivedAt && !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)
       && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming")
-      && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider
+      && usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider
       && (openTurn(turns) || this.nativeWrap.has(thread.id))
       && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
     if (eligible.length) recordUsageProtection(provider);
@@ -361,7 +360,7 @@ export class UsageProtection {
     }
     for (const [provider, limits] of Object.entries(usageLimitsSnapshot(now))) {
       const members = rows.filter(({ thread, turns }) => !thread.archivedAt
-        && driverKindOfInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider);
+        && usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider);
       const running = members.filter(({ thread, turns }) => openTurn(turns) && !thread.hasPendingApprovals && !thread.hasPendingUserInput);
       const activeMs = (this.activeMs.get(provider) ?? 0) + elapsed * Math.min(running.length, this.activeCounts.get(provider) ?? 0);
       this.activeCounts.set(provider, running.length);
@@ -374,7 +373,7 @@ export class UsageProtection {
         const selection = turn.modelSelection ?? thread.modelSelection;
         const fast = selection.options?.some((option) => (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
         const context = this.contexts.get(thread.id);
-        const providerTurns = turns.filter((turn) => driverKindOfInstance((turn.modelSelection ?? selection).instanceId) === provider);
+        const providerTurns = turns.filter((turn) => usageKeyForInstance((turn.modelSelection ?? selection).instanceId) === provider);
         let inFlight = 0;
         // Claude totals include native tasks. Count gains, including session resets,
         // rather than adding cumulative snapshots or native child costs again.

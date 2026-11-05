@@ -2,7 +2,7 @@ import { SIDE_QUESTION_RULES } from "../../sidequestion.js";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
@@ -1986,5 +1986,96 @@ describe("opencode driver: findings of the v2 port review", () => {
     expect(connected.settled.error).not.toContain("No credential found");
     const missing = await send({});
     expect(missing.settled.error).toContain("No credential found");
+  });
+
+  describe("OpenCode Go's plan usage", () => {
+    const GO = "opencode/opencode-go";
+    const GO_WINDOWS = [
+      { id: "session", label: "Session", resetsAt: "2026-11-05T12:00:00.000Z", exhausted: false, usedPercent: 12 },
+      { id: "weekly", label: "Weekly", resetsAt: "2026-11-09T12:00:00.000Z", exhausted: false, usedPercent: 34 },
+      { id: "monthly", label: "Monthly", resetsAt: "2026-12-01T00:00:00.000Z", exhausted: false, usedPercent: 56 },
+    ];
+
+    async function goSetup(
+      script: ConstructorParameters<typeof FakeOpencodeTransport>[0] = {},
+      instanceId = GO,
+      model = "deepseek-v4.1-flash",
+    ) {
+      const transport = new FakeOpencodeTransport({ sessionID: REAL_SESSION, goUsage: GO_WINDOWS, ...script });
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", modelSelection: { instanceId, model } }));
+      return { transport, driver, events, server: transport.servers[0]!, stop: () => Effect.runPromise(Fiber.interrupt(fiber)) };
+    }
+
+    async function turn(driver: OpenCodeDriver, server: FakeOpencodeTransport["servers"][number], prompt: string) {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt }));
+      const outcome = driver.awaitTurn("thread-1", sent.turnId);
+      await server.push({ type: "session.idle", properties: { sessionID: REAL_SESSION } });
+      return await outcome;
+    }
+
+    it("reports the Go windows from the server the session already runs on, under the Go instance", async () => {
+      const { events, server, stop } = await goSetup();
+      await waitFor("the usage report", () => events.some((event) => event.type === "rate-limits.updated"));
+      expect(events.find((event) => event.type === "rate-limits.updated")).toMatchObject({
+        provider: "opencode",
+        instanceId: GO,
+        windows: GO_WINDOWS,
+      });
+      // The server it just started, never a Console request of its own.
+      expect(server.callsTo("usage.limits")).toHaveLength(1);
+      await stop();
+    });
+
+    it("reports nothing for another OpenCode provider, even on the same server", async () => {
+      const { driver, events, server, stop } = await goSetup({}, "opencode/anthropic", "claude-opus-4-6");
+      await turn(driver, server, "x");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(server.callsTo("usage.limits")).toEqual([]);
+      expect(events.some((event) => event.type === "rate-limits.updated")).toBe(false);
+      await stop();
+    });
+
+    it("reads at most once a minute on one server, and again after it", async () => {
+      let clock = Date.now();
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      try {
+        const { driver, server, stop } = await goSetup();
+        await waitFor("the start-up read", () => server.callsTo("usage.limits").length === 1);
+        await turn(driver, server, "one");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(server.callsTo("usage.limits")).toHaveLength(1);
+
+        clock += 61_000;
+        await turn(driver, server, "two");
+        await waitFor("the next read", () => server.callsTo("usage.limits").length === 2);
+        await stop();
+      } finally {
+        now.mockRestore();
+      }
+    });
+
+    it("leaves a turn and the transcript alone when the read fails", async () => {
+      const { driver, server, events, stop } = await goSetup({ failMethods: { "usage.limits": "no route" } });
+      await expect(turn(driver, server, "hi")).resolves.toMatchObject({ status: "completed", error: null });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(events.some((event) => event.type === "rate-limits.updated")).toBe(false);
+      await stop();
+    });
+
+    it("does not start an OpenCode server just to read the plan", async () => {
+      const { driver, server, transport, stop } = await goSetup();
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "x" }));
+      const outcome = driver.awaitTurn("thread-1", sent.turnId);
+      server.kill();
+      await expect(outcome).resolves.toMatchObject({ status: "failed" });
+      await waitFor("the dead server to be dropped", () => server.disposed);
+      expect(transport.servers).toHaveLength(1);
+      await stop();
+    });
   });
 });

@@ -1391,7 +1391,7 @@ export function App({
   useEffect(() => {
     if (!booted && isBootReady(shell, openThreadId, threadState, providersReady)) setBooted(true);
   }, [booted, shell, openThreadId, threadState, providersReady]);
-  const threadUsageLimits = currentProvider === null ? null : (planUsage[currentProvider.driver] ?? currentProvider.usageLimits);
+  const threadUsageLimits = currentProvider === null ? null : (planUsage[currentProvider.instanceId] ?? planUsage[currentProvider.driver] ?? currentProvider.usageLimits);
   const planGauges = planUsageGauges(threadUsageLimits);
   const contextBreakdown = useContextBreakdown(
     client,

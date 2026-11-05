@@ -24,7 +24,7 @@ import type { InteractionMode } from "../types.js";
 const SHARED_STEPS = [
   "## Before the first delegate: find out what you can spend",
   "1. What exists: call `models`. Never guess a provider, model or effort id: an unknown one fails.",
-  "2. What is left: the `models` result carries `usageLimits` per provider (session and weekly windows, `usedPercent`, `resetsAt`). " +
+  "2. What is left: the `models` result carries `usageLimits` per provider (session, weekly and monthly windows, `usedPercent`, `resetsAt`). " +
     "A provider at or near 100% is out of the plan, not a retry. A provider with no `usageLimits` has no data, which is not the same as unlimited. " +
     "Put the bulk of the work where there is headroom, and size the fan-out to what is left.",
   "3. What each model is good for: read what memory has on the models (memory_read), then research every model you intend to use whose notes are missing or stale, " +

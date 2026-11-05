@@ -1577,6 +1577,44 @@ describe("DirectConnection plan usage", () => {
       await connection.close();
     }
   });
+
+  it("shows OpenCode Go's plan on the Go instance only, never on another OpenCode provider", async () => {
+    const harness = await testHarness();
+    const opencode = (instanceId: string): ProviderSummary => ({
+      instanceId,
+      driver: "opencode",
+      displayName: instanceId,
+      enabled: true,
+      installed: true,
+      status: null,
+      authStatus: null,
+      models: [],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+    });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      providers: async () => [opencode("opencode/opencode-go"), opencode("opencode/anthropic")],
+    });
+    try {
+      const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+      recordUsageWindows("opencode/opencode-go", [
+        { id: "session", label: "Session", resetsAt, exhausted: false, usedPercent: 12 },
+        { id: "weekly", label: "Weekly", resetsAt, exhausted: false, usedPercent: 34 },
+        { id: "monthly", label: "Monthly", resetsAt, exhausted: false, usedPercent: 56 },
+      ]);
+      const listed = await connection.query({ type: "providers.list" });
+      const go = listed.providers.find((provider) => provider.instanceId === "opencode/opencode-go");
+      const anthropic = listed.providers.find((provider) => provider.instanceId === "opencode/anthropic");
+      expect(go?.usageLimits?.windows.map((window) => window.kind)).toEqual(["session", "weekly", "monthly"]);
+      expect(anthropic?.usageLimits).toBeNull();
+    } finally {
+      resetUsageLimitsForTests();
+      await connection.close();
+    }
+  });
 });
 
 describe("DirectConnection settings", () => {

@@ -177,11 +177,14 @@ provider's own mechanism — a hook, a permission denial, a sandbox).
 
 ## Usage
 
-Subscription windows (Claude's session and weekly limits)
-belong to the account, not the thread. The process owning the sessions
-merges what drivers report into one record per provider, persisted next to
-the thread store, so a fresh process shows the last reading before its
-first turn.
+Subscription windows belong to the account, not the thread: Claude and
+Codex report a five-hour session window and a weekly one (Codex reports a
+monthly allowance instead on some plans), and OpenCode Go reports a 5-hour,
+a weekly and a monthly window from the server Moxen already runs. The
+process owning the sessions merges what drivers report into one record per
+account — per provider driver, and for OpenCode per instance, so Go's plan
+shows only on `opencode/opencode-go` — persisted next to the thread store, so
+a fresh process shows the last reading before its first turn.
 
 ### Stats
 

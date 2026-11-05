@@ -80,6 +80,17 @@ import {
   isServerUnreachable,
 } from "./transport.js";
 import { registerOpencodeMcpServer, type OpencodeMessage } from "./translate.js";
+import { isOpencodeGo, OPENCODE_GO_INSTANCE } from "./usage.js";
+
+/**
+ * The shortest gap between two reads of OpenCode Go's usage on one server.
+ * Codex probes its account once at session start and then hears live updates;
+ * OpenCode publishes no account event, so a turn end is the one moment its
+ * plan can have moved. Once a minute is closer than that is worth (Claude
+ * reprobes its own account at most every 25 s) and still catches a plan spent
+ * mid-conversation.
+ */
+const GO_USAGE_REFRESH_MS = 60_000;
 
 export interface OpenCodeDriverOptions {
   readonly settings?: Partial<OpencodeSettings>;
@@ -563,6 +574,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly liveConnections = new Map<string, OpencodeServerConnection>();
   /** `name:config` already registered per server connection (see `registerMcpServers`). */
   private readonly mcpRegistered = new WeakMap<OpencodeServerConnection, Set<string>>();
+  /** When each server (by working directory) last had its OpenCode Go usage read. */
+  private readonly goUsageReadAt = new Map<string, number>();
   private readonly pumps = new Map<string, { controller: AbortController; ready: Promise<void>; done: Promise<void> }>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
@@ -703,6 +716,32 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   private async connectionFor(session: OpenCodeSession): Promise<OpencodeServerConnection> {
     return await this.connectionForSession(session.threadId, session.workingDirectory);
+  }
+
+  /**
+   * OpenCode Go's plan windows, read from the server this session already
+   * talks to (never a new one) and at most once per server per
+   * `GO_USAGE_REFRESH_MS`. Fire and forget: a slow or refused read costs the
+   * reading, never the turn. Only the Go instance reports a plan; every other
+   * OpenCode provider shares the server but not those windows.
+   */
+  private refreshGoUsage(session: OpenCodeSession): void {
+    if (session.closed || !isOpencodeGo(session.instanceId)) return;
+    const key = session.workingDirectory;
+    // Only a server that is already up: a reading is never a reason to start
+    // one, and a lost server's sessions still settle here.
+    const connection = this.liveConnections.get(key);
+    if (!connection) return;
+    const now = Date.now();
+    if (now - (this.goUsageReadAt.get(key) ?? 0) < GO_USAGE_REFRESH_MS) return;
+    this.goUsageReadAt.set(key, now);
+    void connection
+      .usageLimits()
+      .then((windows) => {
+        if (session.closed || windows === null) return;
+        this.publish({ type: "rate-limits.updated", provider: this.provider, threadId: session.threadId, windows, instanceId: OPENCODE_GO_INSTANCE });
+      })
+      .catch(() => undefined);
   }
 
   /** Model limits + compaction config, fetched once per server connection. */
@@ -936,6 +975,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         startedAt: new Date().toISOString(),
       };
       this.sessions.set(input.threadId, session);
+      // A Go thread learns its plan from the server it just started or attached to,
+      // without making the first message wait for that reading.
+      this.refreshGoUsage(session);
       return this.describeSession(session);
     });
 
@@ -2178,6 +2220,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   private settleOpenTurn(session: OpenCodeSession, status: OpenCodeTurnStatus, detail: string): void {
     this.reconcileServers();
+    // A turn is when the plan can have moved: refresh a Go thread's windows,
+    // paced per server so a burst of short turns cannot become a request each.
+    this.refreshGoUsage(session);
     const open = this.openTurn(session);
     if (open) {
       this.clearStallTimer(open.id);

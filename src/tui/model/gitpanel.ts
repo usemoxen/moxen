@@ -116,7 +116,7 @@ export function handOffTarget(
 ): { instanceId: string; model: string; label: string } | null {
   for (const provider of providers ?? []) {
     if (!provider.enabled || !provider.installed || provider.instanceId === currentInstanceId) continue;
-    if (exhausted(usage[provider.driver] ?? provider.usageLimits)) continue;
+    if (exhausted(usage[provider.instanceId] ?? usage[provider.driver] ?? provider.usageLimits)) continue;
     const visible = provider.models.filter((model) => !model.isHidden);
     const model = visible.find((candidate) => candidate.isDefault === true) ?? visible[0];
     if (model === undefined) continue;

@@ -162,7 +162,7 @@ import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
-import { persistUsageLimits, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { persistUsageLimits, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
@@ -2000,13 +2000,17 @@ export class DirectConnection implements ClientApi {
 /**
  * The catalog with each provider's recorded plan usage filled in where the
  * catalog itself has none (the direct catalog never does: usage arrives
- * live from sessions).
+ * live from sessions). An instance that reports its own plan (OpenCode Go)
+ * is recorded under its instance id; every other provider shares its
+ * driver's account.
  */
 function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[] {
   const live = usageLimitsSnapshot();
-  return providers.map((provider) =>
-    provider.usageLimits === null && live[provider.driver] !== undefined ? { ...provider, usageLimits: live[provider.driver]! } : provider,
-  );
+  return providers.map((provider) => {
+    if (provider.usageLimits !== null) return provider;
+    const limits = live[usageKeyForInstance(provider.instanceId)] ?? live[provider.driver];
+    return limits === undefined ? provider : { ...provider, usageLimits: limits };
+  });
 }
 
 /** A thread's latest context reading (`context-window.updated`), or null when its provider never reported one. */

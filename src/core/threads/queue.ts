@@ -1,7 +1,6 @@
 import { CliError } from "../errors.js";
 import type { CliConfig } from "../types.js";
-import { driverKindOfInstance } from "../types.js";
-import { usageLimitsSnapshot, usageSignal } from "../usage/limits.js";
+import { usageKeyForInstance, usageLimitsSnapshot, usageSignal } from "../usage/limits.js";
 import type { StoredThread, StoredTurn } from "./types.js";
 
 export const QUEUE_RESET_GRACE_MS = 5000;
@@ -110,7 +109,7 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || row.thread.snoozedUntil) blocked.push("Thread is not active");
   if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) blocked.push("Waiting for your answer or approval");
   if (turn.scheduledFor && Date.parse(turn.scheduledFor) > now) blocked.push(`Scheduled for ${turn.scheduledFor}`);
-  const provider = driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown";
+  const provider = usageKeyForInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId);
   if (policy?.automatic || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") blocked.push(...automaticUsageBlock(provider, config, now));
   else if (providerExhausted(provider, now)) blocked.push(`${provider}: usage exhausted`);
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
@@ -137,6 +136,6 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
     }
   }
   if (rows.some((r) => r.thread.id === row.thread.id && r.turns.some((t) => t.status === "running" && t.id !== turn.id))) blocked.push("Thread is running");
-  if (rows.some((r) => r.turns.some((t) => t.status === "running" && t.queue && (policy?.sequential || t.queue.sequential) && t.id !== turn.id && driverKindOfInstance((t.modelSelection ?? r.thread.modelSelection).instanceId) === provider))) blocked.push(`${provider}: preceding queue entry is running`);
+  if (rows.some((r) => r.turns.some((t) => t.status === "running" && t.queue && (policy?.sequential || t.queue.sequential) && t.id !== turn.id && usageKeyForInstance((t.modelSelection ?? r.thread.modelSelection).instanceId) === provider))) blocked.push(`${provider}: preceding queue entry is running`);
   return { blocked, latched, conditions };
 }

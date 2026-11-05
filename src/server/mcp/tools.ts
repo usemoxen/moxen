@@ -155,7 +155,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "models",
     description:
       "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
-      "here, and only models the user has not hidden, plus each provider's usage limits (session and weekly windows) when known. " +
+      "here, and only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
       "Pass provider to list just that one.",
     inputSchema: {
       type: "object",

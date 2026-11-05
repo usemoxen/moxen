@@ -20,6 +20,15 @@ keychain.
 GPT models can run through native Codex or OpenCode. Grok (SuperGrok) models
 run through OpenCode; there is no native Grok driver.
 
+Subscription windows are reported per account and shown per instance: Claude
+and Codex report for the whole driver, while OpenCode's `opencode-go` plan
+belongs to that instance alone and is read from the server's experimental
+`/api/experimental/usage/limits` route (the same server the thread runs on)
+when a Go session starts and after its turns, at most once a minute. Every
+other OpenCode provider reports no plan windows; when the route has nothing
+to say — not signed in, no Go plan, an older server — usage is simply unknown,
+never an error.
+
 ## Defaults
 
 When nothing names a model — no flag, no config, no project or thread
@@ -541,9 +550,11 @@ works for Codex review/compact turns too, without assuming they accept steer.
 It does not silently install or approve provider hooks.
 
 Conditional messages, new threads and usage recovery share server-owned queue
-admission. Explicit usage conditions require a real quota feed; OpenCode and
-Harness work can still use time, dependencies, and another provider's quota
-conditions. Automatic recovery checks the session and weekly reserves immediately
+admission. Explicit usage conditions require a real quota feed; a thread on a
+provider without one (an OpenCode provider other than Go, or the Harness) can
+still use time, dependencies, and another provider's quota conditions.
+OpenCode Go reports its own plan windows; they belong to that instance.
+Automatic recovery checks the session and weekly reserves immediately
 before admission. Model-written handoffs use a dedicated summary turn and the
 request-scoped `submit_handoff` tool, not final-response parsing. Providers whose
 MCP definitions are fixed at session creation reopen the same conversation from
@@ -572,11 +583,15 @@ Claude Agent SDK 0.3.292 / OpenCode client 2.0.24:
   Existing recorded usage is not rewritten. Estimates do not add reasoning output
   twice. Unknown model prices stay uncalibrated.
 - [OpenCode v2 API](https://opencode.ai/v2/docs/api): ordinary external-provider
-  sessions have no general subscription quota feed. Newer docs do list
-  `experimental.usage.limits`, but it covers OpenCode Go/Console workspace budgets,
-  not arbitrary connected Claude/Codex accounts; the installed client does not
-  expose it. OpenCode remains outside MXN-203's quota-triggered protection scope,
-  rather than inheriting another driver's account limit. It retains its existing
+  sessions have no general subscription quota feed. The docs list
+  `experimental.usage.limits`, which covers the OpenCode Go/Console workspace's
+  5-hour, weekly and monthly allowances, not arbitrary connected Claude/Codex
+  accounts. The installed client does not expose the route, so Moxen calls it on
+  the server it already runs (the connection's own Basic auth, the location
+  query), only for a Go session, at session start and after a turn, at most once
+  a minute, and treats every failure or changed body as unknown. Only
+  `opencode/opencode-go` gets those windows; other OpenCode providers stay
+  outside quota-triggered protection. It retains its existing
   per-turn usage, interruption, durable inbox and usage-limit continuation.
 - Moxen Harness API endpoints likewise have no subscription-window contract;
   token totals alone cannot supply remaining account allowance.

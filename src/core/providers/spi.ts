@@ -472,6 +472,12 @@ export type ProviderRuntimeEvent =
       readonly provider: ProviderDriverKind;
       readonly threadId: ThreadId;
       readonly windows: ReadonlyArray<RateLimitWindow>;
+      /**
+       * The provider instance whose account these windows belong to, when it
+       * is narrower than the driver (OpenCode Go: one instance, not every
+       * OpenCode provider). Absent means the driver's own account.
+       */
+      readonly instanceId?: string;
       readonly raw?: unknown;
     }
   | {

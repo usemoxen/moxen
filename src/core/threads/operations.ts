@@ -60,6 +60,7 @@ import type {
 import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
+import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
@@ -712,8 +713,8 @@ async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, tur
     }
   }
   if (turn.queue!.continuation === "model" && !handoff.summary && !handoff.fallback) {
-    const summaryProvider = driverKindOfInstance(source.modelSelection.instanceId);
-    const exhausted = summaryProvider !== null && providerExhausted(summaryProvider, now);
+    const summaryProvider = usageKeyForInstance(source.modelSelection.instanceId);
+    const exhausted = providerExhausted(summaryProvider, now);
     if (!handoff.summaryTurnId && !exhausted) {
       if (openTurn(await store.readTurns(threadId))) return;
       const sent = await sendTurn(store, threadId, {

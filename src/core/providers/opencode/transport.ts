@@ -21,6 +21,7 @@ import { OpenCode } from "@opencode/client";
 
 import { CliError } from "../../errors.js";
 import { killProcessGroup, killProcessTree } from "../../infra/process.js";
+import type { RateLimitWindow } from "../spi.js";
 import {
   buildServerConfigContent,
   compactionPluginOptions,
@@ -40,6 +41,7 @@ import {
   type OpencodeMessage,
   type OpencodeSubscribedEvent,
 } from "./translate.js";
+import { readOpencodeUsageLimits } from "./usage.js";
 
 export type { OpencodeMessage, OpencodeSubscribedEvent } from "./translate.js";
 
@@ -153,6 +155,13 @@ export interface OpencodeServerConnection {
   /** `session.inbox.cancel`: drop a queued, undelivered inbox item (a prompt or steer). */
   cancelInbox(sessionID: string, inboxID: string): Promise<void>;
   contextSettings(): Promise<OpencodeContextSettings>;
+  /**
+   * OpenCode Go's plan windows (`GET /api/experimental/usage/limits`). Null
+   * when the server cannot say: not signed in, no Go on the workspace, a
+   * server that predates the experimental route, or an answer that no longer
+   * matches. Never an error — usage is advisory.
+   */
+  usageLimits(): Promise<ReadonlyArray<RateLimitWindow> | null>;
   /** Models the server can run right now (`model.list`). */
   listModels(): Promise<ReadonlyArray<OpencodeModelInfo>>;
   /** `command.list` plus `skill.list` (skills carry `source: "skill"`; v2 has no command hints). */
@@ -344,6 +353,8 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
     private readonly client: SdkClient,
     private readonly child: ChildProcess | null,
     private readonly directory: string,
+    /** The same Basic auth the client sends: the experimental route is not in the generated client. */
+    private readonly authHeaders: Readonly<Record<string, string>> = {},
   ) {
     this.closed = child
       ? new Promise<void>((resolve) => {
@@ -504,6 +515,10 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
         hints: [] as readonly string[],
       }));
     return [...commandEntries, ...skillEntries];
+  }
+
+  async usageLimits(): Promise<ReadonlyArray<RateLimitWindow> | null> {
+    return await readOpencodeUsageLimits(this.url, this.directory, this.authHeaders);
   }
 
   async contextSettings(): Promise<OpencodeContextSettings> {
@@ -780,9 +795,10 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
     const baseEnv = input.env ?? process.env;
     if (settings.serverUrl.trim().length > 0) {
       const url = settings.serverUrl.trim();
-      const client = OpenCode.make({ baseUrl: url, headers: basicAuthHeader(settings.serverPassword) });
+      const headers = basicAuthHeader(settings.serverPassword);
+      const client = OpenCode.make({ baseUrl: url, headers });
       const version = await verifyServerVersion(client, settings.minVersion, settings.binaryPath);
-      return new LiveOpencodeServerConnection(url, version, true, client, null, input.workingDirectory);
+      return new LiveOpencodeServerConnection(url, version, true, client, null, input.workingDirectory, headers);
     }
 
     const port = await findAvailablePort().catch((cause: unknown) => {
@@ -811,7 +827,8 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
       killProcessTree(child, "SIGKILL");
       throw cause;
     });
-    const client = OpenCode.make({ baseUrl: url, headers: basicAuthHeader(password) });
+    const headers = basicAuthHeader(password);
+    const client = OpenCode.make({ baseUrl: url, headers });
     const version = await verifyServerVersion(client, settings.minVersion, settings.binaryPath).catch(
       async (cause: unknown) => {
         await new LiveOpencodeServerConnection(url, versionFallback(), false, client, child, input.workingDirectory)
@@ -820,7 +837,7 @@ export class SpawnOpencodeTransport implements OpencodeTransport {
         throw cause;
       },
     );
-    return new LiveOpencodeServerConnection(url, version, false, client, child, input.workingDirectory);
+    return new LiveOpencodeServerConnection(url, version, false, client, child, input.workingDirectory, headers);
   }
 }
 

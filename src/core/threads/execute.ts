@@ -22,7 +22,7 @@ import type { SkillInventory } from "../catalog/summary.js";
 import type { BackgroundTaskSummary } from "../providers/spi.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { armScheduledTurn } from "./schedule.js";
-import { recordUsageWindows, standingLimit } from "../usage/limits.js";
+import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { CodexDriver } from "../providers/codex/driver.js";
@@ -335,7 +335,7 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
       Effect.sync(() => {
         // Plan usage belongs to the account, not the thread: recorded here,
         // once per event, whoever (if anyone) watches the thread.
-        if (event.type === "rate-limits.updated") recordUsageWindows(event.provider, event.windows);
+        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows);
         trackLiveText(buffers, event);
         for (const subscriber of subscribers.get("*") ?? []) subscriber(event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) subscriber(event);
@@ -511,7 +511,7 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // the next queued message now would only fail it against the same wall
     // (and then the next, until the whole queue is failed turns), so hold
     // it for just after the reset instead — it runs then like a scheduled one.
-    const standing = standingLimit(driverKey(selection.instanceId));
+    const standing = standingLimit(usageKeyForInstance(selection.instanceId));
     if (standing !== null) {
       const until = new Date(Date.parse(standing.resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString();
       store.untrackRunning(next.id);
@@ -1156,7 +1156,7 @@ function recordTurnActivity(
    */
   const noteFailure = (): void => {
     if (limitRecorded || modelSelection === null) return;
-    const provider = driverKey(modelSelection.instanceId);
+    const provider = usageKeyForInstance(modelSelection.instanceId);
     const standing = standingLimit(provider);
     if (standing === null) return;
     limitRecorded = true;

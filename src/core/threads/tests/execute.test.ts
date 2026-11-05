@@ -741,11 +741,12 @@ describe("a turn that fails while a limit stands", () => {
 
   it("records the standing limit on the failed turn and asks for the continue", async () => {
     const resetsAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
-    recordUsageWindows("opencode", [{ id: "session", label: "Session", resetsAt, exhausted: true, usedPercent: 100 }]);
+    // OpenCode reports per instance: this thread's account is `opencode/anthropic`.
+    recordUsageWindows("opencode/anthropic", [{ id: "session", label: "Session", resetsAt, exhausted: true, usedPercent: 100 }]);
     const { store, threadId, turnId, limited } = await failingTurn();
     const row = (await store.readActivities(threadId)).find((activity) => activity.kind === "usage.limit");
     expect(row?.turnId).toBe(turnId);
-    expect(row?.payload).toMatchObject({ provider: "opencode", label: "Session", resetsAt, standing: true });
+    expect(row?.payload).toMatchObject({ provider: "opencode/anthropic", label: "Session", resetsAt, standing: true });
     expect(limited).toEqual([{ turnId, resetsAt }]);
   });
 
@@ -756,7 +757,7 @@ describe("a turn that fails while a limit stands", () => {
   });
 
   it("ignores a spent window whose reset has already passed", async () => {
-    recordUsageWindows("opencode", [
+    recordUsageWindows("opencode/anthropic", [
       { id: "session", label: "Session", resetsAt: new Date(Date.now() - 60_000).toISOString(), exhausted: true, usedPercent: 100 },
     ]);
     const { store, threadId } = await failingTurn();

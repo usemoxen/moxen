@@ -16,6 +16,7 @@ import type {
   OpencodeSubscribedEvent,
   OpencodeTransport,
 } from "../transport.js";
+import type { RateLimitWindow } from "../../spi.js";
 import { answerForForm, OpencodeEventTranslator } from "../translate.js";
 
 export interface FakeOpencodeScript {
@@ -48,6 +49,8 @@ export interface FakeOpencodeScript {
   readonly undeliverableInbox?: readonly string[];
   /** `compaction.buffer` from the server's config. */
   readonly buffer?: number | null;
+  /** What `usageLimits` answers: OpenCode Go windows, or null for unknown. Unset: unknown. */
+  readonly goUsage?: ReadonlyArray<RateLimitWindow> | null;
 }
 
 export class FakeOpencodeServerConnection implements OpencodeServerConnection {
@@ -204,6 +207,12 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     this.calls.push({ method: "model.list", args: {} });
     if (!this.script.models) throw new Error("model.list unavailable");
     return this.script.models;
+  }
+
+  async usageLimits(): Promise<ReadonlyArray<RateLimitWindow> | null> {
+    this.calls.push({ method: "usage.limits", args: {} });
+    this.failChecked("usage.limits");
+    return this.script.goUsage ?? null;
   }
 
   async contextSettings(): Promise<OpencodeContextSettings> {

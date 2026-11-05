@@ -1,14 +1,18 @@
 /**
  * The latest subscription usage windows each provider reported (Claude's
- * session and weekly limits), merged
- * from every `rate-limits.updated` event the drivers publish: the start-up
- * probe gives the full set, live events refresh one window at a time.
+ * session and weekly limits, OpenCode Go's five-hour, weekly and monthly
+ * ones), merged from every `rate-limits.updated` event the drivers publish:
+ * the start-up probe gives the full set, live events refresh one window at a
+ * time.
  *
- * Kept per driver kind, not per thread: the limits belong to the account
- * the provider CLI is logged into, so every thread on it shares them. The
- * process that owns the sessions records them; clients read them through
- * the `usage.limits` query. Persisted next to the thread store so a fresh
- * process shows the last known numbers before its first turn.
+ * Kept per account, not per thread: the limits belong to the account the
+ * provider CLI is logged into, so every thread on it shares them. For Claude
+ * and Codex that account is the driver; OpenCode below its driver id is one
+ * provider per instance, so an instance that reports its own plan (Go) is
+ * recorded under its instance id (`usageKeyForInstance`). The process that
+ * owns the sessions records them; clients read them through the `usage.limits`
+ * query. Persisted next to the thread store so a fresh process shows the last
+ * known numbers before its first turn.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -17,6 +21,7 @@ import { renameReplacing } from "../infra/atomic.js";
 
 import type { ProviderUsageLimits, ProviderUsageWindow } from "../catalog/summary.js";
 import type { RateLimitWindow } from "../providers/spi.js";
+import { driverKindOfInstance } from "../types.js";
 
 interface RecordedWindow {
   id: string;
@@ -130,9 +135,20 @@ function windowKind(label: string): string {
 }
 
 /**
- * Every provider's windows, keyed by driver kind. A window whose reset time
- * has passed reads 0% with no reset: the provider hasn't reported the new
- * one yet, but the old number no longer holds.
+ * The key one thread's usage windows live under. Claude and Codex report for
+ * their whole driver; an `opencode/<provider>` instance is its own provider,
+ * so Go's windows are its instance's and no other OpenCode instance's.
+ */
+export function usageKeyForInstance(instanceId: string): string {
+  const raw = instanceId.trim().toLowerCase();
+  const kind = driverKindOfInstance(raw);
+  return kind !== null ? (kind === "opencode" && raw.startsWith("opencode/") ? raw : kind) : raw;
+}
+
+/**
+ * Every provider's windows, keyed by account (`usageKeyForInstance`). A window
+ * whose reset time has passed reads 0% with no reset: the provider hasn't
+ * reported the new one yet, but the old number no longer holds.
  */
 export function usageLimitsSnapshot(now: number = Date.now()): Record<string, ProviderUsageLimits> {
   const result: Record<string, ProviderUsageLimits> = {};
@@ -156,7 +172,7 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
 }
 
 /**
- * The window that is spent right now for `provider`, if any: at 100% with
+ * The window that is spent right now for an account, if any: at 100% with
  * a reset still ahead. A turn that fails while one stands was stopped by
  * it, whatever its error text says — the provider only reports a limit
  * when it *changes*, so the second turn into the same wall is told nothing.

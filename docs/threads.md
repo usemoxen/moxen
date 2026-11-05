@@ -350,7 +350,8 @@ client concern. Existing turn state values and CLI JSON goldens are unchanged.
 
 The forecast learns active thread-time and dollars per percentage point from the
 cumulative gains since each window's first observed sample, starting over at reset;
-session and weekly windows are learned separately. User-input and approval waits
+each account window is learned separately (Claude's session and weekly, OpenCode
+Go's 5-hour, weekly and monthly). User-input and approval waits
 are excluded. It budgets cached reads, cache writes and 4,096 output tokens for
 each model's wrap-up, with a 50%
 margin and between two and ten percentage points of reserve. The ten-point cap
@@ -456,7 +457,8 @@ another queue entry finishes, a provider is out or protected. Each choice leads 
 the next question (which provider, which allowance, how much, what must happen,
 when it counts) and the last answer adds the condition. Below the list, the
 entry's current conditions can be removed. A condition can wait on any provider
-that reports usage, in each window it reports (session, weekly) or all of them.
+that reports usage, in each window it can name (session, weekly) or all of them
+(`all` covers every reported window, an OpenCode Go monthly one included).
 Failed/interrupted managed entries remain visible for inspection and an explicit
 retry. A restarted server never blindly replays a provider request whose
 acceptance is uncertain. **Schedule work** uses the same steps on one page that

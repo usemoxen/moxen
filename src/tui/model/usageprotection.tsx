@@ -33,11 +33,15 @@ export function usageProtectionNotices(
   now: number,
   providers: readonly ProviderSummary[] | null = null,
 ): Notice[] {
+  const providerName = (key: string): string =>
+    providers?.find((provider) => provider.instanceId.toLowerCase() === key)?.displayName
+    ?? providers?.find((provider) => driverKindOfInstance(provider.instanceId) === key)?.displayName
+    ?? key;
   const notices: Notice[] = state.forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => ({
     key: `forecast:${forecast.provider}:${forecast.windowId}`,
     glyph: "◔", glyphColor: COLOR.warn,
     title: t("protection.forecast", {
-      provider: providers?.find((provider) => driverKindOfInstance(provider.instanceId) === forecast.provider)?.displayName ?? forecast.provider,
+      provider: providerName(forecast.provider),
       window: forecast.label, percent: Math.round(forecast.usedPercent),
     }),
     detail: <text fg={COLOR.dim} selectable={false}>{t("protection.detail", {
