@@ -7,7 +7,7 @@ import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, pars
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { runningModelOf, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { runningModelOf, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -159,6 +159,13 @@ describe("runtime instructions", () => {
     for (const instanceId of [CLAUDE]) {
       expect(buildRuntimeInstructions({ instanceId, env: LOCAL, shell: LINUX })).not.toContain("background: true");
     }
+  });
+
+  it("requires progress notes on OpenCode, whose models stay silent when told only how long a note may be", () => {
+    for (const instanceId of ["opencode", "opencode/opencode-go"]) {
+      expect(buildRuntimeInstructions({ instanceId, env: LOCAL, shell: LINUX })).toContain(`${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}`);
+    }
+    expect(buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX })).not.toContain(OPENCODE_PROGRESS_GUIDANCE);
   });
 
   it("tells an OpenCode session how to keep its checklist, and no harness that has its own", () => {

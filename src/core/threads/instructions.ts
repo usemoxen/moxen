@@ -182,6 +182,14 @@ export const PROGRESS_GUIDANCE =
   '("Reading the driver", "Editing the settle logic"). Save explanations, summaries and long text for your final message, once the work is done.';
 
 /**
+ * The line above limits a note's length and never asks for one, so a model
+ * can honour it by saying nothing: DeepSeek ran 186 tool calls in a row without a word.
+ */
+export const OPENCODE_PROGRESS_GUIDANCE =
+  "These notes are not optional. The user sees your messages, not your thinking, and a long run of tool calls with no text looks stuck. " +
+  "Write one before your first tool call and another each time you start a new step, in the same reply as the tool call.";
+
+/**
  * What a session is told about the messages Moxen sends it. They ride inside
  * the conversation, where a model has every reason to read instructions as
  * the user's words — or, being wary of instructions in a message, to ignore
@@ -334,7 +342,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   add("Environment", environment.join("\n\n"));
   add("Look it up", LOOKUP_GUIDANCE);
   if (input.knowledge === true) add("Moxen knowledge base", KNOWLEDGE_GUIDANCE);
-  add("Progress notes", PROGRESS_GUIDANCE);
+  add("Progress notes", harness === "OpenCode" ? `${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}` : PROGRESS_GUIDANCE);
   add("Showing images", IMAGE_GUIDANCE);
   // A subagent's final message is a report another agent reads; a layout is for a person.
   if (!delegation) add("Layouts, charts and states", UI_BLOCK_GUIDANCE);
