@@ -2850,6 +2850,43 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   };
 }
 
+/** A task a caller may act on with `task_send` or `task_ask`: its delegation row and the task thread. */
+export interface ControlledTask {
+  readonly row: StoredDelegation;
+  readonly target: StoredThread;
+}
+
+/**
+ * The task a caller may act on with `task_send` or `task_ask`: only the
+ * delegation it holds (`ownedDelegation`), so a task that continued in a new
+ * thread is still reachable, and never a research run's lead or role, whose
+ * traffic goes through the run's scoped and capped messages.
+ */
+export async function requireTaskControl(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+  tool: "task_send" | "task_ask",
+): Promise<ControlledTask> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
+  const caller = await ctx.store.readThreadRecord(parentThreadId);
+  const target = await ctx.store.readThreadRecord(row.childThreadId);
+  if (!caller || !target) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3 });
+  }
+  if (caller.researchRole || isResearchRunActive(caller.researchRun) || target.researchRole || target.researchRun) {
+    const code = tool === "task_send" ? "TASK_SEND_RESEARCH" : "TASK_ASK_RESEARCH";
+    const verb = tool === "task_send" ? "take messages" : "take side questions";
+    throw new CliError(
+      code,
+      `A research run's roles and lead ${verb} only through the run (research_message_submit, and the lead's follow-ups), which are scoped and capped: ${tool} does not reach them.`,
+      { exitCode: 4, details: { taskId: row.childThreadId } },
+    );
+  }
+  return { row, target };
+}
+
 /** What became of a message sent to a delegated task. */
 export type TaskMessageOutcome =
   /** It reached the running turn, which reads it at its next step. */
@@ -2870,6 +2907,18 @@ export interface SentTaskMessage extends Omit<DescribedTask, "task"> {
   readonly woke: boolean;
   /** What the caller should and should not assume. */
   readonly note: string;
+}
+
+/** An answer to a side question asked of a delegated task (`task_ask`). */
+export interface AskedTask {
+  readonly taskId: string;
+  /** The task's status when the question was asked; a finished task can still answer from its recorded session. */
+  readonly status: DelegatedTaskStatus;
+  /** The answer, from a tool-less copy of the task's thread. */
+  readonly text: string;
+  /** False when the task had no session to answer from, so the answer is not about this task. */
+  readonly withContext: boolean;
+  readonly provider: string;
 }
 
 /**
@@ -2893,17 +2942,7 @@ export async function sendTaskMessage(
   const parentThreadId = requireThreadId(rawParentThreadId);
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
-  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
-  const caller = await ctx.store.readThreadRecord(parentThreadId);
-  const target = await ctx.store.readThreadRecord(row.childThreadId);
-  if (!caller || !target) throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3 });
-  if (caller.researchRole || isResearchRunActive(caller.researchRun) || target.researchRole || target.researchRun) {
-    throw new CliError(
-      "TASK_SEND_RESEARCH",
-      "A research run's roles and lead take messages only through the run (research_message_submit, and the lead's follow-ups), which are scoped and capped: task_send does not reach them.",
-      { exitCode: 4, details: { taskId: row.childThreadId } },
-    );
-  }
+  const { row, target } = await requireTaskControl(ctx, parentThreadId, rawTaskId, "task_send");
 
   const before = await describeTask(ctx, parentThreadId, row.childThreadId);
   const turns = await ctx.store.readTurns(target.id);

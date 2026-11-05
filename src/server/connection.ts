@@ -123,6 +123,7 @@ import {
   submitHandoff,
   cancelTask,
   sendTaskMessage,
+  requireTaskControl,
   continueThread,
   delegate,
   beginResearchRun,
@@ -1168,6 +1169,8 @@ export class DirectConnection implements ClientApi {
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
+      case "thread.task.ask":
+        return await this.taskAsk(command);
       case "thread.message.queue":
         return await queueAgentMessage(await this.context(), command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) });
       case "thread.plan.set":
@@ -1385,15 +1388,30 @@ export class DirectConnection implements ClientApi {
   }
 
   /**
+   * `task_ask`: a side question to a task the caller delegated. The same
+   * ownership and research-run rules as `task_send` (`requireTaskControl`),
+   * then the task's own provider answers on a copy of its thread
+   * (`sideQuestion`), so nothing is added to the task and its turn is not
+   * touched.
+   */
+  private async taskAsk(command: CommandOf<"thread.task.ask">): Promise<CommandResult<"thread.task.ask">> {
+    const ctx = await this.context();
+    const { row, target } = await requireTaskControl(ctx, command.parentThreadId, command.taskId, "task_ask");
+    const described = await describeTask(ctx, command.parentThreadId, row.childThreadId);
+    const answer = await this.sideQuestion({ threadId: target.id, question: command.question });
+    return { ...answer, taskId: target.id, status: described.task.status };
+  }
+
+  /**
    * `/btw`. The thread's own provider answers, on a copy of its session so
    * the thread never sees the question. Providers that cannot copy a
    * session into a tool-less one-shot say so rather than falling back to
    * something that would touch the thread.
    */
-  private async sideQuestion(command: CommandOf<"thread.side-question">): Promise<CommandResult<"thread.side-question">> {
+  private async sideQuestion(input: { readonly threadId: string; readonly question: string }): Promise<CommandResult<"thread.side-question">> {
     const { store } = await this.context();
-    const thread = await store.readThreadRecord(command.threadId);
-    if (!thread) throw new CliError("THREAD_NOT_FOUND", `No thread ${command.threadId}.`, { exitCode: 2 });
+    const thread = await store.readThreadRecord(input.threadId);
+    if (!thread) throw new CliError("THREAD_NOT_FOUND", `No thread ${input.threadId}.`, { exitCode: 2 });
     const selection = thread.modelSelection;
     const provider = driverKey(selection.instanceId);
     const driver = this.driverFor(selection.instanceId);
@@ -1410,7 +1428,7 @@ export class DirectConnection implements ClientApi {
     const answer = await driver.sideQuestion({
       cursor,
       workingDirectory: thread.env.path,
-      question: command.question.trim(),
+      question: input.question.trim(),
       model: selection.model,
     });
     return { ...answer, provider };

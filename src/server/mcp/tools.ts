@@ -22,9 +22,15 @@ import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import type { ClientApi } from "../api.js";
-import { decodeResearchPlan } from "../protocol.js";
+import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
 export const MAX_WAIT_MS = 45_000;
+/**
+ * How long `task_ask` waits for a side answer. The call runs inside the
+ * orchestrator's turn, and MCP clients cap a tool call (Codex at 60s), so it
+ * must answer with something either way.
+ */
+export const MAX_ASK_MS = 45_000;
 /** A checklist is a plan at a glance, not a log: past this it stops being read. */
 export const MAX_TODOS = 15;
 export const MAX_TODO_CHARS = 160;
@@ -220,6 +226,24 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     },
   },
   {
+    name: "task_ask",
+    description:
+      "Ask a task you delegated a side question, like /btw, without disturbing it: it answers on a copy of its thread, with no tools, and adds nothing to its conversation or its turn, so it works while the task is running. " +
+      "Use it to check on a long task's progress or what it decided, when thread_read would cost too much context or show steps instead of meaning. " +
+      "The answer cannot run commands or read files, so a limitation it names is the answer's, not the task's. " +
+      `Waits at most ${MAX_ASK_MS / 1000} seconds. A provider that cannot answer says so plainly; fall back to thread_read then. ` +
+      "Only reaches your own tasks, and not a research run's roles or lead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        question: { type: "string", description: "What to ask about the task's work. It can only use what is already in the task's thread." },
+      },
+      required: ["taskId", "question"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "message_queue",
     description:
       "Queue a message on a thread, to run later: your own thread (the default: \"wake me after the usage reset\", \"check back in an hour\") or a task you delegated. " +
@@ -306,7 +330,7 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task is itself the delegation, so it gets none.
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "message_queue", "thread_search", "thread_read", "image_gen"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -595,7 +619,7 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy> } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
@@ -723,6 +747,8 @@ export async function callMoxenTool(
         const sent = await api.dispatch({ type: "thread.task.send", parentThreadId, taskId, message: argString(args, "message", true)!, ...(args.wake === true ? { wake: true } : {}) });
         return ok({ taskId, outcome: sent.outcome, status: sent.task.status, woke: sent.woke, note: sent.note });
       }
+      case "task_ask":
+        return await taskAskTool(api, parentThreadId, args, options.askTimeoutMs ?? MAX_ASK_MS);
       case "message_queue": {
         if (args.delivery !== undefined && args.delivery !== "queue") throw new CliError("INVALID_TOOL_INPUT", "delivery must be \"queue\": a queued message cannot steer, restart or start a turn on its own.");
         if (args.conditions !== undefined && !Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
@@ -828,6 +854,75 @@ async function currentWebPolicy(api: ClientApi): Promise<WebPolicy> {
 
 function ok(value: unknown): ToolResult {
   return { text: JSON.stringify(value, null, 2), isError: false };
+}
+
+/**
+ * The answer, or `"timeout"`. A side question can take longer than an MCP
+ * client allows a tool call, and this runs inside the orchestrator's turn, so
+ * the call returns a plain result either way. The work itself is not
+ * cancelled: drivers that honor an abort signal would need one the protocol
+ * cannot carry over a wire.
+ */
+async function withinDeadline<T>(work: Promise<T>, ms: number): Promise<T | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), Math.max(1, ms));
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * `task_ask`: the task's own provider answers on a copy of its thread,
+ * through the same `thread.side-question` path as `/btw`. The server enforces
+ * that the caller delegated the task (or continued the thread that did).
+ */
+async function taskAskTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>, timeoutMs: number): Promise<ToolResult> {
+  const taskId = argString(args, "taskId", true)!;
+  const question = argString(args, "question", true)!;
+  let answered: CommandResult<"thread.task.ask"> | "timeout";
+  try {
+    answered = await withinDeadline(api.dispatch({ type: "thread.task.ask", parentThreadId, taskId, question }), timeoutMs);
+  } catch (cause) {
+    // A provider that cannot copy a session is a plain outcome, not a failed
+    // call: the orchestrator can go straight to thread_read.
+    if (cause instanceof CliError && cause.code === "SIDE_QUESTION_UNSUPPORTED") {
+      const provider = (cause.details as { provider?: string } | undefined)?.provider;
+      return ok({
+        taskId,
+        supported: false,
+        code: cause.code,
+        ...(provider === undefined ? {} : { provider }),
+        reason: cause.message,
+        next: "This is the provider's limit, not a fault in the task. Read where the task stands with thread_read instead; asking in the task's thread would interrupt it.",
+      });
+    }
+    throw cause;
+  }
+  if (answered === "timeout") {
+    return ok({
+      taskId,
+      timedOut: true,
+      note: `No answer within ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} seconds` : `${Math.round(timeoutMs)} ms`}. The task is unchanged and still working. Check on it with task_status, or read its thread with thread_read; asking in the task's thread would interrupt it.`,
+    });
+  }
+  return ok({
+    taskId,
+    status: answered.status,
+    answer: answered.text,
+    withContext: answered.withContext,
+    provider: answered.provider,
+    note: [
+      "A side question: answered on a copy of the task's thread, with no tools, and nothing was added to the task or its turn.",
+      "If the answer says it cannot run a command or read a file, that is this answer's limit, not a fault in the task.",
+      ...(answered.withContext ? [] : ["The task had no session to read its context from, so this answer is not about the task's work."]),
+    ].join(" "),
+  });
 }
 
 async function imageGenerationTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>, sleep: (ms: number) => Promise<void>) {

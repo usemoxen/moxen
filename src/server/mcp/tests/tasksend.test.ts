@@ -247,6 +247,14 @@ describe("task_send: research runs and delegated tasks", () => {
       expect((await t.send(t.orchestrator, researcher.child.id, "Report now", true)).text).toContain("TASK_NOT_FOUND");
       expect((await t.store.readMessages(researcher.child.id)).some((message) => message.origin === "task-message")).toBe(false);
       expect((await t.store.readMessages(leadId)).some((message) => message.origin === "task-message")).toBe(false);
+
+      // A side question follows the same rule: the run's traffic goes through the run.
+      const askedLead = await callMoxenTool(t.connection, t.orchestrator, "task_ask", { taskId: leadId, question: "How is it going?" });
+      expect(askedLead.isError).toBe(true);
+      expect(askedLead.text).toContain("TASK_ASK_RESEARCH");
+      const askedRole = await callMoxenTool(t.connection, leadId, "task_ask", { taskId: researcher.child.id, question: "How is it going?" });
+      expect(askedRole.isError).toBe(true);
+      expect(askedRole.text).toContain("TASK_ASK_RESEARCH");
     } finally {
       unattended();
       await t.connection.close();

@@ -22,7 +22,7 @@ import * as Stream from "effect/Stream";
 import { DEFAULT_CONFIG } from "../config.js";
 import { CliError } from "../errors.js";
 import type { McpServerSpec } from "../mcp.js";
-import type { ProviderRuntimeEvent } from "../providers/spi.js";
+import type { ProviderRuntimeEvent, SideAnswer, SideQuestionInput } from "../providers/spi.js";
 import { runProcess } from "../infra/process.js";
 import { rmTempAsync } from "./tmp.js";
 import { openThreadStore, type ThreadStore } from "../threads/store.js";
@@ -57,6 +57,7 @@ class HarnessDriver implements TurnDriver {
     private readonly onSendTurn?: (input: SentTurn) => void,
     private readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void,
     steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
+    sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>,
   ) {
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
     if (steer) {
@@ -65,9 +66,13 @@ class HarnessDriver implements TurnDriver {
           ? Effect.fail(new CliError("STEER_FAILED", "Harness driver could not steer the turn."))
           : Effect.sync(() => steer.onSteer?.(threadId, text));
     }
+    if (sideQuestion) this.sideQuestion = sideQuestion;
   }
 
   steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
+
+  /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
+  sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;
 
   /** Like the drivers that can: a session already running is given the servers of the day. */
   async updateMcpServers(threadId: string, servers: readonly McpServerSpec[]): Promise<void> {
@@ -161,13 +166,16 @@ export interface TestHarnessOptions {
   readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
   /** Sees each steer a driver accepted. */
   readonly onSteer?: (threadId: string, text: string) => void;
+  /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
+  readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness", (input: SideQuestionInput) => Promise<SideAnswer>>>;
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
   const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
-    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined);
+    const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),

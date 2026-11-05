@@ -888,6 +888,8 @@ function moxenToolView(
       const outcome = asString(result?.outcome);
       return view("message task", outcome === null ? null : (TASK_MESSAGE_OUTCOME[outcome] ?? outcome));
     }
+    case "task_ask":
+      return view("ask task", result?.timedOut === true ? "no answer yet" : status === null ? null : said);
     case "message_queue": {
       const when = asString(result?.scheduledFor);
       return view("queue message", result === null ? null : result.status === "running" ? "started now" : when !== null ? `queued for ${when}` : "queued", [input.threadId === undefined ? "own thread" : null]);

@@ -747,9 +747,27 @@ continued before this link existed can't reach what their source left behind.
 A research run's lead and roles are
 never reachable (`TASK_SEND_RESEARCH`): their messages are scoped and capped by
 the run, and a free message would be a way round both. A delegated task, a
-research lead and a research role are not offered `task_send` at all. An empty
-message is refused as in `threads send`; there is no length cap, as there is
-none there.
+research lead and a research role are not offered `task_send` or `task_ask` at
+all. An empty message is refused as in `threads send`; there is no length cap,
+as there is none there.
+
+### Asking a delegated task a side question (`task_ask`)
+
+`task_ask` takes `taskId` and `question` and answers it the way `/btw` answers
+a person's: the task's own provider replies on a copy of its session, with no
+tools, and neither the question nor the answer is recorded in the task or
+touches its turn (`thread.side-question`). It therefore works while the task is
+running, and the answer cannot read a file or run a command; the result says
+so, so a limit in the answer is not read as a fault in the task. A finished
+task answers from its recorded session; a task with no session yet answers
+without its context, and the result says that too.
+
+The ownership rule is `task_send`'s, continuations included, and a research
+run's lead and roles are refused (`TASK_ASK_RESEARCH`). A provider that cannot
+copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
+than an error, so the orchestrator can fall back to `thread_read`. The call
+waits at most 45 seconds, then returns a `timedOut` result; the task is
+unchanged either way.
 
 ### Queueing a message from an agent (`message_queue`)
 

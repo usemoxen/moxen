@@ -34,6 +34,7 @@ import { requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
+  AskedTask,
   CancelledTask,
   SentTaskMessage,
   QueuedAgentMessage,
@@ -270,6 +271,13 @@ export type CommandBody =
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
   /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
   | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
+  /**
+   * A side question to a task the caller delegated (moxen's `task_ask`): the
+   * task's own provider answers on a copy of its thread, with no tools, and
+   * nothing is recorded there. Owned like `task_send`; spends usage, so a
+   * transport must never retry it.
+   */
+  | { readonly type: "thread.task.ask"; readonly parentThreadId: string; readonly taskId: string; readonly question: string }
   /** An agent's message into its own thread's queue, or a task it delegated's (moxen's `message_queue`). */
   | { readonly type: "thread.message.queue"; readonly callerThreadId: string; readonly message: string; readonly threadId?: string; readonly at?: string; readonly conditions?: QueuePolicy["conditions"] }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
@@ -441,6 +449,7 @@ export interface CommandResults {
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.task.send": SentTaskMessage;
+  "thread.task.ask": AskedTask;
   "thread.message.queue": QueuedAgentMessage;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
@@ -1234,6 +1243,14 @@ export function decodeCommand(value: unknown): Command {
         taskId: requireField(record.taskId, type, "taskId"),
         message: requireField(record.message, type, "message"),
         ...optionalBoolean(record, "wake"),
+      };
+    case "thread.task.ask":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+        question: requireField(record.question, type, "question"),
       };
     case "thread.message.queue":
       return {
