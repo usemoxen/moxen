@@ -5,11 +5,13 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CliConfig } from "../../types.js";
+import { resetUsageLimitsForTests, recordUsageWindows } from "../../usage/limits.js";
 import { MAX_USAGE_CONTINUES, autoContinuesAt, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { toThreadEnvelope } from "../project.js";
 import { armScheduledTurn, armedScheduleCount, onScheduledTurnDue } from "../schedule.js";
 import { openThreadStore } from "../store.js";
 import { completeTurn, createThread, holdPromotedTurn, interruptTurn, isHeldTurn, promoteDueScheduledTurn, sendTurn, turnPrompt, updateThreadMeta } from "../threads.js";
+import { queueAdmission } from "../queue.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 const MODEL = { instanceId: "claudeAgent", model: "claude-fable-5-1" };
@@ -17,6 +19,7 @@ const cleanup: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   onScheduledTurnDue(null);
+  resetUsageLimitsForTests();
   vi.useRealTimers();
   await Promise.all(cleanup.splice(0).map((run) => run()));
 });
@@ -296,5 +299,25 @@ describe("holding a queued message for the reset", () => {
     store.trackRunning(sent.turn.id, () => {});
     expect(await holdPromotedTurn(store, thread.id, sent.turn.id, "2026-09-26T15:01:00.000Z")).toBe(false);
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === sent.turn.id)?.status).toBe("running");
+  });
+
+  it("holds a plain queued turn at settle while its provider is exhausted", async () => {
+    let now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread } = await setup(() => now);
+    const first = await sendTurn(store, thread.id, { prompt: "the turn that settles" });
+    const queued = await sendTurn(store, thread.id, { prompt: "sent while it ran", delivery: "queue" });
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    await completeTurn(store, thread.id, first.turn.id, { text: "done" });
+    // Held, not promoted: the queue shows it blocked on the same exhaustion.
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued" });
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.promoted")).toBe(false);
+    const row = { thread: (await store.readThreadRecord(thread.id))!, turns: await store.readTurns(thread.id) };
+    const waiting = row.turns.find((turn) => turn.id === queued.turn.id)!;
+    expect(queueAdmission(row, waiting, [row], {} as CliConfig, now).blocked).toContain("claude: usage exhausted");
+    // After the reset lapses the next settle promotes it.
+    now += 3600_000 + 1000;
+    const retry = await sendTurn(store, thread.id, { prompt: "meanwhile" });
+    await completeTurn(store, thread.id, retry.turn.id, { text: "done" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "running" });
   });
 });

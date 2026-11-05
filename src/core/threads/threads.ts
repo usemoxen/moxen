@@ -11,7 +11,8 @@ import os from "node:os";
 
 import { imageSetError } from "../attachments.js";
 import { CliError } from "../errors.js";
-import { captureUsageProtectionOverride, usageProtectionOverrideActive } from "../usage/limits.js";
+import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
+import { providerExhausted } from "./queue.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -806,7 +807,18 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   const turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
-  const next = turns.find((turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold") && !isHeldTurn(turn, Date.parse(now)));
+  const instant = Date.parse(now);
+  const next = turns.find((turn) => {
+    if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
+    if (admittedId) return turn.id === admittedId;
+    if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
+    // Plain turns never pass through the admission path, so their one
+    // admission check lives here: `queueAdmission` — and the Work queue
+    // display built on it — blocks any non-automatic turn on an exhausted
+    // provider. Promoting regardless would start a turn the queue shows as
+    // blocked, failing it into a hold instead of letting it wait.
+    return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+  });
   if (!next) return;
   if (pause && pause.recoveryTurnId === next.id) {
     await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
