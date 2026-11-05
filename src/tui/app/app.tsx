@@ -850,6 +850,9 @@ export function App({
         } else if (sessionRunningRef.current && busyDelivery === "queue") {
           toasts.push("queued", "info", t("app.queued_sent_once_this_2b24"), COPY_TOAST_MS);
         }
+        if (result.researchSizePending === true) {
+          toasts.push("research-size", "info", t("send.researchSizePending"), COPY_TOAST_MS);
+        }
       })
       .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
   };

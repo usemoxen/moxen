@@ -697,6 +697,7 @@ export const en = {
   "attach.limit": "A message can carry {max} images — delete an [Image #N] to attach another",
   "send.queuedAfterContinue": "Queued: goes out after the continue at {at} (see Queued, above)",
   "send.scheduledFor": "Scheduled for {when} (see Queued, above)",
+  "send.researchSizePending": "Run size still to choose — the next send asks for it",
   "send.cannot": "Cannot send: {why}",
   "send.notAttached": "Not attached: {why}",
   "title.working": "{frame} {title} — working {time}",

@@ -491,6 +491,12 @@ export interface StartedTurnSummary {
   readonly status: TurnStatus;
   /** Steer/inject only: whether the running provider turn received it, or it was only recorded. */
   readonly steerDelivered?: boolean;
+  /**
+   * True when the send carried a Research question that was parked: the
+   * thread was busy, or no client was listening for the run-size question
+   * yet. The one-shot flag survives, so a later send asks for it.
+   */
+  readonly researchSizePending?: boolean;
 }
 
 // -- queries ------------------------------------------------------------------

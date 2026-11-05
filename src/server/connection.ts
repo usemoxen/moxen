@@ -510,6 +510,25 @@ export class DirectConnection implements ClientApi {
     return await this.dispatch({ type: "thread.delegate", ...request, interactionMode: "research", research: { ...request.research, size } });
   }
 
+  /**
+   * How long a user's own Research send waits for a client to listen for the
+   * run-size question before parking it. The send can win the race against
+   * the client's opt-in (`subscribeShell({ researchProposals })`); without
+   * the wait the question would be parked even though a client is already
+   * opening the thread.
+   */
+  private static readonly researchResponderWaitMs = 1_000;
+
+  /** True once a client listens for this thread's run-size question (or the connection closed meanwhile). */
+  private async awaitResearchResponder(threadId: string): Promise<boolean> {
+    const start = Date.now();
+    while (!this.closed && (this.researchResponders.get(threadId) ?? 0) <= 0) {
+      if (Date.now() - start >= DirectConnection.researchResponderWaitMs) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return !this.closed;
+  }
+
   private async chooseResearch(
     threadId: string,
     task: string,
@@ -1485,7 +1504,39 @@ export class DirectConnection implements ClientApi {
     // The picker shows for `/research` (a prompt-only Research mode) and for the first
     // prompt after the user switched the thread into Research mode, not for every message in it.
     const asksSize = command.interactionMode === "research" || (thread?.researchPicker === true && mode === "research");
-    if (asksSize && thread?.researchPicker === true) {
+    // Asked unless a run is already active (or the thread cannot lead one).
+    // Never spent without asking: while the thread is busy, or no client is
+    // listening for the question yet, the flag survives this send and the
+    // result says the run size is still to choose.
+    const askable = asksSize && mode === "research" && !isResearchRunActive(thread?.researchRun) && !thread?.researchRole &&
+      !(await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId);
+    let researchSizePending = false;
+    if (askable && !pending && await this.awaitResearchResponder(threadId)) {
+      // The one-shot flag is claimed under the thread lock: a concurrent send
+      // may have claimed it first, in which case this send just goes out.
+      let claim = command.interactionMode === "research";
+      if (thread?.researchPicker === true) {
+        await (await this.store()).withThreadLock(threadId, async () => {
+          const current = await (await this.store()).readThreadRecord(threadId);
+          if (current?.researchPicker) {
+            const { researchPicker: _asked, ...rest } = current;
+            await (await this.store()).writeThreadRecord(rest);
+            claim = true;
+          }
+        });
+      }
+      if (claim) {
+        const plan = await this.chooseResearch(threadId, message.text, "user-thread", command.modelSelection ? { modelSelection: command.modelSelection } : {});
+        if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");
+        if (plan) {
+          const ctx = await this.context();
+          const approved = resolveResearchPlan(command.modelSelection ?? thread!.modelSelection, ctx.config, plan);
+          await beginResearchRun(ctx, threadId, approved);
+        }
+      }
+    } else if (askable && thread?.researchPicker === true) {
+      researchSizePending = true;
+    } else if (asksSize && thread?.researchPicker === true) {
       await (await this.store()).withThreadLock(threadId, async () => {
         const current = await (await this.store()).readThreadRecord(threadId);
         if (current?.researchPicker) {
@@ -1493,16 +1544,6 @@ export class DirectConnection implements ClientApi {
           await (await this.store()).writeThreadRecord(rest);
         }
       });
-    }
-    if (asksSize && mode === "research" && !pending && !isResearchRunActive(thread?.researchRun) && !thread?.researchRole &&
-        !(await (await this.store()).readDelegations()).some((row) => row.childThreadId === threadId)) {
-      const plan = await this.chooseResearch(threadId, message.text, "user-thread", command.modelSelection ? { modelSelection: command.modelSelection } : {});
-      if (this.closed) throw new CliError("CONNECTION_CLOSED", "The server closed before research could start.");
-      if (plan) {
-        const ctx = await this.context();
-        const approved = resolveResearchPlan(command.modelSelection ?? thread!.modelSelection, ctx.config, plan);
-        await beginResearchRun(ctx, threadId, approved);
-      }
     }
     const started = await startTurn(await this.context(), {
       threadId,
@@ -1523,7 +1564,7 @@ export class DirectConnection implements ClientApi {
       // subscriptions register their own callbacks alongside this one.
       onEvent: () => undefined,
     });
-    return { ...(await this.settle(started, command.wait === true)), accepted: true };
+    return { ...(await this.settle(started, command.wait === true)), accepted: true, ...(researchSizePending ? { researchSizePending: true as const } : {}) };
   }
 
   /**

@@ -252,6 +252,79 @@ describe("full research runs", () => {
     } finally { unsubscribe(); await connection.close(); }
   });
 
+  it("parks the size question when a queued row is present instead of spending it", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      // A scheduled message queues while the thread is idle; it must not spend the question.
+      const scheduled = await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Later" }, scheduledFor: new Date(Date.now() + 3_600_000).toISOString(), wait: false });
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBe(true);
+      // Sticky Research mode carries no interactionMode of its own.
+      const parked = await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: true });
+      expect(parked.researchSizePending).toBe(true);
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBe(true);
+      expect(await connection.query({ type: "research.proposals", threadId: own.threadId })).toEqual([]);
+      // Once the queue clears, the same question is asked on the next send.
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId: own.threadId, turnId: scheduled.turnId });
+      const asking = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: false });
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await asking;
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
+  it("keeps the size question when no client listens yet, and asks once one does", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      // No opt-in: the send waits for one, then parks the question instead of spending it.
+      const parked = await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: true });
+      expect(parked.researchSizePending).toBe(true);
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBe(true);
+      expect(await connection.query({ type: "research.proposals", threadId: own.threadId })).toEqual([]);
+      // A late opt-in still gets the question on the next send.
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      const asking = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: false });
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await asking;
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
+  it("still asks when the opt-in lands while the send waits for it", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      const asking = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "First question" }, wait: false });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      // The flag is spent only because a proposal exists to answer.
+      expect((await store.readThreadRecord(own.threadId))?.researchPicker).toBeUndefined();
+      const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await asking;
+      expect(await connection.query({ type: "research.proposals", threadId: own.threadId })).toEqual([]);
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
   it.each([1, 8])("enforces %i total researchers atomically without orphans or reusing a settled slot", async (researchers) => {
     const harness = await testHarness({ leaveTurnsRunning: true });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
