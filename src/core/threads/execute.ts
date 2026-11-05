@@ -441,8 +441,17 @@ export interface ExecuteTurnArgs {
   readonly onEvent?: (event: ProviderRuntimeEvent) => void;
   /** The provider already started this turn itself (a background turn): await it, send nothing. */
   readonly driverTurnId?: string;
-  /** Called once the provider has accepted the prompt: what the prompt carried is now delivered. */
-  readonly afterSend?: () => void | Promise<void>;
+  /**
+   * Called once the provider has answered the prompt (it produced output): what the prompt carried is now delivered.
+   * Accepting a prompt is not enough: a turn a usage limit stopped before the model ran never read it.
+   */
+  readonly afterAnswer?: () => void | Promise<void>;
+  /**
+   * The provider's conversation had no history before this turn. If the turn ends with no output from the
+   * provider, the session handle it stored is dropped and the turn marked `unanswered`: the next turn starts clean
+   * and carries what this one sent.
+   */
+  readonly freshConversation?: boolean;
   /** A usage limit stopped this turn (`resetsAt` when the provider said): the automatic continue hooks in here. */
   readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
   /** Once the turn has settled and any queued turn is under way: where the server hands off or compacts a long thread unasked. */
@@ -850,6 +859,40 @@ async function persistResumeCursor(store: ThreadStore, driver: TurnDriver, threa
 }
 
 /**
+ * Whether the provider answered the prompt. Claude counts the turn's output
+ * tokens, and a usage-limit stop reads "You've hit your limit" as a message
+ * with none, so a count of zero is no answer; a provider that counts nothing
+ * answered if it said or did anything. An interrupt counts as answered once
+ * anything streamed, whatever the token count had reached.
+ */
+function turnAnswered(outcome: TurnOutcome, outputSeen: boolean): boolean {
+  if (outcome.status === "interrupted") return outputSeen;
+  if (outcome.turnOutputTokens !== undefined) return outcome.turnOutputTokens > 0;
+  return outcome.text.trim() !== "" || outputSeen;
+}
+
+/**
+ * A turn on a conversation with no history ended with no output: whatever
+ * handle the provider reported names a conversation that never read the
+ * prompt. Forget it, and mark the turn so the next turn carries its prompt.
+ * Best effort, like `persistResumeCursor`.
+ */
+async function forgetUnansweredSession(store: ThreadStore, args: ExecuteTurnArgs, threadId: string, storeTurnId: string): Promise<void> {
+  await store
+    .withThreadLock(threadId, async () => {
+      const thread = await store.readThreadRecord(threadId);
+      if (thread === null) return;
+      const key = driverKey((args.modelSelection ?? thread.modelSelection).instanceId);
+      if (thread.providerSessions?.[key] !== undefined) {
+        const { [key]: _forgotten, ...providerSessions } = thread.providerSessions;
+        await store.writeThreadRecord({ ...thread, providerSessions });
+      }
+      await store.updateTurn(threadId, storeTurnId, { unanswered: true });
+    })
+    .catch(() => undefined);
+}
+
+/**
  * Adopt the provider's own session title for the thread, once per settled
  * run (no polling). Only drivers whose provider keeps a title have
  * `sessionTitle`; a thread the user named is left alone. Best effort.
@@ -902,8 +945,10 @@ function recordTurnActivity(
   storeTurnId: string,
   modelSelection: ModelSelection | null,
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
-): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; saveUnfinishedText: () => Promise<void>; noteFailure: () => void } {
+): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; saveUnfinishedText: () => Promise<void>; noteFailure: () => void; outputSeen: () => boolean } {
   const written = new Map<string, string>();
+  // Whether the provider showed any output this turn (streamed text or a tool call).
+  let outputSeen = false;
   let limitRecorded = false;
   // Appends are chained rather than fired in parallel: the ledger is an
   // append-only file and the rows must land in the order they happened.
@@ -931,6 +976,7 @@ function recordTurnActivity(
       const message = unfinished.get(id) ?? { text: "", createdAt: store.nowIso() };
       message.text += event.text;
       unfinished.set(id, message);
+      if (event.text.trim()) outputSeen = true;
       return;
     }
     if (event.type === "reasoning.updated") {
@@ -1097,6 +1143,7 @@ function recordTurnActivity(
     if (row === null) return;
     if (written.get(row.callId) === row.signature) return;
     written.set(row.callId, row.signature);
+    outputSeen = true;
     append(row.kind, row.summary, row.payload);
   };
   /**
@@ -1135,7 +1182,7 @@ function recordTurnActivity(
     unfinished.clear();
     return chain;
   };
-  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure };
+  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen: () => outputSeen };
 }
 
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -1177,6 +1224,9 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
   const controller = new AbortController();
   let completedWithText = false;
+  let answered = false;
+  // Stopped by an interrupt: the provider may well have read the prompt, so its handle stays.
+  let interrupted = false;
   store.trackRunning(storeTurnId, () => controller.abort());
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
@@ -1199,8 +1249,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     // Persisted as soon as the turn is under way, not only at settle: a
     // process that dies mid-turn is exactly the one whose successor needs it.
     await persistResumeCursor(store, driver, threadId);
-    if (!args.driverTurnId) await args.afterSend?.();
     const outcome = await driver.awaitTurn(threadId, sent.turnId, controller.signal);
+    answered = turnAnswered(outcome, recordTools.outputSeen());
+    interrupted = outcome.status === "interrupted";
+    // Delivered before the outcome is recorded: whoever sees the turn settle sees the delivery too.
+    if (answered && !args.driverTurnId) await args.afterAnswer?.();
     await recordContextUsage(store, driver, threadId, storeTurnId);
     if (outcome.status === "failed") recordTools.noteFailure();
     if (outcome.status !== "completed" || !outcome.text) await recordTools.saveUnfinishedText();
@@ -1209,6 +1262,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   } catch (cause) {
     await recordTools.saveUnfinishedText();
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
+      interrupted = true;
       await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
       await settleCheckpoints(store, args, cwd, pre);
       return;
@@ -1234,7 +1288,8 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     await recordTools.flush();
     // Again at the end: some providers only report the handle once the
     // first reply lands (Claude's `init` arrives with it).
-    await persistResumeCursor(store, driver, threadId);
+    if (args.freshConversation && !answered && !interrupted) await forgetUnansweredSession(store, args, threadId, storeTurnId);
+    else await persistResumeCursor(store, driver, threadId);
     await syncProviderTitle(store, driver, threadId, cwd);
   }
 }

@@ -217,6 +217,11 @@ export interface StoredTurn {
   /** For an automatic continue after a usage limit: which attempt in a row (1-based). */
   readonly continueAttempt?: number;
   readonly error: string | null;
+  /**
+   * The turn was the first the provider's conversation was given and it ended with no output (a usage limit).
+   * The provider never read its prompt, so the next turn on that conversation sends it again.
+   */
+  readonly unanswered?: true;
   /** Tokens spent by the provider run; null when the driver reported none. */
   readonly usage: TurnUsage | null;
   /** Per-turn output when usage itself is a provider session total. */

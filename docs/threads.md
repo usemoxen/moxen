@@ -571,6 +571,14 @@ model that fits it, checking budget, memory and isolation before delegating.
   is kept on the thread (`modeState`), and forgotten after a compaction or
   a revert so the procedure is sent again. On OpenCode it is an instruction
   entry (`moxen-research` / `moxen-orchestrate`), removed in Build.
+- **Told once the provider answers:** a mode block, and a runtime instruction
+  update, count as delivered when the provider has produced output for the
+  prompt that carried them, not when it accepts the prompt. A first turn on a
+  conversation that ends with no output (a usage limit stopped it before the
+  model ran) is marked `unanswered`: its session handle is dropped, nothing
+  is recorded as told, and the next turn starts clean with that turn's prompt
+  (a handoff document, say) ahead of it, up to the last turn the provider
+  answered, along with the mode block.
 - A new thread starts in Build unless a mode is picked while drafting it,
   and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate.
 - The TUI shows the mode as the composer's left-edge colour (Build sky,

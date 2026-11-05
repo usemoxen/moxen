@@ -151,7 +151,7 @@ export interface BuiltinMcpOptions {
 /** Runtime instructions the model has not seen yet: put before the next prompt, then recorded as delivered. */
 interface InstructionsUpdate {
   readonly text: string;
-  /** Record the update as delivered; called once the provider has accepted the prompt that carried it. */
+  /** Record the update as delivered; called once the provider has answered the prompt that carried it. */
   readonly delivered: () => Promise<void>;
 }
 
@@ -200,9 +200,40 @@ async function withUsageProtectionContext(ctx: OperationContext, thread: StoredT
   return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
 }
 
-/** What to record once the provider accepted a prompt `promptWithUpdate` built. */
+/** What to record once the provider answered a prompt `promptWithUpdate` built. */
 function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
   return [setup.instructionsUpdate?.delivered, setup.modeUpdate?.delivered].filter((step): step is () => Promise<void> => step !== undefined);
+}
+
+/**
+ * A conversation with no history starts clean, but an earlier turn on it may
+ * have ended with no output from the provider (a usage limit; see `unanswered`
+ * on the turn): the provider never read that prompt, and the work is in it
+ * (a handoff document, say). Those prompts go ahead of this one, up to the
+ * last turn the provider did answer. A usage continue is only a nudge and stays out.
+ * An interrupted turn is not one of these: the provider may have read it.
+ */
+async function withUnansweredPrompts(
+  ctx: OperationContext,
+  thread: StoredThread,
+  turnId: string,
+  setup: { fresh: boolean; key: string },
+  prompt: string,
+): Promise<string> {
+  // A slash command has to stay first for the provider to read it as one.
+  if (!setup.fresh || prompt.trimStart().startsWith("/")) return prompt;
+  const turns = await ctx.store.readTurns(thread.id);
+  if (!turns.some((turn) => turn.unanswered)) return prompt;
+  const messages = await ctx.store.readMessages(thread.id);
+  let owed: string[] = [];
+  for (const turn of turns) {
+    if (turn.id === turnId || driverKey((turn.modelSelection ?? thread.modelSelection).instanceId) !== setup.key) continue;
+    if (turn.unanswered) {
+      const own = turn.scheduleReason === "usage-reset" ? null : turnPrompt(messages, turn);
+      if (own) owed.push(own.text);
+    } else if (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted") owed = [];
+  }
+  return owed.length === 0 ? prompt : `${owed.join("\n\n")}\n\n${prompt}`;
 }
 
 /**
@@ -244,7 +275,7 @@ async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
   instanceId: string = thread.modelSelection.instanceId,
-): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
+): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; fresh: boolean; key: string; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
@@ -342,6 +373,8 @@ async function sessionSetup(
         ? null
         : { text: plan.update, delivered: () => record({ ...next, delivered: plan.update! }) },
     modeUpdate: pendingModeUpdate(ctx, thread, key, history),
+    fresh: !history,
+    key,
   };
 }
 
@@ -407,8 +440,9 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     driver,
     threadId,
     storeTurnId: turn.id,
-    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, message.text), setup),
-    ...(steps.length > 0 ? { afterSend: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup),
+    ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+    ...(setup.fresh ? { freshConversation: true } : {}),
     interactionMode: turn.interactionMode,
     ...(images.length > 0 ? { images } : {}),
     modelSelection: selection,
@@ -1259,8 +1293,9 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     driver,
     threadId: thread.id,
     storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, driverPrompt ?? input.prompt.trim()), setup), rules?.text ?? null),
-    ...(delivered.length > 0 ? { afterSend: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+    ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+    ...(setup.fresh ? { freshConversation: true } : {}),
     ...(images.length > 0 ? { images } : {}),
     // Always the turn's own model, so a live session switches when the
     // thread's model changed since it started.
