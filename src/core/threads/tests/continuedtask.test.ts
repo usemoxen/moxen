@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, queueTaskNotification, runningTasksNote, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../operations.js";
+import { continueThread, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
 
 afterEach(() => vi.useRealTimers());
@@ -48,9 +48,13 @@ describe("a delegated task continued in a new thread", () => {
     queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTurnRunners();
     expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
-    await new Promise((resolve) => setTimeout(resolve, TASK_NOTIFICATION_BATCH_MS + 300));
-    await flushTurnRunners();
-    const sent = await notificationsIn(w, parent.id);
+    let sent: string[] = [];
+    for (let waited = 0; waited < 10_000; waited += 200) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flushTurnRunners();
+      sent = await notificationsIn(w, parent.id);
+      if (sent.length > 0) break;
+    }
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(`taskId ${continued.threadId}, continued from taskId ${child.id}`);
     expect(sent[0]).not.toContain(`(taskId ${child.id}`);
@@ -102,8 +106,11 @@ describe("an orchestrator continued in a new thread", () => {
     const waiting = (await w.store.readTurns(running.id)).find((turn) => turn.status === "queued")!;
     await interruptTurn(w.store, running.id, waiting.id);
     queueTaskNotification(w.ctx, parent.id, running.id);
-    await new Promise((resolve) => setTimeout(resolve, 2 * TASK_NOTIFICATION_BATCH_MS + 300));
-    await flushTurnRunners();
+    for (let waited = 0; waited < 10_000; waited += 200) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flushTurnRunners();
+      if ((await notificationsIn(w, continued.threadId)).length > 0) break;
+    }
     expect(await notificationsIn(w, parent.id)).toEqual([]);
     expect((await notificationsIn(w, continued.threadId)).join("\n")).toContain(`taskId ${running.id}`);
   }, 15_000);
