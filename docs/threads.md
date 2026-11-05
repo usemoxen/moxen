@@ -301,8 +301,15 @@ silently dropping the wake-up. The original native conversation remains the
 source for any trigger text the provider did not expose.
 
 Clients call `ClientApi.dispatch({ type: "thread.protect", threadId })`; it follows
-the same paired-remote access rule as ordinary thread commands. No CLI or TUI
-command is required by the server. In `ThreadEnvelope` (`src/core/types.ts`),
+the same paired-remote access rule as ordinary thread commands. The TUI's
+`/protect` (listed in the composer's `/` picker, a bare command that is never
+sent to the agent and cannot be scheduled) dispatches it for the open thread;
+the CLI has no command for it. While held, the TUI shows one line over the
+composer: "Thread protected" (by you, when forced, saying a message ends it)
+and the number of wake-ups waiting. A turn a forced hold cut off closes on a
+"Protected by you" marker with no reset line, and a queued provider
+notification (`origin: "background-notification"`) shows as "Background task
+finished" instead of its raw payload. In `ThreadEnvelope` (`src/core/types.ts`),
 `protection` is present only while held and contains `protected: true`, `forced`
 (boolean), and `waitingWakeUps` (queued automatic deliveries and scheduled
 messages, excluding the protection recovery entry and removed entries). The field

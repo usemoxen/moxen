@@ -30,6 +30,7 @@ export function detectSkillTrigger(text: string, cursorOffset: number): SkillTri
 const moxenCommands = (): readonly SkillSummary[] => [
   plainSkill("compact", t("cmd.compact")),
   plainSkill("btw", t("cmd.btw"), { shortDescription: t("cmd.btwShort") }),
+  plainSkill("protect", t("cmd.protect")),
   plainSkill("research", t("cmd.research")),
   plainSkill("orchestrate", t("cmd.orchestrate")),
 ];

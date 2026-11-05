@@ -301,6 +301,25 @@ export function useThreadOps(params: {
   };
 
   /**
+   * `/protect`: holds the open thread under usage protection by hand. The
+   * hold shows on the thread (`ThreadEnvelope.protection`), so the toast only
+   * says it took; a refusal (an archived thread) surfaces as an error.
+   */
+  const protectThread = (onDispatched: () => void = () => undefined) => {
+    if (openThreadId === null || selected === null) {
+      setError(t("ops.noneProtect"));
+      return;
+    }
+    void client
+      .dispatch({ type: "thread.protect", threadId: selected.id })
+      .then(() => {
+        toasts.push("thread-protected", "info", t("ops.protected"), COPY_TOAST_MS);
+        onDispatched();
+      })
+      .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+  };
+
+  /**
    * Message click shared by prompts and the closing reply: Copy plus Revert
    * for both (revert resolves through the entry's turn either way). A
    * text-selection drag ending on the card must not act, so a non-empty live
@@ -399,6 +418,7 @@ export function useThreadOps(params: {
     regenerateThreadTitle,
     archiveThread,
     compactSession,
+    protectThread,
     openMessageActions,
     revertMessageTurn,
     submitRename,

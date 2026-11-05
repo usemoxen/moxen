@@ -4,7 +4,7 @@ import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
 import { toMessageEnvelope } from "../../../core/threads/project.js";
-import { applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
+import { isBackgroundNotification, applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
 function activity(id: string, kind: string, payload: Record<string, unknown>, turnId = "turn-1"): ActivityEnvelope {
   return { id, tone: "info", kind, summary: kind, turnId, createdAt: `2026-09-25T10:00:0${id.length % 10}.000Z`, payload } as unknown as ActivityEnvelope;
@@ -289,6 +289,21 @@ describe("continuing after a usage limit", () => {
     const promoted = activity("p1", "turn.promoted", {}, "turn-2");
     const ran = timeline(state({ activities: [queued, promoted, stopped], messages: [prompt("m2", "turn-2", "queued one")] }));
     expect(ran.map((entry) => entry.id)).toEqual(["m2"]);
+  });
+
+  it("labels a queued native background notification instead of dumping its raw payload", () => {
+    const held = (messageId: string) => ({ id: "t", queuedTurns: [{ turnId: "t", messageId, scheduledFor: null, scheduleReason: "usage-hold" }] }) as unknown as ThreadState["thread"];
+    const raw = '{"task_id":"b1","status":"completed","output_file":"/tmp/out"}';
+    const items = queuedMessages(state({ messages: [prompt("n", "t", raw, "background-notification")], thread: held("n") }));
+    expect(items).toHaveLength(1);
+    expect(isBackgroundNotification(prompt("n", "t", raw, "background-notification"))).toBe(true);
+    expect(isBackgroundNotification(prompt("u", "t", raw))).toBe(false);
+    expect(items[0]!.background).toBe(true);
+    expect(queuedLabel(items[0]!)).toBe("Background task finished");
+    expect(queuedLabel(items[0]!)).not.toContain("task_id");
+    // The user's own message with the same text is still shown as typed.
+    const typed = queuedMessages(state({ messages: [prompt("u", "t", raw)], thread: held("u") }));
+    expect(queuedLabel(typed[0]!)).toBe(raw);
   });
 
   it("tells a continue apart from the user's own prompts, tagged or by its text", () => {

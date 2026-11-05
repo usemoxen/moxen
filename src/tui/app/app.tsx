@@ -146,7 +146,8 @@ import { promptWithPaths } from "../model/pathattachments.js";
 import { useFileAttachments } from "../features/composer/useFileAttachments.js";
 import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel, useUsageProtection } from "../features/sidepanel/useSidePanel.js";
-import { usageProtectionNotices } from "../model/usageprotection.js";
+import { isProtectCommand } from "../model/usagepause.js";
+import { threadProtectionNotice, usageProtectionNotices } from "../model/usageprotection.js";
 import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
 import { useProviderCatalog } from "../features/pickers/useProviderCatalog.js";
@@ -687,6 +688,7 @@ export function App({
     regenerateThreadTitle,
     archiveThread,
     compactSession,
+    protectThread,
     openMessageActions,
     revertMessageTurn,
     submitRename,
@@ -1641,6 +1643,8 @@ export function App({
         };
   /** What waits over the composer, most urgent first; the banner pages between them. */
   const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
+  const threadProtection = threadState.thread?.protection ?? selected?.protection;
+  if (threadProtection !== undefined) notices.push(threadProtectionNotice(threadProtection));
   notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now, providers));
   if (usageProtection.error) notices.push({ key: "usage-error", glyph: "!", glyphColor: COLOR.danger, title: usageProtection.error, detail: null, actions: [] });
   if (usageBanner.banner !== null) {
@@ -2539,6 +2543,12 @@ export function App({
   const submitComposerWithSchedule = (schedule?: { queue?: QueuePolicy; at?: Date }) => {
     if (editingExternallyRef.current) return;
     if (schedule && parseSideQuestion(draft) !== null) { setError(t("queue.noSideQuestion")); return; }
+    // `/protect` alone holds this thread by hand; it never reaches the thread as text, nor waits on a schedule.
+    if (isProtectCommand(draft)) {
+      if (schedule) { setError(t("queue.noProtect")); return; }
+      protectThread(() => resetDraft(openThreadId ?? "__creating__"));
+      return;
+    }
     const submit = (text: string) => {
       if (creating) createThread(text, { ...(schedule?.queue ? { queue: schedule.queue } : {}), ...(schedule?.at ? { scheduledFor: schedule.at.toISOString() } : {}) });
       else send(text, schedule ? "queue" : "steer", schedule?.at, schedule?.queue);

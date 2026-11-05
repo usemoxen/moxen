@@ -21,8 +21,8 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import { describeActivity, fileRowCounts, formatMs, memoryLabel, memoryTitle, readRangeLabel, webToolSource } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { renderMessage } from "../../model/message.js";
-import { isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
-import { usagePauseLines } from "../../model/usagepause.js";
+import { isBackgroundNotification, isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
+import { usagePauseLines, usagePauseTitle } from "../../model/usagepause.js";
 import type { TurnUsagePause } from "../../../core/types.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
 import { isWaiting, workingMs } from "../../model/waits.js";
@@ -886,7 +886,7 @@ function UsagePauseNotice({ pause, now }: { pause: TurnUsagePause; now: number }
     <box border={["left"]} borderStyle="heavy" borderColor={COLOR.warn} backgroundColor={SURFACE.panel}
       style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}>
       {/* Not SpeakerHeader: it clips on one row, and this marker must wrap in a narrow column. */}
-      <text fg={COLOR.warn} bg={SURFACE.panel} style={{ flexShrink: 0 }}>{`${tr("timeline.usagePaused")}  ·  ${clockTime(pause.pausedAt, now)}`}</text>
+      <text fg={COLOR.warn} bg={SURFACE.panel} style={{ flexShrink: 0 }}>{`${usagePauseTitle(pause)}  ·  ${clockTime(pause.pausedAt, now)}`}</text>
       {usagePauseLines(pause, now).map((line, index) => (
         <text key={index} fg={COLOR.dim} bg={SURFACE.panel} style={{ flexShrink: 0 }}>{line}</text>
       ))}
@@ -899,7 +899,7 @@ function ContinueNotice({ entry, now }: { entry: TimelineEntry; now: number }) {
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, paddingLeft: 1 }}>
       <text fg={COLOR.warn}>{"↻ "}</text>
-      <text fg={COLOR.dim}>{tr(entry.message?.origin === "handoff-summary" ? "timeline.preparingHandoff" : "timeline.continued")}</text>
+      <text fg={COLOR.dim}>{tr(entry.message?.origin === "handoff-summary" ? "timeline.preparingHandoff" : isBackgroundNotification(entry.message) ? "timeline.backgroundNotification" : "timeline.continued")}</text>
       <text fg={COLOR.faint}>{`  ·  ${clockTime(entry.at, now)}`}</text>
     </box>
   );
@@ -1384,6 +1384,7 @@ function TurnBlock({  group,
     // Show the wrap-up notice, never the maintenance prompt itself.
     if (isUsageProtection(entry.message)) return <UsageProtectionNotice key={entry.id} entry={entry} now={now} />;
     if (isUsageContinue(entry.message) || entry.message?.origin === "handoff-summary") return <ContinueNotice key={entry.id} entry={entry} now={now} />;
+    if (isBackgroundNotification(entry.message)) return <ContinueNotice key={entry.id} entry={entry} now={now} />;
     const ask = entry.message?.role === "user" ? readOpenRequestPrompt(entry.message.text) : null;
     if (ask !== null) return <OpenRequestBlock key={entry.id} entry={entry} ask={ask} now={now} />;
     const tasks = taskNotifications(entry.message);
@@ -1444,7 +1445,7 @@ function TurnBlock({  group,
   // A delegated task settling mid-turn is not something the user said: folded,
   // its card stays where it landed — below the fold, not above it with the
   // opening prompts.
-  const lateNotices = workExpanded ? [] : group.nudges.filter((entry) => taskNotifications(entry.message) !== null);
+  const lateNotices = workExpanded ? [] : group.nudges.filter((entry) => taskNotifications(entry.message) !== null || isBackgroundNotification(entry.message));
   const work =
     (inFlow && group.reply !== null) || nudges.length > 0
       ? [...group.work, ...(inFlow && group.reply !== null ? [group.reply] : []), ...nudges].sort((left, right) => left.at.localeCompare(right.at))

@@ -73,7 +73,7 @@ export function QueuedPanel({
     return (
       <box key={item.turnId} style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${index + 1}. `}</text>
-        <OverflowText fg={item.tasks === undefined ? COLOR.text : COLOR.dim} bg={SURFACE.panel} width={textWidth}>{firstLine || t("queued.image_only_d3ad")}</OverflowText>
+        <OverflowText fg={item.tasks === undefined && item.background !== true ? COLOR.text : COLOR.dim} bg={SURFACE.panel} width={textWidth}>{firstLine || t("queued.image_only_d3ad")}</OverflowText>
         <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{extra}</text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         <text fg={item.reason === "usage-hold" ? COLOR.warn : COLOR.faint} bg={SURFACE.panel} selectable={false}>

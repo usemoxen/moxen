@@ -1125,6 +1125,11 @@ export function isUsageContinue(message: MessageEnvelope | null): boolean {
   return !isUsageProtection(message) && (message.origin === "usage-continue" || (message.role === "user" && message.text === USAGE_CONTINUE_PROMPT));
 }
 
+/** A provider's own background-task completion, delivered to the thread as a message whose text is raw payload. */
+export function isBackgroundNotification(message: MessageEnvelope | null): boolean {
+  return message !== null && message.origin === "background-notification";
+}
+
 /** Earlier protection prompts shared the recovery tag; do not label them as a reset. */
 export function isUsageProtection(message: MessageEnvelope | null): boolean {
   return message !== null && (message.origin === "usage-protection" || (message.origin === "usage-continue" && message.text.startsWith("The provider's shared usage allowance is nearly exhausted.")));
@@ -1150,10 +1155,13 @@ export interface QueuedMessage {
   readonly reason: "user" | "usage-reset" | "usage-hold" | null;
   /** Set when the message is moxen's own "your delegated tasks settled" note. */
   readonly tasks?: readonly TaskNotificationView[];
+  /** Set when it is a provider's own background-task notice, whose text is raw payload. */
+  readonly background?: true;
 }
 
 /** What the Queued panel shows for a message: its first line, or a summary for a task notification (whose text is a tag the user never typed). */
-export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks">): string {
+export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "background">): string {
+  if (item.background === true) return tr("timeline.backgroundNotification");
   const tasks = item.tasks;
   if (tasks !== undefined && tasks.length > 0) {
     if (tasks.length > 1) return tr("timeline.tasksSettled", { count: tasks.length });
@@ -1185,6 +1193,7 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
         scheduledFor: queued.scheduledFor,
         reason: queued.scheduleReason,
         ...(tasks === null ? {} : { tasks }),
+        ...(isBackgroundNotification(message) ? { background: true as const } : {}),
       },
     ];
   });

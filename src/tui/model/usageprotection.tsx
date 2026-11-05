@@ -3,7 +3,7 @@ import type { Notice } from "../ui/noticebanner.js";
 import { COLOR } from "../theme.js";
 import { t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
-import { driverKindOfInstance } from "../../core/types.js";
+import { driverKindOfInstance, type ThreadEnvelope } from "../../core/types.js";
 import { formatDuration } from "./turns.js";
 
 type UsageQueueEntry = QueryResults["usage.protection"]["queue"][number];
@@ -61,4 +61,21 @@ export function usageProtectionNotices(
     });
   }
   return notices;
+}
+
+/**
+ * The open thread's own hold, one line over the composer: that it is protected,
+ * whether by the user, and how many automatic wake-ups wait. A forced hold
+ * says what ends it, since no reset will.
+ */
+export function threadProtectionNotice(protection: NonNullable<ThreadEnvelope["protection"]>): Notice {
+  const waiting = protection.waitingWakeUps;
+  return {
+    key: "thread-protected",
+    glyph: "◔", glyphColor: COLOR.warn,
+    title: t(protection.forced ? "protection.heldByYou" : "protection.held"),
+    ...(waiting > 0 ? { tags: [{ text: t("protection.wakeUps", { count: waiting }), color: COLOR.dim }] } : {}),
+    detail: <text fg={COLOR.dim} selectable={false}>{t(protection.forced ? "protection.heldByYouDetail" : "protection.heldDetail")}</text>,
+    actions: [],
+  };
 }
