@@ -104,8 +104,10 @@ describe("conditional work queue", () => {
   });
 
   it("does not lose an exhaustion event that resets before the next scheduler tick", async () => {
-    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const w = await world(); const thread = await w.make();
     await sendTurn(w.store, thread.id, { prompt: "after the event", queue: parseQueuePolicy({ conditions: [{ type: "provider", provider: "claude", state: "exhausted", mode: "after" }] }) });
+    // Read after queueing: on a loaded runner the entry can postdate an earlier clock reading, and its event must not.
+    const now = Date.now() + 1000;
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: null }], now + 1);
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: null }], now + 2);
     await runWorkQueue(w.ctx, now + 3); await settleRuns();

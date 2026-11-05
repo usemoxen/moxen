@@ -119,6 +119,18 @@ export class ThreadStore {
     this.aborts.set(turnId, abort);
   }
 
+  /**
+   * Take a promoted turn for one runner, or lose it to the one already running
+   * it. A turn stays `running` and untracked until `executeTurn` is past its
+   * setup, so without this a settling runner and the work queue both start it.
+   * `executeTurn` replaces this placeholder with the real abort.
+   */
+  claimRun(turnId: string): boolean {
+    if (this.aborts.has(turnId)) return false;
+    this.aborts.set(turnId, () => undefined);
+    return true;
+  }
+
   /** Whether a run in this process owns the turn. */
   isTracked(turnId: string): boolean {
     return this.aborts.has(turnId);

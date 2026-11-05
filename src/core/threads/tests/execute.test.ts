@@ -16,6 +16,7 @@ import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, 
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
+import { settleRuns } from "../../testing/turns.js";
 import { buildHandoff } from "../handoff.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -75,6 +76,32 @@ describe("executeTurn", () => {
     expect(await buildHandoff(reopened, thread.id)).toContain("Stopping here; tests remain unfinished.");
     expect(await buildHandoff(reopened, thread.id, { preferModelSummary: true })).toContain("Stopping here; tests remain unfinished.");
     expect(await buildHandoff(reopened, thread.id, { preferModelSummary: true })).toContain("Edits are on disk; inspect them before continuing.");
+  });
+
+  it("a settling runner leaves a promoted turn to the runner that claimed it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-claim-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "Race", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, env: { mode: "local", path: root, branch: null } });
+    const first = await sendTurn(store, thread.id, { prompt: "first" });
+    const queued = await sendTurn(store, thread.id, { prompt: "only once", delivery: "queue" });
+    const sent: string[] = [];
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true), startSession: () => Effect.succeed({}),
+      sendTurn: (input) => { sent.push(input.prompt); return Effect.succeed({ threadId: thread.id, turnId: "native" }); },
+      interruptTurn: () => Effect.void, streamEvents: Stream.never,
+      awaitTurn: async () => {
+        // The work queue has admitted the next turn and is still setting it up: running, not yet tracked.
+        if (sent.length === 1) {
+          await store.updateTurn(thread.id, queued.turn.id, { status: "running" });
+          store.claimRun(queued.turn.id);
+        }
+        return { status: "completed", text: "done", usage: null, error: null };
+      },
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "first" });
+    await settleRuns();
+    expect(sent).toEqual(["first"]);
   });
 
   it.each([false, true])("a late interrupted runner never interrupts the replacement wrap-up (throws=%s)", async (throws) => {

@@ -367,14 +367,15 @@ function sameEndpoint(left: OutOfProcessMcpServerSpec, right: McpServerSpec): bo
 export async function recoverOrphanedTurn(ctx: OperationContext, threadId: string): Promise<boolean> {
   const result = await reconcileOrphanedTurn(ctx.store, threadId).catch(() => null);
   if (!result) return false;
-  if (result.promoted) await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+  if (result.promoted && ctx.store.claimRun(result.promoted.id)) await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
   return true;
 }
 
+/** The caller has claimed `turn` (`claimRun`); every way out here settles or frees it. */
 async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<void> {
   const { store } = ctx;
   const thread = await store.readThreadRecord(threadId);
-  if (!thread) return;
+  if (!thread) { store.untrackRunning(turn.id); return; }
   // One message, or several queued ones batched into this turn at promotion.
   const message = turnPrompt(await store.readMessages(threadId), turn);
   if (message === null) {
@@ -454,7 +455,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     if (admission.blocked.length) continue;
     if (await switchColdRecovery(ctx, row, candidate, now)) continue;
     const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary);
-    if (!turn) return false;
+    if (!turn || !ctx.store.claimRun(turn.id)) return false;
     await runRecoveredTurn(ctx, threadId, turn);
     rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
     return true;

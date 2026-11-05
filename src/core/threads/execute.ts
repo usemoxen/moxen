@@ -482,12 +482,15 @@ export async function imagesOf(attachments: readonly StoredAttachment[]): Promis
  */
 async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
   const { store, threadId, driver } = args;
+  // Held until the turn is handed to `executeTurn`; any earlier way out frees it.
+  let claimed: string | null = null;
   try {
     const turns = await store.readTurns(threadId);
     const next = turns.find(
       (turn) => turn.status === "running" && turn.delivery === "queued" && !store.isTracked(turn.id),
     );
-    if (!next) return;
+    if (!next || !store.claimRun(next.id)) return;
+    claimed = next.id;
     const thread = await store.readThreadRecord(threadId);
     if (!thread) return;
     const selection = next.modelSelection ?? thread.modelSelection;
@@ -502,6 +505,8 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const standing = standingLimit(driverKey(selection.instanceId));
     if (standing !== null) {
       const until = new Date(Date.parse(standing.resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString();
+      store.untrackRunning(next.id);
+      claimed = null;
       if (await holdPromotedTurn(store, threadId, next.id, until)) armScheduledTurn(threadId, next.id, until);
       return;
     }
@@ -510,6 +515,7 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     if (prompt === null) return;
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
+    claimed = null;
     void executeTurn({
       store,
       driver,
@@ -526,6 +532,8 @@ async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     });
   } catch {
     // Best effort: the turn stays promoted and a later send can see it.
+  } finally {
+    if (claimed !== null) store.untrackRunning(claimed);
   }
 }
 
