@@ -73,6 +73,8 @@ const KERNEL_PREFIXES = [
   // Static starting points for the guided add flows (server types, MCP servers): data, not an operation.
   "src/core/providers/harness/presets",
   "src/core/threads/views",
+  // When `--at` and the agents' queue tool mean: one pure reading of a time, shared by both.
+  "src/core/threads/scheduledtime",
   // How big a research run may be and its three reviews: values the server enforces and a client offers.
   "src/core/threads/researchvocab",
   // When a long thread hands off or compacts: pure rules over config and a reading, like `threads/views`. The server acts on them; a client only draws the card.

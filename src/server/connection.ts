@@ -147,6 +147,7 @@ import {
   removeThreadWorktree,
   revertThread,
   runDueScheduledTurn,
+  queueAgentMessage,
   startTurn,
   type BuiltinMcpOptions,
   type OperationContext,
@@ -1157,6 +1158,8 @@ export class DirectConnection implements ClientApi {
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
+      case "thread.message.queue":
+        return await queueAgentMessage(await this.context(), command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) });
       case "thread.plan.set":
         return await recordChecklist(await this.context(), command.threadId, command.plan);
       case "thread.background.stop": {

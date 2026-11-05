@@ -53,7 +53,7 @@ exceptions.
   file, and points them away from any real server); `workspace.ts` backs the
   live-diff and attachment reads a client makes; `main.ts` is the
   server process; `mcp/` is the `moxen` MCP server every top-level provider
-  session gets (`delegate` / `task_status` / `task_cancel` / `task_send`, over `ClientApi`).
+  session gets (`delegate` / `task_status` / `task_cancel` / `task_send` / `message_queue`, over `ClientApi`).
   **New frontend surface goes here, not into a client.**
 - `src/cli/` — a client: `index.ts` (command definitions; thin dispatch
   over the modules below), `output.ts`, `doctor.ts`, and `catalog/`,

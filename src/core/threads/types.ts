@@ -280,8 +280,8 @@ export interface StoredMessage {
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
 }
 
-/** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. */
-export type MessageOrigin = "task-notification" | "background-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message";
+/** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */
+export type MessageOrigin = "task-notification" | "background-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message" | "agent-message";
 
 export interface StoredActivity {
   readonly id: string;

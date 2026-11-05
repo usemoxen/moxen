@@ -56,6 +56,7 @@ const SHARED_STEPS = [
     "`queued` means the task is busy and cannot take input mid-turn, so the message waits for its next turn and the task has not read it yet (do not assume it acted on it); " +
     "`not_delivered` means send it again once the task settles. A finished or settled task is refused unless you pass `wake: true`, which starts a new turn (spending usage); " +
     "you then get a task notification when it settles again. You can only message your own tasks, and not a research run's roles.",
+  "- `message_queue` queues or schedules a message on your own thread or on a task you delegated, to run later (after a usage reset, at a time, once another thread finishes); it never steers, shows in the user's Work queue, and `threadId` defaults to your own thread.",
   "- Your provider's own subagents are for quick same-model side work inside your turn; `delegate` is for another provider or model, " +
     "a specific effort, its own branch, or a thread the user should be able to open and steer.",
   "",

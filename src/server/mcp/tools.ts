@@ -20,6 +20,7 @@ import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/sett
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
+import { parseQueuePolicy } from "../../core/threads/queue.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan } from "../protocol.js";
 
@@ -208,6 +209,41 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "message_queue",
+    description:
+      "Queue a message on a thread, to run later: your own thread (the default: \"wake me after the usage reset\", \"check back in an hour\") or a task you delegated. " +
+      "It goes into the same queue the user's composer uses, so the entry shows in Work queue, where the user can edit or remove it. " +
+      "The message arrives as a message from you, not from the user. It is never a steer and never interrupts a turn. " +
+      "With no at and no conditions it queues behind the current turn and runs once when that turn ends (on an idle task it starts a turn at once). " +
+      "at holds it until a time; conditions hold it until the queue's own conditions are met; with both, it waits for both. " +
+      "Returns the entry's turnId, the threadId, and when it is expected to run. On a thread usage protection holds, the message waits behind the hold and does not end it. " +
+      "You can queue only on your own thread and tasks you delegated, and not on a research run's roles or lead. " +
+      "The message has none of your conversation when it runs: say it in full.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "What the thread should do or know when it runs. Say it in full." },
+        threadId: { type: "string", description: "A task you delegated. Omit for your own thread." },
+        delivery: { type: "string", enum: ["queue"], description: "Always queue: a queued message waits its turn. Steering and restarting are not offered." },
+        at: { type: "string", description: "When to run it: an ISO date-time, or HH:MM on the machine's clock (today, or tomorrow once that has passed)." },
+        conditions: {
+          type: "array",
+          maxItems: 16,
+          description: "Hold it until all of these are met. Each is an object with a type: " +
+            "{type:\"reset\", provider, window:\"session\"|\"weekly\"|\"all\"} (after that allowance resets); " +
+            "{type:\"usage\", provider, window, minimum} (at least minimum percent of the allowance left); " +
+            "{type:\"thread\", threadId} (after that thread has nothing running or queued); " +
+            "{type:\"entry\", threadId, turnId} (after that queue entry has run); " +
+            "{type:\"at\", at} (an ISO time); " +
+            "{type:\"provider\", provider, state:\"exhausted\"|\"protected\", mode:\"after\"|\"while\"}.",
+          items: { type: "object" },
+        },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 /** Finding and reading other threads (MXN-133). Results stay in the caller's context, so each answer is held to a budget. */
@@ -260,7 +296,7 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task is itself the delegation, so it gets none.
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "thread_search", "thread_read", "image_gen"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "message_queue", "thread_search", "thread_read", "image_gen"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -674,6 +710,19 @@ export async function callMoxenTool(
         const taskId = argString(args, "taskId", true)!;
         const sent = await api.dispatch({ type: "thread.task.send", parentThreadId, taskId, message: argString(args, "message", true)!, ...(args.wake === true ? { wake: true } : {}) });
         return ok({ taskId, outcome: sent.outcome, status: sent.task.status, woke: sent.woke, note: sent.note });
+      }
+      case "message_queue": {
+        if (args.delivery !== undefined && args.delivery !== "queue") throw new CliError("INVALID_TOOL_INPUT", "delivery must be \"queue\": a queued message cannot steer, restart or start a turn on its own.");
+        if (args.conditions !== undefined && !Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
+        const queued = await api.dispatch({
+          type: "thread.message.queue",
+          callerThreadId: parentThreadId,
+          message: argString(args, "message", true)!,
+          ...(argString(args, "threadId") !== undefined ? { threadId: argString(args, "threadId")! } : {}),
+          ...(argString(args, "at") !== undefined ? { at: argString(args, "at")! } : {}),
+          ...(Array.isArray(args.conditions) ? { conditions: parseQueuePolicy({ conditions: args.conditions }).conditions } : {}),
+        });
+        return ok(queued);
       }
       default:
         return { text: `Unknown tool: ${name}`, isError: true };

@@ -205,6 +205,9 @@ export const MESSAGES_GUIDANCE = [
 /** Opens a message from the thread that delegated a task, so the task's model does not read it as the user's. */
 export const TASK_MESSAGE_HEADER = "Message from the thread that delegated this task (not from the user):";
 
+/** Opens a message this thread queued for itself with `message_queue`, so it is not read as the user's. */
+export const SELF_QUEUED_HEADER = "Message you queued for this thread earlier with message_queue (not from the user):";
+
 /**
  * What a session with the delegation tools is told about the message Moxen
  * sends it when a task it delegated settles: it arrives as a turn of the

@@ -1057,7 +1057,7 @@ function PromptBlock({
     >
       <SpeakerHeader
         // A native subagent's prompt came from the agent that spawned it.
-        label={entry.message?.origin === "subagent-prompt" ? tr("timeline.askedByAgent") : tr("timeline.you")}
+        label={entry.message?.origin === "subagent-prompt" ? tr("timeline.askedByAgent") : entry.message?.origin === "agent-message" ? tr("timeline.queuedByAgent") : tr("timeline.you")}
         time={clockTime(entry.at, now)}
         mode={mode}
         color={hovered ? COLOR.bright : COLOR.user}

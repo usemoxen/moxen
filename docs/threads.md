@@ -708,6 +708,34 @@ research lead and a research role are not offered `task_send` at all. An empty
 message is refused as in `threads send`; there is no length cap, as there is
 none there.
 
+### Queueing a message from an agent (`message_queue`)
+
+An agent can queue or schedule a message on a thread without a shell:
+`message_queue` takes `message`, and optionally `threadId`, `delivery`, `at` and
+`conditions`. It goes through the composer's send path, so the durable queue
+owns admission and the entry shows in Work queue, where the user can edit or
+remove it. The result carries the `turnId`, the `threadId`, `status`,
+`expectedRun` (in words), `scheduledFor` and `waitingFor`.
+
+- `threadId` defaults to the calling thread. An agent may name only a task it
+  delegated (the `task_send` rule, continuations included); anything else is
+  `TASK_NOT_FOUND`, and a research run's roles and lead are refused
+  (`QUEUE_MESSAGE_RESEARCH`). A delegated task, a research lead and a role are not
+  offered the tool.
+- `delivery` accepts only `queue`: it never steers or restarts a turn, so a thread
+  queueing for itself mid-turn waits for that turn instead of joining it.
+- `at` is read by the same code as `threads send --at`: an ISO date-time, or
+  `HH:MM` on the machine's local clock (today, or tomorrow once that has passed).
+  `conditions` are the queue's own (reset, usage, thread, entry, at, provider).
+- With neither, the message queues behind the current turn and runs once when it
+  ends. On an idle task it starts a turn at once (there is nothing to wait for);
+  a settled task is refused as in `threads send`.
+- The message is headed "Message you queued for this thread earlier with
+  message_queue (not from the user)" (or the task header when sent to a task) and
+  stored with `origin: "agent-message"`; the transcript labels it "queued by the
+  agent", not as the user's. That origin is why it cannot end a usage hold: on a
+  protected thread it is an automatic wake-up that waits behind the hold.
+
 Some providers wake a session on their own — a finished background task,
 a monitor event. That output arrives as a turn like any other and is shown
 in the side panel's Background tab, which can also list and stop running

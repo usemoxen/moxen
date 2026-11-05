@@ -36,6 +36,7 @@ import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type Upd
 import type {
   CancelledTask,
   SentTaskMessage,
+  QueuedAgentMessage,
   ChecklistStep,
   DelegateRequest,
   Delegation,
@@ -269,6 +270,8 @@ export type CommandBody =
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
   /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
   | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
+  /** An agent's message into its own thread's queue, or a task it delegated's (moxen's `message_queue`). */
+  | { readonly type: "thread.message.queue"; readonly callerThreadId: string; readonly message: string; readonly threadId?: string; readonly at?: string; readonly conditions?: QueuePolicy["conditions"] }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
   | { readonly type: "thread.background.stop"; readonly threadId: string; readonly taskId: string }
   /** The agent's checklist, for a provider with none of its own (moxen's `todos` tool). The whole list. */
@@ -438,6 +441,7 @@ export interface CommandResults {
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.task.send": SentTaskMessage;
+  "thread.message.queue": QueuedAgentMessage;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
@@ -1214,6 +1218,16 @@ export function decodeCommand(value: unknown): Command {
         taskId: requireField(record.taskId, type, "taskId"),
         message: requireField(record.message, type, "message"),
         ...optionalBoolean(record, "wake"),
+      };
+    case "thread.message.queue":
+      return {
+        ...meta,
+        type,
+        callerThreadId: requireThreadId(record.callerThreadId),
+        message: requireField(record.message, type, "message"),
+        ...(record.threadId !== undefined ? { threadId: requireThreadId(record.threadId) } : {}),
+        ...optionalString(record, "at"),
+        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }).conditions } : {}),
       };
     case "thread.background.stop":
       return {

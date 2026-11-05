@@ -32,6 +32,7 @@ import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/cl
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
 import { serverStart, serverStatus, serverStop } from "./server.js";
 import { CliError } from "../core/errors.js";
+import { parseScheduledTime } from "../core/threads/scheduledtime.js";
 import { APP_VERSION } from "../server/api.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import { importClaudeMemory, listMemory, memoryEmbeddings } from "./memory/memory.js";
@@ -276,20 +277,6 @@ function addSendOptions(command: Command): Command {
     .option("--dry-run", "Build the turn command without dispatching it.")
     .option("--no-wait", "Return at turn acceptance without waiting for the provider run to settle.")
     .option("--at <time>", "Schedule the message: an ISO date-time, or HH:MM (today, or tomorrow once that has passed). It queues until then.");
-}
-
-/** `--at`: an ISO date-time as given, or a bare HH:MM as the next time the clock reads it. */
-function scheduledTime(raw: string, now: Date = new Date()): string {
-  const clock = /^(\d{1,2}):(\d{2})$/.exec(raw.trim());
-  if (clock) {
-    const at = new Date(now);
-    at.setHours(Number(clock[1]), Number(clock[2]), 0, 0);
-    if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1);
-    return at.toISOString();
-  }
-  const parsed = Date.parse(raw.trim());
-  if (!Number.isFinite(parsed)) throw new CliError("INVALID_THREAD_OPTION", "--at takes an ISO date-time or HH:MM.", { exitCode: 2 });
-  return new Date(parsed).toISOString();
 }
 
 interface WorkspaceCommandOptions {
@@ -1140,7 +1127,7 @@ threads
       const result = await client.dispatch({
         type: "thread.continue",
         threadId: options.thread,
-        ...(options.at ? { scheduledFor: scheduledTime(options.at) } : {}),
+        ...(options.at ? { scheduledFor: parseScheduledTime(options.at) } : {}),
       });
       const { accepted: _accepted, ...envelope } = result;
       writeSuccess(
@@ -1292,7 +1279,7 @@ addSendOptions(threads.command("send"))
         ...(options.wakeSettled ? { wakeSettled: true } : {}),
         ...(options.delivery ? { delivery: options.delivery } : {}),
         ...(options.handoffNote ? { handoffNote: options.handoffNote } : {}),
-        ...(options.at ? { scheduledFor: scheduledTime(options.at) } : {}),
+        ...(options.at ? { scheduledFor: parseScheduledTime(options.at) } : {}),
         ...(!context.json && !options.stdin ? { confirmSettled: confirmSettledThread } : {}),
         ...(options.dryRun ? { dryRun: true } : {}),
         ...(options.wait === false ? { noWait: true } : {}),

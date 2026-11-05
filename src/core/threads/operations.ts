@@ -62,7 +62,7 @@ import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -85,6 +85,7 @@ import {
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
+import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -2898,6 +2899,106 @@ export async function sendTaskMessage(
     not_delivered: "The message is recorded in the task's thread but did not reach its running turn, and nothing will resend it. Send it again once the task settles.",
   };
   return { ...after, outcome, turnId: started.turn.id, messageId: started.messageId, woke: idle && (before.task.status !== "running" || threadStatus(target) === "settled"), note: notes[outcome] };
+}
+
+export interface QueueAgentMessageInput {
+  readonly message: string;
+  /** The thread to queue on; the caller's own when absent. */
+  readonly threadId?: string;
+  /** Raw `--at` text (ISO date-time or HH:MM); parsed by the one shared reader. */
+  readonly at?: string;
+  /** Queue conditions, as the work queue accepts them (already parsed by `parseQueuePolicy`). */
+  readonly conditions?: QueuePolicy["conditions"];
+}
+
+export interface QueuedAgentMessage {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly messageId: string;
+  /** `queued`, or `running` when the thread was idle and nothing held the message back. */
+  readonly status: "queued" | "running";
+  /** Whether the target is the calling thread. */
+  readonly self: boolean;
+  /** When it is expected to run, in words: now, at a time, once the current turn ends, or when its conditions are met. */
+  readonly expectedRun: string;
+  /** The time it is held to, when `at` was given. */
+  readonly scheduledFor: string | null;
+  /** What it still waits for. */
+  readonly waitingFor: readonly string[];
+  readonly note: string;
+}
+
+/**
+ * An agent's message into a thread's queue (`message_queue`): its own thread,
+ * or a task it delegated (the `task_send` rule, continuations included, and
+ * never a research run's lead or roles). It takes the composer's path
+ * (`startTurn`), so the durable queue owns admission and the entry shows in the
+ * Work queue. It is always `queue` delivery: never a steer, so a thread
+ * queueing for itself mid-turn waits for that turn instead of joining it, and
+ * it takes no lock of its own (the send locks only for its ledger writes).
+ *
+ * The message carries `origin: "agent-message"`, which is what keeps it from
+ * ending a usage hold (`manualContinuation` needs no origin): a protected
+ * thread keeps it as an automatic wake-up that waits behind the hold.
+ */
+export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId: string, input: QueueAgentMessageInput): Promise<QueuedAgentMessage> {
+  const callerId = requireThreadId(rawCallerThreadId);
+  const message = input.message.trim();
+  if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
+  const caller = await ctx.store.readThreadRecord(callerId);
+  if (!caller) throw new CliError("THREAD_NOT_FOUND", `No thread exists with id ${callerId}.`, { exitCode: 3 });
+  const requested = input.threadId === undefined ? callerId : requireThreadId(input.threadId);
+  const self = requested === callerId;
+  const targetId = self ? callerId : (await ownedDelegation(ctx, callerId, requested)).childThreadId;
+  const target = self ? caller : await ctx.store.readThreadRecord(targetId);
+  if (!target) throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${requested} for thread ${callerId}.`, { exitCode: 3 });
+  if (caller.researchRole || isResearchRunActive(caller.researchRun) || target.researchRole || target.researchRun) {
+    throw new CliError(
+      "QUEUE_MESSAGE_RESEARCH",
+      "A research run's roles and lead take messages only through the run (research_message_submit, and the lead's follow-ups), which are scoped and capped: message_queue does not reach them.",
+      { exitCode: 4, details: { threadId: targetId } },
+    );
+  }
+  const scheduledFor = input.at === undefined ? undefined : parseScheduledTime(input.at, new Date(), "at");
+  const conditions = input.conditions ?? [];
+  const queue = conditions.length > 0 ? parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }) : undefined;
+  const started = await startTurn(ctx, {
+    threadId: targetId,
+    prompt: `${self ? SELF_QUEUED_HEADER : TASK_MESSAGE_HEADER}\n\n${message}`,
+    origin: "agent-message",
+    delivery: "queue",
+    ...(scheduledFor ? { scheduledFor } : {}),
+    ...(queue ? { queue } : {}),
+    onEvent: () => undefined,
+  });
+  const turn = (await ctx.store.readTurns(targetId)).find((candidate) => candidate.id === started.turn.id) ?? started.turn;
+  const thread = (await ctx.store.readThreadRecord(targetId)) ?? started.thread;
+  let waitingFor: string[] = [];
+  if (turn.status === "queued") {
+    const rows = await queueRows(ctx);
+    const row = rows.find((candidate) => candidate.thread.id === targetId) ?? { thread, turns: await ctx.store.readTurns(targetId) };
+    waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config).blocked : [];
+    if (!turn.queue && thread.usagePause) waitingFor = ["Waiting for thread protection"];
+  }
+  const held = typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) > Date.now() ? turn.scheduledFor : null;
+  const expectedRun =
+    turn.status === "running" ? "now: the thread was idle and nothing held the message back"
+    : turn.queue || thread.usagePause ? `when it is admitted: ${waitingFor.length ? waitingFor.join("; ") : "its conditions are met"}${held ? `, no earlier than ${held}` : ""}`
+    : held ? `at ${held}, once the thread is free`
+    : "when the current turn ends";
+  return {
+    threadId: targetId,
+    turnId: turn.id,
+    messageId: started.messageId,
+    status: turn.status === "running" ? "running" : "queued",
+    self,
+    expectedRun,
+    scheduledFor: held,
+    waitingFor,
+    note: turn.status === "running"
+      ? "The thread was idle with nothing to wait for, so the message started a turn now."
+      : "The message is in the thread's queue (Work queue); it runs once, when it is admitted. The user can edit or remove it there.",
+  };
 }
 
 /**
