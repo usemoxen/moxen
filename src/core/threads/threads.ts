@@ -8,8 +8,9 @@
  * `failTurn` / `trackRunning`. See docs/threads.md.
  */
 import os from "node:os";
+import { readFile } from "node:fs/promises";
 
-import { imageSetError } from "../attachments.js";
+import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
@@ -409,6 +410,9 @@ export async function sendTurn(
         turnId: running.id,
         kind: delivery === "steer" ? "turn.steered" : "message.injected",
         summary: prompt.slice(0, 120),
+        // The message id the steer was filed under: steer confirmation and
+        // redelivery match on this, never on text.
+        payload: { messageId },
         createdAt: now,
       });
       if (input.handoffNote !== undefined && input.handoffNote.trim()) {
@@ -711,6 +715,150 @@ export async function reconcileOrphanedTurn(
     store.emit(threadId, "turn-interrupted");
     return { interrupted, promoted };
   });
+}
+
+/** A steer to send again, as named by a driver (`takeUnconfirmedSteers`) or an orphaned turn's ledger rows. */
+export interface RedeliverSteer {
+  /** The ledger message id the steer was filed under; null when unknown (a driver-minted id, or a row from before they were recorded). */
+  readonly messageId: string | null;
+  readonly text: string;
+  /** Raw base64 images, used only when no ledger message carries them. */
+  readonly images: ReadonlyArray<{ readonly name: string; readonly mimeType: string; readonly data: string }>;
+}
+
+/**
+ * Send unconfirmed steers again, each as a queued turn of its own — the
+ * at-least-once half of steer delivery. The provider confirmed whatever is
+ * not listed; what is listed was pushed but never reached the conversation,
+ * so it waits behind the running turn (or the thread, when idle) and runs
+ * next. Metadata (origin, notification facts, images) is reread off the
+ * recorded message, matched by id; a steer with no recorded message goes
+ * out bare. Each send is marked (`steer.redelivered`), so a repeated
+ * recovery never queues one twice. Never throws: a thread gone, settled
+ * without a wake, or held simply keeps nothing.
+ */
+export async function redeliverUnconfirmedSteers(
+  store: ThreadStore,
+  rawThreadId: string,
+  turnId: string,
+  steers: readonly RedeliverSteer[],
+): Promise<void> {
+  if (steers.length === 0) return;
+  const threadId = requireThreadId(rawThreadId);
+  const messages = await store.readMessages(threadId).catch(() => null);
+  const activities = await store.readActivities(threadId).catch(() => null);
+  if (!messages || !activities) return;
+  const redelivered = new Set<string>();
+  for (const activity of activities) {
+    if (activity.kind !== "steer.redelivered") continue;
+    const payload = activity.payload ?? {};
+    if (typeof payload["messageId"] === "string") redelivered.add(payload["messageId"] as string);
+    if (typeof payload["text"] === "string") redelivered.add(`text:${payload["text"] as string}`);
+  }
+  for (const steer of steers) {
+    const original = steer.messageId !== null
+      ? (messages.find((message) => message.id === steer.messageId && message.role === "user") ?? null)
+      : (messages.find((message) => message.turnId === turnId && message.role === "user" && message.text === steer.text) ?? null);
+    if (original && redelivered.has(original.id)) continue;
+    if (!original && redelivered.has(`text:${steer.text}`)) continue;
+    const text = original?.text ?? steer.text;
+    if (!text.trim()) continue;
+    const uploads = original ? await uploadsOfAttachments(original.attachments ?? []) : uploadsOfImages(steer.images);
+    // A system message meant to wake (a task notification) keeps its wake;
+    // anything else redelivers only onto a live thread, never waking one put away.
+    const wakeSettled = original?.origin === "task-notification" || original?.origin === "background-notification";
+    const sent = await sendTurn(store, threadId, {
+      prompt: text,
+      delivery: "queue",
+      ...(original?.origin ? { origin: original.origin } : {}),
+      ...(original?.notification ? { notification: original.notification } : {}),
+      ...(uploads.length > 0 ? { attachments: uploads } : {}),
+      ...(wakeSettled ? { wakeSettled: true } : {}),
+    }).catch(() => null);
+    if (!sent) continue;
+    redelivered.add(original ? original.id : `text:${steer.text}`);
+    await store
+      .appendLedger(threadId, "activity", {
+        id: store.newId(),
+        threadId,
+        turnId: sent.turn.id,
+        kind: "steer.redelivered",
+        summary: `Steer sent again as its own turn: ${text.slice(0, 120)}`,
+        payload: { ...(original ? { messageId: original.id } : { text: steer.text }) },
+        createdAt: store.nowIso(),
+      })
+      .catch(() => undefined);
+  }
+}
+
+/**
+ * The steers an orphaned turn never confirmed, for `redeliverUnconfirmedSteers`:
+ * every message steered or injected into it, by exact message id off the
+ * steer activity. Rows from before those ids were recorded match by text,
+ * first unmatched first. The turn's own prompt is never one of them (it has
+ * no steer activity), so an orphan's dropped prompt stays dropped — only
+ * additions made mid-turn go out again.
+ */
+export function orphanedSteers(
+  messages: readonly StoredMessage[],
+  activities: readonly { readonly kind: string; readonly turnId: string | null; readonly summary: string; readonly payload?: Record<string, unknown> | undefined }[],
+  turnId: string,
+): RedeliverSteer[] {
+  const used = new Set<string>();
+  const steers: RedeliverSteer[] = [];
+  for (const activity of activities) {
+    if (activity.turnId !== turnId || (activity.kind !== "turn.steered" && activity.kind !== "message.injected")) continue;
+    const messageId = typeof activity.payload?.["messageId"] === "string" ? (activity.payload["messageId"] as string) : null;
+    const original = messageId !== null
+      ? (messages.find((message) => message.id === messageId && message.role === "user") ?? null)
+      : (messages.find((message) => !used.has(message.id) && message.turnId === turnId && message.role === "user" && (message.text === activity.summary || message.text.startsWith(activity.summary))) ?? null);
+    if (original) used.add(original.id);
+    steers.push({ messageId: original?.id ?? null, text: original?.text ?? activity.summary, images: [] });
+  }
+  return steers;
+}
+
+/**
+ * Send an orphaned turn's unconfirmed steers again (see
+ * `redeliverUnconfirmedSteers`). Reads the activities first and the messages
+ * only when a steer row names this turn, so a thread without steers pays
+ * one ledger read and a recovery whose message read fails still fails where
+ * it always did — in its runner's prompt build, not here.
+ */
+export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string): Promise<void> {
+  const threadId = requireThreadId(rawThreadId);
+  const activities = await store.readActivities(threadId).catch(() => null);
+  if (!activities) return;
+  if (!activities.some((activity) => activity.turnId === turnId && (activity.kind === "turn.steered" || activity.kind === "message.injected"))) return;
+  const messages = await store.readMessages(threadId).catch(() => null);
+  if (!messages) return;
+  await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId)).catch(() => undefined);
+}
+
+async function uploadsOfAttachments(attachments: readonly StoredAttachment[]): Promise<ImageAttachmentUpload[]> {
+  const uploads: ImageAttachmentUpload[] = [];
+  for (const attachment of attachments) {
+    const bytes = await readFile(attachment.path).catch(() => null);
+    if (bytes === null) continue;
+    uploads.push({
+      type: "image",
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      sizeBytes: bytes.length,
+      dataUrl: `data:${attachment.mimeType};base64,${bytes.toString("base64")}`,
+    });
+  }
+  return uploads;
+}
+
+function uploadsOfImages(images: ReadonlyArray<{ readonly name: string; readonly mimeType: string; readonly data: string }>): ImageAttachmentUpload[] {
+  return images.map((image) => ({
+    type: "image" as const,
+    name: image.name,
+    mimeType: image.mimeType,
+    sizeBytes: Buffer.byteLength(image.data, "base64"),
+    dataUrl: `data:${image.mimeType};base64,${image.data}`,
+  }));
 }
 
 /** A queued turn still waiting for its scheduled time. */

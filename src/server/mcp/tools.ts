@@ -296,7 +296,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "task_send",
     description:
       "Send a message to a task you delegated, to correct or redirect it without cancelling it. It arrives as a message from you, not from the user. " +
-      "The result's outcome says what happened: steered (the running turn received it and reads it at its next step); " +
+      "The result's outcome says what happened: steered (the running turn took it and reads it at its next step; if the turn ends without it reaching the conversation, it is sent again as its own turn); " +
       "queued (the task is busy and cannot take input mid-turn, so the message waits and runs as its next turn: it has NOT read it yet); " +
       "started (a new turn began on an idle task); not_delivered (recorded but it did not reach the running turn: send it again after the task settles). " +
       "Never assume the task read a message unless the outcome is steered or started. " +

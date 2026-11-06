@@ -58,6 +58,7 @@ import type {
   TurnId,
   SideAnswer,
   SideQuestionInput,
+  UnconfirmedSteer,
 } from "../spi.js";
 import { dropTurnWaiter } from "../spi.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -293,9 +294,9 @@ function refusalCategoryLabel(raw: unknown): string | null {
 /** The model `/rename` retitles on: a short summary, so the cheapest one. */
 const TITLE_MODEL = "claude-haiku-4-5";
 
-/** A user message: the text, then each image as a base64 content block. */
-function userMessage(text: string, images: readonly ProviderImage[] = []): SDKUserMessage {
-  return {
+/** A user message: the text, then each image as a base64 content block. `uuid` is our own client id, echoed back on the reply frames and result of whichever turn consumes the message — the arrival signal steers are confirmed by. */
+function userMessage(text: string, images: readonly ProviderImage[] = [], uuid?: string): SDKUserMessage {
+  const message: SDKUserMessage = {
     type: "user",
     message: {
       role: "user",
@@ -309,6 +310,8 @@ function userMessage(text: string, images: readonly ProviderImage[] = []): SDKUs
     } as SDKUserMessage["message"],
     parent_tool_use_id: null,
   };
+  if (uuid !== undefined) message.uuid = uuid as NonNullable<SDKUserMessage["uuid"]>;
+  return message;
 }
 
 class PromptQueue {
@@ -316,9 +319,9 @@ class PromptQueue {
   private takers: Array<(result: IteratorResult<SDKUserMessage>) => void> = [];
   closed = false;
 
-  /** `priority: "next"` folds the message into the running turn at its next step (a steer). */
-  push(text: string, images: readonly ProviderImage[] = [], priority?: "next"): void {
-    const message: SDKUserMessage = priority ? { ...userMessage(text, images), priority } : userMessage(text, images);
+  /** `priority: "next"` folds the message into the running turn at its next step (a steer). `uuid` is the client id the CLI echoes on whatever consumes the message. */
+  push(text: string, images: readonly ProviderImage[] = [], priority?: "next", uuid?: string): void {
+    const message: SDKUserMessage = priority ? { ...userMessage(text, images, uuid), priority } : userMessage(text, images, uuid);
     const taker = this.takers.shift();
     if (taker) taker({ value: message, done: false });
     else this.pending.push(message);
@@ -411,6 +414,17 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * session — without this it would start with no history.
    */
   private readonly resumable = new Map<ThreadId, string>();
+  /**
+   * Steer confirmation per thread: every streamed message carries our client
+   * uuid, and the CLI echoes a consumed message's uuid on its first reply
+   * frames and on its result. `pending` holds steers no frame or result has
+   * echoed yet; `sent` holds every uuid this session streamed (a steer is
+   * confirmed by any echo, so the opening prompt's echo also proves the CLI
+   * speaks the protocol); `echoCapable` remembers that proof across turns.
+   * Lives on the driver rather than the session so a session dying still
+   * leaves what the settling turn takes; a fresh session starts unproven.
+   */
+  private readonly steerTracking = new Map<ThreadId, { pending: Map<string, { text: string; images: ProviderImage[] }>; sent: Set<string>; echoCapable: boolean }>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
   constructor(options: ClaudeDriverOptions = {}) {
@@ -572,8 +586,15 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * message pushed while it works is folded into the running turn between
    * tool rounds (or, if the run is already finishing, runs next and is
    * announced by the result's `queued_turn_count`).
+   *
+   * The push succeeding is not delivery: a message the CLI drops on the way
+   * in (MXN-312: a steer arriving while the CLI is still taking the turn's
+   * first message) is never echoed and never runs. So every message carries
+   * our client uuid, the pump confirms whatever the CLI's reply frames and
+   * results echo, and `takeUnconfirmedSteers` reports the rest at settle for
+   * the runner to send again.
    */
-  readonly steerTurn = (threadId: ThreadId, text: string, images: readonly ProviderImage[] = []): Effect.Effect<void, CliError> =>
+  readonly steerTurn = (threadId: ThreadId, text: string, images: readonly ProviderImage[] = [], steerId?: string): Effect.Effect<void, CliError> =>
     this.attempt("CLAUDE_STEER_FAILED", `Could not steer the turn on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       const open = session.transcript.find((turn) => turn.status === "running");
@@ -583,10 +604,55 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         });
       }
       open.items.push({ kind: "user", text });
+      // The ledger message id doubles as the client uuid: uuid-shaped in
+      // practice (`store.newId`), and the CLI only ever compares it as an
+      // exact string — so a confirmation echoes the recorded id back.
+      const uuid = steerId ?? randomUUID();
+      this.trackSteerSent(threadId, uuid, { text, images: [...images] });
       // Said outright rather than left to the default: a steer is read at
       // the running turn's next step, never held until it ends.
-      session.input.push(text, images, "next");
+      session.input.push(text, images, "next", uuid);
     });
+
+  /**
+   * Steers pushed to the running turn that no reply frame or result ever
+   * echoed back (see `steerTurn`): the provider never confirmed they reached
+   * the conversation. A CLI that never echoes anything streamed (older than
+   * the `user_message_uuid` protocol) reports nothing — push stays
+   * delivered there, so nothing is ever sent twice for it.
+   */
+  readonly takeUnconfirmedSteers = (threadId: ThreadId): ReadonlyArray<UnconfirmedSteer> => {
+    const tracking = this.steerTracking.get(threadId);
+    if (!tracking) return [];
+    this.steerTracking.delete(threadId);
+    if (!tracking.echoCapable) return [];
+    return [...tracking.pending].map(([id, steer]) => ({ id, text: steer.text, images: steer.images }));
+  };
+
+  private trackSteerSent(threadId: ThreadId, uuid: string, steer?: { text: string; images: ProviderImage[] }): void {
+    const tracking = this.steerTracking.get(threadId) ?? { pending: new Map(), sent: new Set<string>(), echoCapable: false };
+    tracking.sent.add(uuid);
+    if (steer) tracking.pending.set(uuid, steer);
+    this.steerTracking.set(threadId, tracking);
+  }
+
+  /**
+   * Whatever the CLI consumed it echoes our client uuid on: a reply's first
+   * frames (`user_message_uuid`, plus the full `user_message_uuids` list)
+   * and the result. Any echo proves the CLI speaks the protocol; an echo of
+   * a pending steer proves that steer arrived.
+   */
+  private confirmSteerEchoes(threadId: ThreadId, message: { user_message_uuid?: unknown; user_message_uuids?: unknown }): void {
+    const tracking = this.steerTracking.get(threadId);
+    if (!tracking) return;
+    const echoed = [
+      ...(typeof message.user_message_uuid === "string" ? [message.user_message_uuid] : []),
+      ...(Array.isArray(message.user_message_uuids) ? message.user_message_uuids.filter((uuid): uuid is string => typeof uuid === "string") : []),
+    ];
+    if (!echoed.some((uuid) => tracking.sent.has(uuid))) return;
+    tracking.echoCapable = true;
+    for (const uuid of echoed) tracking.pending.delete(uuid);
+  }
 
   /**
    * The CLI's own `/context` reading, in its cheap `summary` form (from the
@@ -897,7 +963,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       };
       session.transcript.push(turn);
       session.turnsSinceCompaction += 1;
-      session.input.push(promptForEffort(input.prompt, effort), input.images ?? []);
+      const opening = randomUUID();
+      this.trackSteerSent(session.threadId, opening);
+      session.input.push(promptForEffort(input.prompt, effort), input.images ?? [], undefined, opening);
       return { threadId: session.threadId, turnId: turn.id };
     });
 
@@ -1304,6 +1372,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   private handleStreamEvent(session: ClaudeSession, message: Extract<SDKMessage, { type: "stream_event" }>): void {
     if (message.parent_tool_use_id !== null) return;
+    // The turn's first reply frames already echo what the CLI consumed —
+    // the earliest a steer is known arrived.
+    this.confirmSteerEchoes(session.threadId, message);
     const event = message.event as unknown as Record<string, unknown>;
     const index = typeof event["index"] === "number" ? (event["index"] as number) : -1;
     switch (event["type"]) {
@@ -1779,6 +1850,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
 
   private handleAssistant(session: ClaudeSession, message: Extract<SDKMessage, { type: "assistant" }>): void {
     const subagent = message.parent_tool_use_id !== null;
+    if (!subagent) this.confirmSteerEchoes(session.threadId, message);
     const open = subagent
       ? (session.transcript.find((turn) => turn.status === "running") ?? null)
       : this.turnForOutput(session);
@@ -1873,6 +1945,10 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   }
 
   private handleResult(session: ClaudeSession, message: Extract<SDKMessage, { type: "result" }>): void {
+    // Before the drain check: the interrupted run's own ending still echoes
+    // what it consumed, and a consumed steer is arrived (its text persists
+    // provider-side), never to be sent again.
+    this.confirmSteerEchoes(session.threadId, message);
     // A run's streaming bookkeeping ends with it.
     const stopFailure = session.lastStopFailure;
     session.lastStopFailure = null;
