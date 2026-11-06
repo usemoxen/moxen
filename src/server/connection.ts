@@ -117,6 +117,7 @@ import {
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
 import {
   armPendingScheduledTurns,
+  recoverTaskNotifications,
   readWorkQueue,
   editWorkQueue,
   pendingHandoff,
@@ -730,6 +731,11 @@ export class DirectConnection implements ClientApi {
     onScheduledTurnDue(this.onDue);
     void this.context()
       .then((ctx) => armPendingScheduledTurns(ctx))
+      .catch(() => undefined);
+    // A restart inside a task notification's batch window left its batch on
+    // disk: deliver it now, once, rather than losing it.
+    void this.context()
+      .then((ctx) => recoverTaskNotifications(ctx))
       .catch(() => undefined);
     // Finished worktree threads give their checkouts and merged branches back: now, then every few hours.
     void this.pruneFinished();
