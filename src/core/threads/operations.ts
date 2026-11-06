@@ -2461,10 +2461,11 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const interactionMode: InteractionMode = request.interactionMode ?? "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
-  // A thread created without a branch (and a continuation that copied it) can
-  // still run in a checkout on a real branch: ask the checkout instead of
-  // trusting the record.
-  const parentBranch = isolated && !parentEnv.branch
+  // When isolated, the branch always comes from the checkout, never the
+  // record: the record can name a branch the checkout has left (detached
+  // HEAD, or moved to another branch since), or none at all (threads the
+  // TUI creates record none).
+  const parentBranch = isolated
     ? ((await readStatus(parentEnv.path))?.branch ?? null)
     : parentEnv.branch;
   if (isolated && !parentBranch) {

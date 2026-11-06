@@ -10,6 +10,7 @@ import { testHarness, type TestHarnessOptions } from "../../../core/testing/harn
 import { TASK_NOTIFICATION_BATCH_MS } from "../../../core/threads/operations.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { completeTurn } from "../../../core/threads/threads.js";
+import type { ClientApi } from "../../api.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
 
@@ -300,6 +301,68 @@ describe("task_cancel: whose task it is", () => {
       const fromContinuation = await callMoxenTool(t.connection, continued.threadId, "task_cancel", { taskId: second });
       expect(fromContinuation.isError).toBe(false);
       expect(JSON.parse(fromContinuation.text)).toMatchObject({ taskId: second, cancelRequested: true });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("cancels several tasks at once, reporting each outcome without stopping on a bad id", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const first = await t.delegate();
+      const second = await t.delegate(undefined, "second");
+      const result = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskIds: [first, "task-missing", second] });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>> };
+      expect(batch.tasks).toHaveLength(3);
+      expect(batch.tasks[0]).toMatchObject({ taskId: first, cancelRequested: true });
+      expect(batch.tasks[1]).toMatchObject({ taskId: "task-missing", error: expect.stringContaining("TASK_NOT_FOUND") });
+      expect(batch.tasks[2]).toMatchObject({ taskId: second, cancelRequested: true });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("refuses a task_cancel that mixes or omits the id forms", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const call = (args: Record<string, unknown>) => callMoxenTool(t.connection, t.orchestrator, "task_cancel", args);
+      expect((await call({ taskId, taskIds: [taskId] })).text).toContain("not both");
+      expect((await call({})).text).toContain("taskId");
+      expect((await call({ taskIds: [] })).text).toContain("non-empty array");
+      for (const reply of [await call({}), await call({ taskIds: [] })]) expect(reply.isError).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("stops a repeated id once, in order", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const result = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskIds: [taskId, taskId] });
+      expect(result.isError).toBe(false);
+      expect(JSON.parse(result.text)).toMatchObject({ tasks: [{ taskId, cancelRequested: true }] });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("codes a failure no CliError names, and fails a missing parent as the single form does", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const failing = {
+        dispatch: async () => { throw new Error("boom"); },
+        query: async () => ({ thread: {} }),
+      } as unknown as ClientApi;
+      const coded = await callMoxenTool(failing, "parent", "task_cancel", { taskIds: ["a"] });
+      expect(coded.isError).toBe(false);
+      expect(JSON.parse(coded.text)).toEqual({ tasks: [{ taskId: "a", error: "TASK_START_FAILED: boom" }] });
+
+      const missing = await callMoxenTool(t.connection, "thread-missing", "task_cancel", { taskIds: ["a", "b"] });
+      expect(missing.isError).toBe(true);
+      expect(missing.text).toContain("TASK_NOT_FOUND");
     } finally {
       await t.connection.close();
     }
