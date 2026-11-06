@@ -331,6 +331,19 @@ describe("codex driver turns", () => {
     }
   });
 
+  it("stopAll closes every session", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    await Effect.runPromise(driver.startSession({ threadId: "thread-2", workingDirectory: "/repo" }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-2", prompt: "hi" }));
+    await Effect.runPromise(driver.stopAll());
+    expect(transport.sessions).toHaveLength(2);
+    expect(transport.sessions.every((session) => session.client.closed)).toBe(true);
+    expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
+  });
+
   it("enforces medium effort unless overridden", async () => {
     const transport = new FakeCodexTransport();
     const driver = new CodexDriver({ transport });

@@ -96,6 +96,8 @@ export interface CodexDriverOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: CodexTransport;
   readonly rateLimitsTimeoutMs?: number;
+  /** Bound on the harness wind-down in `closeSession`; see `stopTimeoutMs`. */
+  readonly stopTimeoutMs?: number;
 }
 
 export type CodexTurnStatus = "completed" | "failed" | "interrupted";
@@ -293,6 +295,13 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly transport: CodexTransport;
   private readonly rateLimitsTimeoutMs: number;
+  /**
+   * How long `closeSession` waits for the harness wind-down before
+   * carrying on to `peer.close()` anyway, so the app-server peer is
+   * always released even when stopping background work stalls.
+   * Well under the server's stop budget.
+   */
+  private readonly stopTimeoutMs: number;
   private secretEnv: readonly string[] = [];
   private readonly sessions = new Map<ThreadId, CodexSession>();
   /** Codex thread id per thread, kept past session teardown (see `resumeCursor`). */
@@ -308,6 +317,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     this.baseEnv = options.env ?? process.env;
     this.transport = options.transport ?? new SpawnCodexTransport();
     this.rateLimitsTimeoutMs = options.rateLimitsTimeoutMs ?? 3000;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
   }
 
   /** Custom Harness profile keys must not reach application-owned shell commands. */
@@ -610,17 +620,19 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     this.attempt("CODEX_STOP_FAILED", "Could not stop Codex sessions", async () => {
       for (const abort of this.titleAborts.values()) abort.abort();
-      for (const session of [...this.sessions.values()]) {
-        await this.closeSession(session, "session-stopped");
-      }
+      // Concurrently: a session stalled in wind-down must not hold the
+      // rest from reaching `peer.close()`.
+      await Promise.all([...this.sessions.values()].map((session) => this.closeSession(session, "session-stopped")));
     });
 
   private async closeSession(session: CodexSession, reason: string): Promise<void> {
     if (session.closed) return;
     session.closed = true;
-    await session.harness.close();
     this.denyParked(session, "Session ended.");
+    // Settle before the wind-down wait, so a stalled harness close cannot
+    // hold the turn's waiters.
     this.settleOpenTurn(session, "interrupted", "Session ended.");
+    await this.windDownForClose(session);
     session.background.clear();
     try {
       session.peer.close();
@@ -634,6 +646,32 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       threadId: session.threadId,
       state: reason,
     });
+  }
+
+  /**
+   * Best-effort harness wind-down for a session going away, bounded so
+   * `peer.close()` below is always reached even when stopping background
+   * work stalls. A wind-down that outlives the bound keeps running
+   * detached; a real failure still surfaces, since only the timeout is
+   * swallowed. The timer is unref'd and cleared like the Claude driver's.
+   */
+  private async windDownForClose(session: CodexSession): Promise<void> {
+    const closing = session.harness.close();
+    // Absorb a detached wind-down's late failure: the race below still
+    // reports a failure that arrives before the bound does.
+    void closing.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        closing,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.stopTimeoutMs);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   readonly listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>

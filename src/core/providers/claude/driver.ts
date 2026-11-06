@@ -124,6 +124,8 @@ export interface ClaudeDriverOptions {
   readonly transport?: ClaudeTransport;
   readonly sessionApi?: ClaudeSessionApi;
   readonly usageProbeTimeoutMs?: number;
+  /** Bound on the `interrupt()` wait in `closeSession`; see `stopTimeoutMs`. */
+  readonly stopTimeoutMs?: number;
   /**
    * The `agent-skills` mod to load into every session (see `skillsmod.ts`).
    * Null leaves sessions as they were; production passes `locateSkillsMod()`.
@@ -409,6 +411,13 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   private readonly transport: ClaudeTransport;
   private readonly sessionApi: ClaudeSessionApi;
   private readonly usageProbeTimeoutMs: number;
+  /**
+   * How long `closeSession` waits for the CLI to answer `interrupt()`
+   * before carrying on to `close()` anyway. A hung process must not hold
+   * the turn's waiters or the sessions queued behind it in `stopAll`
+   * (which the server bounds); well under that budget.
+   */
+  private readonly stopTimeoutMs: number;
   private readonly skillsMod: SkillsMod | null;
   private readonly sessions = new Map<ThreadId, ClaudeSession>();
   /**
@@ -425,6 +434,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SdkTransport();
     this.sessionApi = options.sessionApi ?? new SdkSessionApi();
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
     this.skillsMod = options.skillsMod ?? null;
   }
 
@@ -821,25 +831,21 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     this.attempt("CLAUDE_STOP_FAILED", "Could not stop Claude sessions", async () => {
-      for (const session of [...this.sessions.values()]) {
-        await this.closeSession(session, "session-stopped");
-      }
+      // Concurrently: a session hung in `interrupt()` must not hold the
+      // rest from reaching `close()`.
+      await Promise.all([...this.sessions.values()].map((session) => this.closeSession(session, "session-stopped")));
     });
 
   private async closeSession(session: ClaudeSession, reason: string): Promise<void> {
     if (session.closed) return;
     session.closed = true;
     this.denyParked(session, "Session ended.");
-    try {
-      await session.query.interrupt();
-    } catch {
-      // Best effort: the process may already be gone.
-    }
-    // Settle here, not in the pump: the pump skips its own settle once the
-    // session is closed, which used to leave awaitTurn waiters hanging.
-    // Settling is guarded on the transcript, so a result the pump settled
-    // first is never published twice.
+    // Settle before the interrupt wait, not after it and not in the pump:
+    // the pump skips its own settle once the session is closed, and a hung
+    // process must not hold the turn's waiters. Settling is guarded on the
+    // transcript, so a result the pump settled first is never published twice.
     this.settleOpenTurn(session, "interrupted", "Session ended.");
+    await this.interruptForClose(session);
     // An interactive interrupt only stops the turn; close terminates the
     // transport too, including background work and later notifications.
     session.query.close?.();
@@ -851,6 +857,29 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       threadId: session.threadId,
       state: reason,
     });
+  }
+
+  /**
+   * Best-effort interrupt for a session going away, bounded so `close()`
+   * below is always reached even when the process never answers.
+   * The timer is unref'd and cleared: it never holds the process open and
+   * never fires after an interrupt that answered in time.
+   */
+  private async interruptForClose(session: ClaudeSession): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        session.query.interrupt(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.stopTimeoutMs);
+          timer.unref();
+        }),
+      ]);
+    } catch {
+      // Best effort: the process may already be gone.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   readonly listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
