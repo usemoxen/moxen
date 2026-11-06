@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
+import { writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -9,7 +12,7 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -100,6 +103,25 @@ describe("conditional work queue", () => {
     await runWorkQueue(w.ctx, now);
     expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: new Date(now + 60_000).toISOString() });
     await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it("waits for every reported window when the condition asks for all", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    await sendTurn(w.store, thread.id, { prompt: "when every allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });
+    const soon = new Date(now + 60_000).toISOString();
+    const later = new Date(now + 6 * 86400_000).toISOString();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: soon },
+      { id: "weekly", label: "Weekly", usedPercent: 95, exhausted: false, resetsAt: later },
+    ]);
+    await runWorkQueue(w.ctx, now);
+    expect(w.sent).toEqual([]);
+    // "all" covers every reported window: the session reset alone is not enough.
+    expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: later });
+    await runWorkQueue(w.ctx, now + 66_000);
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, Date.parse(later) + 6000); await settleRuns();
     expect(w.sent).toHaveLength(1);
   });
 
@@ -316,6 +338,60 @@ describe("explicit handoff submissions", () => {
 });
 
 /**
+ * A recovery whose session fails to start must not strand the turn behind
+ * it: orphan recovery promotes B and fails it, and that failure promotes C
+ * to `running` with no runner and no tracking — the next send then sees a
+ * busy thread no orphan recovery will ever reap (its owner is alive).
+ */
+describe("setup failures behind a recovery", () => {
+  it("holds the turn behind a recovery whose session fails to start instead of stranding it running", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const a = await sendTurn(w.store, thread.id, { prompt: "first" });
+    const b = await sendTurn(w.store, thread.id, { prompt: "second on claude", delivery: "queue", modelSelection: { instanceId: "claude", model: "test-model" } });
+    const c = await sendTurn(w.store, thread.id, { prompt: "third", delivery: "queue" });
+    // A's runner is gone, and B's provider cannot start a session.
+    await w.store.updateTurn(thread.id, a.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    const driverFor = w.ctx.driverFor;
+    const spy = vi.spyOn(w.ctx, "driverFor").mockImplementation((id) => {
+      if (driverKindOfInstance(id) === "claude") throw new CliError("PROVIDER_UNKNOWN", "No direct driver.");
+      return driverFor(id);
+    });
+    try {
+      await recoverOrphanedTurn(w.ctx, thread.id);
+    } finally {
+      spy.mockRestore();
+    }
+    const turns = await w.store.readTurns(thread.id);
+    const statusOf = (id: string) => turns.find((turn) => turn.id === id)?.status;
+    expect({ a: statusOf(a.turn.id), b: statusOf(b.turn.id), c: statusOf(c.turn.id) }).toEqual({ a: "interrupted", b: "failed", c: "queued" });
+    expect(turns.find((turn) => turn.id === c.turn.id)?.heldAtSettle).toBe(true);
+    expect(w.store.isTracked(b.turn.id)).toBe(false);
+    expect(w.store.isTracked(c.turn.id)).toBe(false);
+  });
+
+  it("frees a recovery whose ledger read fails before its runner starts", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const a = await sendTurn(w.store, thread.id, { prompt: "first" });
+    const b = await sendTurn(w.store, thread.id, { prompt: "second", delivery: "queue" });
+    // A's runner is gone, and the recovery's ledger read fails: B is never
+    // settled, so its admission claim must be released rather than leak —
+    // or later interrupts would promote behind it and orphan recovery would
+    // skip it as tracked.
+    await w.store.updateTurn(thread.id, a.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    const spy = vi.spyOn(w.store, "readMessages").mockRejectedValueOnce(new Error("ledger unavailable"));
+    try {
+      await recoverOrphanedTurn(w.ctx, thread.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(w.store.isTracked(b.turn.id)).toBe(false);
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === b.turn.id)?.status).toBe("running");
+  });
+});
+
+/**
  * A plain queued turn held at settle — by snooze (MXN-278) or by an
  * exhausted provider (MXN-276) — sits on an idle thread with no runner.
  * The admission path must start it once nothing blocks it, with no further
@@ -368,5 +444,99 @@ describe("admission of held plain queued turns", () => {
     await runWorkQueue(w.ctx, now + 3600_000 + 1000); await settleRuns();
     expect(w.sent.map((turn) => turn.prompt)).toContain("queued past the limit");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("queues a fresh send behind an older held turn and runs the older first", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the limit", delivery: "queue" });
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The limit lapses, but the fresh send still queues behind the older held
+    // turn instead of running ahead of it — and the send says so.
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
+    const fresh = await startTurn(w.ctx, { threadId: thread.id, prompt: "newer message" });
+    expect(fresh.delivery).toBe("queued");
+    expect(fresh.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The older held turn goes first: the admission run takes it, and the
+    // newer message follows in the same run — older text first — rather than
+    // jumping ahead of it.
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
+    expect(w.sent.map((turn) => turn.prompt)).toEqual(["queued past the limit\n\nnewer message"]);
+  });
+
+  it("resumes a held turn with current native tools and rule changes", async () => {
+    const w = await world(); const thread = await w.make("claudeAgent"); const now = Date.now();
+    // Park the first turn's completion so the second queues behind a live run.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveGate = resolve; });
+    const driver = w.ctx.driverFor("claudeAgent");
+    const awaitTurn = driver.awaitTurn.bind(driver);
+    driver.awaitTurn = async (...args) => { await gate; return awaitTurn(...args); };
+    const first = await startTurn(w.ctx, { threadId: thread.id, prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the limit", delivery: "queue" });
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    // The session started with no rule files; change them while it sits idle.
+    await writeFile(path.join(w.work, "AGENTS.md"), "Never force-push without a confirming flag.\n");
+    await completeTurn(w.store, thread.id, first.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    const nativeTools: { threadId: string; names: readonly string[]; moxenPrompt?: boolean | undefined }[] = [];
+    driver.updateNativeTools = async (threadId, names, moxenPrompt) => { nativeTools.push({ threadId, names, moxenPrompt }); };
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
+    await runWorkQueue(w.ctx, now);
+    resolveGate();
+    await settleRuns();
+    // The resume re-registers native tools and carries the rule change ahead
+    // of the prompt, like a fresh send does. (The first turn never reached
+    // the provider: it was completed while its session was still starting,
+    // so the resumed prompt is the only one the driver sees.)
+    expect(nativeTools).toHaveLength(1);
+    expect(nativeTools[0]?.threadId).toBe(thread.id);
+    expect(w.sent.at(-1)?.prompt).toContain("<moxen-context-update>");
+    expect(w.sent.at(-1)?.prompt).toContain("force-push");
+    expect(w.sent.at(-1)?.prompt).toContain("queued past the limit");
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
+  });
+
+  it("carries rule changes into a turn promoted at settle on a warm session", async () => {
+    const w = await world(); const thread = await w.make("claudeAgent");
+    await writeFile(path.join(w.work, "AGENTS.md"), "Keep functions small.\n");
+    // Park the first turn's completion so the second queues behind a live run.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveGate = resolve; });
+    const driver = w.ctx.driverFor("claudeAgent");
+    const awaitTurn = driver.awaitTurn.bind(driver);
+    driver.awaitTurn = async (...args) => { await gate; return awaitTurn(...args); };
+    const first = await startTurn(w.ctx, { threadId: thread.id, prompt: "work" });
+    await sendTurn(w.store, thread.id, { prompt: "queued behind it", delivery: "queue" });
+    // Change the rules after the session read them; the settle-promoted run
+    // takes the patch ahead of its prompt.
+    await writeFile(path.join(w.work, "AGENTS.md"), "Keep functions small.\nNever force-push without a confirming flag.\n");
+    resolveGate();
+    await first.run;
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.prompt)).toHaveLength(2);
+    expect(w.sent[1]?.prompt).toContain("<moxen-context-update>");
+    expect(w.sent[1]?.prompt).toContain("force-push");
+    expect(w.sent[1]?.prompt).toContain("queued behind it");
+  });
+
+  it("holds a queued send behind a held turn that cannot run yet, reporting it queued", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued while snoozed", delivery: "queue" });
+    await snoozeThread(w.store, thread.id, new Date(now + 3600_000).toISOString());
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The snooze still holds the older turn, so the new message waits behind
+    // it — queued with its place kept, not swallowed and not jumped ahead.
+    const fresh = await startTurn(w.ctx, { threadId: thread.id, prompt: "newer message", delivery: "queue" });
+    expect(fresh.delivery).toBe("queued");
+    expect(fresh.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "queued", "queued"]);
   });
 });

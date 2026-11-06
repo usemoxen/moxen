@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeConfig } from "../config.js";
 import { CliError } from "../errors.js";
-import { requestedInteractionMode, storedInteractionMode } from "../interactionmode.js";
+import { INTERACTION_MODES, requestedInteractionMode, storedInteractionMode } from "../interactionmode.js";
 import { ThreadStore } from "../threads/store.js";
 
 const refusal = (run: () => unknown): CliError => {
@@ -36,6 +36,18 @@ describe("interaction modes after plan mode", () => {
     expect(removed.exitCode).toBe(2);
     expect(refusal(() => requestedInteractionMode("nope", "--mode")).code).toBe("INVALID_THREAD_OPTION");
     expect(requestedInteractionMode("default", "--mode")).toBe("default");
+  });
+
+  it("keeps review off threads: asked for only where a task or prompt runs", () => {
+    expect(INTERACTION_MODES).toEqual(["default", "research", "orchestrate", "review"]);
+    // A stored review (a delegated task's record) loads as itself.
+    expect(storedInteractionMode("review")).toBe("review");
+    // A thread's own mode, config value or handover target cannot be review.
+    const refused = refusal(() => requestedInteractionMode("review", "--mode"));
+    expect(refused.code).toBe("INVALID_THREAD_OPTION");
+    expect(refused.message).toContain("/review");
+    // Turn and delegation decoders opt in explicitly.
+    expect(requestedInteractionMode("review", "thread.turn.start", INTERACTION_MODES)).toBe("review");
   });
 
   it("loads a config that still says plan as Build, and still refuses nonsense", () => {

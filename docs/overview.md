@@ -199,10 +199,12 @@ their own colour, the rest in one grey row; a long history shares a column
 across days) and lists each model and provider with its tokens, cost and share.
 
 Tokens are those the providers report, so a provider that reports none adds
-activity but no tokens. **Cost** is what the provider says the turn cost: an
-estimate, not a bill, and never a price Moxen made up. `unpriced` means no turn
-reported one, and a trailing `+` means some did not. Deleted threads are not
-counted.
+activity but no tokens. **Cost** is what the provider says the turn cost, or
+else an estimate at the model's current prices: your per-model rows on each
+provider's settings page (Model prices) over Moxen's shipped price list. It is
+an estimate, not a bill. `unpriced` means the turn reported no cost and its
+model has no price anywhere, and a trailing `+` means some turns are not
+priced. Deleted threads are not counted.
 
 `s` (or `s copy card`) copies a **stats card** for the range on screen to the
 clipboard as an image, ready to paste: a PNG in the current theme's colours

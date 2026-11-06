@@ -87,6 +87,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Hand a self-contained task to a new subagent thread, which runs in parallel on any provider and model. " +
       "Only when the user has asked you to delegate (or put the thread in Research or Orchestrate mode): each subagent starts cold and spends their usage, so by default do the work yourself. " +
       "Research defaults to one researcher. For claims that matter and need an adversarial check, propose a full research run with researchProposal (size and optional per-role models). " +
+      "Review delegation reviews a PR or branch: mode review checks the target out in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST; pass target-specific questions to attack in the task. " +
       "A full run costs a lead, researchers, critics and a finalizer. Only the user's answer starts one; without an answering client or after its answer deadline, it runs one researcher instead. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "The default is always a worktree (except fork: true, which shares your checkout): even when your thread's record names no branch, the worktree is cut from the branch your checkout is on. " +
@@ -160,9 +161,11 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         },
         mode: {
           type: "string",
-          enum: ["build", "research"],
+          enum: ["build", "research", "review"],
           description:
             "build (default): the subagent does the task directly. research: the subagent works as a researcher (its own tools, read only) and answers in the research report format. " +
+            "review: the subagent reviews a PR or branch (named in the task) in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST. " +
+            "With tasks, the shared mode applies to every entry; entries take no mode of their own. " +
             "A subagent cannot delegate, and Orchestrate is not available to one.",
         },
       },
@@ -1099,8 +1102,8 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   }
   const fork = args.fork === true;
   const modeArg = argString(args, "mode");
-  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research") {
-    throw new CliError("INVALID_TOOL_INPUT", "mode must be build or research: a subagent never runs in Orchestrate.");
+  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research" && modeArg !== "review") {
+    throw new CliError("INVALID_TOOL_INPUT", "mode must be build, research or review: a subagent never runs in Orchestrate.");
   }
   const provider = argString(args, "provider");
   const model = argString(args, "model");
@@ -1120,6 +1123,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(fork ? { fork: true } : {}),
     ...(modeArg === "research" ? { mode: "research" as const } : {}),
+    ...(modeArg === "review" ? { mode: "review" as const } : {}),
     ...(args.researchProposal === undefined ? {} : { researchProposal: args.researchProposal }),
   });
 }
@@ -1168,6 +1172,7 @@ async function delegateManyTool(
         ...((entry.idempotencyKey ?? (shared.idempotencyKey ? batchEntryKey(shared.idempotencyKey, entry.title, entry.task) : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? batchEntryKey(shared.idempotencyKey!, entry.title, entry.task))! } : {}),
         ...(shared.fork ? { fork: true } : {}),
         ...(shared.modeArg === "research" ? { mode: "research" as const } : {}),
+        ...(shared.modeArg === "review" ? { mode: "review" as const } : {}),
       }));
     } catch (cause) {
       // One task failing to start never loses the others: its error is that
@@ -1293,7 +1298,7 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
 async function startDelegation(
   api: ClientApi,
   parentThreadId: string,
-  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research"; researchProposal?: unknown },
+  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research" | "review"; researchProposal?: unknown },
 ) {
   const delegated = await api.dispatch({
     type: "thread.delegate",
@@ -1308,6 +1313,7 @@ async function startDelegation(
     ...(request.effort ? { thinkingEffort: request.effort } : {}),
     ...(request.fork === true ? { fork: true } : {}),
     ...(request.mode === "research" ? { interactionMode: "research" as const } : {}),
+    ...(request.mode === "review" ? { interactionMode: "review" as const } : {}),
     ...(request.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(request.researchProposal) }),
   });
   return {
@@ -1375,6 +1381,9 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    // A review child's verdict and warnings ride with the status; a finished
+    // review with no VERDICT line is said visibly here, not passed on as one.
+    ...(described.review === null ? {} : { review: described.review }),
   };
 }
 

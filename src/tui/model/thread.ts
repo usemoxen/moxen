@@ -1598,6 +1598,10 @@ export interface TaskNotificationView {
   filesChanged: number | null;
   additions: number | null;
   deletions: number | null;
+  /** A review task's trailing verdict (`VERDICT: MERGE` / `VERDICT: FIX FIRST`); null for other tasks and for a review with none. */
+  verdict: string | null;
+  /** Whether the task ran in Review mode: a review with no verdict is shown as unfinished, not as an ordinary task. */
+  review: boolean;
 }
 
 /**
@@ -1628,6 +1632,8 @@ export function taskNotifications(message: MessageEnvelope | null): TaskNotifica
         filesChanged: count(task.filesChanged),
         additions: count(task.additions),
         deletions: count(task.deletions),
+        verdict: text(asRecord(task.review)?.verdict),
+        review: asRecord(task.review) !== null,
       },
     ];
   });

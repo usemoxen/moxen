@@ -808,6 +808,7 @@ describe("opencode driver", () => {
       { args: { sessionID: "ses_old", key: "moxen", value: null } },
       { args: { sessionID: "ses_old", key: "moxen-research", value: null } },
       { args: { sessionID: "ses_old", key: "moxen-orchestrate", value: null } },
+      { args: { sessionID: "ses_old", key: "moxen-review", value: null } },
     ]);
   });
 

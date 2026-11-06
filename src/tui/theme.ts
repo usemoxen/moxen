@@ -49,14 +49,16 @@ export const COLOR = {
 /**
  * A thread's mode, on the composer's left edge and in its footer. Amber
  * (running, warnings) and green (the user's messages) already mean something,
- * so no mode takes them. Build's restrained teal, Research's cool lavender,
- * and Orchestrate's orchid stay distinct; blue remains the app's structural
- * focus colour instead of competing with Build in the composer.
+ * so no mode takes them; orange reads close to amber but never marks a
+ * warning on its own, so Review takes it while Build keeps restrained teal,
+ * Research keeps cool lavender, and Orchestrate keeps orchid. Blue remains
+ * the app's structural focus colour instead of competing with Build in the
+ * composer.
  */
-export const MODE_COLOR = { default: "", research: "", orchestrate: "" };
+export const MODE_COLOR = { default: "", research: "", orchestrate: "", review: "" };
 
 /** The other end of each mode's running pulse (`pulseColor` from `MODE_COLOR`). */
-export const MODE_PULSE = { default: "", research: "", orchestrate: "" };
+export const MODE_PULSE = { default: "", research: "", orchestrate: "", review: "" };
 
 /**
  * Tree-sitter highlight-group palette for code grammars (`keyword`,
@@ -160,11 +162,12 @@ export function applyTheme(name: string | undefined): boolean {
     removed: t.red,
     selectionBg: t.selection,
   });
-  Object.assign(MODE_COLOR, { default: t.teal, research: t.purple, orchestrate: t.pink });
+  Object.assign(MODE_COLOR, { default: t.teal, research: t.purple, orchestrate: t.pink, review: t.orange });
   Object.assign(MODE_PULSE, {
     default: lerpColor(t.teal, t.bright, 0.7),
     research: lerpColor(t.purple, t.bright, 0.7),
     orchestrate: lerpColor(t.pink, t.bright, 0.7),
+    review: lerpColor(t.orange, t.bright, 0.7),
   });
   Object.assign(DIFF_BG, {
     added: lerpColor(t.base, t.green, 0.14),
