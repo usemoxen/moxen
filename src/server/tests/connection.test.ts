@@ -2270,3 +2270,140 @@ describe("DirectConnection side questions", () => {
     }
   });
 });
+
+/**
+ * A driver whose `stopAll` the test scripts: the double behind
+ * "DirectConnection close".
+ */
+class CloseDriver implements TurnDriver {
+  constructor(
+    private readonly name: string,
+    private readonly asked: string[],
+    private readonly stop: () => Effect.Effect<void, CliError>,
+  ) {}
+
+  hasSession(_threadId: string): Effect.Effect<boolean, CliError> {
+    return Effect.succeed(false);
+  }
+
+  startSession(input: { threadId: string }): Effect.Effect<unknown, CliError> {
+    return Effect.sync(() => ({ threadId: input.threadId }));
+  }
+
+  sendTurn(input: { threadId: string }): Effect.Effect<{ threadId: string; turnId: string }, CliError> {
+    return Effect.succeed({ threadId: input.threadId, turnId: "driver-turn-1" });
+  }
+
+  interruptTurn(): Effect.Effect<void, CliError> {
+    return Effect.void;
+  }
+
+  async awaitTurn(): Promise<TurnOutcome> {
+    return { status: "completed", text: "done", usage: null, error: null };
+  }
+
+  get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
+    return Stream.never;
+  }
+
+  readonly stopAll = (): Effect.Effect<void, CliError> => {
+    this.asked.push(this.name);
+    return this.stop();
+  };
+}
+
+/** Own a driver of each instance id on `connection`, without running a turn. */
+async function ownDriver(connection: DirectConnection, threadId: string, projectId: string, instanceId: string): Promise<void> {
+  await connection.dispatch({
+    type: "thread.create",
+    threadId,
+    projectId,
+    title: threadId,
+    modelSelection: { instanceId, model: "model" },
+    branch: "main",
+  });
+  // `runtime-mode.set` resolves the thread's driver, which owns it from then on.
+  await connection.dispatch({ type: "thread.runtime-mode.set", threadId, runtimeMode: "auto" });
+}
+
+describe("DirectConnection close", () => {
+  it("stops drivers concurrently rather than one after another", async () => {
+    // The first-owned driver waits for the second-owned one to start: in
+    // sequence it would wait forever, concurrently it finishes at once.
+    const started: string[] = [];
+    let releaseSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const first = new CloseDriver("first", started, () => Effect.promise(() => secondStarted));
+    const second = new CloseDriver("second", started, () => Effect.sync(() => releaseSecond()));
+    const harness = await testHarness({ drivers: { claude: () => first, codex: () => second } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await ownDriver(connection, "thread-first", ensured.project.id, "claude");
+      await ownDriver(connection, "thread-second", ensured.project.id, "codex");
+      await connection.close();
+      expect(started).toEqual(["first", "second"]);
+    } finally {
+      releaseSecond();
+      await connection.close();
+    }
+  });
+
+  it("asks every driver to stop under a deadline, even when one hangs", async () => {
+    const asked: string[] = [];
+    const stuck = new CloseDriver("stuck", asked, () => Effect.never);
+    const quick = new CloseDriver("quick", asked, () => Effect.void);
+    const harness = await testHarness({ drivers: { claude: () => stuck, codex: () => quick } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, closeDriverTimeoutMs: 50 });
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await ownDriver(connection, "thread-stuck", ensured.project.id, "claude");
+      await ownDriver(connection, "thread-quick", ensured.project.id, "codex");
+      await connection.close();
+      // The stuck driver was still asked (its session heard it); the hang
+      // only bounds the wait, and the other driver was not starved behind it.
+      expect(asked).toContain("stuck");
+      expect(asked).toContain("quick");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("clears the subscription poll timers, so a closed connection holds nothing open", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, shellPollMs: 5, threadPollMs: 5 });
+    // Every timer the subscriptions start must be handed back on close: the
+    // poll intervals are the only ones `close()` did not already clear, and
+    // without them a closed connection keeps the event loop alive.
+    const setOriginal = globalThis.setInterval.bind(globalThis);
+    const clearOriginal = globalThis.clearInterval.bind(globalThis);
+    const created: unknown[] = [];
+    const cleared: unknown[] = [];
+    const setSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((...args: unknown[]) => {
+      const timer = (setOriginal as (...rest: unknown[]) => unknown)(...args);
+      created.push(timer);
+      return timer;
+    }) as typeof setInterval);
+    const clearSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(((timer: unknown) => {
+      cleared.push(timer);
+      (clearOriginal as (handle: unknown) => void)(timer);
+    }) as typeof clearInterval);
+    const stopShell = connection.subscribeShell({}, () => {}, () => {});
+    const stopThread = connection.subscribeThread("missing-thread", {}, () => {}, () => {});
+    try {
+      expect(created.length).toBeGreaterThan(0);
+      await connection.close();
+      for (const timer of created) expect(cleared).toContain(timer);
+    } finally {
+      stopShell();
+      stopThread();
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+      await connection.close();
+    }
+  });
+});
