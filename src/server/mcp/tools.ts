@@ -230,9 +230,9 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "usage_status",
     description:
       "The user's current shared provider usage, for every set-up provider: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
-      "Also which provider your own thread runs on, and what usage protection holds or has queued. " +
+      "Also which provider your own thread runs on, and what usage protection holds or has queued (a delegated task sees its own held entry only). " +
       "Call it before fanning work out (Orchestrate: after models, before delegate), and whenever you must decide where there is headroom: the usageLimits in models can be hours old, while this tries a cheap fresh reading first and falls back to the stored one with its age. " +
-      "A provider with no windows has no data, which is not the same as unlimited. " +
+      "A provider with no windows has no data, which is not the same as unlimited: key that off the empty windows list, not off stale. " +
       "Read-only: it never spends provider usage.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
@@ -723,7 +723,7 @@ export async function callMoxenTool(
       case "context_usage":
         return ok(await contextUsageTool(api, parentThreadId));
       case "usage_status":
-        return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS));
+        return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS, options.delegated === true));
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
@@ -1387,7 +1387,7 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string) {
  * protection snapshot is the same one `moxen usage status` shows: what
  * usage protection holds or has queued.
  */
-async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number) {
+async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number, delegated: boolean) {
   const [listed, stored, protection, inspected] = await Promise.all([
     api.query({ type: "providers.list" }),
     api.query({ type: "usage.limits" }),
@@ -1437,6 +1437,11 @@ async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs
   return {
     callerProvider: inspected?.thread.modelSelection?.instanceId ?? null,
     providers,
-    protection,
+    // A delegated task is denied thread_search/thread_read, so it must not
+    // learn other threads' titles through here either: it keeps its own
+    // held entry, account-level forecasts, and nothing else.
+    protection: delegated
+      ? { ...protection, queue: protection.queue.filter((entry) => entry.threadId === parentThreadId) }
+      : protection,
   };
 }

@@ -180,6 +180,24 @@ describe("usage_status", () => {
     expect(answer.protection.forecasts).toHaveLength(1);
   });
 
+  it("shows a delegated task only its own held entry, never another thread's", async () => {
+    const own = { threadId: "caller", title: "Own held work", phase: "waiting", provider: "codex", windows: [], order: 1, handoff: false };
+    const other = { threadId: "other", title: "Secret other-thread title", phase: "waiting", provider: "codex", windows: [], order: 2, handoff: false };
+    const world: World = {
+      providers: [provider("codex")],
+      stored: {},
+      protection: { forecasts: [{ provider: "codex" }], queue: [own, other] },
+      callerProvider: "codex",
+      refresh: {},
+    };
+    const result = await ask(world, { delegated: true, usageRefreshMs: 20 });
+    expect(result.isError).toBe(false);
+    const answer = JSON.parse(result.text) as Answer;
+    expect(answer.protection.queue).toEqual([own]);
+    expect(result.text).not.toContain("Secret other-thread title");
+    expect(answer.protection.forecasts).toHaveLength(1);
+  });
+
   it("is offered to a delegated task as well as an ordinary thread", async () => {
     expect(MOXEN_TOOLS.map((tool) => tool.name)).toContain("usage_status");
     expect(moxenToolsFor({}).map((tool) => tool.name)).toContain("usage_status");

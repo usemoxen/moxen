@@ -195,6 +195,14 @@ import {
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
+/**
+ * Bound for one driver's freshness probe inside `usage.refresh`: covers the
+ * slowest healthy probe (OpenCode Go's five-second HTTP read) with margin,
+ * well inside the tool's outer eight-second race. A probe slower than this is
+ * cut here, while its late completion still freshens the next call through
+ * the normal event path.
+ */
+const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
 
 export type { TurnDriverFactories } from "../core/threads/execute.js";
 
@@ -723,14 +731,28 @@ export class DirectConnection implements ClientApi {
    * Explicit freshness ask behind `usage_status`: every owned driver re-reads
    * its subscription windows where that is cheap (an open session or live
    * connection - never a new session, never a model call), in parallel, and
-   * a probe that lands is recorded under its key. Drivers with nothing cheap
-   * to read sit the round out, and one driver's failure never stops the rest.
+   * a probe that lands is recorded under its key. Each probe races its own
+   * deadline, so one hung or slow driver cannot stall the rest: what lands is
+   * recorded, the round returns a partial snapshot, and one driver's failure
+   * never stops the rest. Drivers with nothing cheap to read sit the round out.
    */
   private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
     await Promise.allSettled(
       [...this.ownedDrivers].map(async (driver) => {
-        const refreshed = await driver.refreshUsage?.();
-        if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+        // Records on landing, even past the deadline: the round answers from
+        // the partial snapshot, and a late probe freshens the next call.
+        const landed = (async () => await driver.refreshUsage?.())().then(
+          (refreshed) => {
+            if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+            return refreshed;
+          },
+          () => null,
+        );
+        const deadline = new Promise<null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), USAGE_DRIVER_PROBE_TIMEOUT_MS);
+          timer.unref?.();
+        });
+        await Promise.race([landed, deadline]);
       }),
     );
     return usageLimitsSnapshot();

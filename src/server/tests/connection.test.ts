@@ -1645,6 +1645,34 @@ describe("DirectConnection plan usage", () => {
       await connection.close();
     }
   });
+
+  // Slow on purpose (~6s): pins that one hung probe cannot stall the round,
+  // and the fast driver's windows still land in the partial snapshot.
+  it("cuts a hung probe off at the per-driver deadline and keeps the fast driver's windows", async () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const hanging = {
+      refreshUsage: async () => await new Promise<never>(() => undefined),
+    } as unknown as TurnDriver;
+    const fast = {
+      refreshUsage: async () => ({
+        key: "codex",
+        windows: [{ id: "session", label: "Session", resetsAt, exhausted: false, usedPercent: 41 }],
+      }),
+    } as unknown as TurnDriver;
+    const harness = await testHarness({ drivers: { claude: () => hanging, codex: () => fast } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      // Any driver use takes ownership; skills.list needs nothing but the driver itself.
+      await connection.query({ type: "skills.list", instanceId: "claudeAgent", cwd: harness.work });
+      await connection.query({ type: "skills.list", instanceId: "codex", cwd: harness.work });
+      const refreshed = await connection.query({ type: "usage.refresh" });
+      expect(refreshed.providers.codex?.windows).toEqual([{ id: "session", kind: "session", label: "Session", usedPercent: 41, resetsAt }]);
+      expect(refreshed.providers.claude).toBeUndefined();
+    } finally {
+      resetUsageLimitsForTests();
+      await connection.close();
+    }
+  }, 15_000);
 });
 
 describe("DirectConnection settings", () => {
