@@ -324,6 +324,34 @@ describe("timeline bookkeeping filtering", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]?.activityKind).toBe("user-input.requested");
   });
+
+  it("hides a plain steer.redelivered marker but shows one that lost images", () => {
+    const marker = (id: string, payload: Record<string, unknown>) => ({
+      id,
+      kind: "steer.redelivered",
+      tone: "info",
+      summary: "Steer sent again as its own turn",
+      turnId: "turn-2",
+      createdAt: "2026-09-17T05:20:51.000Z",
+      payload,
+    });
+    let state = emptyThreadState();
+    state = applyThreadFrame(
+      state,
+      snapshotWith({
+        thread: {
+          id: "t1",
+          activities: [
+            marker("plain", { messageId: "m1" }),
+            marker("loss", { messageId: "m2", imagesDropped: ["a.png"] }),
+          ],
+        },
+      }),
+    );
+    const entries = timeline(state);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.activityKind).toBe("steer.redelivered");
+  });
 });
 
 function snapshotWith(thread: Record<string, unknown>) {

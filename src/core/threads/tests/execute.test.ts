@@ -1136,4 +1136,35 @@ describe("steer redelivery at settle", () => {
     expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(2);
     expect((await store.readActivities(thread.id)).filter((row) => row.kind === "steer.redelivered")).toHaveLength(1);
   });
+
+  it("runs the redelivery when the turn was already terminal, so nothing promotes it (MXN-312)", async () => {
+    const { store, thread, first, steered } = await steeredThread();
+    const pending: Array<{ id: string; text: string; images: [] }> = [{ id: steered.messageId, text: "task settled", images: [] }];
+    let calls = 0;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.empty,
+      awaitTurn: async () => {
+        calls += 1;
+        if (calls === 1) {
+          // A concurrent interrupt settles the turn first: the catch below
+          // redelivers behind a terminal turn, which promotes nothing.
+          await interruptTurn(store, thread.id, first.turn.id);
+          throw new Error("boom");
+        }
+        return { status: "completed", text: "copy done", usage: null, error: null };
+      },
+      steerTurn: () => Effect.void,
+      takeUnconfirmedSteers: () => pending.splice(0),
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    await flushTurnRunners();
+    const turns = await store.readTurns(thread.id);
+    // The copy ran instead of sitting queued (or running with no runner) with nothing to promote it.
+    expect(turns.map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+    expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(2);
+  });
 });

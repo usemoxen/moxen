@@ -16,6 +16,7 @@ import {
   interruptTurn,
   listThreads,
   readThread,
+  redeliverUnconfirmedSteers,
   sendTurn,
   settleThread,
   snoozeThread,
@@ -187,6 +188,28 @@ describe("send busy policies", () => {
     expect(failed.turn.status).toBe("failed");
     expect(failed.turn.error).toBe("boom");
     expect(await codeOf(() => completeTurn(store, thread.id, sent.turn.id))).toBe("TURN_NOT_RUNNING");
+  });
+
+  it("marks a redelivery copy whose images are gone, instead of looking complete (MXN-312)", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const running = await sendTurn(store, thread.id, { prompt: "one" });
+    const steered = await sendTurn(store, thread.id, {
+      prompt: "see this",
+      delivery: "steer",
+      attachments: [{ type: "image", name: "a.png", mimeType: "image/png", sizeBytes: 8, dataUrl: "data:image/png;base64,iVBORw0KGgo=" }],
+    });
+    expect(steered.delivery).toBe("steered");
+    const saved = (await store.readMessages(thread.id)).find((message) => message.id === steered.messageId)?.attachments ?? [];
+    expect(saved).toHaveLength(1);
+    await rm(saved[0]!.path, { force: true });
+    const copies = await redeliverUnconfirmedSteers(store, thread.id, running.turn.id, [{ messageId: steered.messageId, text: "see this", images: [] }]);
+    expect(copies).toHaveLength(1);
+    const marker = (await store.readActivities(thread.id)).find((activity) => activity.kind === "steer.redelivered");
+    expect(marker?.payload).toMatchObject({ messageId: steered.messageId, imagesDropped: ["a.png"] });
+    expect(marker?.summary).toMatch(/without 1 missing image/);
+    const copyMessage = (await store.readMessages(thread.id)).find((message) => message.turnId === copies[0]);
+    expect(copyMessage?.attachments ?? []).toHaveLength(0);
   });
 });
 

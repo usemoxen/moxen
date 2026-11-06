@@ -511,6 +511,22 @@ describe("setup failures behind a recovery", () => {
     expect((await w.store.readMessages(thread.id)).filter((message) => message.text === "task settled")).toHaveLength(2);
     expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
   });
+
+  it("runs the redelivered copy when an orphaned steer has nothing queued behind it (MXN-312)", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    await sendTurn(w.store, thread.id, { prompt: "task settled", delivery: "steer" });
+    await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(true);
+    // The copy would otherwise sit running with no runner: a later send
+    // would pile behind it and nothing in-process would ever heal it.
+    await settleRuns();
+    const turns = await w.store.readTurns(thread.id);
+    const copy = turns.find((turn) => turn.id !== running.turn.id);
+    expect(copy?.status).toBe("completed");
+    expect((await w.store.readMessages(thread.id)).find((message) => message.turnId === copy?.id)?.text).toBe("task settled");
+  });
 });
 
 /**

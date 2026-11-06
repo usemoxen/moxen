@@ -864,6 +864,22 @@ describe("claude steer confirmation", () => {
     await outcome;
     expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([{ id: steer!, text: "also this", images: [] }]);
   });
+
+  it("reports a pending steer on interrupt even where the CLI never echoes (MXN-312)", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await Effect.runPromise(driver.steerTurn("thread-1", "also this"));
+    await sleep(20);
+    // No echo at all: the interrupt discarded the CLI queue, so the steer
+    // goes out again rather than trusting the push.
+    const steer = transport.created[0]!.messages[1]!.uuid as string;
+    await Effect.runPromise(driver.interruptTurn("thread-1"));
+    await outcome;
+    expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([{ id: steer, text: "also this", images: [] }]);
+  });
 });
 
 describe("claude images", () => {

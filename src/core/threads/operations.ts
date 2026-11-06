@@ -83,7 +83,9 @@ import {
   listThreads,
   openTurn,
   promoteDueScheduledTurn,
+  promoteQueuedTurn,
   redeliverOrphanedSteers,
+  requeueUnownedTurn,
   sendTurn,
   settleThread,
   threadFamily,
@@ -413,9 +415,19 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // Its process died with steers mid-flight whose arrival died with it: the
   // ledger still holds them, so they go out again as queued turns of their
   // own rather than vanishing. Marked, so a repeated recovery sends nothing
-  // twice; queued ahead of the promoted turn's run, they go first.
-  await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id).catch(() => undefined);
-  if (result.promoted && ctx.store.claimRun(result.promoted.id)) await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+  // twice. They queue behind the promoted turn's run when there is one, and
+  // run after it; with nothing promoted the first copy is run here, or the
+  // copies would sit running with no runner and never heal in-process.
+  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id).catch(() => [] as string[]);
+  if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
+    await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+    return true;
+  }
+  if (!result.promoted && copies.length > 0) {
+    for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
+    const next = await promoteQueuedTurn(ctx.store, threadId).catch(() => null);
+    if (next && ctx.store.claimRun(next.id)) await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+  }
   return true;
 }
 

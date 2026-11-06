@@ -595,7 +595,9 @@ function isBookkeepingActivity(activity: ActivityEnvelope): boolean {
     // read as "Worked for 4s · 2 steps" over a `turn.started` echo of the
     // prompt and a `turn.completed` row whose summary is a raw turn id.
     // `turn.failed` is deliberately absent: its summary is the real error.
-    TURN_LIFECYCLE_KINDS.has(activity.kind) ||
+    // A redelivery that dropped images is the exception: its marker names
+    // the loss, and hiding it would show a copy that looks complete.
+    (TURN_LIFECYCLE_KINDS.has(activity.kind) && !steerRedeliveryLostImages(activity)) ||
     // The live set feeds the background panel. (Per-task rows stay: they
     // collapse by `taskId` into one card that goes running → finished.)
     activity.kind === "background.tasks" ||
@@ -887,6 +889,16 @@ export function backgroundSummaryLabel(tasks: readonly BackgroundTaskRow[]): str
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
   return [...counts.entries()].map(([kind, count]) => `${count} ${count === 1 ? kind : `${kind}s`}`).join(", ");
+}
+
+/**
+ * Whether a `steer.redelivered` marker reports images its copy lost: shown
+ * as a note, so the redelivered turn does not read as complete.
+ */
+function steerRedeliveryLostImages(activity: ActivityEnvelope): boolean {
+  if (activity.kind !== "steer.redelivered") return false;
+  const dropped = asRecord(activity.payload)?.["imagesDropped"];
+  return Array.isArray(dropped) && dropped.length > 0;
 }
 
 /**

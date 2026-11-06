@@ -735,19 +735,19 @@ export interface RedeliverSteer {
  * recorded message, matched by id; a steer with no recorded message goes
  * out bare. Each send is marked (`steer.redelivered`), so a repeated
  * recovery never queues one twice. Never throws: a thread gone, settled
- * without a wake, or held simply keeps nothing.
+ * without a wake, or held simply keeps nothing. Returns the new turn ids.
  */
 export async function redeliverUnconfirmedSteers(
   store: ThreadStore,
   rawThreadId: string,
   turnId: string,
   steers: readonly RedeliverSteer[],
-): Promise<void> {
-  if (steers.length === 0) return;
+): Promise<string[]> {
+  if (steers.length === 0) return [];
   const threadId = requireThreadId(rawThreadId);
   const messages = await store.readMessages(threadId).catch(() => null);
   const activities = await store.readActivities(threadId).catch(() => null);
-  if (!messages || !activities) return;
+  if (!messages || !activities) return [];
   const redelivered = new Set<string>();
   for (const activity of activities) {
     if (activity.kind !== "steer.redelivered") continue;
@@ -755,6 +755,7 @@ export async function redeliverUnconfirmedSteers(
     if (typeof payload["messageId"] === "string") redelivered.add(payload["messageId"] as string);
     if (typeof payload["text"] === "string") redelivered.add(`text:${payload["text"] as string}`);
   }
+  const copies: string[] = [];
   for (const steer of steers) {
     const original = steer.messageId !== null
       ? (messages.find((message) => message.id === steer.messageId && message.role === "user") ?? null)
@@ -763,7 +764,11 @@ export async function redeliverUnconfirmedSteers(
     if (!original && redelivered.has(`text:${steer.text}`)) continue;
     const text = original?.text ?? steer.text;
     if (!text.trim()) continue;
-    const uploads = original ? await uploadsOfAttachments(original.attachments ?? []) : uploadsOfImages(steer.images);
+    const kept = original ? await uploadsOfAttachments(original.attachments ?? []) : uploadsOfImages(steer.images);
+    // Images whose saved bytes are gone cannot go out again: the copy says
+    // so on its marker, rather than looking complete.
+    const dropped = (original?.attachments ?? []).filter((attachment) => !kept.some((upload) => upload.name === attachment.name)).map((attachment) => attachment.name);
+    const uploads = kept;
     // A system message meant to wake (a task notification) keeps its wake;
     // anything else redelivers only onto a live thread, never waking one put away.
     const wakeSettled = original?.origin === "task-notification" || original?.origin === "background-notification";
@@ -776,6 +781,7 @@ export async function redeliverUnconfirmedSteers(
       ...(wakeSettled ? { wakeSettled: true } : {}),
     }).catch(() => null);
     if (!sent) continue;
+    copies.push(sent.turn.id);
     redelivered.add(original ? original.id : `text:${steer.text}`);
     await store
       .appendLedger(threadId, "activity", {
@@ -783,12 +789,15 @@ export async function redeliverUnconfirmedSteers(
         threadId,
         turnId: sent.turn.id,
         kind: "steer.redelivered",
-        summary: `Steer sent again as its own turn: ${text.slice(0, 120)}`,
-        payload: { ...(original ? { messageId: original.id } : { text: steer.text }) },
+        summary: dropped.length > 0
+          ? `Steer sent again as its own turn without ${dropped.length} missing image${dropped.length === 1 ? "" : "s"}: ${text.slice(0, 120)}`
+          : `Steer sent again as its own turn: ${text.slice(0, 120)}`,
+        payload: { ...(original ? { messageId: original.id } : { text: steer.text }), ...(dropped.length > 0 ? { imagesDropped: dropped } : {}) },
         createdAt: store.nowIso(),
       })
       .catch(() => undefined);
   }
+  return copies;
 }
 
 /**
@@ -823,16 +832,53 @@ export function orphanedSteers(
  * `redeliverUnconfirmedSteers`). Reads the activities first and the messages
  * only when a steer row names this turn, so a thread without steers pays
  * one ledger read and a recovery whose message read fails still fails where
- * it always did — in its runner's prompt build, not here.
+ * it always did — in its runner's prompt build, not here. Returns the new
+ * turn ids.
  */
-export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string): Promise<void> {
+export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string): Promise<string[]> {
   const threadId = requireThreadId(rawThreadId);
   const activities = await store.readActivities(threadId).catch(() => null);
-  if (!activities) return;
-  if (!activities.some((activity) => activity.turnId === turnId && (activity.kind === "turn.steered" || activity.kind === "message.injected"))) return;
+  if (!activities) return [];
+  if (!activities.some((activity) => activity.turnId === turnId && (activity.kind === "turn.steered" || activity.kind === "message.injected"))) return [];
   const messages = await store.readMessages(threadId).catch(() => null);
-  if (!messages) return;
-  await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId)).catch(() => undefined);
+  if (!messages) return [];
+  return await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId)).catch(() => []);
+}
+
+/**
+ * Promote the oldest promotable queued turn, for a runner that queued work
+ * with no settle coming to promote it (a redelivery behind an already
+ * terminal turn, an orphan recovery with nothing promoted). Null when a
+ * turn is already running or nothing is promotable: admission owns those.
+ * The caller claims and runs what comes back.
+ */
+export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string): Promise<StoredTurn | null> {
+  const threadId = requireThreadId(rawThreadId);
+  return await store.withThreadLock(threadId, async () => {
+    const now = store.nowIso();
+    if (openTurn(await store.readTurns(threadId))) return null;
+    await promoteQueuedLocked(store, threadId, now);
+    return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
+  });
+}
+
+/**
+ * Send a running turn with no runner back to queued, unowned, so the normal
+ * promotion path can take it. Only touches turns this process owns and no
+ * run tracks: redelivery copies a settle already missed, never live work.
+ * Delivery goes back to `queued` with it: the copy was filed as `started`
+ * when nothing was running, and the promotion scan only takes queued turns.
+ */
+export async function requeueUnownedTurn(store: ThreadStore, rawThreadId: string, turnId: string): Promise<boolean> {
+  const threadId = requireThreadId(rawThreadId);
+  return await store.withThreadLock(threadId, async () => {
+    const turn = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+    if (!turn || turn.status !== "running" || store.isTracked(turnId)) return false;
+    const owner = turn.owner;
+    if (!owner || owner.host !== os.hostname() || owner.pid !== process.pid) return false;
+    await store.updateTurn(threadId, turnId, { status: "queued", delivery: "queued", owner: null, updatedAt: store.nowIso() });
+    return true;
+  }).catch(() => false);
 }
 
 async function uploadsOfAttachments(attachments: readonly StoredAttachment[]): Promise<ImageAttachmentUpload[]> {

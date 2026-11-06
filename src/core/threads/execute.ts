@@ -54,7 +54,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, redeliverUnconfirmedSteers, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -1421,19 +1421,25 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
-      await redeliverSteers(store, driver, threadId, storeTurnId);
-      await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
+      const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+      const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
+      // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
+      if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
       return;
     }
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
     await recordPreOutcome(store, driver, args, cwd, pre);
-    await redeliverSteers(store, driver, threadId, storeTurnId);
+    const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+    let settled = false;
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
+      settled = true;
     } catch {
       // Already terminal (e.g. a concurrent interrupt won the race).
     }
+    // Already terminal, same as above: nothing promoted the copies.
+    if (!settled) await runStrandedRedelivery(args, copies);
   } finally {
     clearInterval(liveContext);
     controller.signal.removeEventListener("abort", onAbort);
@@ -1541,20 +1547,34 @@ async function recordPreOutcome(
  * a throwing one must never rewrite the turn's outcome, so failures are
  * swallowed — the ledger still holds the steer for orphan recovery.
  */
-async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string): Promise<void> {
+async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string): Promise<string[]> {
   let pending: ReadonlyArray<UnconfirmedSteer> = [];
   try {
     pending = driver.takeUnconfirmedSteers?.(threadId) ?? [];
   } catch {
     pending = [];
   }
-  if (pending.length === 0) return;
-  await redeliverUnconfirmedSteers(
+  if (pending.length === 0) return [];
+  return await redeliverUnconfirmedSteers(
     store,
     threadId,
     storeTurnId,
     pending.map((steer) => ({ messageId: steer.id, text: steer.text, images: steer.images })),
-  ).catch(() => undefined);
+  ).catch(() => []);
+}
+
+/**
+ * Run redelivery copies their settle missed: the turn was already terminal,
+ * so the settle below promotes nothing and the copies would sit with no
+ * runner. Requeued, promoted and run the normal way instead. No-op when the
+ * settle did promote, or admission holds the copies.
+ */
+async function runStrandedRedelivery(args: ExecuteTurnArgs, copies: readonly string[]): Promise<void> {
+  const { store, threadId } = args;
+  if (copies.length === 0) return;
+  for (const id of copies) await requeueUnownedTurn(store, threadId, id).catch(() => false);
+  const next = await promoteQueuedTurn(store, threadId).catch(() => null);
+  if (next) await runPromotedTurn(args).catch(() => undefined);
 }
 
 async function settleTurn(

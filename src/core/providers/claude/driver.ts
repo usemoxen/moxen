@@ -420,11 +420,13 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * frames and on its result. `pending` holds steers no frame or result has
    * echoed yet; `sent` holds every uuid this session streamed (a steer is
    * confirmed by any echo, so the opening prompt's echo also proves the CLI
-   * speaks the protocol); `echoCapable` remembers that proof across turns.
+   * speaks the protocol); `echoCapable` remembers that proof across turns;
+   * `interrupted` remembers our own interrupt ended the turn, which
+   * discarded the CLI queue — pending steers go out again either way.
    * Lives on the driver rather than the session so a session dying still
    * leaves what the settling turn takes; a fresh session starts unproven.
    */
-  private readonly steerTracking = new Map<ThreadId, { pending: Map<string, { text: string; images: ProviderImage[] }>; sent: Set<string>; echoCapable: boolean }>();
+  private readonly steerTracking = new Map<ThreadId, { pending: Map<string, { text: string; images: ProviderImage[] }>; sent: Set<string>; echoCapable: boolean; interrupted: boolean }>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
   constructor(options: ClaudeDriverOptions = {}) {
@@ -617,20 +619,22 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   /**
    * Steers pushed to the running turn that no reply frame or result ever
    * echoed back (see `steerTurn`): the provider never confirmed they reached
-   * the conversation. A CLI that never echoes anything streamed (older than
-   * the `user_message_uuid` protocol) reports nothing — push stays
+   * the conversation — or our own interrupt ended the turn first, which
+   * discarded the CLI queue, so the echo never comes. A CLI that never
+   * echoes anything streamed (older than the `user_message_uuid` protocol)
+   * reports nothing on a turn that ends any other way — push stays
    * delivered there, so nothing is ever sent twice for it.
    */
   readonly takeUnconfirmedSteers = (threadId: ThreadId): ReadonlyArray<UnconfirmedSteer> => {
     const tracking = this.steerTracking.get(threadId);
     if (!tracking) return [];
     this.steerTracking.delete(threadId);
-    if (!tracking.echoCapable) return [];
+    if (!tracking.echoCapable && !tracking.interrupted) return [];
     return [...tracking.pending].map(([id, steer]) => ({ id, text: steer.text, images: steer.images }));
   };
 
   private trackSteerSent(threadId: ThreadId, uuid: string, steer?: { text: string; images: ProviderImage[] }): void {
-    const tracking = this.steerTracking.get(threadId) ?? { pending: new Map(), sent: new Set<string>(), echoCapable: false };
+    const tracking = this.steerTracking.get(threadId) ?? { pending: new Map(), sent: new Set<string>(), echoCapable: false, interrupted: false };
     tracking.sent.add(uuid);
     if (steer) tracking.pending.set(uuid, steer);
     this.steerTracking.set(threadId, tracking);
@@ -983,6 +987,12 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       if (!open || open.status !== "running") return;
       this.settleOpenTurn(session, "interrupted", "Interrupted.");
       session.pendingText = null;
+      // The interrupt discarded the CLI queue with the turn: pending steers
+      // are unconfirmed even where no echo could prove the CLI speaks the
+      // protocol, so the run sends them again (at-least-once, duplicates
+      // documented in docs/threads.md).
+      const tracking = this.steerTracking.get(threadId);
+      if (tracking) tracking.interrupted = true;
       // The interrupted run still ends with its own `result`; anything it
       // sends before that must not open a background turn.
       session.drainUntilResult = true;

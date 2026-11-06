@@ -816,9 +816,11 @@ provider confirms it reached the conversation — Claude echoes every
 streamed message's id on the reply frames and result of the turn that
 consumes it — and whatever is still unconfirmed when the turn settles goes
 out again, each as a queued turn of its own. Notifications are therefore
-at-least-once and never silently lost; a steer consumed but unconfirmed when
-its turn is interrupted can arrive twice. A provider with no arrival signal
-keeps push-means-delivered, and a steer on a session that dies with its
+at-least-once and never silently lost. Interrupting a turn redelivers its
+pending steers even where no echo could confirm them — our own interrupt
+ended the turn with the CLI queue — so an interrupted steer can arrive
+twice. A provider with no arrival signal keeps push-means-delivered on
+turns that end any other way, and a steer on a session that dies with its
 process goes out again when the orphaned turn is recovered.
 
 ### Messaging a delegated task (`task_send`)
