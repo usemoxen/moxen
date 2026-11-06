@@ -9,7 +9,7 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, runWorkQueue, pendingHandoff, submitHandoff, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -147,6 +147,46 @@ describe("conditional work queue", () => {
     recordUsageWindows("codex", [{ id: "weekly", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 86400_000).toISOString() }]);
     expect(automaticUsageBlock("codex", w.ctx.config)).not.toEqual([]);
     expect(automaticUsageBlock("opencode", w.ctx.config)).toEqual([]);
+  });
+});
+
+describe("cross-provider settle promotion", () => {
+  it("does not strand a queued turn for another provider as running when its settle promotes it", async () => {
+    const w = await world();
+    // Whose driver runs what: the drivers are one instance per provider, so a
+    // prompt reaching the wrong driver (or twice) shows up here.
+    const ran: { kind: string; prompt: string }[] = [];
+    for (const [instance, kind] of [["codex", "codex"], ["claude", "claude"]] as const) {
+      const driver = w.ctx.driverFor(instance);
+      const send = driver.sendTurn.bind(driver);
+      driver.sendTurn = (input) => { ran.push({ kind, prompt: input.prompt }); return send(input); };
+    }
+    // The first turn must still be running while the other two queue behind
+    // it; gate its completion rather than racing the background run.
+    const codexDriver = w.ctx.driverFor("codex");
+    const codexAwait = codexDriver.awaitTurn.bind(codexDriver);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    codexDriver.awaitTurn = async (threadId, turnId, signal) => { await gate; return codexAwait(threadId, turnId, signal); };
+    const thread = await w.make("codex");
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "first" });
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "second on codex", delivery: "queue", modelSelection: { instanceId: "codex", model: "test-model" } });
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "third on claude", delivery: "queue", modelSelection: { instanceId: "claude", model: "test-model" } });
+    release();
+    await settleRuns();
+    // The settling codex runner cannot take the claude turn: it goes back to
+    // the queue for the admission path instead of sitting `running` forever.
+    const held = (await w.store.readTurns(thread.id)).find((turn) => turn.modelSelection?.instanceId === "claude")!;
+    expect(held.status).toBe("queued");
+    expect(held.heldAtSettle).toBe(true);
+    // The admission tick starts it on its own driver, once, with no new message.
+    expect(await runDueScheduledTurn(w.ctx, thread.id)).toBe(true);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed", "completed"]);
+    expect(ran.map((run) => run.kind)).toEqual(["codex", "codex", "claude"]);
+    for (const [index, text] of ["first", "second on codex", "third on claude"].entries()) {
+      expect(ran[index]!.prompt).toContain(text);
+    }
   });
 });
 
