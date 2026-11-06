@@ -36,6 +36,7 @@ import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type Upd
 import type {
   AskedTask,
   CancelledTask,
+  ContinuedOwnThread,
   SentTaskMessage,
   SettledTask,
   QueuedAgentMessage,
@@ -371,6 +372,13 @@ export type CommandBody =
    */
   | ({ readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string; readonly modelSelection?: ModelSelection } & ModelRequest)
   /**
+   * An agent continuing its own thread in a new one: the same
+   * `continueThread` the palette action uses, with the agent-written
+   * handoff and first message. It names only the caller's own thread, so
+   * only that thread's agent can continue it this way.
+   */
+  | ({ readonly type: "thread.continue-agent"; readonly threadId: string; readonly summary: string; readonly firstMessage?: string; readonly idempotencyKey?: string; readonly modelSelection?: ModelSelection } & ModelRequest)
+  /**
    * `/btw`: a side question answered on a copy of the thread's context,
    * with no tools, and never recorded in the thread. A command rather than
    * a query although it changes nothing here: it spends the account's
@@ -494,6 +502,7 @@ export interface CommandResults {
   "harness.models.discover": DiscoverResult;
   "provider.update": ProviderUpdate;
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
+  "thread.continue-agent": ContinuedOwnThread & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
   "forge.request.create": { readonly url: string | null } & Accepted;
   "forge.request.comment": Accepted;
@@ -1414,6 +1423,24 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: requireThreadId(record.threadId),
         ...optionalString(record, "scheduledFor"),
+        ...(selection ? { modelSelection: selection } : {}),
+        ...decodeModelRequest(record, type),
+      };
+    }
+    case "thread.continue-agent": {
+      const selection = asModelSelection(record.modelSelection);
+      const namesModel = asString(record.provider) !== null || asString(record.model) !== null
+        || asString(record.speedMode) !== null || asString(record.thinkingEffort) !== null;
+      if (selection && namesModel) {
+        throw new CliError("INVALID_THREAD_OPTION", "thread.continue-agent takes either modelSelection or provider/model, not both.", { exitCode: 2 });
+      }
+      return {
+        ...meta,
+        type,
+        threadId: requireThreadId(record.threadId),
+        summary: requireField(record.summary, type, "summary"),
+        ...(record.firstMessage !== undefined ? { firstMessage: requireField(record.firstMessage, type, "firstMessage") } : {}),
+        ...(record.idempotencyKey !== undefined ? { idempotencyKey: requireField(record.idempotencyKey, type, "idempotencyKey") } : {}),
         ...(selection ? { modelSelection: selection } : {}),
         ...decodeModelRequest(record, type),
       };

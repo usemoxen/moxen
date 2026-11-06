@@ -2134,18 +2134,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   /** The full live set the side panel lists: background subagents and background commands. */
   private publishBackgroundTasks(session: OpenCodeSession): void {
     this.reconcileServers();
-    const agents = [...this.children]
-      .filter(([, other]) => other.parent === session && other.background && !other.stopped)
-      .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
-    const shells = [...(session.backgroundShells ?? [])].map(([taskId, shell]) => ({
-      taskId,
-      taskType: "local_bash",
-      description: shell.command.split("\n")[0]?.trim() ?? "",
-      toolName: "Bash",
-      command: shell.command,
-      startedAt: shell.startedAt,
-    }));
-    this.publish({ type: "background.tasks.changed", provider: this.provider, threadId: session.threadId, tasks: [...agents, ...shells] });
+    this.publish({ type: "background.tasks.changed", provider: this.provider, threadId: session.threadId, tasks: this.backgroundTasks(session.threadId) });
   }
 
   /** A child session's conversation, for the subagent view. */
