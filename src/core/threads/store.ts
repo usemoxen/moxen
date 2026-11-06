@@ -368,6 +368,28 @@ export class ThreadStore {
       return updated;
     });
   }
+
+  /**
+   * Rewrite several delegation rows at once, under one lock and one file
+   * replacement: readers see every row before or every row after the patch,
+   * never a mixture. A transfer that moved half its rows would leave one
+   * parent notified for a task that already reports to the other.
+   */
+  async updateDelegations(patches: ReadonlyArray<{ readonly id: string; readonly patch: Partial<StoredDelegation> }>): Promise<void> {
+    if (patches.length === 0) return;
+    const wanted = new Map(patches.map((entry) => [entry.id, entry.patch]));
+    await this.withThreadLock("!delegations", async () => {
+      const all = await this.readDelegations();
+      const next = all.map((delegation) => {
+        const patch = wanted.get(delegation.id);
+        return patch === undefined ? delegation : { ...delegation, ...patch, id: delegation.id, updatedAt: this.nowIso() };
+      });
+      const file = this.delegationsFile();
+      const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
+      await writeFile(tmp, next.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+      await renameReplacing(tmp, file);
+    });
+  }
 }
 
 export async function openThreadStore(

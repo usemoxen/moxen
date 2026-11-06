@@ -1101,7 +1101,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   }
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
-  const adopted = await adoptRunningTasks(store, source.id, created.id);
+  const adopted = await adoptTasks(store, source.id, created.id);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
@@ -1134,8 +1134,8 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
  * on, and two threads must not act on the same news. A turn still open on it
  * is left to finish (stopping the session would cut it off), so only the
  * tasks the provider lets us name are stopped then. Nothing here touches the
- * delegations: running children were re-pointed (`adoptRunningTasks`) and
- * finished ones stay reachable. A thread that merely finished a turn never
+ * delegations: delegated children were re-pointed (`adoptTasks`), running
+ * and idle alike. A thread that merely finished a turn never
  * comes through here, so its wake-ups stay.
  */
 async function endContinuedSession(ctx: OperationContext, source: StoredThread): Promise<void> {
@@ -1186,45 +1186,50 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
 }
 
 /**
- * An orchestrator that carries on in a new thread takes its running tasks
- * with it: their delegations name the continuation as parent, so their
- * notifications reach the conversation that is still working.
+ * An orchestrator that carries on in a new thread hands over every task it
+ * delegated — running, idle, finished, cancelled, and ones that themselves
+ * continued: their delegations name the continuation as parent, so
+ * `task_send`, `task_ask`, `message_queue`, `task_cancel`, `task_status` and
+ * completion notifications from then on resolve against the conversation
+ * that is still working. The old thread owns nothing afterwards: every one
+ * of those reads as `TASK_NOT_FOUND` there. A task keeps its own provider,
+ * model and modes; only the parent link moves, so this grants the new
+ * thread no extra access. Research roles stay out: the run owns their
+ * traffic, and the lead still reaches them through it.
+ *
+ * The re-pointing is one atomic file rewrite, so a notification deciding
+ * mid-transfer sees every row before or every row after it, never a mixture
+ * that would tell the old parent about a task that already reports to the
+ * new one. A notification queued and fully delivered just before the
+ * transfer still reaches the old thread; the task's next report — and
+ * `task_status` on the new parent at any time — cover it.
  */
-async function adoptRunningTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
+async function adoptTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
   const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
-    (row) => row.parentThreadId === sourceId && row.status === "running" && row.continuedIn === undefined,
+    (row) => row.parentThreadId === sourceId,
   );
-  const adopted: { taskId: string; title: string }[] = [];
+  const moved: { taskId: string; title: string }[] = [];
+  const patches: { id: string; patch: { parentThreadId: string } }[] = [];
   for (const row of rows) {
-    // A row's `running` is not kept up to date when a task finishes: ask the task itself.
-    if (!(await taskUnfinished(store, row.childThreadId))) continue;
-    await store.updateDelegation(row.id, { parentThreadId: destinationId });
+    // A research role's messages go through its run, never through the
+    // delegation row: re-pointing it would only list run traffic as the new
+    // thread's tasks.
     const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
-    adopted.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
+    if (child?.researchRole !== undefined) continue;
+    patches.push({ id: row.id, patch: { parentThreadId: destinationId } });
+    moved.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
   }
-  return adopted;
+  await store.updateDelegations(patches);
+  return moved;
 }
 
-/**
- * Whether a delegated task still owes its parent a result: a turn running or
- * queued, or its last run stopped by a usage limit with no resume left waiting.
- */
-async function taskUnfinished(store: ThreadStore, childThreadId: string): Promise<boolean> {
-  const turns = await store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
-  if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return true;
-  const lastRan = turns.findLast((turn) => turn.status === "completed");
-  if (!lastRan) return false;
-  const activities = await store.readActivities(childThreadId).catch(() => [] as StoredActivity[]);
-  return activities.some((activity) => (activity.kind === "usage.limit" || activity.kind === "usage.wrap-up") && activity.createdAt >= lastRan.createdAt);
-}
-
-/** The handoff's note of tasks still running, which now report to the new thread. */
+/** The handoff's note of delegated tasks that moved with it, which now report to the new thread. */
 export function runningTasksNote(tasks: readonly { taskId: string; title: string }[]): string {
   if (tasks.length === 0) return "";
   return [
     "",
     "",
-    "## Delegated tasks still running",
+    "## Delegated tasks that moved with this thread",
     "These tasks were delegated from the previous thread and now report here; a task-notification arrives as each settles.",
     ...tasks.map((task) => `- "${task.title}" (taskId ${task.taskId})`),
   ].join("\n");
@@ -1242,8 +1247,62 @@ async function delegationOf(
   return { parentTitle: parent?.title ?? row.parentThreadId, baseBranch: row.baseBranch ?? null };
 }
 
+/**
+ * The live thread this one continued in, following the continuation chain
+ * to its end. Null when the thread never continued, or nothing of the chain
+ * is left (a deleted continuation owns nothing, so there is nothing to
+ * split with). A continued thread starts no new delegations: they would
+ * answer to a dormant thread while its continuation steers beside them.
+ */
+async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
+  let current: string | undefined = threadId;
+  let latest: string | null = null;
+  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+    const notes = await store.readActivities(current).catch(() => []);
+    const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
+    if (next === undefined) break;
+    latest = next;
+    current = (await store.readThreadRecord(next).catch(() => null)) === null ? undefined : next;
+  }
+  return latest !== null && current !== undefined ? latest : null;
+}
+
 async function projectById(storeRoot: string, projectId: string): Promise<StoredProject | null> {
   return (await listStoredProjects(storeRoot)).find((candidate) => candidate.id === projectId) ?? null;
+}
+
+/** What one thread is offered from Moxen's own tools, for routing the directory's shared `moxen` entry to the session that made each call. */
+export interface MoxenSessionRouting {
+  readonly threadId: string;
+  /** No delegation tools: a delegated task, a research run, or orchestration switched off. */
+  readonly delegated: boolean;
+  readonly webFetch: boolean;
+  readonly memory: "write" | "read" | "off";
+  readonly checklist: boolean;
+}
+
+/**
+ * The gating one thread's calls run under: the same shape its session
+ * started with (`sessionSetup`). Null when the thread is gone — the call
+ * must then fail safe, never land on another thread.
+ */
+export async function moxenRoutingFor(ctx: OperationContext, threadId: string): Promise<MoxenSessionRouting | null> {
+  const thread = await ctx.store.readThreadRecord(threadId);
+  if (!thread) return null;
+  const delegation = await delegationOf(ctx.store, thread.id);
+  const kind = driverKindOfInstance(thread.modelSelection.instanceId);
+  const providerConfig = kind === null ? undefined : ctx.config.providers?.[kind];
+  const reach = moxenToolsOf(providerConfig);
+  const project = await projectById(ctx.storeRoot, thread.projectId);
+  const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
+  const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
+  return {
+    threadId,
+    delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
+    webFetch: reach.webFetch,
+    memory: !memoryOn ? "off" : delegation !== null ? "read" : "write",
+    checklist: providerConfig?.todos !== false,
+  };
 }
 
 function requireThreadId(value: string): string {
@@ -2320,26 +2379,6 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
 }
 
 /**
- * Hand the directory's `moxen` entry back to the parent once a shared child
- * is done. The child's session start registered the child's entry over the
- * parent's on their shared OpenCode server (`mcp.add` restarts the server
- * on every call), which also killed the in-flight delegate call with
- * `Connection closed`; without this, the parent's later calls keep landing
- * on the child's entry until the server turns over. A child with more work
- * queued keeps the entry until it is truly done. Best-effort: never throws.
- */
-async function restoreParentMcpEntry(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
-  try {
-    if (!(await taskHasSettledForGood(ctx, childThreadId))) return;
-    const parent = await ctx.store.readThreadRecord(parentThreadId);
-    if (!parent) return;
-    await ctx.driverFor(parent.modelSelection.instanceId).restoreMcpServers?.(parentThreadId);
-  } catch {
-    // Best effort: the entry heals on the next session start.
-  }
-}
-
-/**
  * A resumed turn of a delegated task ended: tell the parent, if it asked to be
  * told and the task is not simply waiting for another resume.
  */
@@ -2672,6 +2711,19 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       details: { threadId: parentThreadId, archivedAt: parent.archivedAt },
     });
   }
+  // A thread that continued in a new one starts no new tasks: the row would
+  // answer to a dormant thread while its continuation steers beside it.
+  // Research roles start through the run, not through here, so the run's
+  // own machinery is exempt.
+  if (options.researchRole === undefined) {
+    const live = await continuedLiveThread(ctx.store, parentThreadId);
+    if (live !== null) {
+      throw new CliError("THREAD_CONTINUED", `Thread ${parentThreadId} was continued in ${live}; delegate from ${live} instead.`, {
+        exitCode: 4,
+        details: { threadId: parentThreadId, continuedIn: live },
+      });
+    }
+  }
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
@@ -2866,9 +2918,6 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // the child it is a delegated task (`core/threads/instructions.ts`).
   if (options.researchRole === undefined) await recordDelegation();
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
-    // The child's session start may have flipped the directory's `moxen`
-    // entry before failing: hand it back, since this child will never run.
-    if (worktree === null) void restoreParentMcpEntry(ctx, parentThreadId, created.id);
     throw new CliError(
       "THREAD_START_FAILED",
       `Created delegated thread ${created.id} but could not start its task turn. The child thread was left untouched.`,
@@ -2876,16 +2925,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     );
   });
 
-  // A shared child runs on the parent's OpenCode server, whose single
-  // `moxen` entry the child's session start flipped to the child (killing
-  // the in-flight call with `Connection closed` when it came over MCP).
-  // Hand the entry back once the child settles, so the parent's later calls
-  // land on the parent again. Worktree children have their own server, and
-  // a child with more work queued keeps the entry until it is truly done.
-  if (worktree === null) {
-    const settled = started.run ?? Promise.resolve();
-    void settled.then(() => restoreParentMcpEntry(ctx, parentThreadId, created.id));
-  }
+  // A shared child runs on the parent's OpenCode server, whose single `moxen`
+  // entry stays the parent's: the child's session start never replaces it,
+  // and each call is routed per call by the session id OpenCode sends in
+  // `CallToolRequest.params._meta` instead.
 
   // A delegation nobody waits on reports back by itself once the task
   // settles: the parent gets a message instead of having to poll for it.
@@ -3151,16 +3194,22 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
-  const task = taskOf(child, taskId);
+  // The live thread, following the same continuedIn chain task control
+  // resolves: asking about a task that carried on reads the continuation,
+  // the thread a send would steer — never the dormant source.
+  const live = await ownedDelegation(ctx, parentThreadId, taskId).catch(() => null);
+  const target = live !== null ? await threadWithLedger(ctx.store, live.childThreadId).catch(() => null) : null;
+  const seen = target ?? child;
+  const task = taskOf(seen, taskId);
   // A review child's verdict, warnings and finished state ride with the
-  // status. The settled verdict is pinned on the delegation row, so a
+  // status. The settled verdict is pinned on the (live) delegation row, so a
   // follow-up turn cannot rewrite it; `task_status` and the task
   // notification read the same pinned facts.
-  const facts = await reviewFactsForTask(ctx, child, parent, delegation, task);
+  const facts = await reviewFactsForTask(ctx, seen, parent, live ?? delegation ?? undefined, task);
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
-    child,
+    child: seen,
     task,
     review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
@@ -3199,10 +3248,8 @@ async function threadLineage(ctx: OperationContext, threadId: string): Promise<R
 
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
- * the task carried on in (`continuedIn`). A task that finished before the
- * orchestrator continued stays listed under the older thread, and is still the
- * continuation's to reach. Refuses with `TASK_NOT_FOUND`, the same for a real
- * id and a fake one, when that thread did not delegate it.
+ * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
+ * same for a real id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
   const rows = await ctx.store.readDelegations();
@@ -3233,7 +3280,7 @@ export interface CancelledTask extends Omit<DescribedTask, "task"> {
 
 /**
  * Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended.
- * Only the thread that delegated the task (or the continuation its running tasks were re-pointed to) may.
+ * Only the thread that owns the task may: the one that delegated it, or the continuation a continue handed it to.
  */
 export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<CancelledTask> {
   const parentThreadId = requireThreadId(rawParentThreadId);
@@ -3286,10 +3333,11 @@ export interface SettledTask extends Omit<DescribedTask, "task"> {
  * Settle a delegated task through the same path as `threads settle`: the
  * task and its own delegated tasks settle, the parent and siblings are
  * untouched, and running or blocked work refuses (`THREAD_SETTLE_BLOCKED`)
- * unless `stop` ends it first. Only the thread that delegated the task (or
- * the continuation its running tasks were re-pointed to) may, exactly like
- * `task_cancel`: a research run's roles and lead have no delegation rows, so
- * they are refused with the same `TASK_NOT_FOUND`. With `removeWorktree`
+ * unless `stop` ends it first. Only the thread that owns the task may — the
+ * one that delegated it, or the continuation a continue handed it to —
+ * exactly like `task_cancel`: a research run's roles and lead have no
+ * delegation rows, so they are refused with the same `TASK_NOT_FOUND`.
+ * With `removeWorktree`
  * the task's worktree checkout goes too, once it is safe; the branch stays.
  */
 export async function settleTask(
@@ -3512,11 +3560,11 @@ export interface AskedTask {
 }
 
 /**
- * A message from the thread that delegated a task, into that task. Only the
- * delegating thread (or the thread an orchestrator continued in, which the
- * running delegations were re-pointed to) reaches it, and never a research
- * run's role or lead: their messages are scoped and capped (`research*`), and
- * a free message would be a way round both.
+ * A message from the thread that owns a task, into that task. Only the
+ * delegating thread (or the continuation a continue handed the task to)
+ * reaches it, and never a research run's role or lead: their messages are
+ * scoped and capped (`research*`), and a free message would be a way round
+ * both.
  *
  * It takes the same path as every send (`startTurn`), then reports from what
  * that returned, not from what the provider is known for: a steer counts only
@@ -3566,7 +3614,9 @@ export async function sendTaskMessage(
     started.delivery === "steered" || started.delivery === "injected"
       ? started.steerDelivered === true ? "steered" : "not_delivered"
       : started.turn.status === "queued" ? "queued" : "started";
-  // A task an older thread left behind is back in work: it reports to the thread that sent this, not the older one.
+  // A task delegated from the old thread in the race between the transfer's
+  // row snapshot and a refusal that landed too late is back in work: it
+  // reports to the thread that sent this, not the older one.
   if (outcome !== "not_delivered" && row.parentThreadId !== parentThreadId) await ctx.store.updateDelegation(row.id, { parentThreadId });
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
   if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);

@@ -586,13 +586,98 @@ export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
-export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+export async function moxenOptionsFor(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<MoxenToolOptions> {
   const run = await api.query({ type: "research.run", threadId }).catch(() => null);
   const active = isResearchRunActive(run);
   const researchLead = active && run?.leadThreadId === threadId;
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
   const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
-  return moxenToolsFor({ ...options, ...(run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {}), imageGeneration, handoff, researchLead, researchMember: active });
+  return { ...options, ...forceDelegated(run, threadId, active), imageGeneration, handoff, researchLead, researchMember: active };
+}
+
+/** A research run in progress takes the delegation tools away, like the list does. */
+function forceDelegated(
+  run: { readonly leadThreadId: string } | null,
+  threadId: string,
+  active: boolean,
+): { readonly delegated?: true } {
+  return run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {};
+}
+
+export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+  return moxenToolsFor(await moxenOptionsFor(api, threadId, options));
+}
+
+/**
+ * Where OpenCode names the session a tool call runs for: request metadata,
+ * not a tool argument, so it is absent from the model-visible schema
+ * (`docs/external/opencode-v2/mcp-servers.md#context`). The id identifies
+ * the invoking OpenCode session, never the MCP transport session; a model
+ * cannot set it, so it selects which thread's tools and identity serve the
+ * call rather than authorizing anything.
+ */
+export const OPENCODE_SESSION_META_KEY = "ai.opencode/sessionID";
+
+/** The native OpenCode session a request runs for, from its MCP request metadata. */
+function sessionOf(params: Record<string, unknown>): string | null {
+  const meta = params._meta;
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const id = (meta as Record<string, unknown>)[OPENCODE_SESSION_META_KEY];
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/**
+ * Who a request runs for on the directory's shared `moxen` entry. A request
+ * carrying a known session id runs with that session's thread and gating; a
+ * request carrying an unknown session id fails rather than landing on
+ * another thread. A request without one falls back to the entry's own
+ * thread — except a `tools/call`, which would otherwise silently execute as
+ * the owner (a `delegate` creating the owner's task, a `memory_save` in the
+ * owner's scope): when sessions share the entry the call is ambiguous, so
+ * it fails naming the missing key, and with one session at most the
+ * fallback cannot land on another thread.
+ */
+export async function routeMcpSession(
+  api: ClientApi,
+  fallback: { readonly threadId: string; readonly options: MoxenToolOptions },
+  params: Record<string, unknown>,
+  requireSession: boolean,
+): Promise<{ readonly threadId: string; readonly options: MoxenToolOptions } | { readonly error: string }> {
+  const nativeSessionId = sessionOf(params);
+  if (nativeSessionId === null) {
+    if (!requireSession) return fallback;
+    // Sessions that could have placed this call on the entry: one at most
+    // and the fallback cannot land on another thread; more and the call is
+    // ambiguous, so it fails naming the missing key. Anything unparsable
+    // fails closed too.
+    let sessions = 2;
+    try {
+      const answer = await api.query({ type: "thread.entry-sessions", threadId: fallback.threadId });
+      if (typeof answer?.count === "number") sessions = answer.count;
+    } catch (cause) {
+      return { error: `Could not count the sessions sharing this entry: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
+    if (sessions <= 1) return fallback;
+    return {
+      error:
+        `Missing "${OPENCODE_SESSION_META_KEY}" in this tools/call: the shared moxen entry serves ${sessions} live sessions, ` +
+        `so the call cannot be attributed to one thread and is refused instead of running as another thread.`,
+    };
+  }
+  let routing;
+  try {
+    routing = await api.query({ type: "opencode.session-thread", nativeSessionId });
+  } catch (cause) {
+    return { error: `Could not resolve the OpenCode session behind this call: ${cause instanceof Error ? cause.message : String(cause)}` };
+  }
+  if (routing === null) {
+    return { error: `Unknown OpenCode session "${nativeSessionId}": the shared moxen entry serves only live sessions, never another thread.` };
+  }
+  const run = await api.query({ type: "research.run", threadId: routing.threadId }).catch(() => null);
+  return {
+    threadId: routing.threadId,
+    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
+  };
 }
 
 /**

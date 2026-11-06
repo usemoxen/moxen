@@ -137,6 +137,21 @@ describe("task_settle", () => {
     }
   }, 20_000);
 
+  it("after the orchestrator continues, a finished task settles from the continuation and no longer from the old thread", async () => {
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await waitForTurnDone(t.store, taskId);
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      expect((await t.settle(t.orchestrator, { taskId })).text).toContain("TASK_NOT_FOUND");
+      const settled = await t.settle(continued.threadId, { taskId });
+      expect(settled.isError).toBe(false);
+      expect(settled.json).toMatchObject({ taskId, settled: true, status: "completed", stopped: false });
+    } finally {
+      await t.connection.close();
+    }
+  });
+
   it("settles several tasks at once, reporting each outcome without stopping on a bad id", async () => {
     const t = await setup();
     try {
