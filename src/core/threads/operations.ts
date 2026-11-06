@@ -75,6 +75,7 @@ import {
   delegationForChild,
   failTurn,
   reconcileOrphanedTurn,
+  holdStrandedPromotions,
   inspectThread,
   interruptTurn,
   listThreads,
@@ -413,10 +414,15 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   const { store } = ctx;
   const thread = await store.readThreadRecord(threadId);
   if (!thread) { store.untrackRunning(turn.id); return; }
+  // Turns queued behind this one if it settles below with no runner to take
+  // a promotion: settled without promoting, held for admission instead.
+  const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
   // One message, or several queued ones batched into this turn at promotion.
   const message = turnPrompt(await store.readMessages(threadId), turn);
   if (message === null) {
     await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
+    store.untrackRunning(turn.id);
+    await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
     return;
   }
   const selection = turn.modelSelection ?? thread.modelSelection;
@@ -434,6 +440,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
     await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+    store.untrackRunning(turn.id);
+    // The failed start settled nothing that runs: a promotion it made has no
+    // runner to take it, so hand those turns back to the admission path.
+    await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
     return;
   }
   const images = await imagesOf(message.attachments);
@@ -1269,6 +1279,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   }
   const fresh = (sent.delivery === "started" || sent.delivery === "restarted") && sent.turn.status === "running";
   if (!fresh) return { ...sent, run: null };
+  // The turn is live in this process from here until `executeTurn` takes it:
+  // a stop landing while the session starts still promotes the turn queued
+  // behind it, and this claim is what tells that stop a runner is coming.
+  // Every exit below either hands the turn to `executeTurn` (which replaces
+  // the claim with its abort) or releases it.
+  const claimed = store.claimRun(sent.turn.id);
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
@@ -1288,7 +1304,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
+    const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
+    if (claimed) store.untrackRunning(sent.turn.id);
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    // The failed start settled nothing that runs: a promotion it made has no
+    // runner to take it, so hand those turns back to the admission path.
+    await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   // A stop that landed while the session was starting already settled the
@@ -1324,6 +1345,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
     });
+    if (claimed) store.untrackRunning(sent.turn.id);
     return { ...sent, run: Promise.resolve() };
   }
   const images = providerImages(uploads);
@@ -1334,24 +1356,32 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
-  const run = executeTurn({
-    store,
-    driver,
-    threadId: thread.id,
-    storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
-    ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
-    ...(setup.fresh ? { freshConversation: true } : {}),
-    ...(images.length > 0 ? { images } : {}),
-    // Always the turn's own model, so a live session switches when the
-    // thread's model changed since it started.
-    modelSelection: turnModel,
-    interactionMode: sent.turn.interactionMode,
-    workingDirectory: sent.thread.env.path,
-    ...(onEvent ? { onEvent } : {}),
-    ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
-    ...longThreadHook(ctx, thread.id),
-  }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  let run: Promise<void>;
+  try {
+    run = executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: sent.turn.id,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+      ...(setup.fresh ? { freshConversation: true } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      // Always the turn's own model, so a live session switches when the
+      // thread's model changed since it started.
+      modelSelection: turnModel,
+      interactionMode: sent.turn.interactionMode,
+      workingDirectory: sent.thread.env.path,
+      ...(onEvent ? { onEvent } : {}),
+      ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
+      ...longThreadHook(ctx, thread.id),
+    }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  } catch (cause) {
+    // The prompt never reached a runner (a ledger read failed while building
+    // it): release the claim rather than leaving the turn tracked forever.
+    if (claimed) store.untrackRunning(sent.turn.id);
+    throw cause;
+  }
   return { ...sent, run };
 }
 

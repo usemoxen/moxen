@@ -329,8 +329,7 @@ describe("settlement and snooze", () => {
 });
 
 describe("interrupt", () => {
-  it("reports idle threads and aborts tracked runners", async () => {
-    const store = await testStore();
+  it("reports idle threads and aborts tracked runners", async () => {    const store = await testStore();
     const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
     const idle = await interruptTurn(store, thread.id);
     expect(idle.interrupted).toBe(false);
@@ -344,6 +343,22 @@ describe("interrupt", () => {
     expect(result.interrupted).toBe(true);
     expect(result.turn?.status).toBe("interrupted");
     expect(aborted).toBe(true);
+  });
+
+  it("leaves a queued turn runnable when the stop finds no live runner", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const running = await sendTurn(store, thread.id, { prompt: "one" });
+    const queued = await sendTurn(store, thread.id, { prompt: "two", delivery: "queue" });
+    // No runner in this process ever took the running turn (a dead runner, or
+    // a stop from another process): promoting the queued turn to `running`
+    // would strand it with an owner but no run, so it stays queued instead —
+    // held for the admission path, never stranded.
+    const result = await interruptTurn(store, thread.id);
+    expect(result.interrupted).toBe(true);
+    const turns = await store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
+    expect(turns.find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
   });
 });
 

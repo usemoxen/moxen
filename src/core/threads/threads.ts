@@ -828,12 +828,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // settle held back are marked, never an ordinary queue: a turn queued
     // behind a protection-interrupted turn keeps waiting for the next send
     // or settle.
-    for (const turn of turns) {
-      if (turn.status === "queued" && !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold"
-        && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
-        await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
-      }
-    }
+    await holdQueuedForAdmission(store, threadId, instant);
   }
   if (!next) return;
   if (pause && pause.recoveryTurnId === next.id) {
@@ -850,6 +845,53 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     createdAt: now,
   });
   store.emit(threadId, "turn-promoted");
+}
+
+/**
+ * Hold every plain turn still queued for the admission path, so it can start
+ * them once nothing blocks them. The admission path only takes plain turns
+ * settle marked this way; without the mark an idle thread's queued plain
+ * turn would wait for a send or settle that never comes.
+ *
+ * Caller must hold the thread lock.
+ */
+async function holdQueuedForAdmission(store: ThreadStore, threadId: string, instant: number): Promise<void> {
+  for (const turn of await store.readTurns(threadId)) {
+    if (turn.status === "queued" && !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold"
+      && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
+      await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
+    }
+  }
+}
+
+/**
+ * Re-queue a promotion no runner will ever take.
+ *
+ * A settle that ran with no live run behind it (a session that failed to
+ * start) promotes the next queued turn to `running`, but nothing hands it to
+ * a driver. The caller names the turns that were queued before the settle;
+ * any of those now `running` with no run in this process goes back to the
+ * queue, held for the admission path. Each turn is claimed first, so a runner
+ * that took it concurrently wins.
+ */
+export async function holdStrandedPromotions(store: ThreadStore, rawThreadId: string, wasQueued: ReadonlySet<string>): Promise<void> {
+  const threadId = requireThreadId(rawThreadId);
+  for (const turnId of wasQueued) {
+    const turn = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+    if (!turn || turn.status !== "running" || store.isTracked(turnId)) continue;
+    const owner = turn.owner;
+    if (!owner || owner.host !== os.hostname() || owner.pid !== process.pid) continue;
+    if (!store.claimRun(turnId)) continue;
+    try {
+      await store.withThreadLock(threadId, async () => {
+        const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+        if (!fresh || fresh.status !== "running") return;
+        await store.updateTurn(threadId, turnId, { status: "queued", heldAtSettle: true, owner: null, updatedAt: store.nowIso() });
+      });
+    } finally {
+      store.untrackRunning(turnId);
+    }
+  }
 }
 
 /**
@@ -997,8 +1039,20 @@ export async function interruptTurn(
     if (!target || (target.status !== "running" && target.status !== "queued")) {
       return { thread, turn: target, interrupted: false };
     }
+    // Whether a run in this process will take the turn this promotes: the
+    // stopped turn's own runner, when it settles, or the send still starting
+    // it (which claims the turn below before its session starts). Read before
+    // the interrupt releases the claim.
+    const hasRunner = store.isTracked(target.id);
     const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
-    await promoteQueuedLocked(store, threadId, now);
+    if (hasRunner) {
+      await promoteQueuedLocked(store, threadId, now);
+    } else {
+      // No runner is alive to take a promotion (a dead runner, or a stop
+      // from another process): hold the queued turns for the admission path
+      // instead of stranding one of them `running` with an owner but no run.
+      await holdQueuedForAdmission(store, threadId, Date.parse(now));
+    }
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "turn-interrupted");

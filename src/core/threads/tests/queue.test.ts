@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
+import os from "node:os";
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -9,7 +10,7 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -328,6 +329,40 @@ describe("explicit handoff submissions", () => {
     }, { timeout: 5000 });
     await runWorkQueue(w.ctx, now + 62_000); await settleRuns();
     expect(w.sent.at(-1)?.threadId).toBe(dependent.id);
+  });
+});
+
+/**
+ * A recovery whose session fails to start must not strand the turn behind
+ * it: orphan recovery promotes B and fails it, and that failure promotes C
+ * to `running` with no runner and no tracking — the next send then sees a
+ * busy thread no orphan recovery will ever reap (its owner is alive).
+ */
+describe("setup failures behind a recovery", () => {
+  it("holds the turn behind a recovery whose session fails to start instead of stranding it running", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const a = await sendTurn(w.store, thread.id, { prompt: "first" });
+    const b = await sendTurn(w.store, thread.id, { prompt: "second on claude", delivery: "queue", modelSelection: { instanceId: "claude", model: "test-model" } });
+    const c = await sendTurn(w.store, thread.id, { prompt: "third", delivery: "queue" });
+    // A's runner is gone, and B's provider cannot start a session.
+    await w.store.updateTurn(thread.id, a.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    const driverFor = w.ctx.driverFor;
+    const spy = vi.spyOn(w.ctx, "driverFor").mockImplementation((id) => {
+      if (driverKindOfInstance(id) === "claude") throw new CliError("PROVIDER_UNKNOWN", "No direct driver.");
+      return driverFor(id);
+    });
+    try {
+      await recoverOrphanedTurn(w.ctx, thread.id);
+    } finally {
+      spy.mockRestore();
+    }
+    const turns = await w.store.readTurns(thread.id);
+    const statusOf = (id: string) => turns.find((turn) => turn.id === id)?.status;
+    expect({ a: statusOf(a.turn.id), b: statusOf(b.turn.id), c: statusOf(c.turn.id) }).toEqual({ a: "interrupted", b: "failed", c: "queued" });
+    expect(turns.find((turn) => turn.id === c.turn.id)?.heldAtSettle).toBe(true);
+    expect(w.store.isTracked(b.turn.id)).toBe(false);
+    expect(w.store.isTracked(c.turn.id)).toBe(false);
   });
 });
 
