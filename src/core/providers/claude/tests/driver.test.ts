@@ -733,6 +733,57 @@ describe("claude driver session controls", () => {
     }
   });
 
+  it("a stop finishing after a restart leaves the successor session alone", async () => {
+    // A stale close must not delete a session that started after the stop
+    // began, nor publish session-stopped for it.
+    let queries = 0;
+    const closes: boolean[] = [];
+    const hangingFirst: ClaudeTransport = {
+      query: () => {
+        const hanging = queries === 0;
+        queries += 1;
+        const index = closes.length;
+        closes.push(false);
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield initMessage();
+            await new Promise<void>(() => undefined);
+          },
+          interrupt: () => (hanging ? new Promise<void>(() => undefined) : Promise.resolve()),
+          setPermissionMode: async () => undefined,
+          setModel: async () => undefined,
+          close: () => {
+            closes[index] = true;
+          },
+        };
+      },
+    };
+    const driver = new ClaudeDriver({ transport: hangingFirst, stopTimeoutMs: 30 });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    const stopping = Effect.runPromise(driver.stopSession("thread-1"));
+    try {
+      await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
+      // Restart on the settled turn while the stale close still waits out its bound.
+      await Effect.runPromise(driver.startSession(START));
+      await stopping;
+      // Only the stale session's own transport was closed; the successor
+      // stays live and no session-stopped was published for it.
+      expect(closes).toEqual([true, false]);
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
+      expect(
+        events.filter((event) => event.type === "thread.state.changed" && (event as { state: string }).state === "session-stopped"),
+      ).toHaveLength(0);
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "again" }));
+    } finally {
+      await stopping.catch(() => undefined);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
   it("stopAll closes every session even when one interrupt never answers", async () => {
     // Sessions close concurrently: the session hung in interrupt() waits
     // out only its own bound while the rest reach close() at once.
@@ -772,6 +823,36 @@ describe("claude driver session controls", () => {
       expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
     } finally {
       await stopping.catch(() => undefined);
+    }
+  });
+
+  it("cleans up the session even when close() itself fails", async () => {
+    // A failing close must not leave the session listed: cleanup runs in a
+    // finally, and the wind-down error surfaces only after it.
+    const failing: ClaudeTransport = {
+      query: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield initMessage();
+          await new Promise<void>(() => undefined);
+        },
+        interrupt: () => Promise.resolve(),
+        setPermissionMode: async () => undefined,
+        setModel: async () => undefined,
+        close: () => {
+          throw new Error("close boom");
+        },
+      }),
+    };
+    const driver = new ClaudeDriver({ transport: failing });
+    await Effect.runPromise(driver.startSession(START));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      await expect(Effect.runPromise(driver.stopSession("thread-1"))).rejects.toMatchObject({ code: "CLAUDE_STOP_FAILED" });
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+      await vi.waitFor(() => expect(events.some((event) => event.type === "thread.state.changed")).toBe(true));
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
     }
   });
 

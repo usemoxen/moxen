@@ -10,7 +10,7 @@ import { CodexDriver, codexContextUsageOf } from "../driver.js";
 import { codexDisabledToolConfig } from "../../../nativetools.js";
 import { FakeCodexTransport } from "./fakes.js";
 import { McpClient } from "../../harness/mcpclient.js";
-import { CODEX_HARNESS_SERVER } from "../tools.js";
+import { CodexHarnessTools, CODEX_HARNESS_SERVER } from "../tools.js";
 
 async function collectEvents(driver: CodexDriver, count: number): Promise<ProviderRuntimeEvent[]> {
   const chunk = await Effect.runPromise(Stream.runCollect(Stream.take(driver.streamEvents, count)));
@@ -331,17 +331,76 @@ describe("codex driver turns", () => {
     }
   });
 
-  it("stopAll closes every session", async () => {
+  it("stopAll closes every session even when one wind-down stalls", async () => {
+    // Sessions close concurrently within the stop bound: the stalled
+    // session waits out only its own bound while the rest reach peer.close().
     const transport = new FakeCodexTransport();
-    const driver = new CodexDriver({ transport });
+    const driver = new CodexDriver({ transport, stopTimeoutMs: 30 });
+    const spy = vi.spyOn(CodexHarnessTools.prototype, "close").mockImplementationOnce(() => new Promise<void>(() => undefined));
     await Effect.runPromise(driver.startSession(START));
     await Effect.runPromise(driver.startSession({ threadId: "thread-2", workingDirectory: "/repo" }));
     await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
     await Effect.runPromise(driver.sendTurn({ threadId: "thread-2", prompt: "hi" }));
-    await Effect.runPromise(driver.stopAll());
-    expect(transport.sessions).toHaveLength(2);
-    expect(transport.sessions.every((session) => session.client.closed)).toBe(true);
-    expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
+    const stopping = Effect.runPromise(driver.stopAll());
+    try {
+      await vi.waitFor(() => expect(transport.sessions[1]!.client.closed).toBe(true));
+      await stopping;
+      expect(transport.sessions).toHaveLength(2);
+      expect(transport.sessions.every((session) => session.client.closed)).toBe(true);
+      expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
+    } finally {
+      await stopping.catch(() => undefined);
+      spy.mockRestore();
+    }
+  });
+
+  it("a stop finishing after a restart leaves the successor session alone", async () => {
+    // A stale close must not delete a session that started after the stop
+    // began, nor publish session-stopped for it.
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport, stopTimeoutMs: 30 });
+    const spy = vi.spyOn(CodexHarnessTools.prototype, "close").mockImplementationOnce(() => new Promise<void>(() => undefined));
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    const stopping = Effect.runPromise(driver.stopSession("thread-1"));
+    try {
+      await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
+      // Restart on the settled turn while the stale close still waits out its bound.
+      await Effect.runPromise(driver.startSession(START));
+      await stopping;
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
+      expect(
+        events.filter((event) => event.type === "thread.state.changed" && (event as { state: string }).state === "session-stopped"),
+      ).toHaveLength(0);
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "again" }));
+    } finally {
+      await stopping.catch(() => undefined);
+      spy.mockRestore();
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
+  it("cleans up the session even when the wind-down itself fails", async () => {
+    // A failing wind-down must not leave the session listed: cleanup runs
+    // in a finally, and the error surfaces only after it.
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    const spy = vi.spyOn(CodexHarnessTools.prototype, "close").mockRejectedValueOnce(new Error("wind-down boom"));
+    await Effect.runPromise(driver.startSession(START));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      await expect(Effect.runPromise(driver.stopSession("thread-1"))).rejects.toMatchObject({ code: "CODEX_STOP_FAILED" });
+      expect(transport.sessions[0]!.client.closed).toBe(true);
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+      await vi.waitFor(() => expect(events.some((event) => event.type === "thread.state.changed")).toBe(true));
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
   });
 
   it("enforces medium effort unless overridden", async () => {

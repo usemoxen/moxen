@@ -414,8 +414,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   /**
    * How long `closeSession` waits for the CLI to answer `interrupt()`
    * before carrying on to `close()` anyway. A hung process must not hold
-   * the turn's waiters or the sessions queued behind it in `stopAll`
-   * (which the server bounds); well under that budget.
+   * the turn's waiters or the sessions queued behind it in `stopAll`;
+   * kept small so shutdown stays prompt.
    */
   private readonly stopTimeoutMs: number;
   private readonly skillsMod: SkillsMod | null;
@@ -845,18 +845,25 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     // process must not hold the turn's waiters. Settling is guarded on the
     // transcript, so a result the pump settled first is never published twice.
     this.settleOpenTurn(session, "interrupted", "Session ended.");
-    await this.interruptForClose(session);
-    // An interactive interrupt only stops the turn; close terminates the
-    // transport too, including background work and later notifications.
-    session.query.close?.();
-    session.input.close();
-    this.sessions.delete(session.threadId);
-    this.publish({
-      type: "thread.state.changed",
-      provider: "claude",
-      threadId: session.threadId,
-      state: reason,
-    });
+    try {
+      await this.interruptForClose(session);
+      // An interactive interrupt only stops the turn; close terminates the
+      // transport too, including background work and later notifications.
+      session.query.close?.();
+    } finally {
+      session.input.close();
+      // A session that started after this stop began owns the thread now:
+      // its teardown, not this stale one's, removes and reports it.
+      if (this.sessions.get(session.threadId) === session) {
+        this.sessions.delete(session.threadId);
+        this.publish({
+          type: "thread.state.changed",
+          provider: "claude",
+          threadId: session.threadId,
+          state: reason,
+        });
+      }
+    }
   }
 
   /**

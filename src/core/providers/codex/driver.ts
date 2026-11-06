@@ -299,7 +299,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
    * How long `closeSession` waits for the harness wind-down before
    * carrying on to `peer.close()` anyway, so the app-server peer is
    * always released even when stopping background work stalls.
-   * Well under the server's stop budget.
+   * Kept small so shutdown stays prompt.
    */
   private readonly stopTimeoutMs: number;
   private secretEnv: readonly string[] = [];
@@ -632,20 +632,27 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     // Settle before the wind-down wait, so a stalled harness close cannot
     // hold the turn's waiters.
     this.settleOpenTurn(session, "interrupted", "Session ended.");
-    await this.windDownForClose(session);
-    session.background.clear();
     try {
-      session.peer.close();
-    } catch {
-      // Best effort.
+      await this.windDownForClose(session);
+    } finally {
+      session.background.clear();
+      try {
+        session.peer.close();
+      } catch {
+        // Best effort.
+      }
+      // A session that started after this stop began owns the thread now:
+      // its teardown, not this stale one's, removes and reports it.
+      if (this.sessions.get(session.threadId) === session) {
+        this.sessions.delete(session.threadId);
+        this.publish({
+          type: "thread.state.changed",
+          provider: "codex",
+          threadId: session.threadId,
+          state: reason,
+        });
+      }
     }
-    this.sessions.delete(session.threadId);
-    this.publish({
-      type: "thread.state.changed",
-      provider: "codex",
-      threadId: session.threadId,
-      state: reason,
-    });
   }
 
   /**
