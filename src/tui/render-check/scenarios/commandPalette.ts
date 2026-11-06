@@ -23,6 +23,13 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
     fail(`${label}:\n${frame()}`);
   };
   const pickRow = async (filter: string, label: string, waiting: string): Promise<void> => {
+    // Start from a closed palette: ctrl+p is swallowed by a focused filter
+    // input, so reopening over a stale filter would only append to it (once
+    // yielding "compactsettle" and no match). Esc first for a fresh open.
+    await act(async () => setup.mockInput.pressEscape());
+    await setup.flush();
+    await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+    await setup.flush();
     for (const char of filter) {
       await act(async () => setup.mockInput.pressKey(char));
       await setup.flush();
@@ -129,8 +136,8 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log(setup.captureCharFrame());
 
   // Rename opens its own prompt, prefilled with the current title …
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
+  // (pickRow opens the palette itself, from a closed picker, so the filter
+  // always starts empty even after a pick that left it open.)
   await pickRow("rename", "Rename thread", "rename row did not narrow to Rename thread");
   console.log("--- rename modal (open) ---");
   console.log(setup.captureCharFrame());
@@ -145,15 +152,11 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log(setup.captureCharFrame());
 
   // Regenerate fires a toast and closes back to where the palette opened.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
   await pickRow("regener", "Regenerate title", "regenerate row did not narrow to Regenerate title");
   console.log("--- title regenerate fired ---");
   console.log(setup.captureCharFrame());
 
   // Compact dispatches a /compact turn and closes.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
   await pickRow("compact", "Compact session", "compact row did not narrow to Compact session");
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
@@ -161,15 +164,11 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log(setup.captureCharFrame());
 
   // Settle toasts and closes, keeping the thread selected.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
   await pickRow("settle", "Settle thread", "settle row did not narrow to Settle thread");
   console.log("--- thread settled ---");
   console.log(setup.captureCharFrame());
 
   // Archive last: success toasts and falls back to the next thread.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
   await pickRow("archiv", "Archive thread", "archive row did not narrow to Archive thread");
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
