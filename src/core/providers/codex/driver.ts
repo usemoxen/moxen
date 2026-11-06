@@ -56,7 +56,14 @@ import { buildCodexSystemPrompt } from "./prompt.js";
 import { resolveStoreRoot } from "../../threads/store.js";
 import { codexAsyncQuestions } from "./questions.js";
 import { conversationContextBreakdown } from "../context.js";
-import { dropTurnWaiter, isCompactCommand } from "../spi.js";
+import { isCompactCommand } from "../spi.js";
+import {
+  parkTurnWaiter,
+  settleAndPublishTurn,
+  terminalTurnEvent,
+  type TerminalTurnStatus,
+  type TurnWaiters,
+} from "../turnsettle.js";
 import { outOfProcess, type McpServerSpec } from "../../mcp.js";
 import {
   codexAccountTypeOf,
@@ -167,7 +174,7 @@ interface CodexSession {
   model: string | null;
   runtimeMode: RuntimeMode;
   transcript: TranscriptTurn[];
-  waiters: Map<TurnId, Array<{ resolve: (outcome: CodexTurnOutcome) => void; reject: (cause: unknown) => void }>>;
+  waiters: TurnWaiters<CodexTurnOutcome>;
   parked: Map<string, ParkedCodex>;
   usage: CodexUsageAccumulator;
   lastWindows: ReturnType<typeof codexWindowsOf>;
@@ -594,14 +601,14 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   }
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("CODEX_SPAWN_FAILED", `Could not stop the Codex session for thread ${threadId}`, async () => {
+    this.attempt("CODEX_STOP_FAILED", `Could not stop the Codex session for thread ${threadId}`, async () => {
       const session = this.sessions.get(threadId);
       if (!session) return;
       await this.closeSession(session, "session-stopped");
     });
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
-    this.attempt("CODEX_SPAWN_FAILED", "Could not stop Codex sessions", async () => {
+    this.attempt("CODEX_STOP_FAILED", "Could not stop Codex sessions", async () => {
       for (const abort of this.titleAborts.values()) abort.abort();
       for (const session of [...this.sessions.values()]) {
         await this.closeSession(session, "session-stopped");
@@ -740,23 +747,14 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         details: { threadId, turnId },
       });
     }
-    return await new Promise<CodexTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
-      const list = session.waiters.get(turnId) ?? [];
-      list.push(waiter);
-      session.waiters.set(turnId, list);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
-          reject(
-            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-              details: { threadId, turnId },
-            }),
-          );
-        },
-        { once: true },
-      );
+    return await parkTurnWaiter({
+      waiters: session.waiters,
+      turnId,
+      signal,
+      onAbort: () =>
+        new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+          details: { threadId, turnId },
+        }),
     });
   }
 
@@ -773,32 +771,31 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     };
   }
 
-  private settleOpenTurn(session: CodexSession, status: CodexTurnStatus, detail: string, expectedTurn?: TranscriptTurn): void {
-    const open = expectedTurn ?? session.transcript.find((turn) => turn.status === "running");
-    if (!open || open.status !== "running") return;
-    session.harness.endTurn(open.id);
-    const usage = this.usageOf(session, open.id);
-    open.usage = usage;
-    open.status = status;
-    open.error = status === "completed" ? null : detail;
-    if (status !== "completed") open.text = open.text || detail;
-    session.usage.take(open.id);
-    const waiters = session.waiters.get(open.id) ?? [];
-    session.waiters.delete(open.id);
-    const outcome: CodexTurnOutcome = {
+  private settleOpenTurn(session: CodexSession, status: TerminalTurnStatus, detail: string, expectedTurn?: TranscriptTurn): void {
+    settleAndPublishTurn({
+      open: expectedTurn ?? session.transcript.find((turn) => turn.status === "running"),
+      waiters: session.waiters,
       status,
-      text: open.text,
-      usage,
-      ...(open.generation ? { generation: open.generation } : {}),
-      error: open.error,
-    };
-    for (const waiter of waiters) waiter.resolve(outcome);
-    this.publish({
-      type: status === "completed" ? "turn.completed" : status === "failed" ? "turn.failed" : "turn.interrupted",
-      provider: "codex",
-      threadId: session.threadId,
-      turnId: open.id,
-      ...(status === "failed" ? { raw: { error: open.error } } : {}),
+      apply: (turn) => {
+        session.harness.endTurn(turn.id);
+        const usage = this.usageOf(session, turn.id);
+        turn.usage = usage;
+        turn.status = status;
+        turn.error = status === "completed" ? null : detail;
+        if (status !== "completed") turn.text = turn.text || detail;
+        session.usage.take(turn.id);
+        const outcome: CodexTurnOutcome = {
+          status,
+          text: turn.text,
+          usage,
+          ...(turn.generation ? { generation: turn.generation } : {}),
+          error: turn.error,
+        };
+        return outcome;
+      },
+      publish: (event) => this.publish(event),
+      event: (turnId) =>
+        terminalTurnEvent("codex", session.threadId, turnId, status, status === "failed" ? { error: detail } : undefined),
     });
   }
 

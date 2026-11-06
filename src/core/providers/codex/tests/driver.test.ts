@@ -312,6 +312,25 @@ describe("codex driver turns", () => {
     expect(transport.sessions[0]!.server.requestsTo("turn/interrupt")).toHaveLength(1);
   });
 
+  it("settles the running turn when its session stops, publishing the interruption once", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    try {
+      await Effect.runPromise(driver.stopSession("thread-1"));
+      await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
+      await vi.waitFor(() => expect(events.some((event) => event.type === "turn.interrupted")).toBe(true));
+      expect(events.filter((event) => event.type === "turn.interrupted")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.completed" || event.type === "turn.failed")).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
   it("enforces medium effort unless overridden", async () => {
     const transport = new FakeCodexTransport();
     const driver = new CodexDriver({ transport });

@@ -59,7 +59,13 @@ import type {
   SideAnswer,
   SideQuestionInput,
 } from "../spi.js";
-import { dropTurnWaiter } from "../spi.js";
+import {
+  parkTurnWaiter,
+  settleAndPublishTurn,
+  terminalTurnEvent,
+  type TerminalTurnStatus,
+  type TurnWaiters,
+} from "../turnsettle.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { mcpSignature, type McpServerSpec } from "../../mcp.js";
 import {
@@ -253,7 +259,7 @@ interface ClaudeSession {
   parkedInputs: Map<string, ParkedRequest & { input: Record<string, unknown> }>;
   sessionAllows: Set<string>;
   transcript: TranscriptTurn[];
-  waiters: Map<TurnId, Array<{ resolve: (outcome: DriverTurnOutcome) => void; reject: (cause: unknown) => void }>>;
+  waiters: TurnWaiters<DriverTurnOutcome>;
   usage: UsageTotals;
   compacted: boolean;
   turnsSinceCompaction: number;
@@ -807,14 +813,14 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   }
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_SPAWN_FAILED", `Could not stop the Claude session for thread ${threadId}`, async () => {
+    this.attempt("CLAUDE_STOP_FAILED", `Could not stop the Claude session for thread ${threadId}`, async () => {
       const session = this.sessions.get(threadId);
       if (!session) return;
       await this.closeSession(session, "session-stopped");
     });
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_SPAWN_FAILED", "Could not stop Claude sessions", async () => {
+    this.attempt("CLAUDE_STOP_FAILED", "Could not stop Claude sessions", async () => {
       for (const session of [...this.sessions.values()]) {
         await this.closeSession(session, "session-stopped");
       }
@@ -829,6 +835,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     } catch {
       // Best effort: the process may already be gone.
     }
+    // Settle here, not in the pump: the pump skips its own settle once the
+    // session is closed, which used to leave awaitTurn waiters hanging.
+    // Settling is guarded on the transcript, so a result the pump settled
+    // first is never published twice.
+    this.settleOpenTurn(session, "interrupted", "Session ended.");
     // An interactive interrupt only stops the turn; close terminates the
     // transport too, including background work and later notifications.
     session.query.close?.();
@@ -984,45 +995,40 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         details: { threadId, turnId },
       });
     }
-    return await new Promise<DriverTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
-      const list = session.waiters.get(turnId) ?? [];
-      list.push(waiter);
-      session.waiters.set(turnId, list);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
-          reject(
-            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-              details: { threadId, turnId },
-            }),
-          );
-        },
-        { once: true },
-      );
+    return await parkTurnWaiter({
+      waiters: session.waiters,
+      turnId,
+      signal,
+      onAbort: () =>
+        new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+          details: { threadId, turnId },
+        }),
     });
   }
 
-  private settleOpenTurn(session: ClaudeSession, status: DriverTurnStatus, detail: string): void {
-    const open = session.transcript.find((turn) => turn.status === "running");
-    if (open) {
-      open.outputAtEnd = session.usage.output;
-      open.status = status;
-      open.error = status === "completed" ? null : detail;
-      if (status !== "completed") open.text = open.text || detail;
-    }
-    const waiters = open ? (session.waiters.get(open.id) ?? []) : [];
-    if (open) session.waiters.delete(open.id);
-    const outcome: DriverTurnOutcome = {
+  private settleOpenTurn(session: ClaudeSession, status: TerminalTurnStatus, detail: string, expectedTurn?: TranscriptTurn, raw?: unknown): void {
+    settleAndPublishTurn({
+      open: expectedTurn ?? session.transcript.find((turn) => turn.status === "running"),
+      waiters: session.waiters,
       status,
-      text: open?.text ?? "",
-      usage: session.usage,
-      turnOutputTokens: open ? session.usage.output - open.outputAtStart : 0,
-      ...(open?.generationDurationMs ? { generation: { characters: open.generationCharacters ?? 0, durationMs: open.generationDurationMs } } : {}),
-      error: open?.error ?? detail,
-    };
-    for (const waiter of waiters) waiter.resolve(outcome);
+      apply: (turn) => {
+        turn.outputAtEnd = session.usage.output;
+        turn.status = status;
+        turn.error = status === "completed" ? null : detail;
+        if (status !== "completed") turn.text = turn.text || detail;
+        const outcome: DriverTurnOutcome = {
+          status,
+          text: turn.text,
+          usage: session.usage,
+          turnOutputTokens: session.usage.output - turn.outputAtStart,
+          ...(turn.generationDurationMs ? { generation: { characters: turn.generationCharacters ?? 0, durationMs: turn.generationDurationMs } } : {}),
+          error: turn.error,
+        };
+        return outcome;
+      },
+      publish: (event) => this.publish(event),
+      event: (turnId) => terminalTurnEvent("claude", session.threadId, turnId, status, raw),
+    });
   }
 
   // -- permissions --------------------------------------------------------
@@ -1923,25 +1929,14 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       raw: { costUsd: cost },
     });
     if (message.subtype === "success") {
-      this.publish({
-        type: "turn.completed",
-        provider: "claude",
-        threadId: session.threadId,
-        turnId: open?.id ?? "unknown",
-      });
+      // Settling publishes `turn.completed`; the terminal event is the
+      // settle's, so an interrupt racing this result cannot publish twice.
       this.settleOpenTurn(session, "completed", "");
       return;
     }
     session.pendingText = null;
     const errorText = extractResultError(message, stopFailure);
-    this.publish({
-      type: "turn.failed",
-      provider: "claude",
-      threadId: session.threadId,
-      turnId: session.transcript.find((turn) => turn.status === "running")?.id ?? "unknown",
-      raw: { subtype: message.subtype, error: errorText },
-    });
-    this.settleOpenTurn(session, "failed", errorText);
+    this.settleOpenTurn(session, "failed", errorText, undefined, { subtype: message.subtype, error: errorText });
   }
 
   private handleRateLimit(session: ClaudeSession, info: SDKRateLimitInfo | undefined): void {
