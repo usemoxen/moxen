@@ -4,14 +4,15 @@ import { useTerminalDimensions } from "@opentui/react";
 import { useHover } from "../../hooks/useHover.js";
 import { useImageVisibility } from "../../hooks/useImageVisibility.js";
 import { imageFromDataUrl, thumbnailCells, type LoadedImage } from "../../model/imagethumb.js";
-import { nativeDecoder } from "../../model/imageshrink.js";
+import { drawableImage, nativeDecoder } from "../../model/imageshrink.js";
 import { blendLoaded, processImage } from "../../model/imageops.js";
 import { mosaicRows } from "../../model/mosaic.js";
 import type { UiImage, UiOp } from "../../../core/threads/uiblock.js";
 import { COLOR } from "../../theme.js";
 import { useModalOpen } from "../../ui/modalopen.js";
 import { loadImage, type AttachmentReader } from "./attachmentrow.js";
-import { ImageSetContext, openImageViewer } from "./imageviewer.js";
+import { Placeholder, UndrawableLine } from "./imagefallback.js";
+import { ImageSetContext, openImageViewer, type ViewedImage } from "./imageviewer.js";
 
 export const ImagePositionContext = createContext("");
 
@@ -94,12 +95,25 @@ function ImagePicture({ image, label, maxColumns, fill = false }: PictureProps &
   const { width: screenWidth } = useTerminalDimensions();
   const { hovered, handlers } = useHover();
   const { ref, visible } = useImageVisibility();
+  const [drawFailed, setDrawFailed] = useState(false);
+  useEffect(() => {
+    setDrawFailed(false);
+  }, [image]);
+  const open = () => openImageViewer(viewed, set === null ? [viewed] : [...set.entries()].sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true })).map(([, value]) => value));
+  // What is drawn: a smaller copy when the image is only too big, null when
+  // the native decoder cannot read it at all. The probe runs only once the
+  // box is on screen: decoding every image in the transcript up front would
+  // hold them all in native memory at once.
+  const drawable = useMemo(() => (visible && !drawFailed ? drawableImage(image) : null), [image, visible, drawFailed]);
   const cells = thumbnailCells(image.size, Math.max(8, maxColumns ?? Math.min(MAX_COLUMNS, screenWidth - SIDE_ROOM)), MAX_ROWS);
   const mosaic = useMemo(
-    () => visible && modalOpen && cells !== null ? mosaicOf(image, cells.columns, cells.rows) : null,
-    [image, visible, modalOpen, cells?.columns, cells?.rows],
+    () => visible && modalOpen && cells !== null && drawable !== null ? mosaicOf(drawable, cells.columns, cells.rows) : null,
+    [drawable, visible, modalOpen, cells?.columns, cells?.rows],
   );
   if (cells === null) return <text fg={COLOR.dim} selectable={false}>{`▣ ${label}`}</text>;
+  // Nothing drawable (over the native ceiling, or corrupt): one clickable
+  // line that opens the viewer, where the original bytes still open externally.
+  if (visible && drawable === null) return <UndrawableLine label={label} onOpen={open} />;
   return (
     <box
       style={{
@@ -108,12 +122,12 @@ function ImagePicture({ image, label, maxColumns, fill = false }: PictureProps &
         width: cells.columns,
         ...(fill ? { flexGrow: 1, justifyContent: "space-between" as const } : {}),
       }}
-      onMouseDown={() => openImageViewer(viewed, set === null ? [viewed] : [...set.entries()].sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true })).map(([, value]) => value))}
+      onMouseDown={open}
       {...handlers}
     >
       <box ref={ref} style={{ height: cells.rows, width: cells.columns, flexShrink: 0 }}>
         {!visible ? null : mosaic === null ? (
-          <image source={image.bytes} fit="fit" style={{ width: cells.columns, height: cells.rows }} />
+          <image source={drawable!.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: cells.columns, height: cells.rows }} />
         ) : (
           mosaic.map((runs, row) => (
             <text key={row} selectable={false}>
@@ -128,15 +142,6 @@ function ImagePicture({ image, label, maxColumns, fill = false }: PictureProps &
       </box>
       <text fg={hovered ? COLOR.bright : COLOR.faint} selectable={false}>{label}</text>
     </box>
-  );
-}
-
-/** What stands in for a picture while its bytes come, or if they cannot. */
-function Placeholder({ label, state }: { label: string; state: string }) {
-  return (
-    <text fg={state === "failed" ? COLOR.faint : COLOR.dim} selectable={false}>
-      {`▣ ${label}${state === "failed" ? " (not found)" : state === "unusable" ? " (could not be drawn)" : ""}`}
-    </text>
   );
 }
 
@@ -191,8 +196,24 @@ export function BlendedImage({
     return blendLoaded(processImage(first, a.ops), processImage(second, b.ops), mode, opacity);
   }, [first, second, key]);
   const label = caption !== undefined && caption.length > 0 ? caption : `${a.caption ?? (a.alt || a.src)} · ${b.caption ?? (b.alt || b.src)}`;
-  if (first === "failed" || second === "failed") return <Placeholder label={label} state="failed" />;
+  // What the viewer opens from a fallback line: the inputs that did come.
+  const viewable = (input: UiImage, image: LoadedImage | null | "failed"): ViewedImage[] =>
+    image === null || image === "failed" ? [] : [{ ...image, label: input.caption ?? (input.alt || input.src), sizeBytes: image.bytes.length }];
+  const viewed = [...viewable(a, first), ...viewable(b, second)];
+  const openInputs = () => {
+    if (viewed.length > 0) openImageViewer(viewed[0]!, viewed);
+  };
+  if (first === "failed" || second === "failed") {
+    if (viewed.length === 0) return <Placeholder label={label} state="failed" />;
+    return (
+      <box onMouseDown={openInputs} style={{ flexShrink: 0 }}>
+        <Placeholder label={label} state="failed" />
+      </box>
+    );
+  }
   if (first === null || second === null) return <Placeholder label={label} state="loading" />;
-  if (blended === null) return <Placeholder label={label} state="unusable" />;
+  // The blend cannot be drawn (an input the decoder cannot read): one
+  // clickable line, opening the viewer on the inputs that did come.
+  if (blended === null) return <UndrawableLine label={label} onOpen={openInputs} />;
   return <ImagePicture image={blended} label={label} maxColumns={maxColumns} fill={fill} />;
 }

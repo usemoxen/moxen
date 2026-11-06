@@ -1,14 +1,16 @@
 import type { BoxRenderable, CliRenderer } from "@opentui/core";
-import { createContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useKeyboard, useRenderer } from "@opentui/react";
 
 import { useHover } from "../../hooks/useHover.js";
 import { t } from "../../i18n/index.js";
+import { nativeDecoder } from "../../model/imageshrink.js";
 import type { LoadedImage } from "../../model/imagethumb.js";
 import { formatBytes } from "../../model/message.js";
 import { COLOR, SURFACE } from "../../theme.js";
 import type { Rect } from "../../model/imagethumb.js";
 import { clearImagePreview } from "./imagepreview.js";
+import { Placeholder } from "./imagefallback.js";
 import { FIT_VIEW, imageGeometry, panImage, zoomImage, type ImageViewport } from "../../model/imageviewport.js";
 import { isModalOpen } from "../../ui/modalopen.js";
 
@@ -139,6 +141,21 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
   const resolution = renderer.resolution;
   const cellAspect = resolution === null ? 2 : (resolution.height / renderer.terminalHeight) / (resolution.width / renderer.terminalWidth);
   const geometry = imageGeometry(image.size, canvas, view, cellAspect);
+  // The original bytes are drawn, however big: zooming wants their pixels.
+  // When the decoder cannot read them at all the canvas says so instead, and
+  // the header and opening externally keep working on the original bytes.
+  const [drawFailed, setDrawFailed] = useState(false);
+  useEffect(() => {
+    setDrawFailed(false);
+  }, [image]);
+  const undrawable = useMemo(() => {
+    try {
+      nativeDecoder(image.bytes).dispose();
+      return false;
+    } catch {
+      return true;
+    }
+  }, [image]);
   const changeView = (update: (value: ImageViewport) => ImageViewport) => {
     setView((value) => imageGeometry(image.size, canvas, update(imageGeometry(image.size, canvas, value, cellAspect).view), cellAspect).view);
   };
@@ -213,7 +230,13 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
           zoom(event.scroll.direction === "up" ? 1.25 : 0.8);
           event.stopPropagation();
         }}>
-        <image source={image.bytes} fit="fill" style={{ position: "absolute", left: geometry.left, top: geometry.top, width: geometry.width, height: geometry.height }} />
+        {undrawable || drawFailed ? (
+          <box style={{ flexGrow: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>
+            <Placeholder label={image.label} state="unusable" />
+          </box>
+        ) : (
+          <image source={image.bytes} onError={() => setDrawFailed(true)} fit="fill" style={{ position: "absolute", left: geometry.left, top: geometry.top, width: geometry.width, height: geometry.height }} />
+        )}
       </box>
     </box>
   );

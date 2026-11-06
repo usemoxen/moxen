@@ -11,6 +11,7 @@ import { queueGroups } from "../../model/workqueue.js";
 import { ENTRY_LONG, ENTRY_NEXT, QUEUE_ENTRIES, ENTRY_STOPPED, QUEUE_THREADS, RECOVERY_ENTRY, queueFixture } from "../queueFixture.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
+import { Placeholder, UndrawableLine } from "../../features/timeline/imagefallback.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
 import { ChartView, KeyValueView, ProgressView, StatusView } from "../../features/timeline/uidataview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
@@ -928,6 +929,20 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       closeImageViewer();
       await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
     },
+  },
+  {
+    id: "reply-image-undrawable",
+    group: "timeline",
+    title: "ReplyImage fallback, one line when a picture cannot be drawn",
+    width: 60,
+    height: 8,
+    element: () => (
+      <Stage width={60} height={8}>
+        <Placeholder label="quarterly chart" state="loading" />
+        <Placeholder label="missing.png" state="failed" />
+        <UndrawableLine label="ceiling.png" onOpen={noop} />
+      </Stage>
+    ),
   },
   {
     id: "ui-block-pair",

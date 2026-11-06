@@ -79,7 +79,7 @@ export function AttachmentRow({
     if (node === null || reader === null || attachmentId === null) return;
     const anchor = { x: node.screenX, y: node.screenY, width: node.width, height: node.height };
     void loadImage(reader, attachmentId).then((image) => {
-      if (image !== null && over.current) showImagePreview({ id: attachmentId, bytes: image.bytes, size: image.size, anchor });
+      if (image !== null && over.current) showImagePreview({ id: attachmentId, label, mimeType: image.mimeType, bytes: image.bytes, size: image.size, anchor });
     });
   };
   const hide = () => {

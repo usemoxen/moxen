@@ -444,7 +444,7 @@ export function Composer({
     hidePreview();
     previewing.current = hit.name;
     const image = decodedImage(hit.name);
-    if (image !== null) showImagePreview({ id: `composer:${hit.name}`, bytes: image.bytes, size: image.size, anchor: hit.anchor });
+    if (image !== null) showImagePreview({ id: `composer:${hit.name}`, label: hit.name, mimeType: image.mimeType, bytes: image.bytes, size: image.size, anchor: hit.anchor });
   };
   useEffect(() => hidePreview, []);
   // The text cursor would blink over the preview image.
