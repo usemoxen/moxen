@@ -197,6 +197,9 @@ export function normalizeConfig(raw: unknown): CliConfig {
     result.thinkingEffort = asString(input.thinkingEffort, "thinkingEffort");
   }
   if (input.sessionTtl !== undefined) result.sessionTtl = asString(input.sessionTtl, "sessionTtl");
+  if (input.backgroundForgottenAfter !== undefined) {
+    result.backgroundForgottenAfter = asString(input.backgroundForgottenAfter, "backgroundForgottenAfter");
+  }
   if (input.instructions !== undefined) {
     const value = asString(input.instructions, "instructions").trim();
     if (value) result.instructions = value;

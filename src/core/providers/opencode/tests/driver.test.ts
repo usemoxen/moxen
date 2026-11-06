@@ -1196,6 +1196,27 @@ describe("opencode driver", () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 
+    it("reports background shells and subagents through backgroundTasks", async () => {
+      const SHELL = "sh_bg1";
+      const transport = new FakeOpencodeTransport({});
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+      expect(driver.backgroundTasks("thread-unknown")).toEqual([]);
+      const server = transport.servers[0]!;
+      await server.pushRaw(call("session.tool.input.started", { name: "shell", id: "call_sh" }));
+      await server.pushRaw(call("session.tool.called", { id: "call_sh", input: { command: "sleep 300", background: true } }));
+      await server.pushRaw(call("session.tool.progress", { id: "call_sh", metadata: { shellID: SHELL } }));
+      expect(driver.backgroundTasks("thread-1")).toMatchObject([{ taskId: SHELL, command: "sleep 300" }]);
+      await server.pushRaw({ type: "shell.exited", data: { id: SHELL, status: "exited" } });
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
     it("answers a subagent's own prompts itself: permissions allowed, questions dismissed", async () => {
       const { server, fiber, subagents } = await running({ parents: { ses_late: PARENT, ses_stranger: "ses_other_client" } });
       await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));

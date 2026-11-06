@@ -31,6 +31,19 @@ export interface TaskNotification {
   readonly deletions: number | null;
   /** The task id the parent delegated, when this task carried on in a new thread after a handoff. */
   readonly continuedFrom?: string;
+  /** Background work still running when the task's turn ended (its own description, command and start). */
+  readonly background: readonly BackgroundWorkNote[];
+  /** True when Moxen could not check for background work, so more may still be running. */
+  readonly backgroundUnknown: boolean;
+}
+
+/** One background task still running when a delegated task's turn ended. */
+export interface BackgroundWorkNote {
+  readonly taskId: string;
+  readonly description: string;
+  readonly command: string | null;
+  /** When it started, ISO; null when the provider never said. */
+  readonly startedAt: string | null;
 }
 
 /** The first line of a report, as its headline (markdown emphasis and heading marks dropped). */
@@ -60,8 +73,10 @@ const VERB: Record<DelegatedTaskStatus, string> = {
   interrupted: "was stopped",
 };
 
-/** The message the parent's agent reads. */
-export function taskNotificationText(tasks: readonly TaskNotification[]): string {
+/** The message the parent's agent reads. A task whose turn ended with
+ * background work still running is not finished: the message says so and
+ * names the work, so the parent reads it as "not finished". */
+export function taskNotificationText(tasks: readonly TaskNotification[], nowMs: number = Date.now()): string {
   const lines = tasks.map((task) => {
     const facts = [
       task.durationMs === null ? null : formatTaskDuration(task.durationMs),
@@ -72,11 +87,20 @@ export function taskNotificationText(tasks: readonly TaskNotification[]): string
     return [
       `- Task "${task.title}" (taskId ${task.taskId}${task.continuedFrom ? `, continued from taskId ${task.continuedFrom}` : ""}) ${VERB[task.status]}${facts.length > 0 ? ` · ${facts.join(" · ")}` : ""}.`,
       task.headline === null ? null : `  Headline: ${task.headline}`,
+      ...backgroundLines(task, nowMs),
     ]
       .filter((line): line is string => line !== null)
       .join("\n");
   });
-  const head = tasks.length === 1 ? "A task you delegated has settled." : `${tasks.length} tasks you delegated have settled.`;
+  const unfinished = tasks.some((task) => task.background.length > 0 || task.backgroundUnknown);
+  const head =
+    tasks.length === 1 && !unfinished
+      ? "A task you delegated has settled."
+      : tasks.length === 1
+        ? "A task you delegated ended its turn with background work still running. It is not finished: do not treat its report as complete."
+        : unfinished
+          ? "Tasks you delegated ended their turns with background work still running. They are not finished: do not treat their reports as complete."
+          : `${tasks.length} tasks you delegated have settled.`;
   return [
     "<task-notification>",
     head,
@@ -84,4 +108,24 @@ export function taskNotificationText(tasks: readonly TaskNotification[]): string
     "Call task_status with a taskId for the full report.",
     "</task-notification>",
   ].join("\n");
+}
+
+/** What a background task has been doing, and for how long: "bun run check (4m)". Unknown start: no age. */
+export function backgroundWorkLabel(note: Pick<BackgroundWorkNote, "description" | "command" | "startedAt">, nowMs: number = Date.now()): string {
+  const what = note.command ?? note.description;
+  if (note.startedAt === null) return what;
+  const ageMs = nowMs - Date.parse(note.startedAt);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return what;
+  return `${what} (${formatTaskDuration(ageMs)})`;
+}
+
+function backgroundLines(task: TaskNotification, nowMs: number): readonly (string | null)[] {
+  const running =
+    task.background.length === 0
+      ? null
+      : `  Background work still running: ${task.background.map((note) => backgroundWorkLabel(note, nowMs)).join("; ")}.`;
+  const unknown = !task.backgroundUnknown
+    ? null
+    : "  Moxen could not check for more background work, so more may still be running beyond what is named above.";
+  return [running, unknown];
 }

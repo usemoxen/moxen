@@ -756,6 +756,21 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
+A turn-end notification always fires on time and nothing can hold it. When the
+task's turn ends with background work still running, the notification names
+that work and for how long (for example "turn ended, 1 background process
+still running: bun run check, 4m"), and reads as not finished: the parent must
+not treat the task's report as complete. When that work ends, the task wakes to
+pick up the result where its provider allows it, and the parent gets a second
+notification when the task next has nothing left to run. Work that never ends
+(a dev-server watcher) sends nothing further and blocks nothing. `task_status`
+lists what is still running and for how long; past `backgroundForgottenAfter`
+(30m unless set) it is flagged as probably forgotten, and Moxen never stops it
+on its own. Where Moxen cannot check — no live session here, or a provider
+that cannot report it all (OpenCode reports only the background shells and
+subagents its own server started) — the notification and `task_status` say so
+plainly instead of implying nothing is running.
+
 Only the delegating thread reaches a task, and the threads that continued it: one that finished before the orchestrator continued stays listed under the older thread, and waking it from the continuation moves it there, so it reports to the conversation still working. When an orchestrator continues in a
 new thread, the tasks still running move with it and it can message them; the
 earlier thread and an unrelated thread (same project or not) cannot. Threads
@@ -818,7 +833,12 @@ a monitor event. That output arrives as a turn like any other and is shown
 in the side panel's Background tab, which can also list and stop running
 background work. Background work lives in the session, so it outlasts a
 turn only where the session does: in a shared server, or a client that
-stays open.
+stays open. What `moxen threads background` lists comes from the same
+driver view: Claude, Codex and the Harness report their background commands,
+monitors and subagents; OpenCode reports the background shells and subagents
+its own server started, and cannot see a shell background process started any
+other way. A settled thread's background work cannot wake it: the wake-up
+arrives as a turn, and a settled thread takes no turn.
 
 A thread that has only finished a turn keeps those wake-ups: an orchestrator
 relies on a watcher to wake it. A thread that was continued in a new one does

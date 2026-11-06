@@ -19,6 +19,7 @@ import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import type { ClientApi } from "../api.js";
@@ -144,6 +145,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "task_status",
     description:
       "Where a delegated task stands: running, or finished with the subagent's report and the branch holding its work. " +
+      "Lists background work still running on the task's thread and for how long; work past the forgotten age is flagged, and a task whose notification names running work is not finished. " +
       "For a full report after a task notification, or one deliberate check on a task taking far longer than expected; never as a polling loop. " +
       `Waits up to waitMs (max ${MAX_WAIT_MS}) for it to finish first.`,
     inputSchema: {
@@ -1028,6 +1030,17 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    background: {
+      unknown: described.background.unknown,
+      tasks: described.background.tasks.map((task) => ({
+        taskId: task.taskId,
+        description: task.description,
+        ...(task.command ? { command: task.command } : {}),
+        ...(task.startedAt ? { startedAt: task.startedAt } : {}),
+        ...(task.ageMs === null ? {} : { age: formatTaskDuration(task.ageMs) }),
+        probablyForgotten: task.probablyForgotten,
+      })),
+    },
   };
 }
 
