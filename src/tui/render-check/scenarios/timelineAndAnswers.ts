@@ -17,11 +17,21 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   console.log(setup.captureCharFrame());
 
   // Wheel inside the timeline box (not the tasks/composer rows below it)
-  // until the closing reply's header scrolls into view, then click it.
-  for (let wheel = 0; wheel < 40; wheel += 1) {
+  // to the bottom, then back up to the closing reply: intermediate
+  // assistant messages share its header text but are display-only, so the
+  // closing reply is the nearest match above the bottom (scrolling down
+  // stops at the first intermediate; scrolling up from the bottom finds
+  // the true closing reply first).
+  for (let wheel = 0; wheel < 60; wheel += 1) {
     await act(async () => setup.mockMouse.scroll(70, 5, "down"));
     await setup.flush();
+    if (!setup.captureCharFrame().includes("Jump to bottom")) break;
+  }
+  await setup.flush();
+  for (let wheel = 0; wheel < 60; wheel += 1) {
     if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(setup.captureCharFrame())) break;
+    await act(async () => setup.mockMouse.scroll(70, 5, "up"));
+    await setup.flush();
   }
   await setup.flush();
   console.log("--- reply visible ---");
@@ -44,8 +54,13 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     return false;
   };
   const clickReply = async (): Promise<void> => {
+    // The closing reply is the last match: intermediate assistant messages
+    // share its header text but render display-only (no click opens).
     const rows = frame().split("\n");
-    const y = rows.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
+    let y = -1;
+    rows.forEach((line, index) => {
+      if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line)) y = index;
+    });
     if (y === -1) fail("closing reply header not visible");
     await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") + 2, y));
     await setup.flush();

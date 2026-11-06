@@ -20,10 +20,15 @@ export function permissionFooterTarget(setup: TestRendererSetup): { x: number; y
 }
 
 /** The closing assistant reply's header. Located fresh every time — flat
-    tool rows above it reflow the pane, so stale coordinates would miss. */
+    tool rows above it reflow the pane, so stale coordinates would miss.
+    Intermediate assistant messages share the header text but are
+    display-only: the closing reply is the last match. */
 export function replyHeader(setup: TestRendererSetup): { x: number; y: number } {
   const rows = setup.captureCharFrame().split("\n");
-  const y = rows.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
+  let y = -1;
+  rows.forEach((line, index) => {
+    if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line)) y = index;
+  });
   if (y === -1) fail("closing reply header not visible");
   const x = rows[y]?.indexOf("Claude Opus 5") ?? -1;
   if (x === -1) fail("closing reply header has no clickable label");
