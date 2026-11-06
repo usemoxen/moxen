@@ -507,8 +507,16 @@ export async function runDueScheduledTurn(ctx: OperationContext, threadId: strin
 async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
   await recoverOrphanedTurn(ctx, threadId);
   const thread = await ctx.store.readThreadRecord(threadId);
-  const index = rows.findIndex((r) => r.thread.id === threadId);
-  if (thread && index >= 0) rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+  let index = rows.findIndex((r) => r.thread.id === threadId);
+  if (thread && index < 0) {
+    // A snapshot that never contained this thread must not delay its
+    // admission to the next rescan (cross-process scheduled work would wait
+    // up to 60s): include it directly, the same fallback queueAgentMessage uses.
+    rows.push({ thread, turns: await ctx.store.readTurns(threadId) });
+    index = rows.length - 1;
+  } else if (thread && index >= 0) {
+    rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+  }
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
   const idle = !openTurn([...row.turns]);
@@ -1344,6 +1352,11 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // A send that queued behind an older held turn: start the older now when
     // it is admissible, so it goes first without waiting for the next tick.
     // Anything still blocked simply stays queued.
+    // This keeps a full scan on purpose: the held turn's provider and usage
+    // conditions read global state (other threads' holds and windows), which
+    // a single-thread snapshot cannot see and would misreport as blocking.
+    // The repeating poll paths (shell poll, schedule timer, agent message,
+    // queue read) share the usage tick's maintained snapshot instead.
     if (sent.turn.status === "queued" && sent.turn.heldAtSettle === true && sent.delivery === "queued" && !input.queue && input.scheduledFor === undefined) {
       await runDueScheduledTurn(ctx, thread.id).catch(() => undefined);
     }

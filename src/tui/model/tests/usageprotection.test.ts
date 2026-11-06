@@ -46,6 +46,12 @@ describe("usage recovery status", () => {
     expect(message).not.toContain("CliError");
   });
 
+  it("strips the Error prefix from a plain failure inside the catalog sentence", () => {
+    const message = protectionActionError(new Error("boom"));
+    expect(message).toContain("boom");
+    expect(message).not.toContain("Error:");
+  });
+
   it("names a running recovery in the work queue as the banner does", () => {
     expect(queueEntryState(work({ status: "running" }))).toBe("resumed");
     expect(queueEntryState(work({ status: "running", policy: { ...work({ status: "running" }).policy, automatic: false, requestId: "x" } }))).toBe("running");

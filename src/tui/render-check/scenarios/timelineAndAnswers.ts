@@ -148,6 +148,9 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   const answerToastX = answerToastRows[answerToastRow]?.lastIndexOf("×") ?? -1;
   if (answerToastX === -1) fail("Answer submitted toast has no ×");
   await act(async () => setup.mockMouse.click(answerToastX, answerToastRow));
+  // The × marks synchronously on mouse-down: assert before the flush below,
+  // whose cost on a loaded machine would otherwise eat the 250ms window.
+  if (!wasModalJustDismissed()) fail("toast × did not mark the dismiss window");
   await setup.flush();
   const toastDismissedFrame = setup.captureCharFrame();
   console.log("--- toast dismissed (manual ×) ---");

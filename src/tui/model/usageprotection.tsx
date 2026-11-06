@@ -3,7 +3,7 @@ import type { Notice } from "../ui/noticebanner.js";
 import { COLOR } from "../theme.js";
 import { t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
-import { CliError, dispatchErrorMessage } from "../../core/errors.js";
+import { dispatchErrorMessage } from "../../core/errors.js";
 import { driverKindOfInstance, type ThreadEnvelope } from "../../core/types.js";
 import { formatDuration } from "./turns.js";
 
@@ -13,7 +13,11 @@ import { formatDuration } from "./turns.js";
  * sees the same sentence shape as every other notice.
  */
 export function protectionActionError(cause: unknown): string {
-  const message = cause instanceof CliError ? cause.message : dispatchErrorMessage(cause);
+  // CliError carries its own clean message, and so does a plain Error — but
+  // String() on one reads "Error: boom", which would leak the raw prefix
+  // into the catalog sentence. Only non-errors go through the generic
+  // message extractor.
+  const message = cause instanceof Error ? cause.message : dispatchErrorMessage(cause);
   return t("protection.actionFailed", { message });
 }
 
