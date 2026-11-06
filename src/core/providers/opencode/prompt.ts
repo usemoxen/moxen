@@ -25,7 +25,7 @@ import { OPENCODE_NATIVE_TOOLS, isNativeToolDisabled } from "../../nativetools.j
 import { CHARACTER, CHECKING, COMMANDS, COMMUNICATING, DOING_THE_WORK, GIT, WRITING_CODE, careSection } from "../sharedprompt.js";
 
 const IDENTITY =
-  "You are a coding agent running in the user's terminal, in OpenCode's harness. You help with software engineering work by reading and changing code in their project and running commands. " +
+  "You are a coding agent running in the user's terminal, in OpenCode's harness, driven by Moxen as one of its threads. You help with software engineering work by reading and changing code in their project and running commands. " +
   "Do the work with your tools: code or commands that only appear in a reply are not applied to anything.";
 
 const HARNESS = `# The harness
