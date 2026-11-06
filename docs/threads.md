@@ -807,6 +807,39 @@ remove it. The result carries the `turnId`, the `threadId`, `status`,
   agent", not as the user's. That origin is why it cannot end a usage hold: on a
   protected thread it is an automatic wake-up that waits behind the hold.
 
+### Continuing your own thread from an agent (`thread_continue`)
+
+An agent can continue its own thread in a new one, the way the user's
+**Continue in a new thread** palette action does: `thread_continue` takes the
+handoff `summary` the agent wrote and an optional `first` message saying what
+the new thread should do first. The summary replaces the generated handoff
+record; the first message is folded into the new thread's first turn. The
+result carries the new thread's id and title, the tasks it adopted, and a note
+telling the agent to end its turn.
+
+- It takes no thread id: it always continues the calling thread, so a
+  delegated child cannot continue its parent (or any other thread). A
+  delegated task is not offered the tool and is refused when it calls
+  anyway: its long work is compacted in place, and its report — not a
+  forked continuation — decides what runs next.
+- The same conditions as the palette action apply: a missing, deleted,
+  archived or settled thread is refused with a clear error. A research run's
+  roles and lead are refused (`THREAD_CONTINUE_RESEARCH`); a delegated task,
+  which may use it, is offered it, while the run's lead and roles are not.
+- An agent continues its thread once: a thread that already has a
+  continuation, or was itself born of an agent's continuation, is refused
+  (`THREAD_CONTINUE_REPEATED`). The next hop needs the user. A retry with the
+  same `idempotencyKey` returns the first continuation.
+- Mid-turn ordering: the new thread's first turn waits for the calling turn
+  to end (an entry condition on it, admitted by the work queue), because the
+  two share a checkout and must never run in parallel. On an idle thread it
+  starts at once. The calling agent must end its turn promptly after the call
+  instead of starting new work.
+- Once the calling turn settles, the old thread's provider session is closed,
+  so a background task or late notification cannot wake it; task notifications
+  already route to the new thread with it. Queued work left on the old thread
+  stays there and runs there.
+
 Some providers wake a session on their own — a finished background task,
 a monitor event. That output arrives as a turn like any other and is shown
 in the side panel's Background tab, which can also list and stop running

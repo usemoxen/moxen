@@ -284,6 +284,29 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "thread_continue",
+    description:
+      "Continue your own thread in a new thread when it is getting long (check context_usage first): the new thread opens with the handoff summary you write, replacing the generated record, and runs your first message once this turn ends. " +
+      "Your running delegated tasks move to the new thread and report there. " +
+      "Rules: only your own top-level thread (it takes no thread id, so a parent or any other thread is unreachable; a delegated task is refused: finish with a report and let the thread that delegated it decide); once per thread and never a second hop without the user (a repeat is refused); not for research runs. " +
+      "After it returns, end your turn promptly with a brief closing message and start no new work: the new thread must not start while this turn is still writing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "The handoff for the new thread: goal, completed work, changed files, checks and failures, next steps, outstanding requests. It has none of your conversation beyond this.", minLength: 1, maxLength: 64000 },
+        first: { type: "string", description: "What the new thread should do first once this turn ends. Say it in full." },
+        idempotencyKey: {
+          type: "string",
+          description:
+            "A UUID you generate for this continuation (one per new thread). If this call fails with a transport error, retry with the SAME key: " +
+            "the retry returns the original thread instead of starting a duplicate.",
+        },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 /** Finding and reading other threads (MXN-133). Results stay in the caller's context, so each answer is held to a budget. */
@@ -334,9 +357,11 @@ export const THREAD_TOOLS: readonly McpTool[] = [
 
 /**
  * The tools that reach other threads: handing work to them, and finding and
- * reading them. A delegated task is itself the delegation, so it gets none.
+ * reading them. A delegated task gets none: it neither delegates again nor
+ * continues itself in a new thread (a full context there is compacted in
+ * place, and its report decides what runs next).
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen", "thread_continue"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -490,6 +515,8 @@ export interface MoxenToolOptions {
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
 function offered(name: string, options: MoxenToolOptions): boolean {
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return false;
+  // A research run's lead and roles continue only through the run, never by starting a new thread.
+  if (options.researchMember === true && name === "thread_continue") return false;
   if (options.webFetch === false && name === "web_fetch") return false;
   const memory = options.memory ?? "write";
   if (name.startsWith("memory_") && (memory === "off" || (memory === "read" && MEMORY_WRITE_TOOLS.has(name)))) return false;
@@ -767,6 +794,21 @@ export async function callMoxenTool(
           ...(Array.isArray(args.conditions) ? { conditions: parseQueuePolicy({ conditions: args.conditions }).conditions } : {}),
         });
         return ok(queued);
+      }
+      case "thread_continue": {
+        const continued = await api.dispatch({
+          type: "thread.continue-agent",
+          threadId: parentThreadId,
+          summary: argString(args, "summary", true)!,
+          ...(argString(args, "first") !== undefined ? { firstMessage: argString(args, "first")! } : {}),
+          ...(argString(args, "idempotencyKey") !== undefined ? { idempotencyKey: argString(args, "idempotencyKey")! } : {}),
+        });
+        return ok({
+          threadId: continued.threadId,
+          title: continued.title,
+          adoptedTasks: continued.adoptedTasks,
+          note: "The new thread is ready but held until this turn ends (it starts at once when nothing is running). Finish your turn now with a brief closing message and start no new work; do not call thread_continue again. Its first turn runs your first message once this turn ends; tasks it adopted report there.",
+        });
       }
       default:
         return { text: `Unknown tool: ${name}`, isError: true };

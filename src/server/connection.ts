@@ -125,6 +125,7 @@ import {
   sendTaskMessage,
   requireTaskControl,
   continueThread,
+  continueOwnThread,
   delegate,
   beginResearchRun,
   isResearchRunActive,
@@ -1262,6 +1263,8 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.continue":
         return await this.continueThread(command);
+      case "thread.continue-agent":
+        return await this.continueAgentThread(command);
       case "thread.side-question":
         return await this.sideQuestion(command);
       case "prompt.improve":
@@ -1458,6 +1461,21 @@ export class DirectConnection implements ClientApi {
     const continued = await continueThread(await this.context(), {
       threadId: command.threadId,
       ...(command.scheduledFor !== undefined ? { scheduledFor: command.scheduledFor } : {}),
+    });
+    return { ...continued, accepted: true };
+  }
+
+  /**
+   * An agent continuing its own thread in a new one (`continueOwnThread`):
+   * the same `continueThread` the palette action runs, with the
+   * agent-written handoff and first message.
+   */
+  private async continueAgentThread(command: CommandOf<"thread.continue-agent">): Promise<CommandResult<"thread.continue-agent">> {
+    const continued = await continueOwnThread(await this.context(), {
+      threadId: command.threadId,
+      summary: command.summary,
+      ...(command.firstMessage !== undefined ? { firstMessage: command.firstMessage } : {}),
+      ...(command.idempotencyKey !== undefined ? { idempotencyKey: command.idempotencyKey } : {}),
     });
     return { ...continued, accepted: true };
   }

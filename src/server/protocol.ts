@@ -36,6 +36,7 @@ import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type Upd
 import type {
   AskedTask,
   CancelledTask,
+  ContinuedOwnThread,
   SentTaskMessage,
   QueuedAgentMessage,
   ChecklistStep,
@@ -355,6 +356,13 @@ export type CommandBody =
    */
   | { readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string }
   /**
+   * An agent continuing its own thread in a new one: the same
+   * `continueThread` the palette action uses, with the agent-written
+   * handoff and first message. It names only the caller's own thread, so
+   * only that thread's agent can continue it this way.
+   */
+  | { readonly type: "thread.continue-agent"; readonly threadId: string; readonly summary: string; readonly firstMessage?: string; readonly idempotencyKey?: string }
+  /**
    * `/btw`: a side question answered on a copy of the thread's context,
    * with no tools, and never recorded in the thread. A command rather than
    * a query although it changes nothing here: it spends the account's
@@ -477,6 +485,7 @@ export interface CommandResults {
   "harness.models.discover": DiscoverResult;
   "provider.update": ProviderUpdate;
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
+  "thread.continue-agent": ContinuedOwnThread & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
   "forge.request.create": { readonly url: string | null } & Accepted;
   "forge.request.comment": Accepted;
@@ -1352,6 +1361,15 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: requireThreadId(record.threadId),
         ...optionalString(record, "scheduledFor"),
+      };
+    case "thread.continue-agent":
+      return {
+        ...meta,
+        type,
+        threadId: requireThreadId(record.threadId),
+        summary: requireField(record.summary, type, "summary"),
+        ...(record.firstMessage !== undefined ? { firstMessage: requireField(record.firstMessage, type, "firstMessage") } : {}),
+        ...(record.idempotencyKey !== undefined ? { idempotencyKey: requireField(record.idempotencyKey, type, "idempotencyKey") } : {}),
       };
     case "forge.request.create":
       return {

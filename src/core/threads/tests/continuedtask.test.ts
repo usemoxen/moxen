@@ -120,6 +120,34 @@ describe("an orchestrator continued in a new thread", () => {
   });
 });
 
+describe("concurrent continuations of one thread", () => {
+  it("two overlapping calls share one destination instead of creating two", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    const [first, second] = await Promise.all([
+      continueThread(w.ctx, { threadId: source.id }),
+      continueThread(w.ctx, { threadId: source.id }),
+    ]);
+    expect(second.threadId).toBe(first.threadId);
+    expect((await w.store.readTurns(first.threadId))).toHaveLength(1);
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(1);
+  });
+
+  it("a sequential retry returns the existing destination instead of duplicating it", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    const first = await continueThread(w.ctx, { threadId: source.id });
+    const second = await continueThread(w.ctx, { threadId: source.id });
+    expect(second.threadId).toBe(first.threadId);
+    expect((await w.store.readTurns(first.threadId))).toHaveLength(1);
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(1);
+  });
+});
+
 describe("a thread continued in a new one", () => {
   /** The codex test driver, with the calls that end a session or a background task recorded. */
   function watch(w: Awaited<ReturnType<typeof world>>, tasks: readonly string[] = []) {
