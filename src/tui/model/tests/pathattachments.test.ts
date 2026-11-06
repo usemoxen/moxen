@@ -28,6 +28,18 @@ describe("paths in the prompt", () => {
     expect(promptWithPaths("Compare  📄 b c.txt (2)  with  📄 b c.txt  in  📁 src ", items)).toBe("Compare [📄 b c.txt (2)](</z/b c.txt>) with [📄 b c.txt](</a/b c.txt>) in [📁 src](/a/src)");
   });
 
+  it("links the chip, not identical text typed earlier in the draft", () => {
+    const items = addPaths([], [{ path: "/tmp/a.py", kind: "file" }]);
+    // The chip the dialog attached reads last (the cursor was at the end);
+    // the typed lookalike first. The link belongs on the chip.
+    expect(promptWithPaths("see 📄 a.py for details, also 📄 a.py", items)).toBe(
+      "see 📄 a.py for details, also [📄 a.py](/tmp/a.py)",
+    );
+    expect(promptWithPaths("see  📄 a.py  for details, also  📄 a.py ", items)).toBe(
+      "see  📄 a.py  for details, also [📄 a.py](/tmp/a.py)",
+    );
+  });
+
   it("still finds a chip at the very start or end of a trimmed draft, where its padding is gone", () => {
     const items = addPaths([], [{ path: "/a/binaural.py", kind: "file" }, { path: "/a/out2", kind: "folder" }]);
     expect(promptWithPaths("📄 binaural.py  - just testing", items)).toBe("[📄 binaural.py](/a/binaural.py)  - just testing");
