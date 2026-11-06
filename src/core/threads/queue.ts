@@ -8,14 +8,14 @@ export const QUEUE_ADMISSION_LOCK = "\0queue-admission";
 
 /**
  * The reset a `reset` queue condition waits for: the reset of the window it
- * asked about. `all` covers every reported window, so it waits for the next
- * reset among them (the earliest) — a session reset does not wait out a
- * weekly one.
+ * asked about. `all` covers every reported window, so it waits for the latest
+ * reset across them — a session reset does not release work that also waits
+ * on the weekly window.
  */
 export function nextReset(provider: string, kind: "session" | "weekly" | "all", now = Date.now()): string | null {
   const windows = usageLimitsSnapshot(now)[provider]?.windows.filter((window) => kind === "all" || window.kind === kind) ?? [];
   if (!windows.length || windows.some((window) => window.resetsAt === null)) return null;
-  return windows.map((window) => window.resetsAt!).sort((a, b) => Date.parse(a) - Date.parse(b)).at(0) ?? null;
+  return windows.map((window) => window.resetsAt!).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 
 export type QueueCondition =

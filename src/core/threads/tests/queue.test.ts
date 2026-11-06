@@ -106,19 +106,22 @@ describe("conditional work queue", () => {
     expect(w.sent).toHaveLength(1);
   });
 
-  it("waits for the nearest reset across windows when the condition asks for all", async () => {
+  it("waits for every reported window when the condition asks for all", async () => {
     const w = await world(); const thread = await w.make(); const now = Date.now();
-    await sendTurn(w.store, thread.id, { prompt: "when any allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });
+    await sendTurn(w.store, thread.id, { prompt: "when every allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });
     const soon = new Date(now + 60_000).toISOString();
+    const later = new Date(now + 6 * 86400_000).toISOString();
     recordUsageWindows("codex", [
       { id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: soon },
-      { id: "weekly", label: "Weekly", usedPercent: 95, exhausted: false, resetsAt: new Date(now + 6 * 86400_000).toISOString() },
+      { id: "weekly", label: "Weekly", usedPercent: 95, exhausted: false, resetsAt: later },
     ]);
     await runWorkQueue(w.ctx, now);
     expect(w.sent).toEqual([]);
-    expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: soon });
-    // The nearest reset is enough: it runs once that passes, without waiting out the weekly one.
-    await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
+    // "all" covers every reported window: the session reset alone is not enough.
+    expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: later });
+    await runWorkQueue(w.ctx, now + 66_000);
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, Date.parse(later) + 6000); await settleRuns();
     expect(w.sent).toHaveLength(1);
   });
 
@@ -365,6 +368,26 @@ describe("setup failures behind a recovery", () => {
     expect(turns.find((turn) => turn.id === c.turn.id)?.heldAtSettle).toBe(true);
     expect(w.store.isTracked(b.turn.id)).toBe(false);
     expect(w.store.isTracked(c.turn.id)).toBe(false);
+  });
+
+  it("frees a recovery whose ledger read fails before its runner starts", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const a = await sendTurn(w.store, thread.id, { prompt: "first" });
+    const b = await sendTurn(w.store, thread.id, { prompt: "second", delivery: "queue" });
+    // A's runner is gone, and the recovery's ledger read fails: B is never
+    // settled, so its admission claim must be released rather than leak —
+    // or later interrupts would promote behind it and orphan recovery would
+    // skip it as tracked.
+    await w.store.updateTurn(thread.id, a.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    const spy = vi.spyOn(w.store, "readMessages").mockRejectedValueOnce(new Error("ledger unavailable"));
+    try {
+      await recoverOrphanedTurn(w.ctx, thread.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(w.store.isTracked(b.turn.id)).toBe(false);
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === b.turn.id)?.status).toBe("running");
   });
 });
 
