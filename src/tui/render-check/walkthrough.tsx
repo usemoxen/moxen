@@ -36,6 +36,7 @@ import { runTasksPanel } from "./scenarios/tasksPanel.js";
 import { runScheduleModal } from "./scenarios/scheduleModal.js";
 import { runSidePanelTabs } from "./scenarios/sidePanelTabs.js";
 import { runNoticeBanner } from "./scenarios/noticeBanner.js";
+import { runProblems } from "./scenarios/problems.js";
 import { runImageThumbs } from "./scenarios/imageThumbs.js";
 import { runImageVisibility } from "./scenarios/imageVisibility.js";
 import { runMessageCaching } from "./scenarios/messageCaching.js";
@@ -137,6 +138,7 @@ export async function runWalkthrough(): Promise<void> {
   await runSettingsSidebarScroll();
   await runQueueAndSide();
   await runNoticeBanner();
+  await runProblems();
   await runImageTokens();
   await runImageThumbs();
   await runImageVisibility();

@@ -41,6 +41,8 @@ import { useResearchRunView } from "../features/researchrun/useResearchRunView.j
 import { parseModeCommand } from "../model/modes.js";
 import { latestRunOf, roleThreadIds, runOfRole, summarizeRun } from "../model/researchrun.js";
 import { describeScheduled } from "../model/schedule.js";
+import { useProblems } from "../features/problems/useProblems.js";
+import { ProblemsModal } from "../features/problems/problemsModal.js";
 import { WorkQueueModal } from "../features/queue/queuemodal.js";
 import type { QueuePolicy } from "../features/queue/useWorkQueue.js";
 import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
@@ -296,6 +298,8 @@ export function App({
   // snapshot outlives the page, so once it exists the app draws from it:
   // a `ui.*` edit applies on the spot instead of after a restart.
   const settings = useSettings(client, picker === "settings" || picker === "model" || picker === "onboarding");
+  /** Bad records readers skipped, with their fixes; warns over the composer until dismissed. */
+  const problems = useProblems(client, toasts.push);
   // Each provider's install on the settings page, and the updaters behind the palette rows and the page's buttons;
   // the versions are read again whenever an update ends.
   const providerVersions = useProviderVersions(client, picker === "settings");
@@ -1703,6 +1707,22 @@ export function App({
         };
   /** What waits over the composer, most urgent first; the banner pages between them. */
   const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
+  // A skipped record or stuck turn the server reported: warned with its fix,
+  // never silently missing. Dismissed until a new problem arrives.
+  if (problems.visible) {
+    const first = problems.rows[0]!;
+    notices.push({
+      key: "problems",
+      glyph: "!",
+      glyphColor: COLOR.warn,
+      title: t("problems.title", { count: problems.rows.length }),
+      detail: <text fg={COLOR.dim} selectable={false}>{`  ${first.message}`}</text>,
+      actions: [
+        { label: t("problems.details"), fg: COLOR.accent, onClick: () => setPicker("problems") },
+        { label: t("action.dismiss"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: problems.dismiss },
+      ],
+    });
+  }
   const threadProtection = threadState.thread?.protection ?? selected?.protection;
   if (threadProtection !== undefined) notices.push(threadProtectionNotice(threadProtection));
   notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now, providers));
@@ -3543,6 +3563,17 @@ export function App({
             remoteAccess.closePairing();
             closePicker(paletteReturnFocus);
           }}
+        />
+      ) : picker === "problems" ? (
+        <ProblemsModal
+          rows={problems.rows}
+          screenWidth={width}
+          screenHeight={height}
+          onClose={() => closePicker("composer")}
+          onQuarantine={problems.quarantine}
+          onReset={problems.resetToDefault}
+          onStop={problems.stopTurn}
+          onCopy={problems.copyPath}
         />
       ) : picker === "work-queue" || picker === "queue-schedule" ? (
         <WorkQueueModal client={client} threads={visibleThreads(shell).map((thread) => ({ id: thread.id, title: thread.title }))} screenWidth={width} screenHeight={height} onClose={() => closePicker("composer")}

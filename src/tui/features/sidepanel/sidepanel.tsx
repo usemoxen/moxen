@@ -288,7 +288,7 @@ function Split({ left, right, leftColor, rightColor, width }: { left: string; ri
   );
 }
 
-const OUTCOME_LABEL: Record<string, string> = { completed: "done", error: "failed", interrupted: "stopped" };
+const OUTCOME_LABEL: Record<string, string> = { completed: "done", error: "failed", interrupted: "stopped", unknown: "unknown" };
 
 export function AgentsTab({
   threads,

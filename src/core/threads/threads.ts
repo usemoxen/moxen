@@ -19,6 +19,7 @@ import type {
   RuntimeMode,
 } from "../types.js";
 import { ThreadStore } from "./store.js";
+import type { StoreProblem } from "./problems.js";
 import type {
   CreateThreadInput,
   ReadView,
@@ -71,6 +72,17 @@ export function threadStatus(thread: StoredThread, now: number = Date.now()): Th
 
 export function openTurn(turns: StoredTurn[]): StoredTurn | null {
   return turns.find((turn) => turn.status === "running") ?? null;
+}
+
+const KNOWN_TURN_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "completed", "interrupted", "failed"]);
+
+/**
+ * Whether a turn's status is one a build writes. Anything else came from a
+ * hand edit or a newer build: it shows as its own state (never silently as
+ * completed) and can be stopped, so it never stays stuck.
+ */
+export function isKnownTurnStatus(status: string): boolean {
+  return KNOWN_TURN_STATUSES.has(status);
 }
 
 /**
@@ -657,6 +669,36 @@ function processAlive(pid: number): boolean {
 }
 
 /**
+ * What a thread's turns show that will never settle on their own: a status
+ * no build writes (a hand edit, a newer build), or a running turn no
+ * process owns and no live run holds. The fix for either is stopping the
+ * turn; the poll reports them through `replaceTurnProblems`.
+ */
+export function turnProblems(store: ThreadStore, threadId: string, turns: StoredTurn[]): Array<Omit<StoreProblem, "id">> {
+  const file = store.turnsFile(threadId);
+  const problems: Array<Omit<StoreProblem, "id">> = [];
+  for (const turn of turns) {
+    if (!isKnownTurnStatus(turn.status)) {
+      problems.push({
+        kind: "turn-status",
+        threadId,
+        turnId: turn.id,
+        file,
+        message: `Turn ${turn.id} has a status no build writes (${JSON.stringify(turn.status)}): it shows as unknown and will never settle on its own. Stop the turn to clear it.`,
+      });
+    } else if (turn.status === "running" && !store.isTracked(turn.id) && !turn.owner) {
+      problems.push({
+        kind: "turn-ownerless",
+        threadId,
+        turnId: turn.id,
+        file,
+        message: `Turn ${turn.id} is running but no process owns it, so nothing will ever settle it. Stop the turn.`,
+      });
+    }
+  }
+  return problems;
+}
+/**
  * Whether nothing will ever settle this running turn: no run in this
  * process holds it, and the process that owned it — on this machine —
  * is gone (a crashed server, a killed CLI, a TUI closed mid-turn). A turn
@@ -1075,7 +1117,9 @@ export async function interruptTurn(
     const target = turnId
       ? (turns.find((turn) => turn.id === turnId) ?? null)
       : (openTurn(turns) ?? null);
-    if (!target || (target.status !== "running" && target.status !== "queued")) {
+    // A turn with a status no build writes is stuck by definition: stopping
+    // it is the fix, so it stops like a running one.
+    if (!target || (isKnownTurnStatus(target.status) && target.status !== "running" && target.status !== "queued")) {
       return { thread, turn: target, interrupted: false };
     }
     // Whether a run in this process will take the turn this promotes: the

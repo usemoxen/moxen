@@ -119,6 +119,11 @@ describe("toThreadEnvelope", () => {
 });
 
 describe("row projections", () => {
+  it("reads a turn with an unknown status as unknown, not completed", () => {
+    const strange = turn({ id: "t9", status: "bogus" as StoredTurn["status"] });
+    expect(toThreadEnvelope(thread(), [strange]).latestTurn).toMatchObject({ turnId: "t9", state: "unknown" });
+  });
+
   it("maps messages, activities, and checkpoints", () => {
     expect(
       toMessageEnvelope({ id: "m", threadId: "t", turnId: "u", role: "assistant", text: "x", createdAt: "c" }),

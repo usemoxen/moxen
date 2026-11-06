@@ -582,7 +582,12 @@ program.command("doctor").description("Check provider binaries, auth, store, and
   action(async () => {
     const context = await commandContext();
     const result = await doctor(context.config);
-    writeSuccess(result, context, result.ok ? "moxen CLI is ready." : "moxen CLI has failing checks.");
+    const lines = [result.ok ? "moxen CLI is ready." : "moxen CLI has failing checks."];
+    for (const problem of result.checks.problems) {
+      const where = problem.source === "config" ? `config ${problem.path}` : problem.line === undefined ? problem.file : `${problem.file}:${problem.line}`;
+      lines.push(`warning: ${problem.message} [${where}]`);
+    }
+    writeSuccess(result, context, lines.join("\n"));
     if (!result.ok) process.exitCode = 1;
   }),
 );

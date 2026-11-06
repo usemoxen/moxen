@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, saveConfig, setConfigValue } from "../config.js";
+import { DEFAULT_CONFIG, configKeyCoversPath, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeConfigLenient, saveConfig, setConfigValue } from "../config.js";
 import { readSetting } from "../configschema.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
@@ -114,7 +114,74 @@ describe("config", () => {
     // old file or the new one, never half of one.
     expect(statSync(file).ino).not.toBe(before);
     expect((await loadConfig(file)).config.runtimeMode).toBe("approval-required");
-    expect(readdirSync(path.join(dir, "nested"))).toEqual(["config.json"]);
+    // The overwritten file is kept beside it, so a bad save can be undone.
+    expect(readdirSync(path.join(dir, "nested")).sort()).toEqual(["config.json", "config.json.bak"]);
+  });
+
+  it("loads past one bad scalar, keeping the rest and reporting where it was", async () => {
+    const { config, skipped } = normalizeConfigLenient({ provider: "mine", speedMode: "turbo" });
+    expect(config.provider).toBe("mine");
+    expect(config.speedMode).toBeUndefined();
+    expect(skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    // The strict reader still refuses it whole: `config set` must not accept it either.
+    expect(() => normalizeConfig({ provider: "mine", speedMode: "turbo" })).toThrow("speedMode must be standard or fast");
+  });
+
+  it("skips one bad MCP server and keeps the good one", () => {
+    const { config, skipped } = normalizeConfigLenient({
+      mcpServers: {
+        good: { command: "server" },
+        bad: { command: "" },
+      },
+    });
+    expect(Object.keys(config.mcpServers ?? {})).toEqual(["good"]);
+    expect(skipped.map((entry) => entry.path)).toEqual(["mcpServers.bad"]);
+  });
+
+  it("skips one bad harness profile and keeps the good one", () => {
+    const good = { id: "lab", baseUrl: "http://localhost:8080", models: [{ id: "qwen3" }] };
+    const { config, skipped } = normalizeConfigLenient({
+      providers: { harness: { profiles: [good, { id: "broken" }] } },
+    });
+    expect(config.providers?.harness?.profiles?.map((profile) => profile.id)).toEqual(["lab"]);
+    expect(skipped.map((entry) => entry.path)).toEqual(["providers.harness.profiles[broken]"]);
+  });
+
+  it("a skipped entry survives a save instead of being silently dropped", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ provider: "mine", speedMode: "turbo" }));
+    const loaded = await loadConfig(file);
+    expect(loaded.config.provider).toBe("mine");
+    expect(loaded.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    await saveConfig(file, { ...loaded.config, provider: "theirs" }, loaded.skipped);
+    const reread = await loadConfig(file);
+    // The user's edit landed, and the bad value is still there to fix, not gone.
+    expect(reread.config.provider).toBe("theirs");
+    expect(reread.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    expect(JSON.parse(readFileSync(file, "utf8")).speedMode).toBe("turbo");
+  });
+
+  it("a fixed entry stops being preserved once it parses", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ speedMode: "turbo" }));
+    const loaded = await loadConfig(file);
+    expect(loaded.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    // The user fixed it: the new value is in force, not the old bad one.
+    await saveConfig(file, { ...loaded.config, speedMode: "fast" }, loaded.skipped);
+    expect(JSON.parse(readFileSync(file, "utf8")).speedMode).toBe("fast");
+    expect((await loadConfig(file)).skipped).toEqual([]);
+  });
+
+  it("matches a set key against the skipped entries it covers", () => {
+    expect(configKeyCoversPath("speedMode", "speedMode")).toBe(true);
+    expect(configKeyCoversPath("ui", "ui.theme")).toBe(true);
+    expect(configKeyCoversPath("ui.theme", "ui.theme")).toBe(true);
+    expect(configKeyCoversPath("ui.theme", "ui.language")).toBe(false);
+    expect(configKeyCoversPath("mcpServers[lab]", "mcpServers.lab")).toBe(true);
+    expect(configKeyCoversPath("providers.harness.profiles[broken]", "providers.harness.profiles[broken]")).toBe(true);
+    expect(configKeyCoversPath("providers.harness.profiles[lab]", "providers.harness.profiles[broken]")).toBe(false);
   });
 });
 

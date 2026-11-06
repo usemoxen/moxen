@@ -377,6 +377,18 @@ describe("interrupt", () => {
     expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
     expect(turns.find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
   });
+
+  it("stops a turn with an unknown status instead of leaving it stuck", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    // A status no build writes (a hand edit, a newer build): the turn never
+    // runs and never settles on its own.
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, status: "bogus" })));
+    const result = await interruptTurn(store, thread.id, sent.turn.id);
+    expect(result.interrupted).toBe(true);
+    expect(result.turn?.status).toBe("interrupted");
+  });
 });
 
 describe("events", () => {

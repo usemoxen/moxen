@@ -53,7 +53,9 @@ function latestTurnOf(turns: StoredTurn[]): LatestTurnEnvelope | null {
           ? "interrupted"
           : latest.status === "failed"
             ? "error"
-            : "completed",
+            : latest.status === "completed"
+              ? "completed"
+              : "unknown",
     requestedAt: latest.createdAt,
     // A turn that waited in the queue started when it was promoted, not
     // when it was asked for — its live clock must not count the wait.

@@ -46,7 +46,7 @@ import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
-import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
+import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
@@ -101,6 +101,7 @@ import {
   readThread,
   settleThread,
   snoozeThread,
+  turnProblems,
   unsettleThread,
   unsnoozeThread,
   updateThreadMeta,
@@ -305,7 +306,7 @@ export class DirectConnection implements ClientApi {
   private readonly catalog: () => Promise<ConfigPayload>;
   private readonly providers: () => Promise<ProviderSummary[]>;
   private readonly loadConfig: () => Promise<CliConfig>;
-  private readonly readConfigFile: () => Promise<{ config: CliConfig; path: string; exists: boolean }>;
+  private readonly readConfigFile: () => Promise<LoadedConfig>;
   /** The per-provider settings the last config read saw; see `driverFor`. */
   private lastProviders: ProvidersConfig | undefined;
   private lastWeb: WebConfig | undefined;
@@ -359,7 +360,7 @@ export class DirectConnection implements ClientApi {
     // the resolved default and is never written unless it asks for one.
     const override = options.config;
     this.readConfigFile = override
-      ? async () => ({ config: await override(), path: options.configPath ?? defaultConfigPath(), exists: true })
+      ? async () => ({ config: await override(), path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] })
       : async () => await loadConfig(options.configPath);
     this.loadConfig = async () => {
       const { config } = await this.readConfigFile();
@@ -906,6 +907,10 @@ export class DirectConnection implements ClientApi {
             const cached = turnCache.get(entry.id);
             const turns = cached && cached.version === version ? cached.turns : await store.readTurns(entry.id);
             if (!cached || cached.version !== version) turnCache.set(entry.id, { version, turns });
+            // Stuck turns surface as warnings with a fix (stop the turn),
+            // not as a blank sidebar: a status no build writes, or a
+            // running turn no process owns, will never settle on its own.
+            store.replaceTurnProblems(entry.id, turnProblems(store, entry.id, turns));
             // This poll already reads every changed thread's turns: a scheduled turn
             // that came due — even one another process scheduled — starts here.
             if (turns.some((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) <= now)) {
@@ -1232,6 +1237,8 @@ export class DirectConnection implements ClientApi {
       case "thread.turn.interrupt":
         await interruptTurn(await this.store(), command.threadId, command.turnId);
         return accepted;
+      case "store.quarantine":
+        return await (await this.store()).quarantineProblem(command.id);
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -1477,8 +1484,8 @@ export class DirectConnection implements ClientApi {
               await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true });
             } catch (error) {
               await this.withConfigWrite(async () => {
-                const { config, path } = await this.readConfigFile();
-                await saveConfig(path, await setConfigValueSecure(config, "memoryEmbeddings", "false"));
+                const { config, path, skipped } = await this.readConfigFile();
+                await saveConfig(path, await setConfigValueSecure(config, "memoryEmbeddings", "false"), skipped);
               });
               throw error;
             }
@@ -1489,9 +1496,12 @@ export class DirectConnection implements ClientApi {
           // have written since, and a settings page that silently reverts a
           // neighbour's edit is worse than one that is a beat behind.
           // The queue above makes even that re-read fresh.
-          const { config, path } = await this.readConfigFile();
+          const { config, path, skipped } = await this.readConfigFile();
           const next = await setConfigValueSecure(config, command.key, command.value);
-          await saveConfig(path, next);
+          // Setting a key clears what the file held for it: a bad entry the
+          // user just reset or removed is not carried back by the save.
+          const kept = skipped.filter((entry) => !configKeyCoversPath(command.key, entry.path));
+          await saveConfig(path, next, kept);
           if (command.key === "memoryEmbeddings" || command.key === "memoryEmbeddingLoading" || command.key === "memory") {
             void this.applyEmbeddingPolicy().catch(() => undefined);
           }
@@ -1506,7 +1516,7 @@ export class DirectConnection implements ClientApi {
             } catch (cause) {
               // Put back what was listening: a setting that says "on" while
               // nothing listens would be a lie the next restart repeats.
-              await saveConfig(path, config);
+              await saveConfig(path, config, skipped);
               await this.remoteAccess.apply(config.remote).catch(() => undefined);
               throw cause;
             }
@@ -1516,10 +1526,10 @@ export class DirectConnection implements ClientApi {
       }
       case "settings.duplicate": {
         return await this.withConfigWrite(async () => {
-          const { config, path } = await this.readConfigFile();
+          const { config, path, skipped } = await this.readConfigFile();
           const entry = listTarget(`${command.key}[${command.id}]`);
           if (!entry) throw new CliError("INVALID_CONFIG_KEY", `${command.key} is not a list setting.`);
-          await saveConfig(path, normalizeConfig(duplicateListItem(config, entry, command.newId, command.key)));
+          await saveConfig(path, normalizeConfig(duplicateListItem(config, entry, command.newId, command.key)), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
       }
@@ -1530,7 +1540,7 @@ export class DirectConnection implements ClientApi {
       case "harness.profile.import": {
         const parsed = parseProfileDocument(command.text);
         return await this.withConfigWrite(async () => {
-          const { config, path } = await this.readConfigFile();
+          const { config, path, skipped } = await this.readConfigFile();
           const existing = config.providers?.harness?.profiles ?? [];
           const wanted = (command.id ?? parsed.id).toLowerCase();
           const taken = new Set(existing.map((entry) => entry.id));
@@ -1541,7 +1551,7 @@ export class DirectConnection implements ClientApi {
           const id = taken.has(wanted) && mode === "rename" ? freeProfileId(wanted, taken) : wanted;
           const next = { ...parsed, id };
           const profiles = taken.has(id) ? existing.map((entry) => (entry.id === id ? next : entry)) : [...existing, next];
-          await saveConfig(path, normalizeConfig({ ...config, providers: { ...config.providers, harness: { ...config.providers?.harness, profiles } } }));
+          await saveConfig(path, normalizeConfig({ ...config, providers: { ...config.providers, harness: { ...config.providers?.harness, profiles } } }), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true, id, fileId: parsed.id };
         });
       }
@@ -1567,7 +1577,7 @@ export class DirectConnection implements ClientApi {
                   ? entry
                   : { ...entry, models: entry.models.map((m) => (m.id === model.id ? { ...m, probed: mergeProbed(m.probed, report) } : m)) },
               );
-              await saveConfig(fresh.path, normalizeConfig({ ...fresh.config, providers: { ...fresh.config.providers, harness: { ...fresh.config.providers?.harness, profiles } } }));
+              await saveConfig(fresh.path, normalizeConfig({ ...fresh.config, providers: { ...fresh.config.providers, harness: { ...fresh.config.providers?.harness, profiles } } }), fresh.skipped);
             });
           }
           return { ...report, saved: save };
@@ -2172,8 +2182,12 @@ export class DirectConnection implements ClientApi {
       case "settings.read":
         return await this.settingsSnapshot();
       case "config.read": {
-        const { config, path, exists } = await this.readConfigFile();
-        return { path, exists, config: config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config };
+        const { config, path, exists, problems } = await this.readConfigFile();
+        return { path, exists, config: config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config, problems };
+      }
+      case "store.problems": {
+        const store = await this.store();
+        return { problems: store.storeProblems() };
       }
       case "harness.profile.export": {
         const { config } = await this.readConfigFile();

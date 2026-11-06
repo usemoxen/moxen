@@ -31,6 +31,7 @@ import type {
   StoredThread,
   StoredTurn,
 } from "./types.js";
+import { type StoreProblem, storeProblemId } from "./problems.js";
 
 export interface ThreadStoreOptions {
   readonly bus?: EventBus<BackendEvent>;
@@ -51,11 +52,18 @@ function ledgerFile(root: string, threadId: string, name: LedgerName): string {
   return path.join(root, "threads", threadId, `${name}.jsonl`);
 }
 
-function parseLedgerLine<T>(line: string, file: string): T {
+function parseLedgerLine<T>(line: string, file: string, lineNumber: number): { value: T } | { problem: Omit<StoreProblem, "id"> } {
   try {
-    return JSON.parse(line) as T;
-  } catch (cause) {
-    throw new CliError("STORE_CORRUPT", `Could not parse ${file}.`, { cause });
+    return { value: JSON.parse(line) as T };
+  } catch {
+    return {
+      problem: {
+        kind: "ledger-line",
+        file,
+        line: lineNumber,
+        message: `Line ${lineNumber} of ${file} is not valid JSON and was skipped; the rest of the ledger still loads.`,
+      },
+    };
   }
 }
 
@@ -64,6 +72,8 @@ export class ThreadStore {
   private readonly aborts = new Map<string, () => void>();
   private readonly bus: EventBus<BackendEvent>;
   private readonly clock: () => number;
+  /** Bad records readers skipped, by stable id: reported once, kept until fixed. */
+  private readonly problems = new Map<string, StoreProblem>();
 
   private constructor(
     private readonly root: string,
@@ -114,6 +124,124 @@ export class ThreadStore {
     return this.bus.subscribe(listener);
   }
 
+  /** Bad records readers skipped, oldest first. The same record is never reported twice. */
+  storeProblems(): StoreProblem[] {
+    return [...this.problems.values()];
+  }
+
+  /**
+   * Record a skipped bad record. The connection's poll calls this for turn
+   * problems it spots while it already holds every turn; readers call it
+   * for the records they skip. Returns the stored problem.
+   */
+  noteProblem(problem: Omit<StoreProblem, "id">): StoreProblem {
+    const id = storeProblemId(problem);
+    const existing = this.problems.get(id);
+    if (existing) return existing;
+    const stored: StoreProblem = { ...problem, id };
+    this.problems.set(id, stored);
+    return stored;
+  }
+
+  /**
+   * Replace one thread's turn problems (unknown statuses, ownerless running
+   * turns) with what its turns show now: a turn that stopped or was fixed
+   * clears its own warning.
+   */
+  replaceTurnProblems(threadId: string, problems: Array<Omit<StoreProblem, "id">>): void {
+    for (const [id, problem] of [...this.problems]) {
+      if (problem.threadId === threadId && (problem.kind === "turn-status" || problem.kind === "turn-ownerless")) {
+        this.problems.delete(id);
+      }
+    }
+    for (const problem of problems) this.noteProblem(problem);
+  }
+
+  /** Drop one problem, after its fix (a quarantine, a reset, a stop) landed. */
+  dropProblem(id: string): void {
+    this.problems.delete(id);
+  }
+
+  /** Absolute path of a thread's turns ledger, for problem reports. */
+  turnsFile(threadId: string): string {
+    return ledgerFile(this.root, threadId, "turns");
+  }
+
+  /**
+   * Move a reported bad record aside into `<root>/quarantine/` — never
+   * deleted — and repair the source: a bad thread record is moved away so
+   * the thread reads as missing, a ledger loses only the bad line (the
+   * original is kept beside the moved record). Problems resolve from the
+   * store's own log by id, so a client can never name an arbitrary path.
+   * Turn problems cannot be quarantined: the error names the fix that
+   * handles them instead.
+   */
+  async quarantineProblem(id: string): Promise<{ movedTo: string }> {
+    const problem = this.problems.get(id);
+    if (!problem) {
+      throw new CliError("PROBLEM_NOT_FOUND", `No bad record is reported with id ${id}.`, { details: { id } });
+    }
+    const stale = (message: string): Error => {
+      this.problems.delete(id);
+      return new CliError("PROBLEM_STALE", message, { details: { id } });
+    };
+    const quarantineDir = path.join(this.root, "quarantine");
+    const movedName = (base: string): string => path.join(quarantineDir, `${base}-${process.pid}-${Date.now()}`);
+    if (problem.kind === "turn-status" || problem.kind === "turn-ownerless") {
+      throw new CliError("PROBLEM_NOT_QUARANTINED", `This problem is a stuck turn, not a bad record: stop it with thread.turn.interrupt instead.`, { details: { id } });
+    }
+    if (problem.kind === "thread-record") {
+      const threadId = problem.threadId!;
+      return await this.withThreadLock(threadId, async () => {
+        let raw: string;
+        try {
+          raw = await readFile(problem.file, "utf8");
+        } catch {
+          throw stale(`Thread ${threadId} already reads, so there is nothing to move aside.`);
+        }
+        try {
+          JSON.parse(raw);
+          throw stale(`Thread ${threadId} parses now, so there is nothing to move aside.`);
+        } catch (error) {
+          if (error instanceof CliError) throw error;
+          // Still bad: move it aside below.
+        }
+        await mkdir(quarantineDir, { recursive: true });
+        const movedTo = movedName(`${threadId}-thread.json`);
+        await renameReplacing(problem.file, movedTo);
+        this.problems.delete(id);
+        return { movedTo };
+      });
+    }
+    const line = problem.line!;
+    const lockId = problem.kind === "delegation-line" ? "!delegations" : problem.threadId!;
+    return await this.withThreadLock(lockId, async () => {
+      let raw: string;
+      try {
+        raw = await readFile(problem.file, "utf8");
+      } catch {
+        throw stale(`The file is already gone, so there is nothing to move aside.`);
+      }
+      const lines = raw.split("\n");
+      const bad = lines[line - 1];
+      if (bad === undefined || bad.trim().length === 0) throw stale(`Line ${line} is already gone, so there is nothing to move aside.`);
+      try {
+        JSON.parse(bad);
+        throw stale(`Line ${line} parses now, so there is nothing to move aside.`);
+      } catch (error) {
+        if (error instanceof CliError) throw error;
+        // Still bad: move it aside below.
+      }
+      await mkdir(quarantineDir, { recursive: true });
+      const movedTo = movedName(path.basename(problem.file));
+      await writeFile(movedTo, raw, "utf8");
+      const kept = [...lines.slice(0, line - 1), ...lines.slice(line)];
+      await writeFile(problem.file, kept.join("\n"), "utf8");
+      this.problems.delete(id);
+      return { movedTo };
+    });
+  }
+
   /** Stage 2 drivers register a live run so interrupt can abort it. */
   trackRunning(turnId: string, abort: () => void): void {
     this.aborts.set(turnId, abort);
@@ -157,22 +285,46 @@ export class ThreadStore {
   }
 
   async readThreadRecord(threadId: string): Promise<StoredThread | null> {
+    const file = this.threadFile(threadId);
     let raw: string;
     try {
-      raw = await readFile(this.threadFile(threadId), "utf8");
+      raw = await readFile(file, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
+      // A record that cannot even be read is skipped like a corrupt one:
+      // one bad file must not blank the sidebar.
+      this.noteProblem({
+        kind: "thread-record",
+        threadId,
+        file,
+        message: `Thread ${threadId} could not be read and is skipped until it is fixed or moved aside.`,
+      });
+      return null;
     }
     let record: unknown;
     try {
       record = JSON.parse(raw) as unknown;
-    } catch (cause) {
-      throw new CliError("STORE_CORRUPT", `Could not parse thread ${threadId}.`, { cause });
+    } catch {
+      // Skipped, not fatal: one corrupt record must not blank the sidebar.
+      this.noteProblem({
+        kind: "thread-record",
+        threadId,
+        file,
+        message: `Thread ${threadId} could not be parsed and is skipped until it is fixed or moved aside.`,
+      });
+      return null;
     }
     if (record === null || typeof record !== "object" || (record as { id?: unknown }).id !== threadId) {
-      throw new CliError("STORE_CORRUPT", `Thread record ${threadId} is invalid.`);
+      this.noteProblem({
+        kind: "thread-record",
+        threadId,
+        file,
+        message: `Thread ${threadId} has an invalid record and is skipped until it is fixed or moved aside.`,
+      });
+      return null;
     }
+    // Fixed by hand since: the warning goes with the bad bytes.
+    this.problems.delete(storeProblemId({ kind: "thread-record", threadId, file }));
     // A thread saved in a mode since removed (plan) reads as Build.
     const stored = record as StoredThread;
     const mode = storedInteractionMode((record as { interactionMode?: unknown }).interactionMode);
@@ -245,10 +397,19 @@ export class ThreadStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
-    return raw
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => parseLedgerLine<T>(line, file));
+    const rows: T[] = [];
+    const lines = raw.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      if (line.trim().length === 0) continue;
+      const parsed = parseLedgerLine<T>(line, file, index + 1);
+      if ("value" in parsed) {
+        rows.push(parsed.value);
+        // Fixed by hand since: the warning goes with the bad bytes.
+        this.problems.delete(storeProblemId({ kind: "ledger-line", threadId, file, line: index + 1 }));
+      } else this.noteProblem({ ...parsed.problem, threadId });
+    }
+    return rows;
   }
 
   /**
@@ -336,10 +497,18 @@ export class ThreadStore {
       throw error;
     }
     const file = this.delegationsFile();
-    return raw
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => parseLedgerLine<StoredDelegation>(line, file));
+    const rows: StoredDelegation[] = [];
+    const lines = raw.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      if (line.trim().length === 0) continue;
+      const parsed = parseLedgerLine<StoredDelegation>(line, file, index + 1);
+      if ("value" in parsed) {
+        rows.push(parsed.value);
+        this.problems.delete(storeProblemId({ kind: "delegation-line", file, line: index + 1 }));
+      } else this.noteProblem({ ...parsed.problem, kind: "delegation-line", message: `Line ${index + 1} of ${file} is not valid JSON and was skipped; the other tasks still load.` });
+    }
+    return rows;
   }
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
