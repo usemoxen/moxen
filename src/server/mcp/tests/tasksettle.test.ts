@@ -14,7 +14,7 @@ import { testHarness, type TestHarnessOptions } from "../../../core/testing/harn
 import { runProcess } from "../../../core/infra/process.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { DirectConnection } from "../../connection.js";
-import { callMoxenTool, DELEGATION_TOOLS } from "../tools.js";
+import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
 
 const WAIT = { timeout: 12_000 };
 
@@ -55,9 +55,21 @@ async function branchList(repo: string, branch: string) {
 }
 
 describe("task_settle", () => {
-  it("is offered to orchestrators, not to delegated tasks", () => {
+  it("is offered to orchestrators, not to delegated tasks", async () => {
     expect(DELEGATION_TOOLS.has("task_settle")).toBe(true);
-  });
+    const names = (options: Parameters<typeof moxenToolsFor>[0]) => moxenToolsFor(options).map((tool) => tool.name);
+    expect(names({})).toContain("task_settle");
+    expect(names({ delegated: true })).not.toContain("task_settle");
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const refused = await callMoxenTool(t.connection, taskId, "task_settle", { taskId }, { delegated: true });
+      expect(refused).toMatchObject({ isError: true });
+      expect(refused.text).toContain("not available in a delegated task");
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
 
   it("settles a finished task without stopping anything", async () => {
     const t = await setup();
