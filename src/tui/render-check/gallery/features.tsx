@@ -3,6 +3,7 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
+import { MemoryManagerModal } from "../../features/memory/memorymanager.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
 import { ChoiceList, KeyButton, KeyHints } from "../../features/queue/parts.js";
 import { QueueList, queueRows } from "../../features/queue/queuelist.js";
@@ -289,6 +290,23 @@ const TASKS: readonly BackgroundTaskRow[] = [
   { taskId: "b3", taskType: "local_agent", description: "Explore: where the themes are applied", toolName: "Agent", command: null, startedAt: null },
 ];
 const TASK_CLIENT = { query: async () => ({ available: true, lines: ["$ bun run dev --port 4000", "listening on http://localhost:4000", "GET / 200 4ms"] }) } as unknown as Pick<ClientApi, "query">;
+
+const MEMORY_CLIENT = {
+  query: async (query: { type: string }) => {
+    if (query.type === "memory.list") {
+      return {
+        projectId: "p-cli",
+        memories: [
+          { name: "editor-font", description: "Preferred font", type: "user", body: "JetBrains Mono.", scope: "global" },
+          { name: "deploy-notes", description: "How deploys go out", type: "project", body: "Ship on Fridays.", scope: "project" },
+        ],
+        index: null,
+      };
+    }
+    return { path: "config.json", exists: true, settings: [{ descriptor: { key: "memory" }, value: true }] };
+  },
+  dispatch: async () => ({ accepted: true }),
+} as unknown as ClientApi;
 
 const STATS_NOW = new Date(2026, 9, 29, 12, 0, 0);
 const STATS_DAILY: UsageStats["daily"] = Array.from({ length: 40 }, (_, index) => {
@@ -734,6 +752,19 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     element: () => (
       <Stage width={90} height={20}>
         <BackgroundTasksModal tasks={TASKS} client={TASK_CLIENT} threadId="t" screenWidth={90} screenHeight={20} left={5} top={2} width={80} height={16} onClose={noop} onStop={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "memory-manager",
+    group: "memory",
+    title: "MemoryManagerModal, grouped list",
+    width: 100,
+    height: 30,
+    settleMs: 400,
+    element: () => (
+      <Stage width={100} height={30}>
+        <MemoryManagerModal client={MEMORY_CLIENT} threadId="t-now" screenWidth={100} screenHeight={30} left={4} top={2} width={92} height={26} onClose={noop} />
       </Stage>
     ),
   },

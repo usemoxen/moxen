@@ -69,6 +69,7 @@ import { runWorkQueueModal } from "./scenarios/workQueue.js";
 import { runResearchRun } from "./scenarios/researchRun.js";
 import { runNewThreadResearch } from "./scenarios/newThreadResearch.js";
 import { runSendGate } from "./scenarios/sendGate.js";
+import { runMemoryManager } from "./scenarios/memoryManager.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -168,6 +169,7 @@ export async function runWalkthrough(): Promise<void> {
   await runResearchRun();
   await runNewThreadResearch();
   await runSendGate();
+  await runMemoryManager();
   await runProtectThread();
   await runThreadAffinity();
 

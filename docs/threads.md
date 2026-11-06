@@ -694,6 +694,15 @@ so a change on Claude's side does not change it.
   `memory_search`, `memory_save`, `memory_edit`, `memory_append` and
   `memory_delete` on the `moxen` MCP server. The model picks the scope.
   A delegated task gets `memory_read` and `memory_search` only.
+- **Managing:** the TUI's memory manager shows the same memories the agents
+  see: open it from Settings > Memory (Manage memories) or the command
+  palette. Memories read global first, then this project, with the same
+  search agents use. One opens in full; creating and editing take a name,
+  description, type, scope and body. Saving over a name that exists asks
+  first, deleting asks first, and a memory another agent saved while it was
+  open is shown rather than silently overwritten. Viewing works with memory
+  off, and says so; saving, editing and deleting are refused while it is off,
+  in the manager, the CLI and on the server.
 - **Reading:** the index is not shipped in the runtime instructions: it can
   reach 200 lines / 25 KB, and `memory_read` with no name returns it as it is
   now, so the rules point there instead of duplicating it. A memory itself is

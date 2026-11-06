@@ -16,6 +16,7 @@ import { useInteractionMode } from "../features/composer/useInteractionMode.js";
 import { pickerEntries } from "../model/skills.js";
 import { TasksPanel } from "../features/taskspanel/taskspanel.js";
 import { BackgroundTasksModal } from "../features/taskspanel/backgroundtasksmodal.js";
+import { MemoryManagerModal } from "../features/memory/memorymanager.js";
 import { SettingsModal } from "../features/settings/settingsmodal.js";
 import { ChangelogModal } from "../features/experience/experiencemodal.js";
 import { OnboardingPage } from "../features/experience/onboardingpage.js";
@@ -2006,6 +2007,19 @@ export function App({
           },
           helpSection(),
           remoteSection(),
+          {
+            header: t("palette.memory"),
+            rows: [
+              {
+                key: "memory:manage",
+                label: t("mem.manage"),
+                onPick: () => {
+                  setPickerFilter("");
+                  setPicker("memory");
+                },
+              },
+            ],
+          },
         ],
       };
     }
@@ -2267,6 +2281,14 @@ export function App({
           {
             header: t("palette.memory"),
             rows: [
+              {
+                key: "memory:manage",
+                label: t("mem.manage"),
+                onPick: () => {
+                  setPickerFilter("");
+                  setPicker("memory");
+                },
+              },
               {
                 key: "memory:import-claude",
                 label: t("app.import_claude_code_memory_1bf9"),
@@ -3584,6 +3606,7 @@ export function App({
           top={backgroundGeometry.top}
           width={backgroundGeometry.width}
           height={backgroundGeometry.height}
+          threadId={openThreadId}
           onClose={() => setPicker(null)}
         />
       ) : picker === "update" ? (
@@ -3624,6 +3647,18 @@ export function App({
           {...(backgroundTaskId === undefined ? {} : { initialTaskId: backgroundTaskId })}
           onClose={() => setPicker(null)}
           onStop={stopBackgroundTask}
+        />
+      ) : picker === "memory" ? (
+        <MemoryManagerModal
+          client={client}
+          threadId={openThreadId}
+          screenWidth={width}
+          screenHeight={height}
+          left={backgroundGeometry.left}
+          top={backgroundGeometry.top}
+          width={backgroundGeometry.width}
+          height={backgroundGeometry.height}
+          onClose={() => closePicker(paletteReturnFocus)}
         />
       ) : (
         <PickerModal
