@@ -28,12 +28,14 @@ export function useMemoryRuntime(client: ClientApi | undefined, visible: boolean
   return status;
 }
 
-export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, onKeyword }: {
+export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, onKeyword, onManage }: {
   status: Status | null;
   saving?: boolean;
   onSetup: () => void;
   onCancel: () => void;
   onKeyword: () => void;
+  /** The memory manager above the settings page; absent where it cannot open. */
+  onManage?: () => void;
 }) {
   const busy = saving || status?.busy === true;
   const failed = status?.state === "failed";
@@ -61,6 +63,7 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
     {failed && status?.message ? <text fg={COLOR.removed} bg={SURFACE.panel} wrapMode="word" selectable={false}>{tx(status.message)}</text> : null}
     {busy ? null : <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.panel}>
       <HoverButton label={t("memory.keyword")} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onKeyword} />
+      {onManage === undefined ? null : <HoverButton label={`  ${t("mem.manage")}`} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onManage} />}
     </box>}
   </box>;
 }

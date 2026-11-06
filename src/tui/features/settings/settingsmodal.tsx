@@ -11,6 +11,7 @@ import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
 import { MemoryRuntimePanel, useMemoryRuntime } from "../memory/memoryruntime.js";
+import { MemoryManagerModal } from "../memory/memorymanager.js";
 import type { ClientApi } from "../../../server/api.js";
 import { TextField } from "./textfield.js";
 import type { HarnessRun } from "./useSettings.js";
@@ -145,6 +146,7 @@ export function SettingsModal({
   height,
   onClose,
   initialSection = SETTING_SECTIONS[0],
+  threadId = null,
 }: {
   client?: ClientApi;
   snapshot: SettingsSnapshot | null;
@@ -180,6 +182,8 @@ export function SettingsModal({
   height: number;
   onClose: () => void;
   initialSection?: SettingSection;
+  /** The open thread, so the memory manager shows this project's memories too. */
+  threadId?: string | null;
 }) {
   const language = currentLanguage();
   // The page draws the snapshot in the current language; what it writes back is by key and value, which stay as they were.
@@ -203,6 +207,8 @@ export function SettingsModal({
   const [editorHeading, setEditorHeading] = useState<string | null>(null);
   /** The MCP access setting whose checklist fills the right pane. */
   const [accessOpen, setAccessOpen] = useState<string | null>(null);
+  /** The memory manager above the page, opened from the Memory tab. */
+  const [managing, setManaging] = useState(false);
   /** The per-model hand-off setting whose editor fills the right pane. */
   const [handoffOpen, setHandoffOpen] = useState<string | null>(null);
 
@@ -467,6 +473,7 @@ export function SettingsModal({
   const handoffItem = handoffOpen === null ? undefined : items.find((item) => item.descriptor.key === handoffOpen);
 
   useKeyboard((key) => {
+    if (managing) return;
     if (tab === "skills" && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
     if (listOpen !== null || accessOpen !== null || handoffOpen !== null || key.defaultPrevented) return;
@@ -776,7 +783,8 @@ export function SettingsModal({
                   {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
                     onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
                     onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
-                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }} /> : null}
+                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
+                    onManage={() => { setEditing(null); setPicking(null); setManaging(true); }} /> : null}
                 <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {items.map((item, itemIndex) => {
                     const group = item.descriptor.group;
@@ -824,6 +832,19 @@ export function SettingsModal({
               <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{hint}</OverflowText>
             </box>
           </box>
+          {managing && client ? (
+            <MemoryManagerModal
+              client={client}
+              threadId={threadId}
+              screenWidth={screenWidth}
+              screenHeight={screenHeight}
+              left={left}
+              top={top}
+              width={width}
+              height={height}
+              onClose={() => setManaging(false)}
+            />
+          ) : null}
         </>
       )}
     </ModalShell>
