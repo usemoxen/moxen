@@ -19,7 +19,7 @@ import { normalizeConfig } from "../../core/config.js";
 import { CliError } from "../../core/errors.js";
 import type { ProviderRuntimeEvent } from "../../core/providers/spi.js";
 import type { TurnDriver, TurnOutcome } from "../../core/threads/execute.js";
-import { createThread, readThread, updateThreadMeta } from "../../core/threads/threads.js";
+import { createThread, readThread, sendTurn, completeTurn, updateThreadMeta } from "../../core/threads/threads.js";
 import { DirectConnection } from "../connection.js";
 import { openClient } from "../client.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
@@ -501,6 +501,58 @@ describe("DirectConnection subscriptions", () => {
     } finally {
       stopThread();
       stopShell();
+      await connection.close();
+    }
+  });
+
+  it("rereads only the changed thread's turns on a shell poll, not idle history", async () => {
+    const harness = await testHarness();
+    const workspaceRoot = await realpath(harness.work);
+    const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+    const idle: string[] = [];
+    for (let index = 0; index < 10; index++) {
+      const thread = await createThread(harness.store, {
+        id: `idle-${index}`, projectId: ensured.project.id, title: `Idle ${index}`,
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const sent = await sendTurn(harness.store, thread.id, { prompt: "done work" });
+      await completeTurn(harness.store, thread.id, sent.turn.id, { text: "done" });
+      idle.push(thread.id);
+    }
+    const active = await createThread(harness.store, {
+      id: "active-poll", projectId: ensured.project.id, title: "Active",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+    });
+    const connection = new DirectConnection({
+      storeRoot: harness.root, drivers: harness.drivers, shellPollMs: 20, threadPollMs: 20,
+    });
+    const frames: unknown[] = [];
+    const stop = connection.subscribeShell({}, (item) => frames.push(item), () => undefined);
+    try {
+      await waitFor("shell snapshot", async () =>
+        frames.some((frame) => JSON.stringify(frame).includes("active-poll")));
+      // The first polls backfill native subagents once per thread (a record
+      // write); wait for that to settle so the version cache is post-backfill.
+      await waitFor("subagent backfill", async () => {
+        for (const id of [...idle, active.id]) {
+          if ((await harness.store.readThreadRecord(id))?.nativeSubagents === undefined) return false;
+        }
+        return true;
+      });
+      // One more poll to refresh the version cache after the backfill writes.
+      await waitFor("post-backfill snapshot", async () => true);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const store = await (connection as unknown as { store: () => Promise<typeof harness.store> }).store();
+      const turns = vi.spyOn(store, "readTurns");
+      // A rename touches only the active thread's record: the next poll must
+      // rebuild its envelope without reparsing idle turns ledgers.
+      await updateThreadMeta(harness.store, active.id, { title: "Active renamed" });
+      await waitFor("renamed shell snapshot", async () =>
+        frames.some((frame) => JSON.stringify(frame).includes("Active renamed")));
+      expect(turns.mock.calls.length).toBeGreaterThan(0);
+      expect(turns.mock.calls.every(([id]) => id === active.id)).toBe(true);
+    } finally {
+      stop();
       await connection.close();
     }
   });

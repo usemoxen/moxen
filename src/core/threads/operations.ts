@@ -468,9 +468,16 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
  * Run the thread's scheduled turn once it is due and the thread is free.
  * Called by the schedule timer and by the shell poll; safe to call any time
  * — nothing happens when nothing is due or a turn is already running.
+ * A candidate snapshot (threads with work, as the usage tick keeps) avoids
+ * rereading idle history; idle dependencies of queued conditions are loaded
+ * on top, as for the work queue.
  */
-export async function runDueScheduledTurn(ctx: OperationContext, threadId: string, now = Date.now()): Promise<boolean> {
-  return ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => admitQueuedTurn(ctx, threadId, await queueRows(ctx), now));
+export async function runDueScheduledTurn(ctx: OperationContext, threadId: string, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<boolean> {
+  return ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
+    const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+    if (snapshot) await queueDependencies(ctx, rows);
+    return admitQueuedTurn(ctx, threadId, rows, now);
+  });
 }
 
 async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
@@ -3135,7 +3142,7 @@ export interface QueuedAgentMessage {
  * ending a usage hold (`manualContinuation` needs no origin): a protected
  * thread keeps it as an automatic wake-up that waits behind the hold.
  */
-export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId: string, input: QueueAgentMessageInput): Promise<QueuedAgentMessage> {
+export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId: string, input: QueueAgentMessageInput, snapshot?: readonly QueueRow[]): Promise<QueuedAgentMessage> {
   const callerId = requireThreadId(rawCallerThreadId);
   const message = input.message.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
@@ -3169,7 +3176,8 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   const thread = (await ctx.store.readThreadRecord(targetId)) ?? started.thread;
   let waitingFor: string[] = [];
   if (turn.status === "queued") {
-    const rows = await queueRows(ctx);
+    const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+    if (snapshot) await queueDependencies(ctx, rows);
     const row = rows.find((candidate) => candidate.thread.id === targetId) ?? { thread, turns: await ctx.store.readTurns(targetId) };
     waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config).blocked : [];
     if (!turn.queue && thread.usagePause) waitingFor = ["Waiting for thread protection"];

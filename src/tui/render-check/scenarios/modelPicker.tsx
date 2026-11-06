@@ -16,7 +16,26 @@ function threadFooterModelTarget(setup: TestRendererSetup): { x: number; y: numb
   const y = rows.findIndex((line) => line.includes("Build · Claude Opus 5"));
   if (y === -1) fail("composer footer model segment not visible");
   const x = rows[y]?.indexOf("Claude Opus 5") ?? -1;
-  return { x: x === -1 ? 50 : x + 2, y };
+  if (x === -1) fail("composer footer model label not visible");
+  return { x: x + 2, y };
+}
+
+/**
+ * Wait until the frame says what the click should have done, instead of
+ * sleeping a fixed delay: a loaded renderer answers later, and a fixed wait
+ * flakes on a slow platform while hiding a real regression on a fast one.
+ */
+async function waitForFrame(setup: TestRendererSetup, label: string, predicate: (frame: string) => boolean, timeoutMs = 5000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await setup.flush();
+    });
+    const frame = setup.captureCharFrame();
+    if (predicate(frame)) return frame;
+  } while (Date.now() < deadline);
+  fail(`${label}:\n${setup.captureCharFrame()}`);
 }
 
 /**
@@ -29,24 +48,20 @@ function threadFooterModelTarget(setup: TestRendererSetup): { x: number; y: numb
  */
 export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
   // Thread view: the open thread locks the picker to its own provider, so
-  // only that provider's visible models are offered.
+  // only that provider's visible models are offered. The footer row is found
+  // by its label afresh: the row above it shifts with the layout.
   await act(async () => {
     const target = threadFooterModelTarget(setup);
     await setup.mockMouse.click(target.x, target.y);
   });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await setup.flush();
+  const threadFrame = await waitForFrame(setup, "model footer click did not open the picker", (frame) => frame.includes("Select model"));
   console.log("--- model picker (thread view) ---");
-  const threadFrame = setup.captureCharFrame();
   console.log(threadFrame);
-  if (!threadFrame.includes("Select model")) fail("model footer click did not open the picker");
   if (!threadFrame.includes("Claude Opus 5")) fail("model picker missing the current model");
   if (threadFrame.includes("Claude Old")) fail("model picker offered a hidden model");
   if (threadFrame.includes("Grok")) fail("model picker offered another provider in the locked thread view");
   await act(async () => setup.mockInput.pressEscape());
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await setup.flush();
-  if (setup.captureCharFrame().includes("Select model")) fail("model picker did not close on esc");
+  await waitForFrame(setup, "model picker did not close on esc", (frame) => !frame.includes("Select model"));
 
   // Zero-thread workspace: fresh install with projects but no threads lands
   // in the creating view — the model picker must open there too (I1), and a
@@ -75,13 +90,9 @@ export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
     { width: 140, height: 26, exitOnCtrlC: false },
   );
   try {
-    await empty.flush();
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await empty.flush();
-    const creatingFrame = empty.captureCharFrame();
+    const creatingFrame = await waitForFrame(empty, "empty workspace did not land in the creating view", (frame) => frame.includes("What should we build in"));
     console.log("--- empty workspace (creating view) ---");
     console.log(creatingFrame);
-    if (!creatingFrame.includes("What should we build in")) fail("empty workspace did not land in the creating view");
     if (creatingFrame.includes("no open thread to set the model for")) {
       fail("empty workspace shows the model error without any interaction");
     }
@@ -89,16 +100,14 @@ export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
     // The desktop layout's selectors row: mode, then the model (none yet, so "-").
     const footer = rows.findIndex((line) => line.includes("Build · -"));
     if (footer === -1) fail("empty creating-view composer footer not visible");
-    const x = (rows[footer]?.indexOf("Build · -") ?? -2) + "Build · ".length;
+    const x = (rows[footer]?.indexOf("Build · -") ?? -1) + "Build · ".length;
+    if ((rows[footer]?.indexOf("Build · -") ?? -1) === -1) fail("empty creating-view composer footer label not visible");
     await act(async () => {
-      await empty.mockMouse.click(x === -1 ? 50 : x, footer);
+      await empty.mockMouse.click(x, footer);
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await empty.flush();
+    const emptyFrame = await waitForFrame(empty, "model picker did not open with zero threads", (frame) => frame.includes("Select model"));
     console.log("--- model picker (empty workspace) ---");
-    const emptyFrame = empty.captureCharFrame();
     console.log(emptyFrame);
-    if (!emptyFrame.includes("Select model")) fail("model picker did not open with zero threads");
     if (emptyFrame.includes("no open thread to set the model for")) {
       fail("model picker errored with zero threads");
     }
@@ -110,17 +119,22 @@ export async function runModelPicker(setup: TestRendererSetup): Promise<void> {
     if (creatingFrame.includes("▀")) fail("the creating view painted a model scene with no model picked");
     const pickerRows = emptyFrame.split("\n");
     const opusRow = pickerRows.findIndex((line) => line.includes("Claude Opus 5"));
+    if (opusRow === -1) fail("model picker offered no Opus row to pick");
+    const opusX = pickerRows[opusRow]?.indexOf("Claude Opus 5") ?? -1;
+    if (opusX === -1) fail("model picker Opus row has no clickable label");
     await act(async () => {
-      await empty.mockMouse.click(pickerRows[opusRow]?.indexOf("Claude Opus 5") ?? 50, opusRow);
+      await empty.mockMouse.click(opusX, opusRow);
     });
-    // The scene blooms in over 1.4 s; wait it out before reading the field.
-    await new Promise((resolve) => setTimeout(resolve, 1700));
-    await empty.flush();
-    const sceneFrame = empty.captureCharFrame();
+    // The scene blooms in over 1.4 s; read when it has painted, whenever that is.
+    // The sidebar keeps its lattice by design; only the creating pane changes,
+    // so the wait itself watches the pane, not the whole frame.
+    const sceneFrame = await waitForFrame(empty, "picking Opus in the creating view did not take", (frame) => {
+      if (!frame.includes("Claude Opus 5") || !frame.includes("▀")) return false;
+      const pane = frame.split("\n").map((line) => line.slice(SIDEBAR_WIDTH)).join("\n");
+      return !pane.includes("·       ·       ·");
+    }, 8000);
     console.log("--- creating view with Opus picked (scene) ---");
     console.log(sceneFrame);
-    if (!sceneFrame.includes("Claude Opus 5")) fail("picking Opus in the creating view did not take");
-    if (!sceneFrame.includes("▀")) fail("the creating view did not paint the Opus scene");
     // The sidebar keeps its lattice by design; only the creating pane changes.
     const creatingPane = sceneFrame
       .split("\n")

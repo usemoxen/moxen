@@ -15,25 +15,30 @@ import { fail } from "../helpers.js";
  */
 export async function runSpanish(): Promise<void> {
   const setup = await testRender(<App client={client} onQuit={() => {}} launchView="thread" ui={{ language: "es-ES" }} />, { width: 150, height: 40, exitOnCtrlC: false });
-  const settle = async (): Promise<void> => {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await setup.flush();
+  const waitFor = async (label: string, predicate: (frame: string) => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      const frame = setup.captureCharFrame();
+      if (predicate(frame)) return frame;
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${setup.captureCharFrame()}`);
   };
   try {
-    await settle();
-    const home = setup.captureCharFrame();
+    const home = await waitFor("the Spanish home screen did not settle", (frame) => frame.includes("Hilos") && frame.includes("ajustes"));
     console.log("--- español: inicio ---");
     console.log(home);
-    for (const word of ["Hilos", "ajustes"]) if (!home.includes(word)) fail(`the Spanish home screen lacks "${word}"`);
 
     await act(async () => setup.mockInput.pressKey("c", { ctrl: true }));
-    await settle();
-    const quit = setup.captureCharFrame();
+    const quit = await waitFor("the Spanish quit confirm did not open", (frame) =>
+      frame.includes("¿Salir de moxen?") && frame.includes("Cancelar (esc)") && frame.includes("Salir (intro / ctrl+c otra vez)"));
     console.log("--- español: salir ---");
     console.log(quit);
-    for (const word of ["¿Salir de moxen?", "Cancelar (esc)", "Salir (intro / ctrl+c otra vez)"]) if (!quit.includes(word)) fail(`the Spanish quit confirm lacks "${word}"`);
     await act(async () => setup.mockInput.pressEscape());
-    await settle();
+    await waitFor("the Spanish quit confirm did not close", (frame) => !frame.includes("¿Salir de moxen?"));
 
   } finally {
     setup.renderer.destroy();

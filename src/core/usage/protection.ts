@@ -16,7 +16,8 @@ const RESUME_PROMPT = "The usage allowance has reset. Resume the unfinished task
 
 export interface UsageQueueEntry extends UsagePause { readonly threadId: string; readonly title: string }
 export interface UsageProtectionSnapshot { readonly forecasts: readonly UsageForecast[]; readonly queue: readonly UsageQueueEntry[] }
-interface Row { thread: StoredThread; turns: StoredTurn[] }
+/** Threads with work, as the usage tick and the work queue share them. */
+export interface UsageRow { thread: StoredThread; turns: StoredTurn[] }
 export const USAGE_CANDIDATE_RESCAN_MS = 60_000;
 
 /** Account-wide coordinator owned by the server, never by an open client tab.
@@ -27,7 +28,7 @@ export class UsageProtection {
   private readonly nativeWrap = new Set<string>();
   private readonly activeMs = new Map<string, number>();
   private readonly activeCounts = new Map<string, number>();
-  private readonly candidates = new Map<string, Row>();
+  private readonly candidates = new Map<string, UsageRow>();
   private readonly dirty = new Set<string>();
   private readonly contexts = new Map<string, Record<string, unknown> | null>();
   private readonly counted = new Set<string>();
@@ -58,6 +59,16 @@ export class UsageProtection {
   close(): void { this.closed = true; this.unsubscribe?.(); this.unsubscribe = null; }
 
   read(): UsageProtectionSnapshot { return { ...this.snapshot, forecasts: this.enabled ? this.snapshot.forecasts : [] }; }
+
+  /**
+   * Candidate rows for queue operations: threads with work, sharing the usage
+   * tick's event-maintained set with its 60s rescan for other-process writes.
+   * `readWorkQueue`/`runWorkQueue`/`runDueScheduledTurn` load the idle
+   * dependencies of queued conditions on top, so crash recovery is unchanged.
+   */
+  snapshotRows(ctx: OperationContext, now = Date.now()): Promise<UsageRow[]> {
+    return this.serialize(() => this.rows(ctx, now));
+  }
 
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.chain.then(fn);
@@ -128,7 +139,7 @@ export class UsageProtection {
     });
   }
 
-  private account(row: Row): void {
+  private account(row: UsageRow): void {
     const previous = new Map<string, number>();
     for (const turn of row.turns) {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
@@ -155,7 +166,7 @@ export class UsageProtection {
     }
   }
 
-  private async rows(ctx: OperationContext, now = Date.now(), dirtyOnly = false): Promise<Row[]> {
+  private async rows(ctx: OperationContext, now = Date.now(), dirtyOnly = false): Promise<UsageRow[]> {
     if (this.closed) return [];
     if (!this.unsubscribe) this.unsubscribe = ctx.store.subscribe((event) => {
       if (event.type === "backend.thread.changed") this.dirty.add(event.threadId);
@@ -219,7 +230,7 @@ export class UsageProtection {
     });
   }
 
-  private async stop(ctx: OperationContext, row: Row): Promise<void> {
+  private async stop(ctx: OperationContext, row: UsageRow): Promise<void> {
     const turn = openTurn(await ctx.store.readTurns(row.thread.id));
     if (!turn) return;
     const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
@@ -239,11 +250,11 @@ export class UsageProtection {
   }
 
   /** One thread's failure must not stop the others being held or recovered; the next tick tries it again. */
-  private async stopBackgroundOrRetry(ctx: OperationContext, row: Row, pause: UsagePause): Promise<void> {
+  private async stopBackgroundOrRetry(ctx: OperationContext, row: UsageRow, pause: UsagePause): Promise<void> {
     await this.stopBackground(ctx, row, pause).catch(() => undefined);
   }
 
-  private async stopBackground(ctx: OperationContext, row: Row, pause: UsagePause): Promise<void> {
+  private async stopBackground(ctx: OperationContext, row: UsageRow, pause: UsagePause): Promise<void> {
     const turn = openTurn(await ctx.store.readTurns(row.thread.id));
     const driver = ctx.driverFor((turn?.modelSelection ?? row.thread.modelSelection).instanceId);
     const tasks = [...(driver.backgroundTasks?.(row.thread.id) ?? [])];
@@ -296,7 +307,7 @@ export class UsageProtection {
     await this.pause(ctx, threadId, { ...pause, recoveryTurnId: recovery.turn.id });
   }
 
-  private async begin(ctx: OperationContext, rows: Row[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
+  private async begin(ctx: OperationContext, rows: UsageRow[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
     const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
       || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
@@ -335,7 +346,7 @@ export class UsageProtection {
     }
   }
 
-  private async refresh(ctx: OperationContext, now: number, rows: Row[]): Promise<void> {
+  private async refresh(ctx: OperationContext, now: number, rows: UsageRow[]): Promise<void> {
     this.enabled = ctx.config.usageProtection === "notify" || ctx.config.usageProtection === "auto";
     if (this.enabled || rows.some(({ thread }) => thread.usagePause)) {
       for (const { thread, turns } of rows) {
@@ -349,7 +360,7 @@ export class UsageProtection {
   }
 
   /** Re-project changed work without reading ledgers or advancing the clock twice. */
-  private forecast(ctx: OperationContext, now: number, rows: Row[]): void {
+  private forecast(ctx: OperationContext, now: number, rows: UsageRow[]): void {
     const elapsed = this.lastAt === null ? 0 : Math.max(0, Math.min(now - this.lastAt, 10_000));
     this.lastAt = now;
     const forecasts: UsageForecast[] = [];

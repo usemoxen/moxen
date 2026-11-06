@@ -46,6 +46,27 @@ describe("conditional work queue", () => {
     expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
   });
 
+  it("starts a due scheduled turn from a candidate snapshot without rereading idle history", async () => {
+    const w = await world();
+    const idle: string[] = [];
+    for (let index = 0; index < 20; index++) {
+      const thread = await w.make();
+      const finished = await sendTurn(w.store, thread.id, { prompt: `idle ${index}` });
+      await completeTurn(w.store, thread.id, finished.turn.id, { text: "done" });
+      idle.push(thread.id);
+    }
+    const due = await w.make();
+    await sendTurn(w.store, due.id, { prompt: "due work", queue: parseQueuePolicy({ conditions: [] }) });
+    const rows = [{ thread: due, turns: await w.store.readTurns(due.id) }];
+    const turns = vi.spyOn(w.store, "readTurns");
+    const lists = vi.spyOn(w.store, "listThreadIds");
+    expect(await runDueScheduledTurn(w.ctx, due.id, Date.now(), rows)).toBe(true);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([due.id]);
+    expect(lists).not.toHaveBeenCalled();
+    expect(turns.mock.calls.every(([id]) => id === due.id)).toBe(true);
+  });
+
   it("does not promote or batch conditional work when an ordinary turn settles", async () => {
     const w = await world(); const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });

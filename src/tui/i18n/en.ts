@@ -169,6 +169,7 @@ export const en = {
   "protection.first": "Move first",
   "protection.last": "Move last",
   "protection.cancel": "Cancel recovery",
+  "protection.actionFailed": "Could not update the recovery queue: {message}",
   "skills.title": "Your skills",
   "skills.description": "Manage skills for your user account or a project. Changes apply to new provider sessions.",
   "skills.global": "Global (user)",

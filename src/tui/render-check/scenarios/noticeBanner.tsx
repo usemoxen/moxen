@@ -4,7 +4,8 @@ import { testRender } from "../testrender.js";
 import { NoticeBanner, type Notice } from "../../ui/noticebanner.js";
 import { COLOR } from "../../theme.js";
 import { fail } from "../helpers.js";
-import { usageProtectionNotices } from "../../model/usageprotection.js";
+import { protectionActionError, usageProtectionNotices } from "../../model/usageprotection.js";
+import { CliError } from "../../../core/errors.js";
 
 /**
  * Two notices over the composer share one slot: the first shows with a
@@ -116,4 +117,21 @@ export async function runNoticeBanner(): Promise<void> {
   console.log(running);
   if (!running.includes("Finish keyboard navigation · resumed")) fail("a running recovery turn is not called resumed");
   if (running.includes("Resets in") || running.includes("messages wait") || running.includes("Cancel recovery") || running.includes("Move first")) fail("a running recovery turn still shows its countdown or recovery controls");
+  // A rejected queue action speaks through the catalog, never as a raw `CliError` string.
+  const failed: Notice[] = [{
+    key: "usage-error", glyph: "!", glyphColor: COLOR.danger,
+    title: protectionActionError(new CliError("USAGE_QUEUE_MISSING", "The thread is not waiting for usage.")),
+    detail: null, actions: [],
+  }];
+  function Failed() {
+    const [index, setIndex] = useState(0);
+    return <NoticeBanner notices={failed} index={index} onPage={setIndex} width={80} />;
+  }
+  const rejected = await testRender(<Failed />, { width: 80, height: 4, exitOnCtrlC: false });
+  await rejected.flush();
+  console.log("--- usage protection: rejected queue action ---");
+  const denied = rejected.captureCharFrame();
+  console.log(denied);
+  if (!denied.includes("Could not update the recovery queue")) fail("a rejected queue action lost its catalog sentence");
+  if (denied.includes("CliError")) fail("a rejected queue action shows a raw CliError string");
 }

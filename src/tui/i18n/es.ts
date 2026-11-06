@@ -163,6 +163,7 @@ export const es: Catalog = {
   "protection.first": "Mover al inicio",
   "protection.last": "Mover al final",
   "protection.cancel": "Cancelar recuperación",
+  "protection.actionFailed": "No se pudo actualizar la cola: {message}",
   "skills.title": "Tus habilidades",
   "skills.description": "Gestiona habilidades para tu cuenta de usuario o un proyecto. Los cambios se aplican a sesiones nuevas del proveedor.",
   "skills.global": "Global (usuario)",

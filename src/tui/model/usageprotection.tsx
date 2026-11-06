@@ -3,8 +3,19 @@ import type { Notice } from "../ui/noticebanner.js";
 import { COLOR } from "../theme.js";
 import { t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
+import { CliError, dispatchErrorMessage } from "../../core/errors.js";
 import { driverKindOfInstance, type ThreadEnvelope } from "../../core/types.js";
 import { formatDuration } from "./turns.js";
+
+/**
+ * A rejected recovery-queue action in the banner's words, never the raw
+ * `CliError` string: the code's own message through the catalog, so Spanish
+ * sees the same sentence shape as every other notice.
+ */
+export function protectionActionError(cause: unknown): string {
+  const message = cause instanceof CliError ? cause.message : dispatchErrorMessage(cause);
+  return t("protection.actionFailed", { message });
+}
 
 type UsageQueueEntry = QueryResults["usage.protection"]["queue"][number];
 export type UsageQueueAction = "first" | "last" | "cancel";
