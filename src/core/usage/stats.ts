@@ -7,7 +7,9 @@
  * graceful degradation, never invention. See docs/threads.md.
  */
 import type { StoredMessage, StoredThread, StoredTurn, TurnUsage } from "../threads/types.js";
+import { driverKindOfInstance } from "../types.js";
 import { type UsageTotals, emptyUsageTotals, summarizeUsage } from "./usage.js";
+import { usageCost, type ModelPrice, type ModelPriceKind } from "./prices.js";
 
 export type StatsRange = "7d" | "30d" | "all";
 
@@ -75,6 +77,13 @@ export interface StatsOptions {
    * recorded their own spend read the same way, from their final value.
    */
   readonly runningTotals?: ReadonlySet<string>;
+  /**
+   * What a model costs on a provider kind, or null when it has no price.
+   * A turn that recorded a provider cost keeps it; one that recorded none is
+   * priced with this at the current values. Absent, only reported costs
+   * count, as before.
+   */
+  readonly priceFor?: (kind: ModelPriceKind | null, model: string) => ModelPrice | null;
 }
 
 export const UNKNOWN_MODEL = "unknown";
@@ -138,12 +147,26 @@ function ran(turn: StoredTurn): boolean {
   return turn.status !== "queued";
 }
 
-/** What providers reported for these turns: the sum, null when none reported, and how many did not. */
-function costOf(turns: ReadonlyArray<StoredTurn>): { costUsd: number | null; unpricedTurns: number } {
+/** What one turn cost: what it reported, else the current price for its kind and model, else unpriced. */
+function turnCost(
+  turn: StoredTurn,
+  instanceId: string,
+  model: string,
+  priceFor: StatsOptions["priceFor"],
+): number | null {
+  const usage = turn.usage;
+  if (!usage) return null;
+  if (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd)) return usage.costUsd;
+  const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model), usage);
+  return estimated?.usd ?? null;
+}
+
+/** What providers reported for these turns: the sum, null when none did, and how many did not. */
+function costOf(turns: ReadonlyArray<StoredTurn>, costs: ReadonlyMap<StoredTurn, number | null>): { costUsd: number | null; unpricedTurns: number } {
   let costUsd: number | null = null;
   let unpricedTurns = 0;
   for (const turn of turns) {
-    const cost = turn.usage?.costUsd;
+    const cost = costs.get(turn);
     if (typeof cost === "number" && Number.isFinite(cost)) costUsd = (costUsd ?? 0) + cost;
     else unpricedTurns += 1;
   }
@@ -155,7 +178,7 @@ interface Accumulator {
   sessions: Set<string>;
 }
 
-function bucketsFrom(groups: Map<string, Accumulator>, all: number): StatsBucket[] {
+function bucketsFrom(groups: Map<string, Accumulator>, all: number, costs: ReadonlyMap<StoredTurn, number | null>): StatsBucket[] {
   const buckets: StatsBucket[] = [];
   for (const [key, group] of groups) {
     const usage = summarizeUsage(group.turns);
@@ -166,7 +189,7 @@ function bucketsFrom(groups: Map<string, Accumulator>, all: number): StatsBucket
       tokens,
       share: all > 0 ? tokens / all : 0,
       sessions: group.sessions.size,
-      ...costOf(group.turns),
+      ...costOf(group.turns, costs),
     });
   }
   return buckets.sort((a, b) => b.tokens - a.tokens || a.key.localeCompare(b.key));
@@ -212,6 +235,7 @@ export function computeUsageStats(
   const hours = new Array<number>(24).fill(0);
   const sessions = new Set<string>();
   const counted: StoredTurn[] = [];
+  const costs = new Map<StoredTurn, number | null>();
   let messages = 0;
 
   for (const { thread, turns: storedTurns, messages: threadMessages } of inputs) {
@@ -229,6 +253,7 @@ export function computeUsageStats(
       const model = turn.modelSelection?.model ?? UNKNOWN_MODEL;
       sessions.add(thread.id);
       counted.push(turn);
+      costs.set(turn, turnCost(turn, provider, model, options.priceFor));
       add(providers, provider, turn, thread.id);
       add(models, model, turn, thread.id);
       hours[time.getHours()] = (hours[time.getHours()] ?? 0) + 1;
@@ -248,7 +273,7 @@ export function computeUsageStats(
 
   const totals = summarizeUsage(counted);
   const all = totalTokens(totals);
-  const byModel = bucketsFrom(models, all);
+  const byModel = bucketsFrom(models, all, costs);
   const days = [...dailyTurns.keys()].sort();
   const peak = Math.max(...hours);
 
@@ -259,12 +284,12 @@ export function computeUsageStats(
     turns: counted.length,
     totals,
     totalTokens: all,
-    ...costOf(counted),
+    ...costOf(counted, costs),
     activeDays: days.length,
     bestStreak: bestStreak(days),
     peakHour: peak > 0 ? hours.indexOf(peak) : null,
     favoriteModel: byModel.find((bucket) => bucket.tokens > 0)?.key ?? null,
-    byProvider: bucketsFrom(providers, all),
+    byProvider: bucketsFrom(providers, all, costs),
     byModel,
     daily: days.map((day) => ({
       day,

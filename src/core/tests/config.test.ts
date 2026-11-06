@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG, defaultConfigPath, migrateLegacyConfig, normalizeConfig, setConfigValue } from "../config.js";
+import { readSetting } from "../configschema.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
   const config = normalizeConfig({ providers: { [kind]: { memory: false } } });
@@ -91,6 +92,17 @@ describe("config", () => {
     expect(set.providers?.opencode?.autoHandoffModels).toEqual({ "a/b.c": 64_000, d: 1_000_000 });
     expect(setConfigValue(set, "providers.opencode.autoHandoffModels", "").providers?.opencode).toBeUndefined();
     expect(() => normalizeConfig({ providers: { claude: { autoHandoffModels: { x: 100 } } } })).toThrow(/token count/);
+  });
+
+  it("keeps per-model prices, sets them from text, and refuses a negative one", () => {
+    const config = normalizeConfig({ providers: { opencode: { modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": "10" } } } });
+    expect(config.providers?.opencode).toEqual({ modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": 10 } });
+    const set = setConfigValue(config, "providers.codex.modelInputPrices", "gpt-6.1-sol=2, other=0");
+    expect(set.providers?.codex?.modelInputPrices).toEqual({ "gpt-6.1-sol": 2, other: 0 });
+    expect(readSetting(set, "providers.codex.modelInputPrices")).toBe("gpt-6.1-sol=2, other=0");
+    expect(setConfigValue(set, "providers.codex.modelInputPrices", "").providers?.codex).toBeUndefined();
+    expect(() => setConfigValue(config, "providers.codex.modelInputPrices", "gpt-6.1-sol=-1")).toThrow(/zero or more/);
+    expect(() => normalizeConfig({ providers: { codex: { modelOutputPrices: { "gpt-6.1-sol": "many" } } } })).toThrow(/zero or more/);
   });
 });
 

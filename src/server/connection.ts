@@ -1885,9 +1885,9 @@ export class DirectConnection implements ClientApi {
       case "handoff.pending":
         return { requestId: await pendingHandoff(await this.context(), query.threadId) };
       case "usage.stats":
-        return await readUsageStats(await this.store(), query.range ?? "all");
+        return await readUsageStats(await this.store(), query.range ?? "all", new Date(), ctx.config);
       case "usage.card":
-        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette);
+        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette, ctx.config);
       case "remote.devices":
         return {
           devices: this.remoteAccess

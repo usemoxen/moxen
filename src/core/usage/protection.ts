@@ -2,12 +2,14 @@ import * as Effect from "effect/Effect";
 import { CliError } from "../errors.js";
 import { readStatus } from "../git/history.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
+import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
-import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
+import { UsageForecaster, type UsageForecast } from "./forecast.js";
+import { modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
 export const WRAP_UP_PROMPT = wrapUpPrompt("The provider's shared usage allowance is nearly exhausted.", "You will resume in this same conversation automatically.");
@@ -128,7 +130,7 @@ export class UsageProtection {
     });
   }
 
-  private account(row: Row): void {
+  private account(ctx: OperationContext, row: Row): void {
     const previous = new Map<string, number>();
     for (const turn of row.turns) {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
@@ -145,7 +147,7 @@ export class UsageProtection {
         previous.set(provider, reported);
       } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
         // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
-        cost = usageCost(selection.model, turn.usage, fast)?.usd ?? 0;
+        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), turn.usage, fast)?.usd ?? 0;
       }
       if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
       if (this.counted.has(key)) continue;
@@ -190,7 +192,7 @@ export class UsageProtection {
           thread = (await ctx.store.readThreadRecord(id))!;
         }
         const row = { thread, turns: await ctx.store.readTurns(id) };
-        if (!thread.archivedAt) this.account(row);
+        if (!thread.archivedAt) this.account(ctx, row);
         if (row.turns.some((turn) => turn.status === "running" || turn.status === "queued")
           || thread.usagePause || thread.usageProtectionOverride || this.nativeWrap.has(id)) {
           this.candidates.set(id, row);
@@ -389,7 +391,7 @@ export class UsageProtection {
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
-          if (live) inFlight = usageCost(selection.model, live, fast)?.usd ?? 0;
+          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), live, fast)?.usd ?? 0;
         }
         const key = `${thread.id}:${turn.id}`;
         inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);
@@ -399,7 +401,7 @@ export class UsageProtection {
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
         // One wrap-up request per open thread: its context input plus a short
         // output, not the cumulative spend of its previous turns.
-        const estimate = used === null ? null : usageCost(selection.model, { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
+        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
       }

@@ -16,7 +16,8 @@ import { driverKindOfInstance } from "../../types.js";
 import { CliError } from "../../errors.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../limits.js";
 import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../protection.js";
-import { UsageForecaster, usageCost } from "../forecast.js";
+import { UsageForecaster } from "../forecast.js";
+import { modelPriceFor, usageCost } from "../prices.js";
 import { buildHandoff } from "../../threads/handoff.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -512,7 +513,7 @@ describe("usage protection", () => {
     const usage = { input: 10_000, cacheRead: 90_000, cacheCreate: 0, output: 0, thinking: 0 };
     w.guard.observe({ type: "token-usage.updated", threadId: id, provider: "codex", usage });
     await w.guard.tick();
-    const priced = usageCost("gpt-6.1-sol", usage)!.usd;
+    const priced = usageCost(modelPriceFor(w.ctx.config, "codex", "gpt-6.1-sol"), usage)!.usd;
     expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBeCloseTo(priced, 9);
     await completeTurn(w.store, id, turn.id, { text: "done", usage });
     w.guard.observe({ type: "turn.completed", threadId: id, provider: "codex", turnId: turn.id });
@@ -944,8 +945,33 @@ describe("usage forecasts", () => {
 
   it("prefers reported cost, charges cached input once, and never adds reasoning twice", () => {
     const usage = { input: 1e6, cacheRead: 1e6, cacheCreate: 1e6, output: 1e6, thinking: 1e6 };
-    expect(usageCost("gpt-6.1-sol", usage)).toEqual({ usd: 14.6, source: "estimated" });
-    expect(usageCost("unknown", { ...usage, costUsd: 0 })).toEqual({ usd: 0, source: "reported" });
-    expect(usageCost("unknown", usage)).toBeNull();
+    const shipped = modelPriceFor({}, "codex", "gpt-6.1-sol");
+    expect(usageCost(shipped, usage)).toEqual({ usd: 14.6, source: "estimated" });
+    expect(usageCost(null, { ...usage, costUsd: 0 })).toEqual({ usd: 0, source: "reported" });
+    expect(usageCost(null, usage)).toBeNull();
+  });
+
+  it("prices live and settled work at the user's rows over the shipped list", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    w.ctx.config.providers = { codex: { modelInputPrices: { "gpt-6.1-sol": 7 }, modelOutputPrices: { "gpt-6.1-sol": 1 }, modelCacheReadPrices: { "gpt-6.1-sol": 0 }, modelCacheWritePrices: { "gpt-6.1-sol": 0 } } };
+    const id = await w.make("user priced");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: null }]);
+    const forecast = vi.spyOn(UsageForecaster.prototype, "forecast");
+    try {
+      const usage = { input: 10_000, cacheRead: 90_000, cacheCreate: 0, output: 1_000, thinking: 0 };
+      w.guard.observe({ type: "token-usage.updated", threadId: id, provider: "codex", usage });
+      await w.guard.tick();
+      // 10k input at the user's 7 plus 1k output at the user's 1, cache at the user's 0.
+      expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBeCloseTo(0.071, 9);
+      await completeTurn(w.store, id, turn.id, { text: "done", usage });
+      w.guard.observe({ type: "turn.completed", threadId: id, provider: "codex", turnId: turn.id });
+      await w.guard.tick();
+      expect(forecast.mock.calls.at(-1)?.[2].costUsd).toBeCloseTo(0.071, 9);
+    } finally {
+      forecast.mockRestore();
+      w.guard.close();
+    }
   });
 });
