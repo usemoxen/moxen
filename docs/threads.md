@@ -444,8 +444,31 @@ identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
-that continues while tasks it delegated are still running takes them along:
-the handoff lists them, and their notifications go to the new thread.
+that continues hands every task it delegated to the new thread — running,
+idle, finished and cancelled alike, including tasks that themselves carried
+on (research roles stay with the run): the handoff lists them, and from then
+on steering, `task_status` and completion notifications resolve against the
+new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
+atomic write, so a notification deciding mid-transfer sees every row before
+or every row after it; a report queued and fully delivered just before the
+transfer still reaches the old thread — the task's next report, and
+`task_status` on the new parent at any time, cover it. A continued thread
+starts no new delegations (`THREAD_CONTINUED` names the live thread):
+otherwise the row would answer to a dormant thread while its continuation
+steers beside it. A
+continuation can also change the model: continuing in a new thread keeps the
+project, the checkout and the handoff, and takes an optional target
+model/provider — the palette's second continue row, or `moxen threads
+continue --provider/--model` (with `--thinking-effort`/`--speed-mode` for the
+effort; without them a model switch re-resolves effort from the settings, as
+for a new thread, while the TUI picker keeps the compatible knobs). The new
+thread keeps the source's model unless the request overrides it; a provider
+switch names its model. The command takes either a full `modelSelection` or
+`provider`/`model`, never both at once. The tasks keep
+their own provider and model either way, so the handoff works across
+providers and grants no extra access. No extra guard applies when the new
+thread runs a more restricted runtime mode: the mode governs only that
+thread's own turns, and steering a task is a message, not execution.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
@@ -583,7 +606,11 @@ One rule, most specific first, the same for `moxen handover`, `moxen threads cre
 - **Permissions:** the request, the provider tab's Permissions, then the global one.
 - **Checkout or worktree:** the request, the project's stored default, its `moxen.json`, then the global Thread environment. `auto`, which always meant the checkout, still loads and reads as `local`.
 
-A follow-up, and a delegated task, keeps its parent thread's selection unless the request overrides it, and never falls back to the settings or the installation default.
+A follow-up, a delegated task, and a thread continued in a new one keeps its
+source thread's selection unless the request overrides it, and never falls
+back to the settings or the installation default. The continuation's model
+request is how a handoff changes models; anything it does not name stays the
+source's.
 
 ## Modes: Build, Research, Orchestrate and Review
 
@@ -797,16 +824,22 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-Only the delegating thread reaches a task, and the threads that continued it: one that finished before the orchestrator continued stays listed under the older thread, and waking it from the continuation moves it there, so it reports to the conversation still working. When an orchestrator continues in a
-new thread, the tasks still running move with it and it can message them; the
-earlier thread and an unrelated thread (same project or not) cannot. Threads
-continued before this link existed can't reach what their source left behind.
-A research run's lead and roles are
-never reachable (`TASK_SEND_RESEARCH`): their messages are scoped and capped by
-the run, and a free message would be a way round both. A delegated task, a
-research lead and a research role are not offered `task_send` or `task_ask` at
-all. An empty message is refused as in `threads send`; there is no length cap,
-as there is none there.
+Only the thread that owns a task steers it: the one that delegated it, or the
+continuation that took it over. Continuing hands every delegation row to the
+new thread — running, idle, finished, cancelled, and carried-on alike — so from then on `task_send`,
+`task_ask`, `message_queue`, `task_cancel` and `task_status` resolve against
+the new parent and read as `TASK_NOT_FOUND` on the old one, stranger or not.
+Reading the task's thread itself stays project-scoped (`thread_read`), so
+the old thread can still look at what its former task did. A task keeps its
+own provider, model and modes; only the parent link moves, across providers
+and models alike, so the handoff grants the new thread no extra access. A `fork: true`
+task moves the same way: its conversation was copied at delegate time, and
+the continuation shares the checkout, so one owner stays unambiguous.
+A research run's lead and roles are never reachable (`TASK_SEND_RESEARCH`):
+their messages are scoped and capped by the run, and a free message would be
+a way round both. A delegated task, a research lead and a research role are
+not offered `task_send` or `task_ask` at all. An empty message is refused as
+in `threads send`; there is no length cap, as there is none there.
 
 ### Asking a delegated task a side question (`task_ask`)
 
@@ -819,8 +852,9 @@ so, so a limit in the answer is not read as a fault in the task. A finished
 task answers from its recorded session; a task with no session yet answers
 without its context, and the result says that too.
 
-The ownership rule is `task_send`'s, continuations included, and a research
-run's lead and roles are refused (`TASK_ASK_RESEARCH`). A provider that cannot
+The ownership rule is `task_send`'s: the thread that owns the task asks, and
+any other thread reads `TASK_NOT_FOUND`. A research run's lead and roles are
+refused (`TASK_ASK_RESEARCH`). A provider that cannot
 copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
 than an error, so the orchestrator can fall back to `thread_read`. The call
 waits at most 45 seconds, then returns a `timedOut` result; the task is

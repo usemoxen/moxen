@@ -1593,8 +1593,18 @@ export class DirectConnection implements ClientApi {
 
   /** A new thread that carries on from `threadId`, opened with a handoff of it (`continueThread`). */
   private async continueThread(command: CommandOf<"thread.continue">): Promise<CommandResult<"thread.continue">> {
-    const continued = await continueThread(await this.context(), {
+    const ctx = await this.context();
+    const source = await ctx.store.readThreadRecord(command.threadId);
+    if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${command.threadId}.`, { exitCode: 2 });
+    // A model handoff resolves like a follow-up: the old thread's model
+    // unless the request overrides it, never the settings default. Its tasks
+    // keep their own provider and model either way.
+    const modelRequested = command.modelSelection !== undefined || command.provider !== undefined
+      || command.model !== undefined || command.speedMode !== undefined || command.thinkingEffort !== undefined;
+    const modelSelection = command.modelSelection ?? followUpSelection(source.modelSelection, ctx.config, command, "") ?? source.modelSelection;
+    const continued = await continueThread(ctx, {
       threadId: command.threadId,
+      ...(modelRequested ? { modelSelection } : {}),
       ...(command.scheduledFor !== undefined ? { scheduledFor: command.scheduledFor } : {}),
     });
     return { ...continued, accepted: true };

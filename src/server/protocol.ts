@@ -348,12 +348,19 @@ export type CommandBody =
   /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
   | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
   /**
-   * Continue a thread in a new one: same project, model and modes, opened
-   * with a handoff written from the old thread's ledger. `scheduledFor`
-   * holds that first message until then (after a usage limit resets, say);
-   * without it the new thread starts at once.
+   * Continue a thread in a new one: same project and checkout, opened with a
+   * handoff written from the old thread's ledger. Without a model request the
+   * new thread keeps the old thread's model; a model request hands off to
+   * another model instead, resolved like a follow-up — the old thread's
+   * selection unless the request overrides it, never the settings or the
+   * installation default. The request is either a full `modelSelection`
+   * (what a picker sends, effort options included) or `provider`/`model`
+   * with the optional `speedMode`/`thinkingEffort` (what the CLI sends).
+   * Delegated tasks keep their own provider and model; only the parent link
+   * moves. `scheduledFor` holds that first message until then (after a usage
+   * limit resets, say); without it the new thread starts at once.
    */
-  | { readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string }
+  | ({ readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string; readonly modelSelection?: ModelSelection } & ModelRequest)
   /**
    * `/btw`: a side question answered on a copy of the thread's context,
    * with no tools, and never recorded in the thread. A command rather than
@@ -1356,13 +1363,22 @@ export function decodeCommand(value: unknown): Command {
         threadId: requireThreadId(record.threadId),
         question: requireField(record.question, type, "question"),
       };
-    case "thread.continue":
+    case "thread.continue": {
+      const selection = asModelSelection(record.modelSelection);
+      const namesModel = asString(record.provider) !== null || asString(record.model) !== null
+        || asString(record.speedMode) !== null || asString(record.thinkingEffort) !== null;
+      if (selection && namesModel) {
+        throw new CliError("INVALID_THREAD_OPTION", "thread.continue takes either modelSelection or provider/model, not both.", { exitCode: 2 });
+      }
       return {
         ...meta,
         type,
         threadId: requireThreadId(record.threadId),
         ...optionalString(record, "scheduledFor"),
+        ...(selection ? { modelSelection: selection } : {}),
+        ...decodeModelRequest(record, type),
       };
+    }
     case "forge.request.create":
       return {
         ...meta,

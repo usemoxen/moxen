@@ -629,6 +629,8 @@ export const en = {
   "app.export_thread_to_markdown_34f7": "Export thread to markdown",
   "app.no_reply_yet_f40d": "no reply yet",
   "app.continue_in_a_new_6599": "Continue in a new thread",
+  "app.continue_on_another_model_7d2e": "Continue in a new thread on another model",
+  "app.pick_the_model_first_3c8b": "pick the model first",
   "app.after_the_reset_2abf": "after the reset",
   "app.fresh_context_a387": "fresh context",
   "app.import_claude_code_memory_1bf9": "Import Claude Code memory",
