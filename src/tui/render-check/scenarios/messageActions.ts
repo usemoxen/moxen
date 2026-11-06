@@ -6,12 +6,27 @@ import { fail } from "../helpers.js";
 /** Prompt-click message actions: copy, and the revert two-step confirm
     (blocked while running, then succeeding on an idle thread). */
 export async function runMessageActions(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // Modals fade in and thread switches resync on their own time, not a
+  // fixed delay a loaded renderer overruns (mid-fade the panel composites
+  // transcript borders into its rows, garbling label matches).
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
   // Rows are found by their label, not a fixed row: the modal is centred, so
   // its rows move whenever it gains or loses one.
   // `required` rows fail the walkthrough when missing; the first pass runs
   // wherever the palette scenario left the app, so its rows are best-effort.
   const clickRow = async (label: string, required = false): Promise<void> => {
-    const rows = setup.captureCharFrame().split("\n");
+    const rows = frame().split("\n");
     const y = rows.findIndex((line) => line.includes(label));
     if (y === -1) {
       if (required) {
@@ -66,14 +81,15 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   const xash = sidebarRows.findIndex((line) => line.includes("Xash3D RT Streamline"));
   if (xash === -1) fail("the sidebar does not list t-xash");
   await act(async () => setup.mockMouse.click(10, xash));
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await setup.flush();
+  // The thread switch resyncs the transcript; wait for the new thread's
+  // header rather than a fixed delay.
+  await waitFor("sidebar did not open t-xash", () => frame().includes("╭─ Xash3D RT Streamline"));
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
   await act(async () => setup.mockMouse.click(60, 5));
-  // ModalShell fades in; look for its rows once it is up.
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
-  await setup.flush();
+  // ModalShell fades in; wait for its rows to read cleanly instead of
+  // capturing mid-fade, when the composite garbles label matches.
+  await waitFor("message actions did not open on t-xash", () => frame().includes("Revert to before this turn"));
   await clickRow("Revert to before this turn", true);
   await setup.flush();
   await clickRow("Confirm revert", true);
