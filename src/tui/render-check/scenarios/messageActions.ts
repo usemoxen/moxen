@@ -82,8 +82,9 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   if (xash === -1) fail("the sidebar does not list t-xash");
   await act(async () => setup.mockMouse.click(10, xash));
   // The thread switch resyncs the transcript; wait for the new thread's
-  // header rather than a fixed delay.
-  await waitFor("sidebar did not open t-xash", () => frame().includes("╭─ Xash3D RT Streamline"));
+  // header rather than a fixed delay. Bound generously: the resync waits on
+  // the thread poll tick, which a loaded machine can stall badly.
+  await waitFor("sidebar did not open t-xash", () => frame().includes("╭─ Xash3D RT Streamline"), 15000);
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
   await act(async () => setup.mockMouse.click(60, 5));
