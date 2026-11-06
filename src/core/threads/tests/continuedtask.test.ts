@@ -71,7 +71,7 @@ describe("a delegated task continued in a new thread", () => {
 });
 
 describe("an orchestrator continued in a new thread", () => {
-  it("takes its running tasks along: listed in the handoff, reporting to the new thread", async () => {
+  it("takes its running and idle tasks along: listed in the handoff, reporting to the new thread", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
     const running = await w.make("still running");
@@ -93,13 +93,14 @@ describe("an orchestrator continued in a new thread", () => {
 
     const continued = await continueThread(w.ctx, { threadId: parent.id });
     const rows = await w.store.readDelegations();
+    // Running, idle and limit-stopped alike: the new thread owns every delegation row now.
     expect(rows.find((row) => row.id === "r")?.parentThreadId).toBe(continued.threadId);
-    expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(parent.id);
+    expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(continued.threadId);
     expect(rows.find((row) => row.id === "l")?.parentThreadId).toBe(continued.threadId);
     const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
     expect(prompt).toContain(`"still running" (taskId ${running.id})`);
     expect(prompt).toContain(`"stopped by a limit" (taskId ${limited.id})`);
-    expect(prompt).not.toContain(done.id);
+    expect(prompt).toContain(`"already done" (taskId ${done.id})`);
     await flushTurnRunners();
 
     // A notification batched for the old parent before the move still reaches the new one.

@@ -1118,10 +1118,12 @@ threads
 
 threads
   .command("continue")
-  .description("Continue a thread in a new one: same project, model and checkout, opened with a handoff written from the old thread.")
+  .description("Continue a thread in a new one: same project and checkout, opened with a handoff written from the old thread. Without --provider/--model the new thread keeps the old thread's model.")
   .requiredOption("--thread <thread-id>", "The thread to continue.")
   .option("--at <time>", "Hold the handoff until then (e.g. just after a usage limit resets): an ISO date-time, or HH:MM.")
-  .action((options: { thread: string; at?: string }) =>
+  .option("--provider <instance-id>", "Hand off to another provider (for example opencode/openai or claudeAgent). Names --model with it when switching providers.")
+  .option("--model <slug>", "Hand off to another model on the same provider, or the model on --provider.")
+  .action((options: { thread: string; at?: string; provider?: string; model?: string }) =>
     action(async () => {
       const context = await commandContext();
       const client = await cliClient(context.config);
@@ -1129,6 +1131,8 @@ threads
         type: "thread.continue",
         threadId: options.thread,
         ...(options.at ? { scheduledFor: parseScheduledTime(options.at) } : {}),
+        ...(options.provider ? { provider: options.provider } : {}),
+        ...(options.model ? { model: options.model } : {}),
       });
       const { accepted: _accepted, ...envelope } = result;
       writeSuccess(
