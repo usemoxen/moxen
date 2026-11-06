@@ -1,7 +1,7 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
-import { fail } from "../helpers.js";
+import { fail, foldTarget } from "../helpers.js";
 
 /** The timeline diff row, the Worked fold, and the diff-turn picker. */
 export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
@@ -19,18 +19,25 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
     } while (Date.now() < deadline);
     fail(`${label}:\n${frame()}`);
   };
-  // The timeline's own "diff …" row — the `d` keybinding is gone, so this
-  // click is the way a user opens it. Still near the top here (above the
-  // fold, no jump-pill overlap yet).
-  await act(async () => setup.mockMouse.click(52, 8));
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await setup.flush();
+  // The timeline's own "diff …" row opens the diff panel — found by its
+  // label, since its row shifts with the layout. A fixed cell here missed
+  // under load and the cascade below opened message actions over the next
+  // scenario instead.
+  const diffRows = frame().split("\n");
+  const diffRow = diffRows.findIndex((line) => /[▸▾] diff /.test(line));
+  if (diffRow === -1) fail("timeline shows no diff row to expand");
+  await act(async () => setup.mockMouse.click(diffRows[diffRow]!.indexOf("diff ") + 2, diffRow));
+  const panelFrame = await waitFor("timeline diff row did not open the diff panel", () => /turns? ▾/.test(frame()));
   console.log("--- turn diff expanded (clicked timeline row) ---");
-  console.log(setup.captureCharFrame());
+  console.log(panelFrame);
 
-  // The "Worked for" fold in the chat column (top row once the prompt scrolls off).
-  await act(async () => setup.mockMouse.click(45, 1));
-  await setup.flush();
+  // The "Worked for" fold in the chat column, located fresh every time —
+  // flat tool rows reflow the pane, so fixed rows would miss.
+  {
+    const target = await foldTarget(setup, act);
+    await act(async () => setup.mockMouse.click(target.x, target.y));
+    await setup.flush();
+  }
   // Scroll up so the expanded cards (not just the tail) are visible.
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
@@ -77,16 +84,24 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   console.log("--- work expanded (scrolled) ---");
   console.log(setup.captureCharFrame());
 
-  // Second file header inside the diff panel (below the new diff-turn header
-  // row and the first file's content rows).
-  await act(async () => setup.mockMouse.click(105, 8));
+  // Second file header inside the diff panel: found by its path and counts —
+  // a transcript row can share the path, never the counts row — so no fixed
+  // cell whose miss would cascade below.
+  const fileRows = setup.captureCharFrame().split("\n");
+  const fileRow = fileRows.findIndex((line) => /[▸▾]\s+\S*timeline\.tsx.*\+\d+\s+-\d+/.test(line));
+  if (fileRow === -1) fail("diff panel shows no timeline.tsx file header");
+  await act(async () => setup.mockMouse.click(fileRows[fileRow]!.indexOf("timeline.tsx"), fileRow));
   await setup.flush();
   console.log("--- second file folded (clicked header) ---");
   console.log(setup.captureCharFrame());
 
-  // The diff panel's own header row opens the turn picker …
-  await act(async () => setup.mockMouse.click(110, 1));
-  await setup.flush();
+  // The diff panel's own header row opens the turn picker: found by its
+  // turns meta, never a fixed cell (which landed on reply headers and opened
+  // message actions instead when the layout shifted).
+  const headerRows = setup.captureCharFrame().split("\n");
+  const headerRow = headerRows.findIndex((line) => /turns? ▾/.test(line));
+  if (headerRow === -1) fail("diff panel shows no turn header");
+  await act(async () => setup.mockMouse.click(headerRows[headerRow]!.indexOf("▾"), headerRow));
   console.log("--- diff-turn picker (open) ---");
   console.log(setup.captureCharFrame());
 
@@ -101,8 +116,11 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   // … and jumps the timeline to the picked turn when its row is picked (Turn
   // 5 here — a different turn than the open Turn 7, so the panel switches too
   // and the jump must land on the settled post-open layout, at the top).
-  await act(async () => setup.mockMouse.click(110, 1));
-  await setup.flush();
+  // Re-resolve the header: the backdrop click above may have scrolled it.
+  const headerRows2 = setup.captureCharFrame().split("\n");
+  const headerRow2 = headerRows2.findIndex((line) => /turns? ▾/.test(line));
+  if (headerRow2 === -1) fail("diff panel shows no turn header");
+  await act(async () => setup.mockMouse.click(headerRows2[headerRow2]!.indexOf("▾"), headerRow2));
   // The header click must have opened the picker before touching its rows:
   // a fixed cell can land on a reply header when the layout shifts, and
   // "Turn 5" also names a transcript row whose click opens message actions
@@ -114,8 +132,9 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   const turnRow = pickerRows.findIndex((line, index) => index > titleRow && line.includes("Turn 5"));
   if (turnRow === -1) fail("diff-turn picker offered no Turn 5");
   await act(async () => setup.mockMouse.click(pickerRows[turnRow]!.indexOf("Turn 5") + 1, turnRow));
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  await setup.flush();
+  // The pick jumps the timeline once it settles: wait for the picked turn's
+  // header rather than a fixed delay a loaded renderer overruns.
+  const jumpedFrame = await waitFor("diff-turn pick did not jump the timeline", () => frame().includes("Diff turn 5"));
   console.log("--- diff-turn picked (timeline jumped) ---");
-  console.log(setup.captureCharFrame());
+  console.log(jumpedFrame);
 }
