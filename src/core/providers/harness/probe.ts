@@ -638,6 +638,12 @@ export function mergeProbed(previous: HarnessProbedConfig | undefined, report: P
   if (slots !== undefined) merged.slots = slots;
   const templateHash = report.server.templateHash ?? kept?.templateHash;
   if (templateHash !== undefined) merged.templateHash = templateHash;
+  // A newer build's extra probed fields survive a probe save, the way a
+  // plain settings.set keeps them; a changed template still starts fresh.
+  if (kept) {
+    const known = new Set(["at", "quirks", "contextWindow", "slots", "templateHash"]);
+    for (const [key, value] of Object.entries(kept)) if (!known.has(key)) (merged as unknown as Record<string, unknown>)[key] = value;
+  }
   return merged;
 }
 

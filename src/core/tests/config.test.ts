@@ -4,7 +4,8 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_CONFIG, configKeyCoversPath, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeConfigLenient, saveConfig, setConfigValue } from "../config.js";
+import { DEFAULT_CONFIG, configKeyCoversPath, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeConfigLenient, normalizeFileConfig, saveConfig, setConfigValue } from "../config.js";
+import type { CliConfig } from "../types.js";
 import { readSetting } from "../configschema.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
@@ -61,7 +62,8 @@ describe("config", () => {
     expect(normalizeConfig({ providers: { harness: web } }).providers?.harness).toEqual(web);
     expect(() => normalizeConfig({ providers: { harness: { webSearch: "bing" } } })).toThrow(/webSearch must be one of/);
     // Exa and Brave were built-in backends once; they are their MCP servers now, and a file that names one still loads, as the default.
-    expect(normalizeConfig({ providers: { harness: { webSearch: "exa", webSearchKeyEnv: "EXA_API_KEY", webSearchKeys: { exa: "keychain:x" }, searxngUrl: "http://s" } } }).providers?.harness).toEqual({ searxngUrl: "http://s" });
+    // The retired backend's leftover keys stay in the file untouched, so a save does not drop them.
+    expect(normalizeConfig({ providers: { harness: { webSearch: "exa", webSearchKeyEnv: "EXA_API_KEY", webSearchKeys: { exa: "keychain:x" }, searxngUrl: "http://s" } } }).providers?.harness).toEqual({ searxngUrl: "http://s", webSearchKeyEnv: "EXA_API_KEY", webSearchKeys: { exa: "keychain:x" } });
     expect(normalizeConfig({ providers: { harness: { webSearch: "brave" } } }).providers?.harness).toBeUndefined();
     expect(() => normalizeConfig({ providers: { harness: { webBrowser: "always" } } })).toThrow(/webBrowser/);
   });
@@ -107,15 +109,16 @@ describe("config", () => {
   it("replaces the config file when saving, so a crash cannot leave a torn config", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
     const file = path.join(dir, "nested", "config.json");
-    await saveConfig(file, normalizeConfig({}));
+    await saveConfig(file, normalizeFileConfig({}));
     const before = statSync(file).ino;
-    await saveConfig(file, normalizeConfig({ runtimeMode: "approval-required" }));
+    await saveConfig(file, normalizeFileConfig({ runtimeMode: "approval-required" }));
     // A rename, not a rewrite in place: a crash mid-write leaves either the
     // old file or the new one, never half of one.
     expect(statSync(file).ino).not.toBe(before);
     expect((await loadConfig(file)).config.runtimeMode).toBe("approval-required");
-    // The overwritten file is kept beside it, so a bad save can be undone.
-    expect(readdirSync(path.join(dir, "nested")).sort()).toEqual(["config.json", "config.json.bak"]);
+    // The rewrite before it left a backup beside the file.
+    expect(readdirSync(path.join(dir, "nested")).sort()).toEqual(["config.json", "config.json.bak.1"]);
+    expect(JSON.parse(readFileSync(path.join(dir, "nested", "config.json.bak.1"), "utf8")).runtimeMode).toBe("full-access");
   });
 
   it("loads past one bad scalar, keeping the rest and reporting where it was", async () => {
@@ -182,6 +185,181 @@ describe("config", () => {
     expect(configKeyCoversPath("mcpServers[lab]", "mcpServers.lab")).toBe(true);
     expect(configKeyCoversPath("providers.harness.profiles[broken]", "providers.harness.profiles[broken]")).toBe(true);
     expect(configKeyCoversPath("providers.harness.profiles[lab]", "providers.harness.profiles[broken]")).toBe(false);
+  });
+
+  it("refuses an unknown key on `config set`, instead of writing it", () => {
+    expect(() => setConfigValue(normalizeFileConfig({}), "futureTop", "1")).toThrow("Unknown config key: futureTop");
+    expect(() => setConfigValue(normalizeFileConfig({}), "ui.futureSection", "1")).toThrow("Unknown config key: ui.futureSection");
+  });
+});
+
+describe("config keeps unknown keys", () => {
+  const FUTURE = {
+    futureTop: 7,
+    ui: { theme: "moxen", futureSection: "keep-me" },
+    providers: {
+      claude: { binaryPath: "claude", futureField: "keep" },
+      harness: {
+        futureProviderField: "keep",
+        profiles: [
+          {
+            id: "local",
+            baseUrl: "http://localhost:8080",
+            futureProfile: "keep",
+            sampling: { topK: 20, futureSampling: 1 },
+            compaction: { tokens: 65_536, futureCompaction: 2 },
+            loopGuard: { calls: false, futureGuard: 3 },
+            quirks: { systemFirstOnly: false, futureQuirk: true },
+            models: [{ id: "qwen3:8b", contextWindow: 131_072, futureModel: "keep", probed: { at: "2026-10-14T10:00:00.000Z", quirks: {}, futureProbed: "keep" } }],
+          },
+          { id: "other", baseUrl: "http://localhost:8081", models: [{ id: "m" }] },
+        ],
+      },
+      futureProvider: { anything: "keep" },
+    },
+    mcpServers: { docs: { command: "docs-mcp", futureServer: "keep" } },
+  };
+
+  it("keeps unknown keys at every level through a known edit, in memory and through the file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-unknowns-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify(FUTURE, null, 2));
+    const loaded = await loadConfig(file);
+    const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+    expect((edited as unknown as Record<string, unknown>).futureTop).toBe(7);
+    expect((edited.ui as unknown as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect((edited.providers?.claude as unknown as Record<string, unknown>).futureField).toBe("keep");
+    expect((edited.providers?.harness as unknown as Record<string, unknown>).futureProviderField).toBe("keep");
+    expect((edited.providers as unknown as Record<string, unknown>).futureProvider).toEqual({ anything: "keep" });
+    expect((edited.mcpServers?.docs as unknown as Record<string, unknown>).futureServer).toBe("keep");
+    const local = edited.providers?.harness?.profiles?.find((entry) => entry.id === "local") as unknown as Record<string, unknown>;
+    expect(local.futureProfile).toBe("keep");
+    expect((local.sampling as Record<string, unknown>).futureSampling).toBe(1);
+    expect((local.compaction as Record<string, unknown>).futureCompaction).toBe(2);
+    expect((local.loopGuard as Record<string, unknown>).futureGuard).toBe(3);
+    expect((local.quirks as Record<string, unknown>).futureQuirk).toBe(true);
+    expect((((local.models as unknown[])[0]) as Record<string, unknown>).futureModel).toBe("keep");
+    await saveConfig(file, edited);
+    const reloaded = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(reloaded.futureTop).toBe(7);
+    expect((reloaded.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect(((reloaded.providers as Record<string, unknown>).claude as Record<string, unknown>).futureField).toBe("keep");
+    expect((((reloaded.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles as unknown[]).length).toBe(2);
+    expect((((((reloaded.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles as unknown[])[0]) as Record<string, unknown>).futureProfile).toBe("keep");
+    expect((reloaded.mcpServers as Record<string, Record<string, unknown>>).docs!.futureServer).toBe("keep");
+    expect((reloaded.ui as Record<string, unknown>).theme).toBe("dracula");
+  });
+
+  it("does not resurrect a cleared setting or a removed entry from the raw file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-clear-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify(FUTURE, null, 2));
+    const loaded = await loadConfig(file);
+    let edited = setConfigValue(loaded.fileConfig, "model", "gpt-6");
+    edited = setConfigValue(edited, "model", "");
+    edited = setConfigValue(edited, "providers.harness.profiles[other]", "");
+    await saveConfig(file, edited);
+    const reloaded = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(reloaded.model).toBeUndefined();
+    expect((reloaded.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    const profiles = ((reloaded.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles as unknown[];
+    expect(profiles.map((entry) => (entry as Record<string, unknown>).id)).toEqual(["local"]);
+  });
+
+  it("never writes an active environment override into the file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-env-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ provider: "file-provider", ui: { theme: "moxen" } }, null, 2));
+    const previous = process.env.MOXEN_PROVIDER;
+    process.env.MOXEN_PROVIDER = "env-provider";
+    try {
+      const loaded = await loadConfig(file);
+      expect(loaded.config.provider).toBe("env-provider");
+      const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+      await saveConfig(file, edited);
+      const reloaded = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      expect(reloaded.provider).toBe("file-provider");
+      expect((reloaded.ui as Record<string, unknown>).theme).toBe("dracula");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_PROVIDER;
+      else process.env.MOXEN_PROVIDER = previous;
+    }
+  });
+
+  it("reads a leaked override back as the file's own value when a save is handed the effective config", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-envleak-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ provider: "file-provider" }, null, 2));
+    const previous = process.env.MOXEN_PROVIDER;
+    process.env.MOXEN_PROVIDER = "env-provider";
+    try {
+      const loaded = await loadConfig(file);
+      // A caller that hands the effective config to the save (rather than the
+      // file's config) must not persist the override.
+      const leaked = { ...loaded.fileConfig, provider: loaded.config.provider } as unknown as CliConfig;
+      await saveConfig(file, leaked);
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).provider).toBe("file-provider");
+      // A value the user actually changed still saves as intended.
+      await saveConfig(file, { ...loaded.fileConfig, provider: "user-choice" });
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).provider).toBe("user-choice");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_PROVIDER;
+      else process.env.MOXEN_PROVIDER = previous;
+    }
+  });
+
+  it("reads a remapped override back as the file's own value, not the raw one", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-envremap-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ interactionMode: "research" }, null, 2));
+    const previous = process.env.MOXEN_INTERACTION_MODE;
+    process.env.MOXEN_INTERACTION_MODE = "plan";
+    try {
+      const loaded = await loadConfig(file);
+      // `plan` was removed: in force it reads as Build.
+      expect(loaded.config.interactionMode).toBe("default");
+      // A save handed the effective value must restore the file's own, not persist the remapping.
+      await saveConfig(file, { ...loaded.fileConfig, interactionMode: loaded.config.interactionMode });
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).interactionMode).toBe("research");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_INTERACTION_MODE;
+      else process.env.MOXEN_INTERACTION_MODE = previous;
+    }
+  });
+
+  it("skips the backup and the rewrite when a save changes nothing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-noop-"));
+    const file = path.join(dir, "config.json");
+    const first = normalizeFileConfig({ projectPolicy: "existing" });
+    await saveConfig(file, first);
+    expect(readdirSync(dir).sort()).toEqual(["config.json"]);
+    await saveConfig(file, normalizeFileConfig(JSON.parse(readFileSync(file, "utf8"))));
+    expect(readdirSync(dir).sort()).toEqual(["config.json"]);
+  });
+
+  it("keeps a keychain reference as a reference, never a secret", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-secret-"));
+    const file = path.join(dir, "config.json");
+    const raw = { providers: { harness: { profiles: [{ id: "local", baseUrl: "http://localhost:8080", apiKey: "keychain:my-key", models: [{ id: "m" }] }] } } };
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+    const loaded = await loadConfig(file);
+    const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+    await saveConfig(file, edited);
+    const reloaded = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const profile = (((reloaded.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles as Record<string, unknown>[])[0]!;
+    expect(profile.apiKey).toBe("keychain:my-key");
+  });
+
+  it("keeps only a small number of backups beside the file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-backups-"));
+    const file = path.join(dir, "config.json");
+    await saveConfig(file, normalizeFileConfig({ projectPolicy: "create" }));
+    for (let at = 0; at < 7; at += 1) {
+      await saveConfig(file, normalizeFileConfig({ projectPolicy: "create", sessionTtl: `${at + 2}m` }));
+    }
+    const names = readdirSync(dir).sort();
+    expect(names).toEqual(["config.json", "config.json.bak.1", "config.json.bak.2", "config.json.bak.3", "config.json.bak.4", "config.json.bak.5"]);
+    expect(JSON.parse(readFileSync(path.join(dir, "config.json.bak.5"), "utf8")).sessionTtl).toBe("3m");
   });
 });
 

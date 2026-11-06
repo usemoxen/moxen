@@ -46,7 +46,7 @@ import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
-import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
+import { appHomeDir, applyEnvironmentOverrides, defaultConfigPath, loadConfig, normalizeFileConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
@@ -360,7 +360,11 @@ export class DirectConnection implements ClientApi {
     // the resolved default and is never written unless it asks for one.
     const override = options.config;
     this.readConfigFile = override
-      ? async () => ({ config: await override(), path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] })
+      ? async () => {
+        const config = await override();
+        const fileConfig = normalizeFileConfig(config);
+        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] };
+      }
       : async () => await loadConfig(options.configPath);
     this.loadConfig = async () => {
       const { config } = await this.readConfigFile();
@@ -1478,14 +1482,14 @@ export class DirectConnection implements ClientApi {
           // Enabling downloads and validates a model, which takes minutes:
           // it runs outside the write queue so other clients keep writing
           // meanwhile, and the queued write below re-reads first.
-          const enabling = (await setConfigValueSecure((await this.readConfigFile()).config, command.key, command.value)).memoryEmbeddings === true;
+          const enabling = (await setConfigValueSecure((await this.readConfigFile()).fileConfig, command.key, command.value)).memoryEmbeddings === true;
           if (enabling) {
             try {
               await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true });
             } catch (error) {
               await this.withConfigWrite(async () => {
-                const { config, path, skipped } = await this.readConfigFile();
-                await saveConfig(path, await setConfigValueSecure(config, "memoryEmbeddings", "false"), skipped);
+                const { fileConfig, path, skipped } = await this.readConfigFile();
+                await saveConfig(path, await setConfigValueSecure(fileConfig, "memoryEmbeddings", "false"), skipped);
               });
               throw error;
             }
@@ -1495,9 +1499,11 @@ export class DirectConnection implements ClientApi {
           // Re-read rather than reusing a cached copy: another client may
           // have written since, and a settings page that silently reverts a
           // neighbour's edit is worse than one that is a beat behind.
-          // The queue above makes even that re-read fresh.
-          const { config, path, skipped } = await this.readConfigFile();
-          const next = await setConfigValueSecure(config, command.key, command.value);
+          // The queue above makes even that re-read fresh. Edits apply to
+          // the file's config (no environment overrides), so the
+          // environment never leaks into the saved file.
+          const { config: before, fileConfig, path, skipped } = await this.readConfigFile();
+          const next = await setConfigValueSecure(fileConfig, command.key, command.value);
           // Setting a key clears what the file held for it: a bad entry the
           // user just reset or removed is not carried back by the save.
           const kept = skipped.filter((entry) => !configKeyCoversPath(command.key, entry.path));
@@ -1516,8 +1522,8 @@ export class DirectConnection implements ClientApi {
             } catch (cause) {
               // Put back what was listening: a setting that says "on" while
               // nothing listens would be a lie the next restart repeats.
-              await saveConfig(path, config, skipped);
-              await this.remoteAccess.apply(config.remote).catch(() => undefined);
+              await saveConfig(path, fileConfig, skipped);
+              await this.remoteAccess.apply(before.remote).catch(() => undefined);
               throw cause;
             }
           }
@@ -1526,10 +1532,10 @@ export class DirectConnection implements ClientApi {
       }
       case "settings.duplicate": {
         return await this.withConfigWrite(async () => {
-          const { config, path, skipped } = await this.readConfigFile();
+          const { fileConfig, path, skipped } = await this.readConfigFile();
           const entry = listTarget(`${command.key}[${command.id}]`);
           if (!entry) throw new CliError("INVALID_CONFIG_KEY", `${command.key} is not a list setting.`);
-          await saveConfig(path, normalizeConfig(duplicateListItem(config, entry, command.newId, command.key)), skipped);
+          await saveConfig(path, normalizeFileConfig(duplicateListItem(fileConfig, entry, command.newId, command.key)), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
       }
@@ -1540,8 +1546,8 @@ export class DirectConnection implements ClientApi {
       case "harness.profile.import": {
         const parsed = parseProfileDocument(command.text);
         return await this.withConfigWrite(async () => {
-          const { config, path, skipped } = await this.readConfigFile();
-          const existing = config.providers?.harness?.profiles ?? [];
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const existing = fileConfig.providers?.harness?.profiles ?? [];
           const wanted = (command.id ?? parsed.id).toLowerCase();
           const taken = new Set(existing.map((entry) => entry.id));
           const mode = command.onConflict ?? "error";
@@ -1551,7 +1557,7 @@ export class DirectConnection implements ClientApi {
           const id = taken.has(wanted) && mode === "rename" ? freeProfileId(wanted, taken) : wanted;
           const next = { ...parsed, id };
           const profiles = taken.has(id) ? existing.map((entry) => (entry.id === id ? next : entry)) : [...existing, next];
-          await saveConfig(path, normalizeConfig({ ...config, providers: { ...config.providers, harness: { ...config.providers?.harness, profiles } } }), skipped);
+          await saveConfig(path, normalizeFileConfig({ ...fileConfig, providers: { ...fileConfig.providers, harness: { ...fileConfig.providers?.harness, profiles } } }), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true, id, fileId: parsed.id };
         });
       }
@@ -1572,12 +1578,12 @@ export class DirectConnection implements ClientApi {
             // Re-read: the file may have changed during the minutes the probe took.
             await this.withConfigWrite(async () => {
               const fresh = await this.readConfigFile();
-              const profiles = (fresh.config.providers?.harness?.profiles ?? []).map((entry) =>
+              const profiles = (fresh.fileConfig.providers?.harness?.profiles ?? []).map((entry) =>
                 entry.id !== profile.id
                   ? entry
                   : { ...entry, models: entry.models.map((m) => (m.id === model.id ? { ...m, probed: mergeProbed(m.probed, report) } : m)) },
               );
-              await saveConfig(fresh.path, normalizeConfig({ ...fresh.config, providers: { ...fresh.config.providers, harness: { ...fresh.config.providers?.harness, profiles } } }), fresh.skipped);
+              await saveConfig(fresh.path, normalizeFileConfig({ ...fresh.fileConfig, providers: { ...fresh.fileConfig.providers, harness: { ...fresh.fileConfig.providers?.harness, profiles } } }), fresh.skipped);
             });
           }
           return { ...report, saved: save };

@@ -184,7 +184,15 @@ function guarded(skipped: SkippedConfigEntry[] | undefined, path: string, value:
   }
 }
 
-export function normalizeConfig(raw: unknown, skipped?: SkippedConfigEntry[]): CliConfig {
+/**
+ * The config as it lives in the file: validated, retired to the shape an
+ * older build reads the same way, with unknown keys kept verbatim at every
+ * level (a newer build's keys survive a save here). No environment
+ * overrides: those apply in memory only and must never leak into the file.
+ * With a collector, a lenient load: bad entries are recorded and skipped
+ * instead of refusing the whole file.
+ */
+export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]): CliConfig {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new CliError("INVALID_CONFIG", "The config file must contain a JSON object.");
   }
@@ -366,13 +374,34 @@ export function normalizeConfig(raw: unknown, skipped?: SkippedConfigEntry[]): C
     const providers = normalizeProviders(input.providers, skipped);
     if (providers) result.providers = providers;
   });
-  return applyEnvironmentOverrides(retireServerProviders(result));
+  const knownTop = new Set([
+    "projectPolicy", "workspaceMode", "openMode", "threadEnvMode", "runtimeMode", "interactionMode",
+    "provider", "model", "promptImprover", "speedMode", "thinkingEffort", "sessionTtl", "backgroundForgottenAfter",
+    "instructions", "memory", "memoryEmbeddings", "memoryEmbeddingLoading",
+    "usageProtection", "usageRecovery", "usageContinuation", "usageColdResume",
+    "usageMinimumSession", "usageMinimumWeekly", "usageColdResumeAfter", "usageColdResumeTokens",
+    "autoContinueAtUsageLimit", "usageLimitContinues", "branchPruneDays", "installSkills",
+    "mcpRunner", "mcpServers", "skills", "web", "longThreads", "ui", "git", "forge", "updates", "remote", "providers",
+  ]);
+  for (const [key, value] of Object.entries(input)) {
+    if (!knownTop.has(key)) (result as unknown as Record<string, unknown>)[key] = value;
+  }
+  return retireServerProviders(result);
 }
 
-/** A lenient load: the config with every bad entry skipped, and the skipped entries with their locations. */
+/**
+ * The config in force: the file's config with `MOXEN_*` overrides applied.
+ * Reads use this; writes use `normalizeFileConfig` so the environment never
+ * leaks into the file.
+ */
+export function normalizeConfig(raw: unknown): CliConfig {
+  return applyEnvironmentOverrides(normalizeFileConfig(raw));
+}
+
+/** A lenient load: the file's config with every bad entry skipped, and the skipped entries with their locations. */
 export function normalizeConfigLenient(raw: unknown): { config: CliConfig; skipped: SkippedConfigEntry[] } {
   const skipped: SkippedConfigEntry[] = [];
-  return { config: normalizeConfig(raw, skipped), skipped };
+  return { config: applyEnvironmentOverrides(normalizeFileConfig(raw, skipped)), skipped };
 }
 
 /**
@@ -448,8 +477,8 @@ function asSection(value: unknown, label: string): Record<string, unknown> {
  * Validate one nested section against the schema, field by field. Values
  * arrive either already typed (from the file) or as text (`config set`
  * hands everything over as a string), so each goes through the
- * descriptor's own parser. Unknown fields are dropped rather than
- * rejected: a config written by a newer build must stay loadable.
+ * descriptor's own parser. Unknown fields are kept verbatim: a config
+ * written by a newer build stays loadable, and a save does not drop it.
  */
 /** Exa and Brave were once built-in search backends; they are now their MCP servers. A file that names one reads as the default backend (DuckDuckGo), not as an error. */
 function withoutRetiredSearch(section: unknown): unknown {
@@ -482,6 +511,7 @@ function normalizeSection<T>(raw: unknown, prefix: string, fields: readonly stri
       skipped.push({ path: `${prefix}.${field}`, message: error.message, value });
     }
   }
+  for (const [key, value] of Object.entries(input)) if (!(key in out) && !fields.includes(key)) out[key] = value;
   return Object.keys(out).length > 0 ? (out as T) : undefined;
 }
 
@@ -621,6 +651,9 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
     const models = handoffModelsOf(input.claude, "providers.claude", skipped);
     const prices = modelPricesOf(input.claude, "providers.claude", skipped);
+    // `launchArgs` is validated above (an invalid shape is dropped, as before),
+    // not carried as an unknown field.
+    if (claude) delete (claude as unknown as Record<string, unknown>).launchArgs;
     if (claude || args || models || prices) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models, ...prices };
   });
   if (input.codex !== undefined) guarded(skipped, "providers.codex", input.codex, () => {
@@ -636,20 +669,24 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     if (opencode || models || prices) result.opencode = { ...opencode, ...models, ...prices };
   });
   if (input.harness !== undefined) guarded(skipped, "providers.harness", input.harness, () => {
-    if (skipped === undefined) {
-      const withProfiles = normalizeHarnessConfig(input.harness);
-      const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
-      const models = handoffModelsOf(input.harness, "providers.harness");
-      const prices = modelPricesOf(input.harness, "providers.harness");
-      if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
-    } else {
-      const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"], skipped);
-      const models = handoffModelsOf(input.harness, "providers.harness", skipped);
-      const prices = modelPricesOf(input.harness, "providers.harness", skipped);
-      const withProfiles = lenientHarnessProfiles(input.harness, skipped);
-      if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
+    const withProfiles = skipped === undefined ? normalizeHarnessConfig(input.harness) : lenientHarnessProfiles(input.harness, skipped);
+    let defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"], skipped);
+    // `profiles` is the list itself (above), not a default: without this an
+    // emptied list would linger as `profiles: []` instead of going away.
+    if (defaults) {
+      delete (defaults as unknown as Record<string, unknown>).profiles;
+      if (Object.keys(defaults).length === 0) defaults = undefined;
     }
+    const models = handoffModelsOf(input.harness, "providers.harness", skipped);
+    const prices = modelPricesOf(input.harness, "providers.harness", skipped);
+    if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
   });
+  // A newer build's extra providers stay in the file untouched.
+  for (const [kind, value] of Object.entries(input)) {
+    if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness") {
+      (result as Record<string, unknown>)[kind] = value;
+    }
+  }
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -683,29 +720,56 @@ function envOverride(name: string): string | undefined {
   return appEnv(name);
 }
 
-function applyEnvironmentOverrides(config: CliConfig): CliConfig {
-  const next = { ...config };
-  const projectPolicy = envOverride("PROJECT_POLICY");
-  if (projectPolicy) next.projectPolicy = projectPolicy as ProjectPolicy;
-  const workspaceMode = envOverride("WORKSPACE_MODE");
-  if (workspaceMode) next.workspaceMode = workspaceMode as WorkspaceMode;
-  const openMode = envOverride("OPEN_MODE");
-  if (openMode) next.openMode = openMode as OpenMode;
-  const threadEnvMode = envOverride("THREAD_ENV_MODE");
-  if (threadEnvMode) next.threadEnvMode = (threadEnvMode === "auto" ? "local" : threadEnvMode) as ThreadEnvMode;
-  const runtimeMode = envOverride("RUNTIME_MODE");
-  if (runtimeMode) next.runtimeMode = runtimeMode as RuntimeMode;
-  const interactionMode = envOverride("INTERACTION_MODE");
-  if (interactionMode) next.interactionMode = (REMOVED_INTERACTION_MODES.has(interactionMode) ? "default" : interactionMode) as InteractionMode;
-  const provider = envOverride("PROVIDER");
-  if (provider) next.provider = provider;
-  const model = envOverride("MODEL");
-  if (model) next.model = model;
-  const speedMode = envOverride("SPEED_MODE");
-  if (speedMode) next.speedMode = speedMode as SpeedMode;
-  const thinkingEffort = envOverride("THINKING_EFFORT");
-  if (thinkingEffort) next.thinkingEffort = thinkingEffort;
-  return normalizeConfigValues(next);
+/** Suffixes `MOXEN_*` may override (read via `appEnv`, which adds the prefix), so a save must never persist them from memory. */
+const ENV_OVERRIDDEN_KEYS = [
+  "PROJECT_POLICY",
+  "WORKSPACE_MODE",
+  "OPEN_MODE",
+  "THREAD_ENV_MODE",
+  "RUNTIME_MODE",
+  "INTERACTION_MODE",
+  "PROVIDER",
+  "MODEL",
+  "SPEED_MODE",
+  "THINKING_EFFORT",
+] as const;
+
+const ENV_TO_KEY = {
+  PROJECT_POLICY: "projectPolicy",
+  WORKSPACE_MODE: "workspaceMode",
+  OPEN_MODE: "openMode",
+  THREAD_ENV_MODE: "threadEnvMode",
+  RUNTIME_MODE: "runtimeMode",
+  INTERACTION_MODE: "interactionMode",
+  PROVIDER: "provider",
+  MODEL: "model",
+  SPEED_MODE: "speedMode",
+  THINKING_EFFORT: "thinkingEffort",
+} as const;
+
+/**
+ * One override's value in force: the raw `MOXEN_*` value with the same
+ * remappings a load applies (`THREAD_ENV_MODE=auto` reads as the project
+ * checkout, a removed `INTERACTION_MODE` as Build). Both
+ * `applyEnvironmentOverrides` and the save's safety net read through here,
+ * so a future remapping cannot reach the file by drifting from the load.
+ */
+function effectiveEnvOverride(suffix: (typeof ENV_OVERRIDDEN_KEYS)[number]): string | undefined {
+  const raw = envOverride(suffix);
+  if (!raw) return undefined;
+  if (suffix === "THREAD_ENV_MODE" && raw === "auto") return "local";
+  if (suffix === "INTERACTION_MODE" && REMOVED_INTERACTION_MODES.has(raw)) return "default";
+  return raw;
+}
+
+export function applyEnvironmentOverrides(config: CliConfig): CliConfig {
+  const next = { ...config } as unknown as Record<string, unknown>;
+  for (const suffix of ENV_OVERRIDDEN_KEYS) {
+    const value = effectiveEnvOverride(suffix);
+    if (value === undefined) continue;
+    next[ENV_TO_KEY[suffix]] = value;
+  }
+  return normalizeConfigValues(next as unknown as CliConfig);
 }
 
 function normalizeConfigValues(config: CliConfig): CliConfig {
@@ -722,12 +786,16 @@ function normalizeConfigValues(config: CliConfig): CliConfig {
   return withoutEnvironment;
 }
 
-/** What a config load saw: the settings in force, and the entries it skipped to get there. */
 export interface LoadedConfig {
+  /** The config in force, with `MOXEN_*` overrides applied. */
   readonly config: CliConfig;
+  /** The config as it lives in the file, without environment overrides. */
+  readonly fileConfig: CliConfig;
+  /** The file's parsed JSON, or undefined when the file does not exist. Carried so a save can keep unknown keys. */
+  readonly raw: unknown;
   readonly path: string;
   readonly exists: boolean;
-  /** Entries that failed to parse: skipped, with raw values for the next save. */
+  /** Entries that failed to parse: skipped, with raw values carried through the next save. */
   readonly skipped: SkippedConfigEntry[];
   /** Where the skipped entries are, for reports; never their values. */
   readonly problems: ConfigProblem[];
@@ -737,49 +805,111 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const configPath = path.resolve(expandHome(explicitPath ?? defaultConfigPath()));
   try {
     const raw = JSON.parse(await readFile(configPath, "utf8")) as unknown;
-    const { config, skipped } = normalizeConfigLenient(raw);
-    return {
-      config,
-      path: configPath,
-      exists: true,
-      skipped,
-      problems: skipped.map((entry) => ({ path: entry.path, message: entry.message })),
-    };
+    const skipped: SkippedConfigEntry[] = [];
+    const fileConfig = normalizeFileConfig(raw, skipped);
+    const problems = skipped.map((entry) => ({ path: entry.path, message: entry.message }));
+    return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw, path: configPath, exists: true, skipped, problems };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
-      return { config: applyEnvironmentOverrides({ ...DEFAULT_CONFIG }), path: configPath, exists: false, skipped: [], problems: [] };
+      const fileConfig = { ...DEFAULT_CONFIG };
+      return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: undefined, path: configPath, exists: false, skipped: [], problems: [] };
     }
     if (error instanceof CliError) throw error;
     // Truly nothing to load: the file is not JSON at all. Name the way
     // back: the previous save's backup, or moving the file aside to start fresh.
     throw new CliError(
       "CONFIG_READ_FAILED",
-      `Could not parse config at ${configPath}: it is not valid JSON. A backup of the previous save may exist at ${configPath}.bak — restore it, or move the file aside to start fresh.`,
+      `Could not parse config at ${configPath}: it is not valid JSON. A backup of the previous save may exist at ${configPath}.bak.1 — restore it, or move the file aside to start fresh.`,
       { cause: error },
     );
   }
 }
 
+/** Config backups kept beside the file before each rewrite, most recent first. */
+export const MAX_CONFIG_BACKUPS = 5;
+
+/**
+ * Copy the current file to `<file>.bak.<1..N>` before it is replaced, so a
+ * bad write or a mistaken setting can be undone by hand. Beside the file:
+ * the same filesystem (so the later rename stays atomic), discoverable next
+ * to what it backs up, and never inside the checkout (the config lives in
+ * `~/.moxen` or a `--config` path; `*.bak.*` is gitignored anyway).
+ * Best-effort: a backup that cannot be made never blocks the save itself.
+ */
+export async function backupConfigFile(configPath: string): Promise<void> {
+  const { copyFile, mkdir, rename, rm, stat } = await import("node:fs/promises");
+  try {
+    await stat(configPath);
+  } catch {
+    return;
+  }
+  try {
+    await mkdir(path.dirname(configPath), { recursive: true });
+    await rm(`${configPath}.bak.${MAX_CONFIG_BACKUPS}`, { force: true });
+    for (let at = MAX_CONFIG_BACKUPS - 1; at >= 1; at -= 1) {
+      try {
+        await rename(`${configPath}.bak.${at}`, `${configPath}.bak.${at + 1}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    await copyFile(configPath, `${configPath}.bak.1`);
+  } catch {
+    // The save below still runs: losing a backup is worse than losing the change.
+  }
+}
+
+/**
+ * Write the file's config (no environment overrides: callers pass
+ * `fileConfig`, or the result of editing one). As a safety net, a value
+ * that exactly matches an active `MOXEN_*` override is read back as the
+ * file's own value instead, so `applyEnvironmentOverrides` can never leak
+ * into a saved file — while a value the user actually changed still saves
+ * as intended. Setting a key to the exact override value is the one
+ * exception that is not written: the file keeps its own value, and the
+ * override still wins in memory, so the save is behaviorally a no-op.
+ * Unknown keys travel in the config itself (`normalizeFileConfig`
+ * keeps them), so clearing a known setting never resurrects it from an old read.
+ * A save that changes nothing skips the backup and the rewrite.
+ * Skipped entries ride along: a save carries what the load could not read
+ * (applied only where the saved config says nothing), so fixing or
+ * resetting one entry never drops the others.
+ */
 export async function saveConfig(configPath: string, config: CliConfig, skipped: readonly SkippedConfigEntry[] = []): Promise<void> {
   // Loaded here rather than at the top: `core/config` is imported during
   // test setup, before any file mock registers, and a static edge would pin
   // the atomic write to the real filesystem for the whole test run.
   const { writeAtomic } = await import("./infra/atomic.js");
-  // Skipped entries ride along: a save must never drop what it could not
-  // read. They apply only where the normalized config says nothing — a
-  // value the user fixed always wins over the old bad one.
-  const next = applySkipped(structuredClone(config) as unknown as Record<string, unknown>, skipped);
-  // A backup of the previous save, so a bad write can be undone. Best
-  // effort: a missing file (a first save) or an unwritable backup never
-  // stops the save itself.
+
+  let next = config as unknown as Record<string, unknown>;
+  let current: string | null = null;
   try {
-    await writeAtomic(`${configPath}.bak`, await readFile(configPath, "utf8"));
+    current = await readFile(configPath, "utf8");
+    const baseline = normalizeFileConfig(JSON.parse(current) as unknown) as unknown as Record<string, unknown>;
+    const out = { ...next };
+    for (const suffix of ENV_OVERRIDDEN_KEYS) {
+      const wanted = effectiveEnvOverride(suffix);
+      if (wanted === undefined) continue;
+      const key = ENV_TO_KEY[suffix];
+      if (String(out[key]) === String(wanted) && String(baseline[key] ?? "") !== String(wanted)) {
+        if (baseline[key] === undefined) delete out[key];
+        else out[key] = baseline[key];
+      }
+    }
+    next = out;
   } catch {
-    // No previous file, or nowhere to keep it.
+    // Missing or unreadable: nothing to strip against; write what was passed.
   }
-  await writeAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
+  // A save must never drop what the load could not read: skipped values
+  // apply only where the saved config says nothing.
+  next = applySkipped(structuredClone(next) as unknown as Record<string, unknown>, skipped);
+  const text = `${JSON.stringify(next, null, 2)}\n`;
+  if (current === text) return;
+  await backupConfigFile(configPath);
+  await writeAtomic(configPath, text);
 }
+
 
 /**
  * Re-apply skipped entries onto a normalized config, setting only what is
@@ -883,15 +1013,17 @@ function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string |
  * Apply one `key=value` edit. The value is parsed against the key's
  * descriptor first — so a bad enum fails with the allowed set rather than
  * being written and rejected on the next load — then the whole config is
- * re-normalized, which is what catches combinations no single key can.
+ * re-normalized as the file's config (no environment overrides, so the
+ * result is what a save writes), which is what catches combinations no
+ * single key can. Unknown keys pass through untouched.
  */
 export function setConfigValue(config: CliConfig, key: ConfigKey, rawValue: string): CliConfig {
   // An entry or field of a list (`providers.harness.profiles[colab].baseUrl`) is edited by id.
   const entry = listTarget(key);
-  if (entry) return normalizeConfig(writeListValue(config, entry, rawValue, key));
+  if (entry) return normalizeFileConfig(writeListValue(config, entry, rawValue, key));
   const descriptor = settingDescriptor(key);
   if (!descriptor) throw new CliError("INVALID_CONFIG_KEY", `Unknown config key: ${key}`);
-  return normalizeConfig(writeSetting(config, key, parseSettingValue(descriptor, rawValue)));
+  return normalizeFileConfig(writeSetting(config, key, parseSettingValue(descriptor, rawValue)));
 }
 
 /**
