@@ -497,7 +497,9 @@ export async function imagesOf(attachments: readonly StoredAttachment[]): Promis
  * nothing used to run it: a `--delivery queue` send was recorded and then
  * sat `running` forever. The runner that just finished is the one process
  * guaranteed to be alive at the moment of promotion, so it takes the next
- * turn — on the same driver, which is the one holding the session.
+ * turn — on the same driver, which is the one holding the session. A turn
+ * for another provider goes back to the queue, marked for the admission
+ * path, so the next tick starts it on its own driver.
  */
 export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
   const { store, threadId, driver } = args;
@@ -513,10 +515,41 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const thread = await store.readThreadRecord(threadId);
     if (!thread) return;
     const selection = next.modelSelection ?? thread.modelSelection;
-    // A queued turn addressed to another provider needs that provider's
-    // driver, which this runner does not hold; leave it for a client.
     const current = args.modelSelection ?? thread.modelSelection;
-    if (driverKey(selection.instanceId) !== driverKey(current.instanceId)) return;
+    if (driverKey(selection.instanceId) !== driverKey(current.instanceId)) {
+      // A queued turn addressed to another provider needs that provider's
+      // driver, which this runner does not hold. Hand it back to the queue,
+      // marked for the admission path, so the next tick starts it on its own
+      // driver: left `running` it would strand — no runner owns it, its owner
+      // is alive so orphan recovery never takes it, and admission only looks
+      // at `queued` turns. Released under the thread lock together with the
+      // requeue, so the tick cannot start it in between; a concurrent
+      // interrupt that already took it back wins, so only a still-`running`
+      // turn is requeued.
+      claimed = null;
+      await store.withThreadLock(threadId, async () => {
+        store.untrackRunning(next.id);
+        const fresh = (await store.readTurns(threadId)).find((turn) => turn.id === next.id);
+        if (!fresh || fresh.status !== "running") return;
+        const now = store.nowIso();
+        await store.updateTurn(threadId, next.id, {
+          status: "queued",
+          heldAtSettle: true,
+          owner: null,
+          updatedAt: now,
+        });
+        await store.appendLedger(threadId, "activity", {
+          id: store.newId(),
+          threadId,
+          turnId: next.id,
+          kind: "turn.held",
+          summary: "Held for its own provider",
+          createdAt: now,
+        });
+        store.emit(threadId, "turn-held");
+      });
+      return;
+    }
     // The turn that just settled may have ended on a usage limit. Running
     // the next queued message now would only fail it against the same wall
     // (and then the next, until the whole queue is failed turns), so hold
