@@ -251,7 +251,8 @@ settings (`web.browser`, `web.privateNetwork`) on every provider, and never reac
 `moxen` MCP server with the delegation tools, but each is switched on its own per provider:
 `providers.<kind>.orchestration` (delegate, task status, models, cancel, thread search and read) and `providers.<kind>.webFetch`. The
 older `moxenTools: false` still turns both off while they are unset. A delegated task keeps `web_fetch` (and the
-checklist) but gets none of the tools that delegate. `context_usage` is behind neither switch: it comes with the
+checklist) but gets none of the tools that delegate. `context_usage` and
+`usage_status` are behind neither switch: they come with the
 server whenever the server is attached. A configured server named `moxen` replaces Moxen's tools,
 and the MCP tab says so.
 
