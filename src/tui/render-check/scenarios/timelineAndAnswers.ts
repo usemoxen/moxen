@@ -34,11 +34,23 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     await setup.mockMouse.click(header.x, header.y);
   });
   await setup.flush();
-  // ModalShell fades in; look once it is up.
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
-  await setup.flush();
+  // ModalShell fades in; look once it is up, not after a fixed delay a
+  // loaded renderer overruns (mid-fade the panel composites transcript
+  // borders into its title, so wait for a row, not the title).
+  const waitForFrame = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return setup.captureCharFrame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${setup.captureCharFrame()}`);
+  };
+  const assistantActions = await waitForFrame("assistant message actions did not open", () =>
+    setup.captureCharFrame().includes("Copy"));
   console.log("--- assistant message actions (open) ---");
-  const assistantActions = setup.captureCharFrame();
   console.log(assistantActions);
   // Only a user prompt is a revert point; an agent reply offers Copy alone.
   if (!assistantActions.includes("Copy")) fail("assistant message actions did not open");
