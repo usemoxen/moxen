@@ -214,7 +214,7 @@ redacts `env` and `headers` values.
 `env` and `headers` values are secrets: set through `moxen config set` or the settings page, each goes to the
 OS keychain and the file keeps a `keychain:<name>` reference, which is read when a session starts (a value
 written into the file by hand is used as it is). Adding a well-known server in the settings page (Brave Search,
-Exa Search, GitHub…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
+Exa Search…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
 `pnpm`, `yarn`) is what starts the npm ones. Exa uses its hosted server, so it installs nothing and takes the
 key as the `x-api-key` header.
 
