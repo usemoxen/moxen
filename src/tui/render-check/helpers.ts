@@ -27,12 +27,12 @@ export function replyHeader(setup: TestRendererSetup): { x: number; y: number } 
   if (y === -1) fail("closing reply header not visible");
   const x = rows[y]?.indexOf("Claude Opus 5") ?? -1;
   if (x === -1) fail("closing reply header has no clickable label");
-  // Click the header row well right of the text, still inside the card: a
-  // click on a text cell leaves a live selection behind, and any later
-  // message-action click reads that stale selection as "that was a drag"
-  // and swallows itself. Empty card chrome selects only spaces. (Padding
-  // cells left of the text don't hit-test; only the card body does.)
-  return { x: Math.min(x + 60, 125), y };
+  // Click the header row's own rail: the box's border cell hit-tests, unlike
+  // the padding beside it, and it never leaves the card — a well-right-of-the
+  // text cell lands in the side panel whenever the pane narrows, while a text
+  // cell leaves a live selection that a later message-action click reads as
+  // a drag and swallows. Empty card chrome selects only spaces.
+  return { x: x - 3, y };
 }
 
 /** The Worked fold, located by text from the top — flat tool rows reflow
