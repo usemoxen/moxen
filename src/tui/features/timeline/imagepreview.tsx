@@ -1,8 +1,7 @@
 import { useKeyboard } from "@opentui/react";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
-import { drawableImage } from "../../model/imageshrink.js";
-import { previewPlacement, type Rect } from "../../model/imagethumb.js";
+import { previewPlacement, type LoadedImage, type Rect } from "../../model/imagethumb.js";
 import { SURFACE } from "../../theme.js";
 import { useModalOpen } from "../../ui/modalopen.js";
 import { Placeholder } from "./imagefallback.js";
@@ -14,9 +13,8 @@ export interface ImagePreview {
   id: string;
   /** Said in the fallback when the image cannot be drawn. */
   label: string;
-  mimeType: string;
-  bytes: Uint8Array;
-  size: { width: number; height: number };
+  /** The shared display copy, or null when the decoder cannot read the image. */
+  display: LoadedImage | null;
   anchor: Rect;
 }
 
@@ -83,21 +81,11 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
   // Typing or a key-driven scroll moves what the preview is anchored to.
   useKeyboard(() => clearImagePreview());
 
-  // What is drawn: a smaller copy when the image is only too big, null when
-  // the decoder cannot read it at all. The probe runs only while the preview
-  // shows, so a modal or the viewer never pays for a decode it will not draw.
-  const drawable = useMemo(
-    () =>
-      preview === null || modalOpen || viewing
-        ? null
-        : drawableImage({ mimeType: preview.mimeType, bytes: preview.bytes, size: preview.size }),
-    [preview, modalOpen, viewing],
-  );
-
   if (preview === null || modalOpen || viewing) return null;
   // Nothing drawable (over the native ceiling, or corrupt), or a draw that
   // failed after the probe: a bordered line saying so instead of a blank box.
-  if (drawable === null || drawFailed) {
+  // The verdict arrives with the preview; this layer never probes itself.
+  if (preview.display === null || drawFailed) {
     const columns = Math.max(8, Math.min(preview.label.length + 24, screenWidth - 2));
     const outerWidth = columns + 2;
     const outerHeight = 3;
@@ -122,7 +110,7 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
       </box>
     );
   }
-  const placed = previewPlacement(drawable.size, preview.anchor, { width: screenWidth, height: screenHeight });
+  const placed = previewPlacement(preview.display.size, preview.anchor, { width: screenWidth, height: screenHeight });
   if (placed === null) return null;
   return (
     <box
@@ -133,7 +121,7 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
       backgroundColor={SURFACE.raised}
       selectable={false}
     >
-      <image source={drawable.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: placed.columns, height: placed.rows }} />
+      <image source={preview.display.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: placed.columns, height: placed.rows }} />
     </box>
   );
 }

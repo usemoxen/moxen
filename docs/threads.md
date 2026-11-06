@@ -575,9 +575,11 @@ status grids. An image can be cropped (which is also the zoom), padded to a
 shape and annotated with boxes, arrows and highlights, and two images can be
 laid over each other or differenced. The TUI draws it from the theme's colours
 and stacks it in a narrow pane; under a modal the images are text cells.
-A picture bigger than the display cap is drawn from a smaller copy, keeping
-the original for opening externally; one the decoder cannot read collapses
-to one line saying it could not be drawn, which still opens the viewer.
+A picture bigger than the display cap but inside what the decoder reads is
+drawn from a smaller copy; one past the decoder's ceiling, or corrupt, cannot
+be shrunk — nothing available decodes it — and collapses to one line saying it
+could not be drawn, which still opens the viewer on the original bytes for
+opening externally.
 Only images in the visible part of the transcript hold native image resources;
 scrolling them out releases those resources while keeping their space in the reply. A
 block that is not valid, over a limit (8 images, 4 levels, 12 bars, 20 rows) or

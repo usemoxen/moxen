@@ -124,6 +124,7 @@ export async function runImageThumbs(): Promise<void> {
   runShrink();
   await runReplyImage(png);
   await runUndrawable();
+  await runLoadingRow();
   await runUiBlock(png);
   await runImageOps();
   await runUiData();
@@ -485,18 +486,26 @@ async function runUndrawable(): Promise<void> {
   closeImageViewer();
   const width = 80;
   const height = 44;
-  const solid = (edge: number): Buffer => {
-    const pixels = new Uint8Array(edge * edge * 4).fill(180);
-    return Buffer.from(encodeRgbaPng(edge, edge, pixels, edge * 4, false));
+  const solid = (width: number, height: number): Buffer => {
+    const pixels = new Uint8Array(width * height * 4).fill(180);
+    return Buffer.from(encodeRgbaPng(width, height, pixels, width * 4, false));
   };
-  // A PNG header stating 200×100, then garbage: the header reads, the decode fails.
-  const corruptHeader = Buffer.alloc(33);
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(corruptHeader);
-  corruptHeader.writeUInt32BE(200, 16);
-  corruptHeader.writeUInt32BE(100, 20);
-  const corrupt = Buffer.concat([corruptHeader, Buffer.from("this is not image data".repeat(64))]);
-  const huge = solid(5000);
-  const overCeiling = solid(5050);
+  // A PNG header stating a size, then garbage: the header reads, the decode fails.
+  const headered = (width: number, height: number): Buffer => {
+    const header = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
+    header.writeUInt32BE(width, 16);
+    header.writeUInt32BE(height, 20);
+    return Buffer.concat([header, Buffer.from("this is not image data".repeat(64))]);
+  };
+  // Over the display cap but decodable: drawn from a smaller copy. Small on
+  // purpose — the downscale path is the same at any size, and the render
+  // harness shares its machine with every other check.
+  const huge = solid(4500, 1000);
+  // Past the native ceiling, as a real 8192×4096 photo would be: no decoder
+  // available can shrink it, so it keeps the fallback line either way.
+  const overCeiling = headered(8192, 4096);
+  const corrupt = headered(200, 100);
   const urlOf = (bytes: Buffer): string => `data:image/png;base64,${bytes.toString("base64")}`;
   const urls: Record<string, string> = {
     "/tmp/huge.png": urlOf(huge),
@@ -547,6 +556,15 @@ async function runUndrawable(): Promise<void> {
   };
   const frame = () => setup.captureCharFrame();
   const rows = () => frame().split("\n");
+  // No timers: microtasks and paints drain, but the verdicts stay pending
+  // behind their yield, so this frame is what precedes every verdict.
+  const flushOnly = async () => {
+    for (let pass = 0; pass < 5; pass += 1) {
+      await act(async () => {
+        await setup.flush();
+      });
+    }
+  };
   await settle(1500);
   console.log("--- undrawable images: a smaller copy, two one-line fallbacks ---");
   console.log(frame());
@@ -587,13 +605,63 @@ async function runUndrawable(): Promise<void> {
   await act(async () => setup.mockInput.pressEscape());
   await settle(400);
   if (frame().includes("open externally")) fail("Esc left the viewer open");
+  // Back on the transcript without settling: the cached verdicts restore the
+  // fallbacks at once, so a known-undrawable image never reserves rows again.
+  await flushOnly();
+  console.log("--- undrawable images: back on the transcript, verdicts cached ---");
+  console.log(frame());
+  for (const label of ["ceiling (could not be drawn)", "corrupt (could not be drawn)"]) {
+    if (!frame().includes(label)) fail(`a cached verdict did not restore its fallback line at once (${label})`);
+  }
 
   // The downscaled image opens the viewer on its original size.
   const hugeRow = rows().findIndex((line) => line.includes("huge"));
   await act(async () => setup.mockMouse.click(4, hugeRow));
   await settle(800);
-  if (!frame().includes("5000×5000")) fail("the viewer did not open the downscaled image at its original size");
+  if (!frame().includes("4500×1000")) fail("the viewer did not open the downscaled image at its original size");
   closeImageViewer();
+}
+
+/** While an image's verdict is unknown, the transcript shows a one-line loading row, never a blank reserved block. */
+async function runLoadingRow(): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const width = 60;
+  const height = 12;
+  function Harness() {
+    return (
+      <ReplyImageReaderContext.Provider
+        value={() => new Promise<never>(() => {})}
+      >
+        <box style={{ flexDirection: "column", width, height }} backgroundColor={SURFACE.base}>
+          <MessageBody
+            entry={{ text: "Slow:\n![slow](/tmp/slow.png)\nDone.", streaming: false, message: null } as never}
+            homeDir={undefined}
+            background={SURFACE.base}
+          />
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
+  const frame = () => setup.captureCharFrame();
+  // Timer-free: paints drain, but a verdict that never comes stays unknown.
+  for (let pass = 0; pass < 8; pass += 1) {
+    await act(async () => {
+      await setup.flush();
+    });
+  }
+  console.log("--- undrawable images: verdict unknown ---");
+  console.log(frame());
+  if (!frame().includes("▣ slow")) fail("no one-line loading row while the verdict is unknown");
+  if (frame().includes("█")) fail("a picture drew before its verdict came");
+  // Still unknown after more flushes: the row stands, nothing reserved.
+  for (let pass = 0; pass < 8; pass += 1) {
+    await act(async () => {
+      await setup.flush();
+    });
+  }
+  if (!frame().includes("▣ slow") || frame().includes("█")) fail("the loading row did not stand while the verdict stayed unknown");
 }
 
 /** A `w`×`h` PNG, `left` on its left half and `right` on its right. */

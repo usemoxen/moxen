@@ -14,10 +14,14 @@ export function Placeholder({ label, state }: { label: string; state: string }) 
 }
 
 /** One clickable line standing in for a picture that cannot be drawn. A click opens the viewer, where the original bytes still open externally. */
-export function UndrawableLine({ label, onOpen }: { label: string; onOpen: () => void }) {
+export function UndrawableLine({ label, onOpen, width, fill = false }: { label: string; onOpen: () => void; width?: number | undefined; fill?: boolean }) {
   const { hovered, handlers } = useHover();
   return (
-    <box onMouseDown={onOpen} {...handlers} style={{ flexShrink: 0 }}>
+    <box
+      onMouseDown={onOpen}
+      {...handlers}
+      style={{ flexShrink: 0, ...(width === undefined ? {} : { width }), ...(fill ? { flexGrow: 1 } : {}) }}
+    >
       <text fg={hovered ? COLOR.bright : COLOR.dim} selectable={false}>
         {`▣ ${label}${UNUSABLE_SUFFIX}`}
       </text>

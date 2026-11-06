@@ -876,7 +876,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     width: 80,
     height: 24,
     element: () => {
-      const image = { mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 };
+      const image = { mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576, undrawable: false };
       return (
         <>
           <Stage width={80} height={24}>
@@ -891,7 +891,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       );
     },
     drive: async () => {
-      openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 });
+      openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576, undrawable: false });
       await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
     },
   },

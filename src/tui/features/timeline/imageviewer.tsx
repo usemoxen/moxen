@@ -1,10 +1,9 @@
 import type { BoxRenderable, CliRenderer } from "@opentui/core";
-import { createContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useKeyboard, useRenderer } from "@opentui/react";
 
 import { useHover } from "../../hooks/useHover.js";
 import { t } from "../../i18n/index.js";
-import { nativeDecoder } from "../../model/imageshrink.js";
 import type { LoadedImage } from "../../model/imagethumb.js";
 import { formatBytes } from "../../model/message.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -21,6 +20,8 @@ export const ImageSetContext = createContext<Map<string, ViewedImage> | null>(nu
 export interface ViewedImage extends LoadedImage {
   label: string;
   sizeBytes: number | null;
+  /** The shared display verdict, known when the transcript or a row drew it: the canvas skips its own probe then. */
+  undrawable: boolean;
 }
 
 let current: ViewedImage | null = null;
@@ -142,19 +143,12 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
   const cellAspect = resolution === null ? 2 : (resolution.height / renderer.terminalHeight) / (resolution.width / renderer.terminalWidth);
   const geometry = imageGeometry(image.size, canvas, view, cellAspect);
   // The original bytes are drawn, however big: zooming wants their pixels.
-  // When the decoder cannot read them at all the canvas says so instead, and
-  // the header and opening externally keep working on the original bytes.
+  // The verdict arrives with the image when the transcript or a row drew it;
+  // a draw that still fails (an image only a token or a block opener holds)
+  // collapses through `onError` instead of a render-time probe.
   const [drawFailed, setDrawFailed] = useState(false);
   useEffect(() => {
     setDrawFailed(false);
-  }, [image]);
-  const undrawable = useMemo(() => {
-    try {
-      nativeDecoder(image.bytes).dispose();
-      return false;
-    } catch {
-      return true;
-    }
   }, [image]);
   const changeView = (update: (value: ImageViewport) => ImageViewport) => {
     setView((value) => imageGeometry(image.size, canvas, update(imageGeometry(image.size, canvas, value, cellAspect).view), cellAspect).view);
@@ -230,7 +224,7 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
           zoom(event.scroll.direction === "up" ? 1.25 : 0.8);
           event.stopPropagation();
         }}>
-        {undrawable || drawFailed ? (
+        {image.undrawable || drawFailed ? (
           <box style={{ flexGrow: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>
             <Placeholder label={image.label} state="unusable" />
           </box>

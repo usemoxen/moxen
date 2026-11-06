@@ -23,6 +23,7 @@ import type { ContextUsageDisplay } from "../../model/turns.js";
 import type { PlanUsageGauge } from "../../model/sidepanel.js";
 import { nextImageLabel, pairImageTokens, relabelImageTokens } from "../../model/imagetokens.js";
 import { imageFromDataUrl, type LoadedImage, type Rect } from "../../model/imagethumb.js";
+import { loadDisplay, toDisplayOutcome } from "../../model/imagedisplay.js";
 import { openImageViewer } from "../timeline/imageviewer.js";
 import { hideImagePreview, showImagePreview, useImagePreviewVisible } from "../timeline/imagepreview.js";
 
@@ -431,7 +432,11 @@ export function Composer({
     const node = areaRef.current;
     const hit = node === null ? null : tokenAt(node, x, y);
     const image = hit === null ? null : decodedImage(hit.name);
-    if (hit !== null && image !== null) openImageViewer({ ...image, label: hit.name, sizeBytes: image.bytes.length });
+    if (hit === null || image === null) return;
+    // The shared verdict tells the viewer to show its fallback at once.
+    void loadDisplay(`composer:${hit.name}`, () => toDisplayOutcome(image)).then((outcome) =>
+      openImageViewer({ ...image, label: hit.name, sizeBytes: image.bytes.length, undrawable: outcome.status === "undrawable" }),
+    );
   };
   const previewTokenAt = (x: number, y: number) => {
     const node = areaRef.current;
@@ -444,7 +449,18 @@ export function Composer({
     hidePreview();
     previewing.current = hit.name;
     const image = decodedImage(hit.name);
-    if (image !== null) showImagePreview({ id: `composer:${hit.name}`, label: hit.name, mimeType: image.mimeType, bytes: image.bytes, size: image.size, anchor: hit.anchor });
+    if (image === null) return;
+    // The verdict and display copy are shared with the viewer under the
+    // token's name, so hovering never probes again.
+    void loadDisplay(`composer:${hit.name}`, () => toDisplayOutcome(image)).then((outcome) => {
+      if (previewing.current !== hit.name || outcome.status === "missing") return;
+      showImagePreview({
+        id: `composer:${hit.name}`,
+        label: hit.name,
+        display: outcome.status === "ready" ? outcome.display : null,
+        anchor: hit.anchor,
+      });
+    });
   };
   useEffect(() => hidePreview, []);
   // The text cursor would blink over the preview image.

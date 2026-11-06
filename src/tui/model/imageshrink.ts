@@ -22,8 +22,11 @@ const MAX_ATTEMPTS = 6;
  * decoder refuses anything over about 25 megapixels (a 5000×5000 image
  * decodes, a 5000×5001 one does not), so a display copy capped at this edge
  * — 4096×4096 at most, about 17 megapixels — always stays drawable whatever
- * its shape. The send-path limits (`core/attachments.ts`, `SHRINK_TARGET_EDGE`)
- * are separate rules about what a turn may carry.
+ * its shape. Nothing else in the dependency tree decodes JPEG or PNG past
+ * that ceiling, so past it no smaller copy can be made at all: those images
+ * keep the one-line fallback, and the original bytes are what the viewer and
+ * opening externally work on. The send-path limits (`core/attachments.ts`,
+ * `SHRINK_TARGET_EDGE`) are separate rules about what a turn may carry.
  */
 export const DISPLAY_MAX_EDGE = 4096;
 
