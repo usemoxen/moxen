@@ -122,7 +122,10 @@ A release is a `v<version>` tag, where the version is `package.json`'s (the one 
 `.github/workflows/release.yml` then, on `macos-latest` and `windows-latest`: checks the tag against
 `package.json` (a mismatch fails), runs `bun run check`, builds and packs the archive, smoke-tests it and
 uploads it as a workflow artifact. A `publish` job, only on a tag and only once both platforms pass, creates
-the GitHub Release with both archives and their `.sha256` files. Running the workflow by hand (`workflow_dispatch`)
+the GitHub Release with both archives, their `.sha256` files and the `install.sh` / `install.ps1` one-line
+installers; its notes are the install steps (`releaseInstallNotes` in `src/core/release.ts`, one source shared
+with the README) above the generated changelog (`gh api .../releases/generate-notes`, composed by
+`bun scripts/release-notes.ts --changelog`), never `--generate-notes` alone. Running the workflow by hand (`workflow_dispatch`)
 does everything except publish, so use it to try a change to the release itself. A release run is never cancelled.
 
 - `bun scripts/package-release.ts [--out dir]` packs one archive for the platform it runs on:
@@ -141,6 +144,9 @@ does everything except publish, so use it to try a change to the release itself.
   outside the checkout and checks the layout, that `--version` equals `package.json`, and that the native
   OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`
   against the unpacked daemon. `--remove` deletes a path first, to show the test fails when it is missing.
+  Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
+  name the archive above the changelog, and runs `install.sh` (off Windows, with a stubbed `uname`) or
+  `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.

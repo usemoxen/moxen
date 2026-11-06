@@ -63,6 +63,26 @@ background follows Animated / Static / Off, and it supports English and Spanish.
 The progress indicator and Back/Continue stay visible while an inline editor is open;
 its own back link returns one level within setup, then to the guide step.
 
+## Installing Moxen
+
+One line on macOS (Apple silicon):
+
+```bash
+curl -fsSL https://github.com/usemoxen/moxen/releases/latest/download/install.sh | sh
+```
+
+One line on Windows (x64, PowerShell):
+
+```powershell
+irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
+```
+
+Either script fetches the latest release, installs Bun first when it is
+missing, checks the download against its `.sha256` and refuses a mismatch,
+then runs `self-update --install` and says how to put Moxen on your PATH.
+Linux and Intel Macs have no build yet. Every GitHub release carries the same
+steps in its notes; the [README](../README.md#from-a-release) has them by hand.
+
 ## Updating Moxen
 
 **Update Moxen** in the command palette opens the update screen, which asks GitHub once

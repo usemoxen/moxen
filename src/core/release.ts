@@ -6,6 +6,9 @@
 
 import path from "node:path";
 
+/** The GitHub repository releases are published from. */
+export const RELEASES_REPOSITORY = "usemoxen/moxen";
+
 export type ReleaseOs = "macos" | "windows";
 export type ReleaseArch = "arm64" | "x64";
 
@@ -96,4 +99,80 @@ export function listCommand(target: ReleaseTarget, archive: string, env: NodeJS.
 
 function windowsTar(env: NodeJS.ProcessEnv): string {
   return path.win32.join(env.SystemRoot ?? env.windir ?? "C:\\Windows", "System32", "tar.exe");
+}
+
+/** The one-line installers published beside every release's archives. */
+export const INSTALL_SCRIPT_POSIX = "install.sh";
+export const INSTALL_SCRIPT_WINDOWS = "install.ps1";
+
+/** `https://github.com/usemoxen/moxen/releases/download/v0.1.2/install.sh`: an asset of one release. */
+export function releaseAssetUrl(tag: string, file: string): string {
+  return `https://github.com/${RELEASES_REPOSITORY}/releases/download/${tag}/${file}`;
+}
+
+/**
+ * The install steps for a release's notes, in markdown. One source: the release workflow puts this above
+ * the changelog (`scripts/release-notes.ts`), and the README says the same for the latest release.
+ */
+export function releaseInstallNotes(version: string): string {
+  const tag = tagForVersion(version);
+  const macos = releaseTargetOf("macos", "arm64");
+  const windows = releaseTargetOf("windows", "x64");
+  const macosArchive = archiveFileName(version, macos);
+  const windowsArchive = archiveFileName(version, windows);
+  const macosChecksum = checksumFileName(version, macos);
+  const windowsChecksum = checksumFileName(version, windows);
+  return [
+    "## Install",
+    "",
+    "macOS on Apple silicon, one line:",
+    "",
+    "```sh",
+    `curl -fsSL ${releaseAssetUrl(tag, INSTALL_SCRIPT_POSIX)} | sh`,
+    "```",
+    "",
+    "Windows on x64, one line (PowerShell):",
+    "",
+    "```powershell",
+    `irm ${releaseAssetUrl(tag, INSTALL_SCRIPT_WINDOWS)} | iex`,
+    "```",
+    "",
+    "The script downloads this release's archive and `.sha256`, installs Bun first when it is missing,",
+    "refuses a checksum mismatch, runs `self-update --install`, and says how to put Moxen on your PATH.",
+    "Linux and Intel Macs have no build and are refused with a message.",
+    "",
+    `By hand instead, download \`${macosArchive}\` and \`${macosChecksum}\` (macOS)`,
+    `or \`${windowsArchive}\` and \`${windowsChecksum}\` (Windows) from this release,`,
+    "check the archive, and install. macOS:",
+    "",
+    "```sh",
+    `shasum -a 256 -c ${macosChecksum}`,
+    `tar -xzf ${macosArchive}`,
+    `bun ${releaseBaseName(version, macos)}/dist/cli/index.js self-update --install`,
+    "```",
+    "",
+    "Windows (PowerShell):",
+    "",
+    "```powershell",
+    `$archive = "${windowsArchive}"; $expected = ((Get-Content "$archive.sha256") -split '\\s+')[0]`,
+    `if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) { throw 'checksum mismatch' }`,
+    `tar -xf ${windowsArchive}`,
+    `bun ${releaseBaseName(version, windows)}/dist/cli/index.js self-update --install`,
+    "```",
+    "",
+    "`self-update --install` copies the release to `~/.moxen/app/versions/<version>/`, records it in",
+    "`~/.moxen/app/current`, writes a `moxen` launcher (`moxen.cmd` on Windows) in `~/.moxen/app/bin`,",
+    "and prints how to put that folder on your PATH. It edits no shell profile. After that you can delete",
+    "the unpacked folder. The builds are not signed or notarized. To update later, run `moxen self-update`.",
+  ].join("\n");
+}
+
+/**
+ * The full notes for a release: the install steps, then the changelog below them. A blank changelog leaves
+ * just the install steps; otherwise the changelog follows verbatim after a rule.
+ */
+export function releaseNotesBody(version: string, changelog: string): string {
+  const notes = releaseInstallNotes(version);
+  if (changelog.trim() === "") return `${notes}\n`;
+  return `${notes}\n\n---\n\n${changelog.trimEnd()}\n`;
 }
