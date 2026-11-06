@@ -86,6 +86,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Hand a self-contained task to a new subagent thread, which runs in parallel on any provider and model. " +
       "Only when the user has asked you to delegate (or put the thread in Research or Orchestrate mode): each subagent starts cold and spends their usage, so by default do the work yourself. " +
       "Research defaults to one researcher. For claims that matter and need an adversarial check, propose a full research run with researchProposal (size and optional per-role models). " +
+      "Review delegation reviews a PR or branch: mode review checks the target out in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST; pass target-specific questions to attack in the task. " +
       "A full run costs a lead, researchers, critics and a finalizer. Only the user's answer starts one; without an answering client or after its answer deadline, it runs one researcher instead. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
@@ -130,9 +131,10 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         },
         mode: {
           type: "string",
-          enum: ["build", "research"],
+          enum: ["build", "research", "review"],
           description:
             "build (default): the subagent does the task directly. research: the subagent works as a researcher (its own tools, read only) and answers in the research report format. " +
+            "review: the subagent reviews a PR or branch (named in the task) in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST. " +
             "A subagent cannot delegate, and Orchestrate is not available to one.",
         },
       },
@@ -967,8 +969,8 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   }
   const fork = args.fork === true;
   const modeArg = argString(args, "mode");
-  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research") {
-    throw new CliError("INVALID_TOOL_INPUT", "mode must be build or research: a subagent never runs in Orchestrate.");
+  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research" && modeArg !== "review") {
+    throw new CliError("INVALID_TOOL_INPUT", "mode must be build, research or review: a subagent never runs in Orchestrate.");
   }
   const parent = await api.query({ type: "thread.inspect", threadId: parentThreadId });
   // Worktree by default, when there is a branch to cut one from — except a
@@ -992,6 +994,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(effort ? { thinkingEffort: effort } : {}),
     ...(fork ? { fork: true } : {}),
     ...(modeArg === "research" ? { interactionMode: "research" as const } : {}),
+    ...(modeArg === "review" ? { interactionMode: "review" as const } : {}),
     ...(args.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(args.researchProposal) }),
   });
   return {
@@ -1028,6 +1031,9 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    // A review child's verdict and warnings ride with the status; a finished
+    // review with no VERDICT line is said visibly here, not passed on as one.
+    ...(described.review === null ? {} : { review: described.review }),
   };
 }
 

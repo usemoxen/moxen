@@ -91,7 +91,7 @@ import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhaust
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
-import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, taskNotificationText, type ReviewFacts, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
@@ -2080,7 +2080,7 @@ export interface DelegateRequest extends ModelRequest {
    * empty one: same provider, the parent's checkout (`shared`).
    */
   readonly fork?: boolean;
-  /** The mode the task runs in: Build (the default) or Research. Orchestrate is for the one delegating, so it is refused. */
+  /** The mode the task runs in: Build (the default), Research or Review. Orchestrate is for the one delegating, so it is refused. */
   readonly interactionMode?: InteractionMode;
 }
 
@@ -2221,6 +2221,21 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  // A review task's verdict and findings ride in the notification itself, and a
+  // missing verdict (or a reviewer on the parent's own model) is said visibly.
+  const rows = child.interactionMode === "review" ? await ctx.store.readDelegations().catch(() => []) : [];
+  const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined) ??
+    rows.find((candidate) => candidate.childThreadId === childThreadId);
+  const parent = row ? await ctx.store.readThreadRecord(row.parentThreadId).catch(() => null) : null;
+  const modelOf = (selection: { instanceId: string; model: string } | undefined | null) =>
+    selection ? `${selection.instanceId}/${selection.model}` : null;
+  const facts = reviewFactsOf({
+    finished: true,
+    interactionMode: child.interactionMode,
+    report: task.summary,
+    childModel: modelOf(child.modelSelection),
+    parentModel: modelOf(parent?.modelSelection),
+  });
   return {
     taskId: childThreadId,
     title: child.title,
@@ -2232,6 +2247,9 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     filesChanged: changes?.files ?? null,
     additions: changes?.additions ?? null,
     deletions: changes?.deletions ?? null,
+    ...(facts === null
+      ? {}
+      : { review: { ...facts, report: task.summary } }),
   };
 }
 
@@ -2439,9 +2457,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
   const { runtimeMode } = requireParentModes(parent);
-  // A task's mode is the delegating model's choice, Build unless it asks for Research. Orchestrate delegates, and a task never does.
+  // A task's mode is the delegating model's choice, Build unless it asks for Research or Review. Orchestrate delegates, and a task never does.
   if (request.interactionMode === "orchestrate") {
-    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build or Research, never Orchestrate: only the thread that delegates orchestrates.", {
+    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build, Research or Review, never Orchestrate: only the thread that delegates orchestrates.", {
       exitCode: 2,
       details: { interactionMode: request.interactionMode },
     });
@@ -2853,6 +2871,13 @@ export interface DescribedTask {
   readonly parent: ThreadEnvelope;
   readonly child: ThreadEnvelope;
   readonly task: TaskView;
+  /**
+   * A review child's verdict, warnings and finished state; null for any
+   * other task. `task_status` and the task notification read this rather
+   * than recomputing it, so a finished review with no `VERDICT` line is
+   * said visibly everywhere instead of passed on as finished.
+   */
+  readonly review: ReviewFacts | null;
 }
 
 /** A delegated task by parent + task id; the task id is the child thread id. */
@@ -2868,11 +2893,22 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
+  const task = taskOf(child, taskId);
+  const modelOf = (selection: { instanceId: string; model: string } | undefined) =>
+    selection ? `${selection.instanceId}/${selection.model}` : null;
+  const finished = task.status !== "running";
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
     child,
-    task: taskOf(child, taskId),
+    task,
+    review: reviewFactsOf({
+      finished,
+      interactionMode: child.interactionMode,
+      report: finished ? task.summary : null,
+      childModel: modelOf(child.modelSelection),
+      parentModel: modelOf(parent.modelSelection),
+    }),
   };
 }
 

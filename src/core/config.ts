@@ -6,7 +6,7 @@ import path from "node:path";
 import { CliError } from "./errors.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
 import { normalizeHarnessConfig } from "./providers/harness/profiles.js";
-import { INTERACTION_MODES } from "./interactionmode.js";
+import { STICKY_INTERACTION_MODES } from "./interactionmode.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
 import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
@@ -56,7 +56,7 @@ const runtimeModes = new Set<RuntimeMode>([
   "auto",
   "full-access",
 ]);
-const interactionModes = new Set<InteractionMode>(INTERACTION_MODES);
+const interactionModes = new Set<InteractionMode>(STICKY_INTERACTION_MODES);
 /** A saved mode since removed, read as Build (the shared migration rule): plan mode (MXN-136). */
 const REMOVED_INTERACTION_MODES = new Set(["plan"]);
 const speedModes = new Set<SpeedMode>(["standard", "fast"]);

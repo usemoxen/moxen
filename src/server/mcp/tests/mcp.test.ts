@@ -158,7 +158,7 @@ describe("moxen MCP server", () => {
     }
   });
 
-  it("runs a task in Build or Research as the model asks, and never in Orchestrate", async () => {
+  it("runs a task in Build, Research or Review as the model asks, and never in Orchestrate", async () => {
     const { harness, connection, parentThreadId } = await setup();
     try {
       const modeOf = async (taskId: string) => (await (await openThreadStore(harness.root)).readThreadRecord(taskId))?.interactionMode;
@@ -166,6 +166,8 @@ describe("moxen MCP server", () => {
       expect(await modeOf(build.taskId)).toBe("default");
       const research = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Look into it", title: "look", isolation: "shared", mode: "research" })).text) as { taskId: string };
       expect(await modeOf(research.taskId)).toBe("research");
+      const review = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Review PR 7", title: "review", isolation: "shared", mode: "review" })).text) as { taskId: string };
+      expect(await modeOf(review.taskId)).toBe("review");
       const refused = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Plan it", title: "plan", isolation: "shared", mode: "orchestrate" });
       expect(refused.isError).toBe(true);
       expect(refused.text).toContain("never runs in Orchestrate");

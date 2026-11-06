@@ -30,7 +30,7 @@ import { CliError } from "../core/errors.js";
 import type { KnowledgeReading, KnowledgeSearch } from "../core/knowledge/types.js";
 import { knowledgeInput } from "../core/knowledge/input.js";
 import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
-import { requestedInteractionMode } from "../core/interactionmode.js";
+import { INTERACTION_MODES, requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
@@ -180,7 +180,7 @@ export type CommandBody =
       readonly threadId: string;
       readonly message: ThreadMessageInput;
       readonly modelSelection?: ModelSelection;
-      /** The mode for this prompt only (`/research`); the thread's own mode is unchanged. */
+      /** The mode for this prompt only (`/research`, `/review`); the thread's own mode is unchanged. */
       readonly interactionMode?: InteractionMode;
       /** What a busy thread does with a plain send: refuse (default) or take it as a steer. */
       readonly ifBusy?: SendIfBusy;
@@ -1042,7 +1042,8 @@ export function decodeCommand(value: unknown): Command {
         message: decodeMessage(record.message),
         ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue) } : {}),
         ...(selection ? { modelSelection: selection } : {}),
-        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
+        // A one-off (`/research`, `/review`) runs this prompt in that mode; the thread keeps its own.
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
         ...optionalEnum(record, "delivery", ["auto", "steer", "restart", "queue"] as const, type),
         ...optionalBoolean(record, "wakeSettled"),
@@ -1233,7 +1234,8 @@ export function decodeCommand(value: unknown): Command {
         ...optionalBoolean(record, "fork"),
         ...(record.research === undefined ? {} : { research: decodeResearchPlan(record.research) }),
         ...(record.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(record.researchProposal) }),
-        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
+        // A delegated task runs in Build, Research or Review — never Orchestrate, which the operation refuses.
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
       };
     case "thread.task.cancel":
       return {
