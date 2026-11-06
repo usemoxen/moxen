@@ -14,6 +14,25 @@ import type { ImageAttachmentUpload } from "../../../core/attachments.js";
 import { COPY_TOAST_MS } from "../../app/constants.js";
 import { copiedToast, copyPrompt } from "../../model/copystash.js";
 
+/** What identifies an unsent image while it moves back into the draft store. */
+const attachmentKey = (attachment: Pick<ImageAttachmentUpload, "name" | "sizeBytes" | "mimeType">): string =>
+  `${attachment.name}\n${attachment.sizeBytes}\n${attachment.mimeType}`;
+
+/**
+ * Merges images that went out with a failed send back over whatever was
+ * attached meanwhile, without duplicating either. Pure, so the merge itself
+ * is unit-tested; the hook wrapper below applies it to the draft store.
+ */
+export function mergeAttachments(
+  current: readonly ImageAttachmentUpload[],
+  snapshot: readonly ImageAttachmentUpload[],
+): ImageAttachmentUpload[] {
+  if (snapshot.length === 0) return [...current];
+  const seen = new Set(current.map(attachmentKey));
+  const missing = snapshot.filter((attachment) => !seen.has(attachmentKey(attachment)));
+  return missing.length === 0 ? [...current] : [...current, ...missing];
+}
+
 /**
  * Composition is per thread: switching threads stashes the draft and
  * pending attachments under the old id and restores the new one's, so a
@@ -106,6 +125,15 @@ export function useComposer(
       return { ...current, [id]: value };
     });
     setComposerResetCounter((count) => count + 1);
+  };
+
+  /** Puts images that went out with a failed send back (see `mergeAttachments`). */
+  const restoreUnsentAttachments = (id: string, snapshot: readonly ImageAttachmentUpload[]) => {
+    if (snapshot.length === 0) return;
+    setPendings((current) => {
+      const merged = mergeAttachments(current[id] ?? [], snapshot);
+      return merged.length === (current[id] ?? []).length ? current : { ...current, [id]: merged };
+    });
   };
 
   const writePending = (id: string, next: ImageAttachmentUpload[]) => {
@@ -205,6 +233,7 @@ export function useComposer(
     resetDraft,
     restoreDraft,
     restoreUnsentDraft,
+    restoreUnsentAttachments,
     writePending,
     setPending,
     editDraftExternally,
