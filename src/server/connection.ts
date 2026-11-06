@@ -128,6 +128,7 @@ import {
   delegate,
   beginResearchRun,
   isResearchRunActive,
+  moxenRoutingFor,
   resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
@@ -1804,6 +1805,18 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "opencode.session-thread": {
+        // The thread behind a live OpenCode session, for routing the
+        // directory's shared `moxen` entry to the session that made each
+        // call. The drivers that own live sessions answer; null fails the
+        // call safe rather than serving another thread.
+        for (const driver of this.ownedDrivers) {
+          const threadId = driver.threadForNativeSession?.(query.nativeSessionId) ?? null;
+          if (threadId === null) continue;
+          return await moxenRoutingFor(ctx, threadId);
+        }
+        return null;
+      }
       case "research.proposals":
         this.expireResearchProposals();
         return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);
