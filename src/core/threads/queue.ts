@@ -6,10 +6,16 @@ import type { StoredThread, StoredTurn } from "./types.js";
 export const QUEUE_RESET_GRACE_MS = 5000;
 export const QUEUE_ADMISSION_LOCK = "\0queue-admission";
 
-function nextReset(provider: string, kind: "session" | "weekly" | "all", now = Date.now()): string | null {
+/**
+ * The reset a `reset` queue condition waits for: the reset of the window it
+ * asked about. `all` covers every reported window, so it waits for the next
+ * reset among them (the earliest) — a session reset does not wait out a
+ * weekly one.
+ */
+export function nextReset(provider: string, kind: "session" | "weekly" | "all", now = Date.now()): string | null {
   const windows = usageLimitsSnapshot(now)[provider]?.windows.filter((window) => kind === "all" || window.kind === kind) ?? [];
   if (!windows.length || windows.some((window) => window.resetsAt === null)) return null;
-  return windows.map((window) => window.resetsAt!).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
+  return windows.map((window) => window.resetsAt!).sort((a, b) => Date.parse(a) - Date.parse(b)).at(0) ?? null;
 }
 
 export type QueueCondition =

@@ -773,6 +773,29 @@ describe("usage protection", () => {
     expect(w.sent).toHaveLength(2);
   });
 
+  it("fills a missing reset time from the recovery entry's window, not the latest hot window", async () => {
+    const w = await world();
+    const id = await w.make("held");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const now = Date.now();
+    const soon = new Date(now + 60_000).toISOString();
+    const recovery = await sendTurn(w.store, id, {
+      prompt: "resume", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "session" }], order: 1, sequential: true, continuation: "same-thread" }), automatic: true, requestId: "usage:1" },
+    });
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(id))!, usagePause: { provider: "codex", windows: [{ id: "session", kind: "session", label: "Session", resetsAt: null }], resetsAt: null, order: 1, phase: "waiting", handoff: false, recoveryTurnId: recovery.turn.id } });
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: soon },
+      { id: "weekly", label: "Weekly", usedPercent: 95, exhausted: false, resetsAt: new Date(now + 6 * 86400_000).toISOString() },
+    ]);
+    try {
+      await w.guard.tick(now);
+      // The recovery entry waits for the session reset, so the pause does too —
+      // not for the later weekly reset that merely also runs hot.
+      expect((await w.store.readThreadRecord(id))?.usagePause?.resetsAt).toBe(soon);
+    } finally { w.guard.close(); }
+  });
+
   it("still recovers the other held threads when closing one thread's session fails", async () => {
     const w = await world();
     w.ctx.config.usageRecovery = "parallel";

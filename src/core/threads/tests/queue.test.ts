@@ -103,6 +103,22 @@ describe("conditional work queue", () => {
     expect(w.sent).toHaveLength(1);
   });
 
+  it("waits for the nearest reset across windows when the condition asks for all", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    await sendTurn(w.store, thread.id, { prompt: "when any allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });
+    const soon = new Date(now + 60_000).toISOString();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 95, exhausted: false, resetsAt: soon },
+      { id: "weekly", label: "Weekly", usedPercent: 95, exhausted: false, resetsAt: new Date(now + 6 * 86400_000).toISOString() },
+    ]);
+    await runWorkQueue(w.ctx, now);
+    expect(w.sent).toEqual([]);
+    expect((await readWorkQueue(w.ctx))[0]?.policy.conditions[0]).toMatchObject({ resetsAt: soon });
+    // The nearest reset is enough: it runs once that passes, without waiting out the weekly one.
+    await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
+    expect(w.sent).toHaveLength(1);
+  });
+
   it("does not lose an exhaustion event that resets before the next scheduler tick", async () => {
     const w = await world(); const thread = await w.make();
     await sendTurn(w.store, thread.id, { prompt: "after the event", queue: parseQueuePolicy({ conditions: [{ type: "provider", provider: "claude", state: "exhausted", mode: "after" }] }) });
