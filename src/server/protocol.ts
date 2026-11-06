@@ -1108,9 +1108,9 @@ export function decodeCommand(value: unknown): Command {
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
         ...optionalEnum(record, "delivery", ["auto", "steer", "restart", "queue"] as const, type),
-        ...optionalBoolean(record, "wakeSettled"),
+        ...optionalBoolean(record, "wakeSettled", type),
         ...optionalString(record, "handoffNote"),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "wait", type),
         ...optionalString(record, "scheduledFor"),
         ...optionalEnum(record, "scheduleReason", ["user", "usage-reset"] as const, type),
       };
@@ -1121,18 +1121,18 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         ...(asString(record.turnId) ? { turnId: asString(record.turnId) as string } : {}),
-        ...optionalBoolean(record, "notifyParent"),
+        ...optionalBoolean(record, "notifyParent", type),
       };
     case "usage.wrap":
       return { ...meta, type, provider: requireField(record.provider, type, "provider") };
     case "thread.protect":
       return { ...meta, type, threadId: threadId() };
     case "queue.edit":
-      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent") };
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent", type) };
     case "handoff.submit":
       return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
-      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const), ...optionalBoolean(record, "notifyParent") };
+      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const), ...optionalBoolean(record, "notifyParent", type) };
     case "thread.settle":
       return {
         ...meta,
@@ -1231,7 +1231,7 @@ export function decodeCommand(value: unknown): Command {
           exitCode: 2,
         });
       }
-      return { ...meta, type, threadId: threadId(), turnCount, ...optionalBoolean(record, "restoreFiles") };
+      return { ...meta, type, threadId: threadId(), turnCount, ...optionalBoolean(record, "restoreFiles", type) };
     }
     case "app.update.apply":
     case "app.update.rollback":
@@ -1249,9 +1249,9 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...decodeModelRequest(record, type),
-        ...optionalBoolean(record, "dryRun"),
-        ...optionalBoolean(record, "scratch"),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "dryRun", type),
+        ...optionalBoolean(record, "scratch", type),
+        ...optionalBoolean(record, "wait", type),
       };
     case "skills.import":
       return { ...meta, type, ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), from: requireField(record.from, type, "from") };
@@ -1289,12 +1289,12 @@ export function decodeCommand(value: unknown): Command {
         ...optionalString(record, "title"),
         ...optionalString(record, "idempotencyKey"),
         ...decodeModelRequest(record, type),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "wait", type),
         ...optionalNumber(record, "timeoutMs", type),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
         ...optionalEnum(record, "isolation", ["shared", "worktree"] as const, type),
-        ...optionalBoolean(record, "notify"),
-        ...optionalBoolean(record, "fork"),
+        ...optionalBoolean(record, "notify", type),
+        ...optionalBoolean(record, "fork", type),
         ...(record.research === undefined ? {} : { research: decodeResearchPlan(record.research) }),
         ...(record.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(record.researchProposal) }),
         // A delegated task runs in Build, Research or Review — never Orchestrate, which the operation refuses.
@@ -1306,7 +1306,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
-        ...optionalBoolean(record, "notifyParent"),
+        ...optionalBoolean(record, "notifyParent", type),
       };
     case "thread.task.settle":
       return {
@@ -1314,8 +1314,8 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
-        ...optionalBoolean(record, "stop"),
-        ...optionalBoolean(record, "removeWorktree"),
+        ...optionalBoolean(record, "stop", type),
+        ...optionalBoolean(record, "removeWorktree", type),
       };
     case "thread.task.send":
       return {
@@ -1324,7 +1324,7 @@ export function decodeCommand(value: unknown): Command {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
         message: requireField(record.message, type, "message"),
-        ...optionalBoolean(record, "wake"),
+        ...optionalBoolean(record, "wake", type),
       };
     case "thread.task.ask":
       return {
@@ -1360,7 +1360,7 @@ export function decodeCommand(value: unknown): Command {
         cwd: requireField(record.cwd, type, "cwd"),
         ...optionalEnum(record, "workspaceMode", ["repo", "folder"] as const, type),
         ...optionalEnum(record, "projectPolicy", ["create", "existing"] as const, type),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
       };
     case "memory.save":
       return {
@@ -1400,7 +1400,7 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeMemoryAddress(record) };
     case "memory.embeddings.setup":
     case "memory.embeddings.rebuild":
-      return { ...meta, type, ...decodeMemoryAddress(record), ...optionalBoolean(record, "all") };
+      return { ...meta, type, ...decodeMemoryAddress(record), ...optionalBoolean(record, "all", type) };
     case "memory.embeddings.unload":
       return { ...meta, type };
     case "model.visibility.set":
@@ -1464,7 +1464,7 @@ export function decodeCommand(value: unknown): Command {
         ...optionalString(record, "body"),
         ...optionalString(record, "targetBranch"),
         ...optionalString(record, "sourceBranch"),
-        ...optionalBoolean(record, "draft"),
+        ...optionalBoolean(record, "draft", type),
       };
     case "forge.request.comment":
       return {
@@ -1481,7 +1481,7 @@ export function decodeCommand(value: unknown): Command {
         threadId: requireThreadId(record.threadId),
         number: requireNumber(record.number, type, "number"),
         ...optionalEnum(record, "strategy", ["merge", "squash", "rebase"] as const, type),
-        ...optionalBoolean(record, "deleteBranch"),
+        ...optionalBoolean(record, "deleteBranch", type),
       };
     case "remote.pairing.start":
     case "remote.pairing.cancel":
@@ -1489,7 +1489,7 @@ export function decodeCommand(value: unknown): Command {
     case "remote.device.revoke":
       return { ...meta, type, deviceId: requireField(record.deviceId, type, "deviceId") };
     case "experience.update":
-      return { ...meta, type, ...optionalBoolean(record, "completeOnboarding"), ...optionalString(record, "seenRelease") };
+      return { ...meta, type, ...optionalBoolean(record, "completeOnboarding", type), ...optionalString(record, "seenRelease") };
     case "settings.set":
       return {
         ...meta,
@@ -1529,7 +1529,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         profileId: requireField(record.profileId, type, "profileId"),
         ...(asString(record.model) !== null ? { model: asString(record.model)! } : {}),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
       };
     case "provider.update":
       return {
@@ -1560,9 +1560,13 @@ function decodeSkillAddress(record: Record<string, unknown>, type: string): Skil
   return { ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), folder: requireField(record.folder, type, "folder") };
 }
 
-function optionalBoolean<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: boolean } {
+function optionalBoolean<K extends string>(record: Record<string, unknown>, key: K, command: string): { [P in K]?: boolean } {
   const value = record[key];
-  return (typeof value === "boolean" ? { [key]: value } : {}) as { [P in K]?: boolean };
+  if (value === undefined) return {} as { [P in K]?: boolean };
+  if (typeof value !== "boolean") {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} ${key} must be true or false.`, { exitCode: 2 });
+  }
+  return { [key]: value } as { [P in K]?: boolean };
 }
 
 /** A required whole number — a PR number that arrived as text is refused. */
@@ -1693,7 +1697,7 @@ export function decodeQuery(value: unknown): Query {
         // Validated by the read itself, whose error names the CLI flag
         // that `--json` consumers already match on.
         ...(typeof record.view === "string" ? { view: record.view as ThreadReadView } : {}),
-        ...optionalBoolean(record, "lastTurn"),
+        ...optionalBoolean(record, "lastTurn", type),
       };
     case "research.proposals":
     case "research.run":

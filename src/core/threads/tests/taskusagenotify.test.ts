@@ -11,11 +11,13 @@ import {
   cancelTask,
   continueThread,
   describeTask,
+  editWorkQueue,
   flushTaskNotifications,
   noteAutoContinueCancelled,
   queueTaskNotification,
   recoverTaskNotifications,
   scheduleUsageContinue,
+  sendTaskMessage,
   startTurn,
   taskNotificationOf,
   type OperationContext,
@@ -258,6 +260,59 @@ describe("a parent that cannot receive task notices yet", () => {
     const note = (await w.store.readMessages(parent.id)).find((message) => message.origin === "task-notification")!;
     expect(note.turnId).toBe(live[0]!.id);
   });
+
+  it("does not deliver a spent parent's batch into the limit on flush or restart", async () => {
+    const w = await world();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+    ]);
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    // Flushing into an exhausted provider keeps the batch instead of
+    // starting a turn into the wall and forgetting it.
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    // A restart replays the same way: still spent, still nothing goes out.
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+  });
+
+  it("keeps a settled spent parent's batch for later activity instead of dropping it", async () => {
+    const w = await world();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+    ]);
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await settleThread(w.store, parent.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    // Once the allowance is back, the waiting batch still delivers.
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+    ]);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const delivered = await notificationsIn(w, parent.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+  });
 });
 
 describe("cancelling a delegated task's automatic continue", () => {
@@ -382,6 +437,111 @@ describe("cancelling a delegated task's automatic continue", () => {
     expect(await noteAutoContinueCancelled(w.ctx, child.id)).toBe(true);
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
   });
+
+  it("does not mark when live work remains, but still tells the parent", async () => {
+    const w = await world({ autoContinueAtUsageLimit: true }, { leaveTurnsRunning: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // A follow-up is still running when a usage-limit continue is scheduled.
+    const followUp = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    expect(followUp.turn.status).toBe("running");
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const cont = (
+      await sendTurn(w.store, child.id, {
+        prompt: "Continue later.",
+        queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true },
+        scheduledFor: at,
+        scheduleReason: "usage-reset",
+      })
+    ).turn;
+    expect(cont.status).toBe("queued");
+
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+    // Not marked: the task is still working and reports on its own.
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).not.toBe("cancelled");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const delivered = await notificationsIn(w, parent.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain("automatic continue was cancelled");
+    await interruptTurn(w.store, child.id, followUp.turn.id);
+  });
+
+  it("clears the mark when fresh work settles, reading the new outcome", async () => {
+    const w = await world({ autoContinueAtUsageLimit: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    await scheduleUsageContinue(w.ctx, child.id, stopped.id, new Date(Date.now() + 3_600_000).toISOString());
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    const resumed = await startTurn(w.ctx, { threadId: child.id, prompt: "Go on." });
+    await resumed.run;
+    await flushTurnRunners();
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("a steered task_send revives the row and re-arms the settle report", async () => {
+    const w = await world({ autoContinueAtUsageLimit: true }, { leaveTurnsRunning: true, steering: { codex: "delivers" } });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    await scheduleUsageContinue(w.ctx, child.id, stopped.id, new Date(Date.now() + 3_600_000).toISOString());
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    // Fresh work starts on the live session while the mark stands.
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Keep going." });
+    const sent = await sendTaskMessage(w.ctx, parent.id, child.id, "Hold on.", false);
+    expect(sent.outcome).toBe("steered");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+
+    await interruptTurn(w.store, child.id, running.turn.id);
+    await flushTurnRunners();
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const delivered = await notificationsIn(w, parent.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+  });
+
+  it("restoring a removed recovery entry clears the mark", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, turn.id, { error: "Usage limit reached." });
+
+    const recovery = (
+      await sendTurn(w.store, child.id, {
+        prompt: "Resume.",
+        queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, requestId: "usage:1" },
+      })
+    ).turn;
+    const record = await w.store.readThreadRecord(child.id);
+    await w.store.writeThreadRecord({
+      ...record!,
+      usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: new Date(Date.now() + 3_600_000).toISOString(), order: 1, recoveryTurnId: recovery.id, handoff: false },
+    });
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    await editWorkQueue(w.ctx, child.id, recovery.id, "restore");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+    // The mark is gone; the failed turn still stands until the restored entry runs.
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("failed");
+  });
 });
 
 describe("a task notification across a continued parent", () => {
@@ -409,8 +569,7 @@ describe("a task notification across a continued parent", () => {
   });
 });
 
-describe("a settle queued behind a pause", () => {
-  it("delivers one message with the settle report, not the stale pause", async () => {
+describe("a settle queued behind a pause", () => {  it("delivers one message with the settle report, not the stale pause", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
     const child = await w.make("task");
