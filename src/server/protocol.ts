@@ -38,6 +38,7 @@ import type {
   CancelledTask,
   ContinuedOwnThread,
   SentTaskMessage,
+  SettledTask,
   QueuedAgentMessage,
   ChecklistStep,
   DelegateRequest,
@@ -270,6 +271,14 @@ export type CommandBody =
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * Settle a task the caller delegated (moxen's `task_settle`), through the
+   * same path as `threads settle`. `stop` ends running work first; a running
+   * task without it is refused. `removeWorktree` also clears the task's
+   * worktree checkout once its branch is merged; a refusal keeps the checkout
+   * and still settles. The thread and its branch are always kept.
+   */
+  | { readonly type: "thread.task.settle"; readonly parentThreadId: string; readonly taskId: string; readonly stop?: boolean; readonly removeWorktree?: boolean }
   /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
   | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
   /**
@@ -463,6 +472,7 @@ export interface CommandResults {
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
+  "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
   "thread.task.ask": AskedTask;
   "thread.message.queue": QueuedAgentMessage;
@@ -751,7 +761,7 @@ export interface QueryResults {
   "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
   "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
   "skills.manage.read": { readonly text: string };
-  "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
+  "thread.background.list": { readonly live: boolean; readonly partial: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
   "thread.agent-read": { readonly text: string };
   "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
   "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };
@@ -1287,6 +1297,15 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
+      };
+    case "thread.task.settle":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+        ...optionalBoolean(record, "stop"),
+        ...optionalBoolean(record, "removeWorktree"),
       };
     case "thread.task.send":
       return {

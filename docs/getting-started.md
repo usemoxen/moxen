@@ -34,7 +34,10 @@ results appear inline. You can cancel, retry a failed check, or continue with
 keyword memory. No terminal command is required.
 
 Settings has a dedicated **Memory** page with the global switches, setup
-status and model loading policy. **Keep loaded** loads a validated local model
+status and model loading policy. **Manage memories** on that page (or the
+command palette) lists, reads, edits and deletes the memories agents keep,
+global first, then the project; while memory is off its write buttons stand
+down and only viewing works. **Keep loaded** loads a validated local model
 when the server starts and keeps it ready; **On demand** releases it after a
 minute without inference. Startup never downloads a model. Each provider
 still has a Memory switch, and global/project memory off takes precedence.

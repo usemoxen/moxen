@@ -34,13 +34,13 @@ import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
 import { dropTurnWaiter, isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
+  BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
   ProviderAdapter,
   ProviderAdapterCapabilities,
   ProviderApprovalDecision,
   ProviderRuntimeEvent,
-  BackgroundTaskSummary,
   ProviderImage,
   ProviderSendTurnInput,
   ProviderSession,
@@ -1337,6 +1337,30 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   }
 
   /**
+   * The background work this thread's session is still running: background
+   * subagents and background `shell` commands. Only what the server told
+   * this driver about — a shell background process started any other way
+   * is invisible here — so callers must never read an empty list as proof
+   * that nothing is running.
+   */
+  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return [];
+    const agents = [...this.children]
+      .filter(([, other]) => other.parent === session && other.background && !other.stopped)
+      .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
+    const shells = [...(session.backgroundShells ?? [])].map(([taskId, shell]) => ({
+      taskId,
+      taskType: "local_bash",
+      description: shell.command.split("\n")[0]?.trim() ?? "",
+      toolName: "Bash",
+      command: shell.command,
+      startedAt: shell.startedAt,
+    }));
+    return [...agents, ...shells];
+  };
+
+  /**
    * Stop one background task without touching its parent turn: a native
    * subagent's call comes back with whatever the child had, and carries on;
    * a background command is killed and the model is told it ended.
@@ -2106,24 +2130,6 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     });
     this.publishBackgroundTasks(session);
   }
-
-  /** The live set the side panel lists: background subagents and background commands this session started. */
-  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] => {
-    const session = this.sessions.get(threadId);
-    if (!session || session.closed) return [];
-    const agents = [...this.children]
-      .filter(([, other]) => other.parent === session && other.background && !other.stopped)
-      .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
-    const shells = [...(session.backgroundShells ?? [])].map(([taskId, shell]) => ({
-      taskId,
-      taskType: "local_bash",
-      description: shell.command.split("\n")[0]?.trim() ?? "",
-      toolName: "Bash",
-      command: shell.command,
-      startedAt: shell.startedAt,
-    }));
-    return [...agents, ...shells];
-  };
 
   /** The full live set the side panel lists: background subagents and background commands. */
   private publishBackgroundTasks(session: OpenCodeSession): void {

@@ -35,7 +35,7 @@ import { CliError } from "../core/errors.js";
 import { parseScheduledTime } from "../core/threads/scheduledtime.js";
 import { APP_VERSION } from "../server/api.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
-import { importClaudeMemory, listMemory, memoryEmbeddings } from "./memory/memory.js";
+import { deleteMemory, editMemory, importClaudeMemory, listMemory, memoryEmbeddings, readMemory, saveMemory, searchMemory } from "./memory/memory.js";
 import { writeError, writeSuccess } from "./output.js";
 import {
   createHandoverThread,
@@ -320,6 +320,33 @@ async function resolvePrompt(options: PromptOptions): Promise<string> {
   if (options.prompt !== undefined) return options.prompt;
   if (options.promptFile !== undefined) return await readFile(path.resolve(options.promptFile), "utf8");
   return await readStdin();
+}
+
+/** A memory body (or an edit's replacement): `--body`, or stdin when asked or piped. */
+async function resolveMemoryBody(options: { body?: string; stdin?: boolean }): Promise<string> {
+  if (options.body !== undefined && options.stdin === true) {
+    throw new CliError("BODY_SOURCE_REQUIRED", "Use exactly one of --body or --stdin.");
+  }
+  if (options.body !== undefined) return options.body;
+  if (options.stdin === true || input.isTTY === false) return await readStdin();
+  throw new CliError("BODY_SOURCE_REQUIRED", "Use --body <text> or --stdin for the body.", { exitCode: 2 });
+}
+
+async function confirmMemoryDelete(name: string, scope: string): Promise<boolean> {
+  if (!input.isTTY || !errorOutput.isTTY) {
+    throw new CliError(
+      "MEMORY_DELETE_CONFIRMATION_REQUIRED",
+      `Re-run with --yes to delete memory ${name} from the ${scope} scope.`,
+      { exitCode: 4, details: { name, scope } },
+    );
+  }
+  const readline = createInterface({ input, output: errorOutput });
+  try {
+    const answer = await readline.question(`Delete memory "${name}" from the ${scope} scope? [y/N] `);
+    return /^(?:y|yes)$/iu.test(answer.trim());
+  } finally {
+    readline.close();
+  }
 }
 
 async function confirmSettledThread(thread: ThreadEnvelope, project: ProjectEnvelope | null): Promise<boolean> {
@@ -1362,7 +1389,9 @@ threads
           ? `No live session for thread ${result.threadId} here.`
           : lines.length > 0
             ? lines.join("\n")
-            : "No background tasks running.",
+            : result.partial
+              ? "No background tasks visible to Moxen."
+              : "No background tasks running.",
       );
     }),
   );
@@ -1808,6 +1837,100 @@ memory
       const result = await listMemory(context.config, options);
       const lines = result.memories.map((entry) => `${entry.scope}\t${entry.name}\t${entry.type}\t${entry.description}`);
       writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No memories.");
+    }),
+  );
+memory
+  .command("read")
+  .description("Read one memory in full. Without --scope, the project's first, then the global.")
+  .argument("<name>", "The memory's name.")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .addOption(new Option("--scope <scope>").choices(["project", "global"]))
+  .action((name: string, options: { cwd?: string; scope?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await readMemory(context.config, name, options);
+      writeSuccess(result, context, result.body);
+    }),
+  );
+memory
+  .command("save")
+  .description("Save (or replace) one memory. The body comes from --body or stdin.")
+  .argument("<name>", "The memory's name (a short kebab-case slug).")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .addOption(new Option("--scope <scope>").choices(["project", "global"]).default("project"))
+  .requiredOption("--description <text>", "One line saying what the memory is about.")
+  .requiredOption("--type <type>", "One of user, feedback, project, reference.")
+  .option("--body <text>", "The memory itself.")
+  .option("--stdin", "Read the body from stdin.")
+  .action((name: string, options: { cwd?: string; scope?: string; description: string; type: string; body?: string; stdin?: boolean }) =>
+    action(async () => {
+      const context = await commandContext();
+      const body = await resolveMemoryBody(options);
+      const result = await saveMemory(context.config, name, {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        description: options.description,
+        memoryType: options.type,
+        body,
+      });
+      writeSuccess(result, context, result.replaced ? `Replaced ${result.name} in the ${result.scope} scope.` : `Saved ${result.name} to the ${result.scope} scope.`);
+    }),
+  );
+memory
+  .command("edit")
+  .description("Replace one piece of a memory's body (old text must occur exactly once). The replacement comes from --new-text, --body, or stdin.")
+  .argument("<name>", "The memory's name.")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .addOption(new Option("--scope <scope>").choices(["project", "global"]).default("project"))
+  .requiredOption("--old-text <text>", "The text to replace.")
+  .option("--new-text <text>", "What to put in its place (an empty string deletes the text).")
+  .option("--body <text>", "Alias for --new-text.")
+  .option("--stdin", "Read the replacement from stdin.")
+  .option("--description <text>", "Replace the description too.")
+  .action((name: string, options: { cwd?: string; scope?: string; oldText: string; newText?: string; body?: string; stdin?: boolean; description?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const newText = options.newText ?? options.body ?? await resolveMemoryBody({ ...(options.stdin !== undefined ? { stdin: options.stdin } : {}) });
+      const result = await editMemory(context.config, name, {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        oldText: options.oldText,
+        newText,
+        ...(options.description !== undefined ? { description: options.description } : {}),
+      });
+      writeSuccess(result, context, `Edited ${result.name} in the ${result.scope} scope.`);
+    }),
+  );
+memory
+  .command("delete")
+  .description("Delete one memory. Without --yes it asks first; outside a terminal --yes is required.")
+  .argument("<name>", "The memory's name.")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .addOption(new Option("--scope <scope>").choices(["project", "global"]).default("project"))
+  .option("--yes", "Delete without asking.")
+  .action((name: string, options: { cwd?: string; scope?: string; yes?: boolean }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await deleteMemory(context.config, name, {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        ...(options.yes === true ? {} : { confirm: confirmMemoryDelete }),
+      });
+      writeSuccess(result, context, `Deleted ${result.name} from the ${result.scope} scope.`);
+    }),
+  );
+memory
+  .command("search <query...>")
+  .description("Search the current project's and global memories by keyword (semantic ranking when set up).")
+  .option("--cwd <path>", "The project resolved from this folder (default: the current one).")
+  .addOption(new Option("--scope <scope>").choices(["project", "global"]))
+  .option("--limit <n>", "Most memories to return.", (value: string) => Number.parseInt(value, 10))
+  .action((words: string[], options: { cwd?: string; scope?: string; limit?: number }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await searchMemory(context.config, words.join(" "), options);
+      const lines = result.memories.map((entry) => `${entry.scope}\t${entry.name}\t${entry.description}\t${entry.excerpt}`);
+      writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No matching memories.");
     }),
   );
 memory

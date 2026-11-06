@@ -20,6 +20,7 @@ import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
@@ -190,6 +191,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "task_status",
     description:
       "Where a delegated task stands: running, or finished with the subagent's report and the branch holding its work. " +
+      "Lists background work still running on the task's thread and for how long; work past the forgotten age is flagged, and a task whose notification names running work is not finished. " +
       "For a full report after a task notification, or one deliberate check on a task taking far longer than expected; never as a polling loop. " +
       `Waits up to waitMs (max ${MAX_WAIT_MS}) for it to finish first.`,
     inputSchema: {
@@ -266,6 +268,25 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       properties: {
         taskId: { type: "string", description: "One delegated task to stop. Not with taskIds." },
         taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to stop, each reported separately. Not with taskId." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_settle",
+    description:
+      "Mark a delegated task finished once its work is done and reviewed: use it (not task_cancel) when the report is in and nothing is left to run. " +
+      "A task that is still running is refused unless stop is true, which ends its work first, including work it delegated itself. " +
+      "With removeWorktree, its worktree checkout goes too, but only once its branch is merged (squash-merges count) or it never committed: anything else keeps the checkout and says why, while the task still settles. " +
+      "The task's thread and branch are always kept. Pass taskId for one task or taskIds for several: each outcome is reported separately, and one bad id does not stop the others.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "One delegated task to settle. Not with taskIds." },
+        taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to settle, each reported separately. Not with taskId." },
+        stop: { type: "boolean", description: "End a still-running task's work first instead of refusing (default false)." },
+        removeWorktree: { type: "boolean", description: "Also remove the task's worktree checkout once its branch is merged (default false). The branch stays either way." },
       },
       required: [],
       additionalProperties: false,
@@ -425,7 +446,7 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * continues itself in a new thread (a full context there is compacted in
  * place, and its report decides what runs next).
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen", "thread_continue"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen", "thread_continue"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -940,6 +961,25 @@ export async function callMoxenTool(
         await throwIfParentMissing(api, parentThreadId, tasks, firstFailure);
         return ok({ tasks });
       }
+      case "task_settle": {
+        if (args.stop !== undefined && typeof args.stop !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "stop must be true or false.");
+        if (args.removeWorktree !== undefined && typeof args.removeWorktree !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "removeWorktree must be true or false.");
+        const options = { ...(args.stop === true ? { stop: true } : {}), ...(args.removeWorktree === true ? { removeWorktree: true } : {}) };
+        const ids = settleIds(args);
+        if (args.taskIds === undefined) {
+          const settled = await settleOne(api, parentThreadId, ids[0]!, options);
+          return ok(settled);
+        }
+        const tasks: Array<Record<string, unknown>> = [];
+        for (const taskId of ids) {
+          try {
+            tasks.push(await settleOne(api, parentThreadId, taskId, options));
+          } catch (cause) {
+            tasks.push({ taskId, error: toolErrorText(cause) });
+          }
+        }
+        return ok({ tasks });
+      }
       case "task_send": {
         if (args.wake !== undefined && typeof args.wake !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "wake must be true or false.");
         const taskId = argString(args, "taskId", true)!;
@@ -991,6 +1031,36 @@ export async function callMoxenTool(
 }
 
 const SEARCH_SNIPPET_CHARS = 120;
+
+/** Exactly one of `taskId` (one task) or `taskIds` (several): one bad id never stops the others. */
+function settleIds(args: Record<string, unknown>): string[] {
+  const single = argString(args, "taskId");
+  const many = args.taskIds;
+  if (single !== undefined && many !== undefined) {
+    throw new CliError("INVALID_TOOL_INPUT", "Pass either taskId for one task, or taskIds for several — not both.");
+  }
+  if (many !== undefined) {
+    if (!Array.isArray(many) || many.length === 0) throw new CliError("INVALID_TOOL_INPUT", "taskIds must be a non-empty array of task ids.");
+    return many.map((id, index) => {
+      if (typeof id !== "string" || !id.trim()) throw new CliError("INVALID_TOOL_INPUT", `taskIds[${index + 1}] must be a non-empty string.`);
+      return id.trim();
+    });
+  }
+  if (single === undefined) throw new CliError("INVALID_TOOL_INPUT", "Pass taskId for one task, or taskIds for several.");
+  return [single];
+}
+
+async function settleOne(api: ClientApi, parentThreadId: string, taskId: string, options: { stop?: boolean; removeWorktree?: boolean }) {
+  const settled = await api.dispatch({ type: "thread.task.settle", parentThreadId, taskId, ...options });
+  return {
+    taskId,
+    settled: true as const,
+    status: settled.task.status,
+    stopped: settled.stopped,
+    ...(settled.worktreeRemoved === undefined ? {} : { worktreeRemoved: settled.worktreeRemoved }),
+    ...(settled.worktreeReason === undefined ? {} : { worktreeReason: settled.worktreeReason }),
+  };
+}
 
 /** `thread_search`: the store's search, scoped to the caller's project unless asked for all, the caller itself left out. */
 async function threadSearchTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>): Promise<ToolResult> {
@@ -1457,6 +1527,17 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    background: {
+      unknown: described.background.unknown,
+      tasks: described.background.tasks.map((task) => ({
+        taskId: task.taskId,
+        description: task.description,
+        ...(task.command ? { command: task.command } : {}),
+        ...(task.startedAt ? { startedAt: task.startedAt } : {}),
+        ...(task.ageMs === null ? {} : { age: formatTaskDuration(task.ageMs) }),
+        probablyForgotten: task.probablyForgotten,
+      })),
+    },
     // A review child's verdict and warnings ride with the status; a finished
     // review with no VERDICT line is said visibly here, not passed on as one.
     ...(described.review === null ? {} : { review: described.review }),
