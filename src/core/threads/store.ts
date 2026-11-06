@@ -69,16 +69,29 @@ function ledgerFile(root: string, threadId: string, name: LedgerName): string {
   return path.join(root, "threads", threadId, `${name}.jsonl`);
 }
 
-function ledgerProblem(kind: "ledger-line" | "delegation-line", file: string, lineNumber: number): Omit<StoreProblem, "id"> {
+function ledgerProblem(kind: "ledger-line" | "delegation-line", file: string, lineNumber: number, validJson: boolean): Omit<StoreProblem, "id"> {
+  const what = validJson ? "has no row id" : "is not valid JSON";
   return {
     kind,
     file,
     line: lineNumber,
     message:
       kind === "ledger-line"
-        ? `Line ${lineNumber} is not valid JSON and was skipped; the rest of the ledger still loads.`
-        : `Line ${lineNumber} is not valid JSON and was skipped; the other tasks still load.`,
+        ? `Line ${lineNumber} ${what} and was skipped; the rest of the ledger still loads.`
+        : `Line ${lineNumber} ${what} and was skipped; the other tasks still load.`,
   };
+}
+
+/** Canonical JSON for comparing rows: object keys sorted, so key order never matters. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 export class ThreadStore {
@@ -472,30 +485,41 @@ export class ThreadStore {
       const line = lines[index]!;
       if (line.trim().length === 0) continue;
       const lineNumber = index + 1;
-      let value: T | null = null;
+      const report = (validJson: boolean): void => {
+        this.noteProblem({ ...ledgerProblem(kind, file, lineNumber, validJson), ...(threadId !== undefined ? { threadId } : {}) });
+      };
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(line) as T;
-        // A row is an object; anything else parses but reads as corruption.
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) value = parsed;
+        parsed = JSON.parse(line);
       } catch {
-        // Not JSON: possibly a torn append, reported below.
+        parsed = undefined;
       }
-      if (value !== null) {
-        rows.push(value);
-        // Fixed by hand since, or complete now: the warning goes with the bad bytes.
-        this.problems.delete(storeProblemId({ kind, file, line: lineNumber, ...(threadId !== undefined ? { threadId } : {}) }));
-        if (this.pendingTorn.get(file)?.line === lineNumber) this.pendingTorn.delete(file);
-        continue;
-      }
-      if (index === lines.length - 1 && !complete) {
-        const pending = this.pendingTorn.get(file);
-        if (!pending || pending.line !== lineNumber || pending.raw !== line) {
-          // First sight: a crash in flight, not corruption yet. Re-read once.
-          this.pendingTorn.set(file, { line: lineNumber, raw: line });
+      if (parsed !== undefined && typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        if (typeof (parsed as { id?: unknown }).id !== "string") {
+          // Complete JSON with no row id: from a hand edit, never a build.
+          // Reported like corruption so it can be quarantined, never read.
+          report(true);
           continue;
         }
+      } else if (parsed === undefined) {
+        if (index === lines.length - 1 && !complete) {
+          const pending = this.pendingTorn.get(file);
+          if (!pending || pending.line !== lineNumber || pending.raw !== line) {
+            // First sight: a crash in flight, not corruption yet. Re-read once.
+            this.pendingTorn.set(file, { line: lineNumber, raw: line });
+            continue;
+          }
+        }
+        report(false);
+        continue;
+      } else {
+        report(false);
+        continue;
       }
-      this.noteProblem({ ...ledgerProblem(kind, file, lineNumber), ...(threadId !== undefined ? { threadId } : {}) });
+      rows.push(parsed as T);
+      // Fixed by hand since, or complete now: the warning goes with the bad bytes.
+      this.problems.delete(storeProblemId({ kind, file, line: lineNumber, ...(threadId !== undefined ? { threadId } : {}) }));
+      if (this.pendingTorn.get(file)?.line === lineNumber) this.pendingTorn.delete(file);
     }
     return rows;
   }
@@ -557,51 +581,62 @@ export class ThreadStore {
       if (line.trim().length === 0) return;
       try {
         const parsed: unknown = JSON.parse(line);
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return;
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && typeof (parsed as { id?: unknown }).id === "string") return;
+        this.noteProblem({ ...ledgerProblem(kind, file, index + 1, true), ...(threadId !== undefined ? { threadId } : {}) });
       } catch {
-        // Falls through to the report below.
+        this.noteProblem({ ...ledgerProblem(kind, file, index + 1, false), ...(threadId !== undefined ? { threadId } : {}) });
       }
-      this.noteProblem({ ...ledgerProblem(kind, file, index + 1), ...(threadId !== undefined ? { threadId } : {}) });
     });
   }
 
   /**
-   * Splice a row list into raw ledger lines: rows replace the parsed line
-   * with the same id, parsed lines with no match in the list are dropped,
-   * and every other line — a bad line, a blank — is kept byte-for-byte.
-   * Rows without an id in the file are appended. Blank lines are dropped,
-   * as rewrites always normalized them away.
+   * Splice a row list into raw ledger lines: rows with an id replace the
+   * parsed line with the same id; rows without one consume one value-equal
+   * file line each, so a rewrite never doubles them. Parsed lines with no
+   * match in the list are dropped, and every other line is kept
+   * byte-for-byte. Blank lines are dropped, as rewrites always did.
    */
   private mergeLedgerLines(current: string[], rows: readonly unknown[]): string[] {
     const wanted = new Map<string, unknown>();
-    const idless: unknown[] = [];
+    const idless: Array<{ row: unknown; key: string }> = [];
     for (const row of rows) {
       const id = (row as { id?: unknown } | null)?.id;
-      if (typeof id === "string") wanted.set(id, row);
-      else idless.push(row);
+      if (typeof id === "string") {
+        wanted.set(id, row);
+        continue;
+      }
+      try {
+        idless.push({ row, key: canonicalJson(row) });
+      } catch {
+        idless.push({ row, key: "" });
+      }
     }
     const seen = new Set<string>();
     const next: string[] = [];
     for (const raw of current) {
       if (raw.trim().length === 0) continue;
-      let id: string | null = null;
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(raw) as { id?: unknown } | null;
-        id = typeof parsed?.id === "string" ? parsed.id : null;
+        parsed = JSON.parse(raw);
       } catch {
         next.push(raw);
         continue;
       }
-      if (id === null) {
-        next.push(raw);
+      const id = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as { id?: unknown }).id
+        : null;
+      if (typeof id === "string") {
+        if (!wanted.has(id)) continue;
+        seen.add(id);
+        next.push(JSON.stringify(wanted.get(id)));
         continue;
       }
-      if (!wanted.has(id)) continue;
-      seen.add(id);
-      next.push(JSON.stringify(wanted.get(id)));
+      const match = idless.findIndex((entry) => entry.key !== "" && entry.key === canonicalJson(parsed));
+      if (match >= 0) idless.splice(match, 1);
+      next.push(raw);
     }
     for (const [id, row] of wanted) if (!seen.has(id)) next.push(JSON.stringify(row));
-    for (const row of idless) next.push(JSON.stringify(row));
+    for (const { row } of idless) next.push(JSON.stringify(row));
     return next;
   }
 

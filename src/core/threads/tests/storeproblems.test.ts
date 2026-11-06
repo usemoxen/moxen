@@ -317,4 +317,33 @@ describe("bad store records", () => {
     expect(await readFile(two.movedTo, "utf8")).toContain("{bad two");
     expect((await store.readMessages(thread.id)).map((message) => message.id)).toEqual(["m1"]);
   });
+
+  it("reports an id-less object line instead of reading it silently", async () => {
+    const { root, store } = await testStore();
+    const thread = await createThread(store, { projectId: "project-1", title: "Noid", modelSelection: MODEL });
+    await store.appendLedger(thread.id, "messages", { id: "m1", threadId: thread.id, turnId: "t1", role: "user", text: "hi", createdAt: store.nowIso() });
+    await appendFile(path.join(root, "threads", thread.id, "messages.jsonl"), '{"noid":true}\n', "utf8");
+
+    expect((await store.readMessages(thread.id)).map((message) => message.id)).toEqual(["m1"]);
+    expect(store.storeProblems()).toMatchObject([{ kind: "ledger-line", threadId: thread.id, line: 2 }]);
+  });
+
+  it("does not double an id-less line on rewrite", async () => {
+    const { root, store } = await testStore();
+    const thread = await createThread(store, { projectId: "project-1", title: "Noid", modelSelection: MODEL });
+    await store.appendLedger(thread.id, "messages", { id: "m1", threadId: thread.id, turnId: "t1", role: "user", text: "hi", createdAt: store.nowIso() });
+    const file = path.join(root, "threads", thread.id, "messages.jsonl");
+    await appendFile(file, '{"noid":true}\n', "utf8");
+    await store.readMessages(thread.id);
+
+    const count = async () => (await readFile(file, "utf8")).split("\n").filter((line) => line === '{"noid":true}').length;
+    await store.rewriteLedger(thread.id, "messages", await store.readMessages(thread.id));
+    expect(await count()).toBe(1);
+    await store.rewriteLedger(thread.id, "messages", await store.readMessages(thread.id));
+    expect(await count()).toBe(1);
+    // A caller-passed id-less row matching the file line is consumed, not appended.
+    await store.rewriteLedger(thread.id, "messages", [...(await store.readMessages(thread.id)), { noid: true } as never]);
+    expect(await count()).toBe(1);
+    expect(store.storeProblems()).toMatchObject([{ kind: "ledger-line", threadId: thread.id }]);
+  });
 });
