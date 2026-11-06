@@ -327,6 +327,51 @@ describe("full research runs", () => {
     }
   });
 
+  it("leaves the mark alone for maintenance sends, so the first real prompt still asks", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    const proposals = async (threadId: string) => await connection.query({ type: "research.proposals", threadId });
+    try {
+      const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      const threadId = randomUUID();
+      await connection.dispatch({ type: "thread.create", threadId, projectId: project.project.id, title: "Fresh research", interactionMode: "research" });
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      unsubscribe = connection.subscribeShell({ researchProposals: [threadId] }, () => {}, () => {});
+      // Either the turn runs (fixed) or a proposal parks it (the bug): answer
+      // a parked question so the dispatch can settle, then fail on the spent mark.
+      const settleSend = async (send: Promise<unknown>): Promise<void> => {
+        await expect.poll(async () => {
+          if ((await proposals(threadId)).length > 0) return "asked";
+          const turns = await store.readTurns(threadId);
+          return turns.length > 0 && turns.every((turn) => turn.status !== "running" && turn.status !== "queued") ? "settled" : "waiting";
+        }, WAIT).not.toBe("waiting");
+        if ((await proposals(threadId)).length > 0) {
+          const [proposal] = await proposals(threadId);
+          await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+        }
+        await send;
+      };
+      // A bare `/compact` turn neither asks nor spends the question.
+      await settleSend(connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "/compact" }, wait: false }));
+      expect(await proposals(threadId)).toEqual([]);
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      // A held work-queue entry neither asks nor spends it either.
+      const held = await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "Later" }, wakeSettled: true, queue: { conditions: [], held: true, order: 1, sequential: true, continuation: "same-thread" }, wait: false });
+      expect(await proposals(threadId)).toEqual([]);
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId, turnId: held.turnId });
+      // The first real prompt still asks.
+      const first = connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "First question" }, wait: true });
+      await expect.poll(async () => (await proposals(threadId)).length, WAIT).toBe(1);
+      const [proposal] = await proposals(threadId);
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await first;
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
   it("does not propose research while busy and preserves mode-lock and delivery semantics", async () => {
     const harness = await testHarness({ leaveTurnsRunning: true });
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });

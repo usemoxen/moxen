@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { continueThread, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -131,6 +131,18 @@ describe("a thread continued in a new one", () => {
     driver.stopBackgroundTask = (threadId: string, taskId: string) => Effect.sync(() => void taskStops.push(`${threadId}:${taskId}`));
     return { stopped, taskStops };
   }
+
+  it("carries an unclaimed run-size mark to the new thread, and none when there is none", async () => {
+    const w = await world();
+    const marked = await w.make("researching");
+    await updateThreadMeta(w.store, marked.id, { interactionMode: "research" });
+    expect((await w.store.readThreadRecord(marked.id))?.researchPicker).toBe(true);
+    const plain = await w.make("building");
+    const movedMarked = await continueThread(w.ctx, { threadId: marked.id });
+    const movedPlain = await continueThread(w.ctx, { threadId: plain.id });
+    expect((await w.store.readThreadRecord(movedMarked.threadId))?.researchPicker).toBe(true);
+    expect((await w.store.readThreadRecord(movedPlain.threadId))?.researchPicker).toBeUndefined();
+  });
 
   it("ends its session so a background task cannot wake it, and leaves every other thread's session alone", async () => {
     const w = await world();
