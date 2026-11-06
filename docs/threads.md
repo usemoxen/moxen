@@ -87,12 +87,18 @@ Review delegation is a single reviewer: `mode: "review"` with the PR or
 branch named in the task. The reviewer checks the target out in a scratch
 worktree, changes nothing in it, proves each finding with a throwaway test
 (or marks it read from code) and ends with `VERDICT: MERGE` or
-`VERDICT: FIX FIRST`. Pass target-specific questions to attack in the task;
+`VERDICT: FIX FIRST` on the report's last line — only a trailing verdict
+counts. Pass target-specific questions to attack in the task;
 the report answers each one first-class. The task notification and
 `task_status` carry the verdict and the review; a finished review with no
-`VERDICT` line is said visibly instead of passed on as finished. When the
-reviewer runs on the same model as the delegating thread, both say so: a
-warning, not a refusal.
+trailing `VERDICT` line is said visibly instead of passed on as finished.
+When the reviewer runs on the same model as the delegating thread, both say so: a
+warning, not a refusal. The comparison reads the models recorded when the
+task was delegated, so a parent that moves on cannot rewrite it. The
+settled verdict is pinned on the delegation: a conversational follow-up
+turn cannot rewrite it, while a follow-up that settles with its own verdict
+re-pins. Continuing a review child starts the new thread in Build, with a
+ledger note saying Review was reset.
 
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and
