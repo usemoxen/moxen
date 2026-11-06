@@ -43,7 +43,7 @@ import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/self
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
 import type { LatestVersions } from "../core/catalog/update.js";
-import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
+import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
@@ -129,6 +129,7 @@ import {
   delegate,
   beginResearchRun,
   isResearchRunActive,
+  moxenRoutingFor,
   resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
@@ -164,7 +165,7 @@ import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
-import { persistUsageLimits, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
@@ -196,6 +197,14 @@ import {
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
+/**
+ * Bound for one driver's freshness probe inside `usage.refresh`: covers the
+ * slowest healthy probe (OpenCode Go's five-second HTTP read) with margin,
+ * well inside the tool's outer eight-second race. A probe slower than this is
+ * cut here, while its late completion still freshens the next call through
+ * the normal event path.
+ */
+const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
 
 /** Config writes in flight, by resolved file: two writers to one file queue, others run together. */
 const configWrites = new Map<string, Promise<unknown>>();
@@ -788,6 +797,37 @@ export class DirectConnection implements ClientApi {
     if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
     this.ownedDrivers.add(driver);
     return driver;
+  }
+
+  /**
+   * Explicit freshness ask behind `usage_status`: every owned driver re-reads
+   * its subscription windows where that is cheap (an open session or live
+   * connection - never a new session, never a model call), in parallel, and
+   * a probe that lands is recorded under its key. Each probe races its own
+   * deadline, so one hung or slow driver cannot stall the rest: what lands is
+   * recorded, the round returns a partial snapshot, and one driver's failure
+   * never stops the rest. Drivers with nothing cheap to read sit the round out.
+   */
+  private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
+    await Promise.allSettled(
+      [...this.ownedDrivers].map(async (driver) => {
+        // Records on landing, even past the deadline: the round answers from
+        // the partial snapshot, and a late probe freshens the next call.
+        const landed = (async () => await driver.refreshUsage?.())().then(
+          (refreshed) => {
+            if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+            return refreshed;
+          },
+          () => null,
+        );
+        const deadline = new Promise<null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), USAGE_DRIVER_PROBE_TIMEOUT_MS);
+          timer.unref?.();
+        });
+        await Promise.race([landed, deadline]);
+      }),
+    );
+    return usageLimitsSnapshot();
   }
 
   // -- subscriptions -------------------------------------------------------
@@ -1554,8 +1594,18 @@ export class DirectConnection implements ClientApi {
 
   /** A new thread that carries on from `threadId`, opened with a handoff of it (`continueThread`). */
   private async continueThread(command: CommandOf<"thread.continue">): Promise<CommandResult<"thread.continue">> {
-    const continued = await continueThread(await this.context(), {
+    const ctx = await this.context();
+    const source = await ctx.store.readThreadRecord(command.threadId);
+    if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${command.threadId}.`, { exitCode: 2 });
+    // A model handoff resolves like a follow-up: the old thread's model
+    // unless the request overrides it, never the settings default. Its tasks
+    // keep their own provider and model either way.
+    const modelRequested = command.modelSelection !== undefined || command.provider !== undefined
+      || command.model !== undefined || command.speedMode !== undefined || command.thinkingEffort !== undefined;
+    const modelSelection = command.modelSelection ?? followUpSelection(source.modelSelection, ctx.config, command, "") ?? source.modelSelection;
+    const continued = await continueThread(ctx, {
       threadId: command.threadId,
+      ...(modelRequested ? { modelSelection } : {}),
       ...(command.scheduledFor !== undefined ? { scheduledFor: command.scheduledFor } : {}),
     });
     return { ...continued, accepted: true };
@@ -1867,6 +1917,17 @@ export class DirectConnection implements ClientApi {
     // The shipped manual must still work when configuration cannot be loaded.
     if (query.type === "knowledge.search") return searchKnowledge(query.query);
     if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
+    // Routing a call without session identity needs no configuration either:
+    // the thread record names the driver, which counts the sessions sharing
+    // the entry — so an offline knowledge call never fails on config. A
+    // thread with no record (or no driver) keeps the entry owner's fallback:
+    // the entry serves it alone until anything proves otherwise.
+    if (query.type === "thread.entry-sessions") {
+      const record = await (await this.store()).readThreadRecord(query.threadId).catch(() => null);
+      const instanceId = record?.modelSelection.instanceId ?? null;
+      if (!record || !instanceId) return { count: 1 };
+      return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
+    }
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":
@@ -1924,6 +1985,18 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "opencode.session-thread": {
+        // The thread behind a live OpenCode session, for routing the
+        // directory's shared `moxen` entry to the session that made each
+        // call. The drivers that own live sessions answer; null fails the
+        // call safe rather than serving another thread.
+        for (const driver of this.ownedDrivers) {
+          const threadId = driver.threadForNativeSession?.(query.nativeSessionId) ?? null;
+          if (threadId === null) continue;
+          return await moxenRoutingFor(ctx, threadId);
+        }
+        return null;
+      }
       case "research.proposals":
         this.expireResearchProposals();
         return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);
@@ -1987,6 +2060,8 @@ export class DirectConnection implements ClientApi {
         return await this.checkAppUpdate();
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "usage.refresh":
+        return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
         return this.usageProtection.read();
       case "queue.read":
@@ -1994,9 +2069,9 @@ export class DirectConnection implements ClientApi {
       case "handoff.pending":
         return { requestId: await pendingHandoff(await this.context(), query.threadId) };
       case "usage.stats":
-        return await readUsageStats(await this.store(), query.range ?? "all");
+        return await readUsageStats(await this.store(), query.range ?? "all", new Date(), ctx.config);
       case "usage.card":
-        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette);
+        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette, ctx.config);
       case "remote.devices":
         return {
           devices: this.remoteAccess

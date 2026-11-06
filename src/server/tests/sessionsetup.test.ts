@@ -8,7 +8,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { runProcess } from "../../core/infra/process.js";
 import { testHarness } from "../../core/testing/harness.js";
@@ -69,18 +69,18 @@ describe("Moxen's own tools, switched per provider", () => {
     const knowledge = ["knowledge_read", "knowledge_search"];
     const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
-    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_status", ...threads, "web_fetch"]);
-    expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_status", ...threads]);
+    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_status", ...threads, "usage_status", "web_fetch"]);
+    expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "usage_status", "web_fetch"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_status", ...threads, "usage_status"]);
   });
 
   it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {
     const noMemory = { memory: false };
     expect(await moxenTools({ orchestration: false, webFetch: false }, noMemory)).toBeNull();
     expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
-    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["context_usage", "knowledge_read", "knowledge_search", "web_fetch"]);
+    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["context_usage", "knowledge_read", "knowledge_search", "usage_status", "web_fetch"]);
     // Memory alone keeps the server, with its tools only.
-    expect(await moxenTools({ moxenTools: false })).toEqual(["context_usage", "knowledge_read", "knowledge_search", "memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"]);
+    expect(await moxenTools({ moxenTools: false })).toEqual(["context_usage", "knowledge_read", "knowledge_search", "memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search", "usage_status"]);
   });
 });
 
@@ -777,17 +777,16 @@ describe("delegating into a worktree from a thread with no saved branch (MXN-270
   });
 });
 
-describe("delegating with an idempotency key, and handing the shared entry back", () => {
+describe("delegating with an idempotency key, and routing the shared entry per call", () => {
   async function sharedWorld() {
-    const restored: string[] = [];
-    const harness = await testHarness({ onRestoreMcpServers: (threadId) => restored.push(threadId) });
+    const harness = await testHarness();
     const connection = new DirectConnection({
       storeRoot: harness.root,
       drivers: harness.drivers,
       config: async () => ({ ...harness.config }),
     });
     const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
-    return { harness, connection, restored, parentThreadId: parent.threadId };
+    return { harness, connection, parentThreadId: parent.threadId };
   }
 
   it("returns the original task instead of delegating again for the same key", async () => {
@@ -820,34 +819,105 @@ describe("delegating with an idempotency key, and handing the shared entry back"
     }
   });
 
-  it("hands the moxen entry back to the parent once a shared child settles", async () => {
-    const { connection, restored, parentThreadId } = await sharedWorld();
+  /** MXN-290: a retry after the task handed off returns the current incarnation, not a duplicate. */
+  it("follows the continuedIn chain for an idempotency-key retry after the task handed off", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
     try {
-      await connection.dispatch({ type: "thread.delegate", parentThreadId, task: "Sub task", title: "Shared work", isolation: "shared" });
-      // The child's session start flipped the directory's single `moxen`
-      // entry to the child; settling hands it back to the parent, and only to the parent.
-      await vi.waitFor(() => expect(restored).toEqual([parentThreadId]));
+      const key = randomUUID();
+      const first = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      const continued = await connection.dispatch({ type: "thread.continue", threadId: first.child.id });
+      expect(continued.threadId).not.toBe(first.child.id);
+      const retry = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      expect(retry.child.id).toBe(continued.threadId);
+      expect(retry.task.taskId).toBe(continued.threadId);
+      // No duplicate: the original row plus its continuation, and still one row carrying the key.
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(2);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(1);
     } finally {
       await connection.close();
     }
   });
 
-  it("leaves the entry alone when the child has its own worktree", async () => {
-    const { harness, connection, restored, parentThreadId } = await sharedWorld();
+  /** MXN-290 review: a retry never follows the chain into a home the caller cannot control. */
+  it("delegates anew when the idempotency chain was re-pointed to another thread", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
     try {
-      const delegated = await connection.dispatch({
+      const key = randomUUID();
+      const elsewhere = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Other home", wait: true, threadEnvMode: "local" });
+      const rehomed = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Re-homed task", wait: true, threadEnvMode: "local" });
+      const now = new Date().toISOString();
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId, childThreadId: randomUUID(), prompt: "Sub task",
+        status: "running", idempotencyKey: key, continuedIn: rehomed.threadId, createdAt: now, updatedAt: now,
+      });
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId: elsewhere.threadId, childThreadId: rehomed.threadId, prompt: "Sub task",
+        status: "running", createdAt: now, updatedAt: now,
+      });
+      const retry = await connection.dispatch({
         type: "thread.delegate",
         parentThreadId,
         task: "Sub task",
-        title: "Own tree",
-        isolation: "worktree",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
       });
-      expect(delegated.worktree).toBeDefined();
-      expect(delegated.task.status).toBe("completed");
-      // No condition can prove an absence, so this waits out the hook's
-      // post-settle tail: a restore armed here would have fired long before.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      expect(restored).toEqual([]);
+      // Not the re-homed task: a fresh delegate under the caller.
+      expect(retry.child.id).not.toBe(rehomed.threadId);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(2);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("counts the sessions sharing a thread's entry as one for unshared drivers, and one for unknown threads", async () => {
+    const { connection, parentThreadId } = await sharedWorld();
+    try {
+      // Harness endpoints serve one thread each, so a call without session
+      // identity falls back to the entry's thread.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: parentThreadId })).toEqual({ count: 1 });
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: "missing-thread" })).toEqual({ count: 1 });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("resolves a live native session to its thread, with that thread's gating", async () => {
+    const { connection, parentThreadId } = await sharedWorld();
+    try {
+      // The parent's own tools: nothing is delegated away.
+      expect(await connection.query({ type: "opencode.session-thread", nativeSessionId: `harness-session-${parentThreadId}` })).toEqual({
+        threadId: parentThreadId,
+        delegated: false,
+        webFetch: true,
+        memory: "write",
+        checklist: true,
+      });
+      // No live session matches: null, so the call fails safe instead of landing on another thread.
+      expect(await connection.query({ type: "opencode.session-thread", nativeSessionId: "harness-session-elsewhere" })).toBeNull();
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId, task: "Sub task", title: "Shared work", isolation: "shared" });
+      // A delegated task gets none of the delegation tools, and reads memory only.
+      expect(await connection.query({ type: "opencode.session-thread", nativeSessionId: `harness-session-${delegated.child.id}` })).toEqual({
+        threadId: delegated.child.id,
+        delegated: true,
+        webFetch: true,
+        memory: "read",
+        checklist: true,
+      });
     } finally {
       await connection.close();
     }

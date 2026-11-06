@@ -348,12 +348,19 @@ export type CommandBody =
   /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
   | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
   /**
-   * Continue a thread in a new one: same project, model and modes, opened
-   * with a handoff written from the old thread's ledger. `scheduledFor`
-   * holds that first message until then (after a usage limit resets, say);
-   * without it the new thread starts at once.
+   * Continue a thread in a new one: same project and checkout, opened with a
+   * handoff written from the old thread's ledger. Without a model request the
+   * new thread keeps the old thread's model; a model request hands off to
+   * another model instead, resolved like a follow-up — the old thread's
+   * selection unless the request overrides it, never the settings or the
+   * installation default. The request is either a full `modelSelection`
+   * (what a picker sends, effort options included) or `provider`/`model`
+   * with the optional `speedMode`/`thinkingEffort` (what the CLI sends).
+   * Delegated tasks keep their own provider and model; only the parent link
+   * moves. `scheduledFor` holds that first message until then (after a usage
+   * limit resets, say); without it the new thread starts at once.
    */
-  | { readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string }
+  | ({ readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string; readonly modelSelection?: ModelSelection } & ModelRequest)
   /**
    * `/btw`: a side question answered on a copy of the thread's context,
    * with no tools, and never recorded in the thread. A command rather than
@@ -526,6 +533,18 @@ export type Query =
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
   | { readonly type: "research.run"; readonly threadId: string }
+  /**
+   * The thread behind a live OpenCode session: which thread's tools and
+   * identity serve the session's calls on the directory's shared `moxen`
+   * entry, with the gating those calls run under. Null when no live session
+   * matches — the call then fails safe, never lands on another thread.
+   */
+  | {
+      readonly type: "opencode.session-thread";
+      readonly nativeSessionId: string;
+    }
+  /** How many live sessions could place calls on a thread's entry: more than one makes a call without session identity ambiguous. */
+  | { readonly type: "thread.entry-sessions"; readonly threadId: string }
   | { readonly type: "research.proposals"; readonly threadId: string }
   | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
@@ -595,6 +614,13 @@ export type Query =
    */
   | { readonly type: "usage.limits" }
   | { readonly type: "usage.protection" }
+  /**
+   * Ask every owned driver for a fresh usage reading where that is cheap (an
+   * open session or live connection - never a new session, never a model
+   * call), then answer the stored snapshot, refreshed where the probe
+   * landed. Read-only; drivers with nothing cheap to read sit the round out.
+   */
+  | { readonly type: "usage.refresh" }
   | { readonly type: "queue.read" }
   | { readonly type: "handoff.pending"; readonly threadId: string }
   /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
@@ -698,6 +724,14 @@ export interface QueryResults {
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
   "research.run": ResearchRunView | null;
+  "opencode.session-thread": {
+    readonly threadId: string;
+    readonly delegated: boolean;
+    readonly webFetch: boolean;
+    readonly memory: "write" | "read" | "off";
+    readonly checklist: boolean;
+  } | null;
+  "thread.entry-sessions": { readonly count: number };
   "research.proposals": readonly ResearchProposal[];
   "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
@@ -728,6 +762,7 @@ export interface QueryResults {
   "usage.stats": UsageStats;
   "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
+  "usage.refresh": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "usage.protection": UsageProtectionSnapshot;
   "queue.read": { readonly entries: readonly WorkQueueEntry[] };
   "handoff.pending": { readonly requestId: string | null };
@@ -1348,13 +1383,22 @@ export function decodeCommand(value: unknown): Command {
         threadId: requireThreadId(record.threadId),
         question: requireField(record.question, type, "question"),
       };
-    case "thread.continue":
+    case "thread.continue": {
+      const selection = asModelSelection(record.modelSelection);
+      const namesModel = asString(record.provider) !== null || asString(record.model) !== null
+        || asString(record.speedMode) !== null || asString(record.thinkingEffort) !== null;
+      if (selection && namesModel) {
+        throw new CliError("INVALID_THREAD_OPTION", "thread.continue takes either modelSelection or provider/model, not both.", { exitCode: 2 });
+      }
       return {
         ...meta,
         type,
         threadId: requireThreadId(record.threadId),
         ...optionalString(record, "scheduledFor"),
+        ...(selection ? { modelSelection: selection } : {}),
+        ...decodeModelRequest(record, type),
       };
+    }
     case "forge.request.create":
       return {
         ...meta,
@@ -1599,6 +1643,10 @@ export function decodeQuery(value: unknown): Query {
     case "research.run":
     case "research.messages":
       return { type, threadId: requireThreadId(record.threadId) };
+    case "opencode.session-thread":
+      return { type, nativeSessionId: requireField(record.nativeSessionId, type, "nativeSessionId") };
+    case "thread.entry-sessions":
+      return { type, threadId: requireThreadId(record.threadId) };
     case "research.role.report":
       return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
     case "thread.task.status":
@@ -1628,6 +1676,7 @@ export function decodeQuery(value: unknown): Query {
     case "usage.stats":
       return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
+    case "usage.refresh":
     case "usage.protection":
     case "queue.read":
     case "remote.status":
