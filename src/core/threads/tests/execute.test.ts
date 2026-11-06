@@ -18,6 +18,7 @@ import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { settleRuns } from "../../testing/turns.js";
+import { rmTempAsync } from "../../testing/tmp.js";
 import { buildHandoff } from "../handoff.js";
 
 /**
@@ -549,7 +550,9 @@ describe("context usage", () => {
   /** MXN-290 review: the outcome is written on timeout when the checkpoint hangs, and a late checkpoint breaks nothing. */
   it("writes the failure outcome even when the checkpoint never resolves", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-checkpoint-hang-"));
-    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    // Retrying remove: the released capture's git can still hold the folder
+    // for a moment on Windows (EBUSY), and a bare rm turns that into a failure.
+    cleanup.push(() => rmTempAsync(root));
     const store = await openThreadStore(root);
     const thread = await createThread(store, {
       projectId: "project-1",
