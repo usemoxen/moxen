@@ -683,7 +683,9 @@ configCommand
   .action(() =>
     action(async () => {
       const context = await commandContext();
-      const { config } = await serverConfig(context);
+      // The server's file and reading of it, as `config show` reports:
+      // the listing describes the settings in force, not this machine's.
+      const { config, path: file, exists } = await serverConfig(context);
       // Straight off the schema table, so this listing and the TUI
       // settings page can never describe a key differently.
       const settings = describeSettings(config).map((view) => ({
@@ -703,7 +705,7 @@ configCommand
         ...(view.effective ? { effective: view.effective } : {}),
       }));
       writeSuccess(
-        { path: context.configPath, exists: context.configExists, settings },
+        { path: file, exists, settings },
         context,
         settings
           .map((setting) => `${setting.key.padEnd(34)} ${String(setting.value ?? "—")}`)
