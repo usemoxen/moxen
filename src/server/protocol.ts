@@ -1423,12 +1423,12 @@ export function decodeCommand(value: unknown): Command {
     case "harness.profile.test":
       return { ...meta, type, profileId: requireField(record.profileId, type, "profileId"), ...(asString(record.model) !== null ? { model: asString(record.model)! } : {}) };
     case "harness.models.discover": {
-      const format = asString(record.apiFormat);
+      const { apiFormat } = optionalEnum(record, "apiFormat", ["chat", "responses", "anthropic"] as const, type);
       return {
         ...meta,
         type,
         baseUrl: requireField(record.baseUrl, type, "baseUrl"),
-        apiFormat: format === "responses" || format === "anthropic" ? format : "chat",
+        apiFormat: apiFormat ?? "chat",
         ...(asString(record.apiKeyEnv) !== null ? { apiKeyEnv: asString(record.apiKeyEnv)! } : {}),
       };
     }

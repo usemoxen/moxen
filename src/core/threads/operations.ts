@@ -2860,6 +2860,12 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   const taskId = requireThreadId(rawTaskId);
   const parent = await threadWithLedger(ctx.store, parentThreadId);
   const delegation = await delegationForChild(ctx.store, parentThreadId, taskId);
+  if (!delegation && !(await isTaskVisibleToParent(ctx, parentThreadId, taskId))) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
+      exitCode: 3,
+      details: { taskId, parentThreadId },
+    });
+  }
   const child = await threadWithLedger(ctx.store, delegation?.childThreadId ?? taskId).catch(() => null);
   if (!child || child.projectId !== parent.projectId) {
     throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
@@ -2873,6 +2879,26 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
     child,
     task: taskOf(child, taskId),
   };
+}
+
+/**
+ * Whether `parentThreadId` may ask after `taskId` without a direct
+ * delegation row: a task delegated from an earlier thread in its lineage
+ * (a continuation inherits what was delegated to it), or a research role
+ * of a run this thread leads (roles are published to the run, and older
+ * delegations may predate the row).
+ */
+async function isTaskVisibleToParent(ctx: OperationContext, parentThreadId: string, taskId: string): Promise<boolean> {
+  const rows = await ctx.store.readDelegations();
+  const lineage = await threadLineage(ctx, parentThreadId);
+  let current: string | undefined = taskId;
+  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+    if (rows.some((row) => row.childThreadId === current && lineage.has(row.parentThreadId))) return true;
+    current = rows.find((row) => row.childThreadId === current)?.continuedIn;
+  }
+  const lead = await ctx.store.readThreadRecord(parentThreadId);
+  const runs = lead?.researchRun === undefined ? [] : [lead.researchRun, ...(lead.pastResearchRuns ?? [])];
+  return runs.some((run) => run.roles.some((role) => role.threadId === taskId));
 }
 
 /** A thread and the threads it continued, nearest first: one conversation, carried on. */
