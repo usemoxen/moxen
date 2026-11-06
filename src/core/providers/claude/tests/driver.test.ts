@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { describe, expect, it, vi } from "vitest";
 
@@ -6,6 +7,7 @@ import { CliError } from "../../../errors.js";
 import { CLAUDE_NATIVE_TOOLS } from "../../../nativetools.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { ClaudeDriver, claudeContextUsageOf } from "../driver.js";
+import type { ClaudeTransport } from "../transport.js";
 import {
   assistantText,
   assistantToolUse,
@@ -182,6 +184,63 @@ describe("claude driver turns", () => {
     await Effect.runPromise(driver.interruptTurn("thread-1"));
     await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
     expect(transport.created[0]!.interrupted).toBe(1);
+  });
+
+  it("publishes one interruption for an interrupt, and the cut-off run's own result settles nothing more", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+      await Effect.runPromise(driver.interruptTurn("thread-1"));
+      await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
+      await vi.waitFor(() => expect(events.some((event) => event.type === "turn.interrupted")).toBe(true));
+      // The interrupted run still ends with its own result; drained, never
+      // settled or published a second time.
+      transport.created[0]!.push(successResult("late"));
+      // The pump drains and retires after the interrupt; nothing more arrives.
+      await vi.waitFor(() => expect(events.some((event) => event.type === "thread.state.changed")).toBe(true));
+      expect(events.filter((event) => event.type === "turn.interrupted")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.completed" || event.type === "turn.failed")).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
+  it("publishes the turn's failure when its message pump crashes", async () => {
+    let releaseCrash!: () => void;
+    const crashGate = new Promise<void>((resolve) => {
+      releaseCrash = resolve;
+    });
+    const crashing: ClaudeTransport = {
+      query: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield initMessage();
+          await crashGate;
+          throw new Error("pump boom");
+        },
+        interrupt: async () => undefined,
+        setPermissionMode: async () => undefined,
+        setModel: async () => undefined,
+      }),
+    };
+    const driver = new ClaudeDriver({ transport: crashing });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+      releaseCrash();
+      await expect(outcomePromise).resolves.toMatchObject({ status: "failed", error: expect.stringContaining("pump boom") });
+      await vi.waitFor(() => expect(events.some((event) => event.type === "turn.failed")).toBe(true));
+      expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(1);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
   });
 
   it("fails turns on error results", async () => {
@@ -628,6 +687,200 @@ describe("claude driver session controls", () => {
     expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
     await Effect.runPromise(driver.stopAll());
     expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
+  });
+
+  it("settles the running turn even when the process never answers interrupt, and still closes", async () => {
+    // stop() exists for a hung process: if interrupt() never returns, the
+    // settle must not wait behind it, or awaitTurn waiters hang anyway —
+    // and close() must still be reached, or the child is orphaned.
+    let closed = 0;
+    const interruptGate = new Promise<void>(() => undefined);
+    const hanging: ClaudeTransport = {
+      query: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield initMessage();
+          await new Promise<void>(() => undefined);
+        },
+        interrupt: () => interruptGate,
+        setPermissionMode: async () => undefined,
+        setModel: async () => undefined,
+        close: () => {
+          closed += 1;
+        },
+      }),
+    };
+    const driver = new ClaudeDriver({ transport: hanging, stopTimeoutMs: 20 });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    let status: string | null = null;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId).then((result) => {
+      status = result.status;
+      return result;
+    });
+    try {
+      // Never awaited: the hung interrupt must hold neither the waiter nor close().
+      void Effect.runPromise(driver.stopSession("thread-1"));
+      await vi.waitFor(() => expect(status).toBe("interrupted"));
+      await expect(outcome).resolves.toMatchObject({ status: "interrupted", error: "Session ended." });
+      await vi.waitFor(() => expect(closed).toBe(1));
+      await vi.waitFor(() => expect(events.some((event) => event.type === "turn.interrupted")).toBe(true));
+      expect(events.filter((event) => event.type === "turn.interrupted")).toHaveLength(1);
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
+  it("a stop finishing after a restart leaves the successor session alone", async () => {
+    // A stale close must not delete a session that started after the stop
+    // began, nor publish session-stopped for it.
+    let queries = 0;
+    const closes: boolean[] = [];
+    const hangingFirst: ClaudeTransport = {
+      query: () => {
+        const hanging = queries === 0;
+        queries += 1;
+        const index = closes.length;
+        closes.push(false);
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield initMessage();
+            await new Promise<void>(() => undefined);
+          },
+          interrupt: () => (hanging ? new Promise<void>(() => undefined) : Promise.resolve()),
+          setPermissionMode: async () => undefined,
+          setModel: async () => undefined,
+          close: () => {
+            closes[index] = true;
+          },
+        };
+      },
+    };
+    const driver = new ClaudeDriver({ transport: hangingFirst, stopTimeoutMs: 30 });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    const stopping = Effect.runPromise(driver.stopSession("thread-1"));
+    try {
+      await expect(outcomePromise).resolves.toMatchObject({ status: "interrupted" });
+      // Restart on the settled turn while the stale close still waits out its bound.
+      await Effect.runPromise(driver.startSession(START));
+      await stopping;
+      // Only the stale session's own transport was closed; the successor
+      // stays live and no session-stopped was published for it.
+      expect(closes).toEqual([true, false]);
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
+      expect(
+        events.filter((event) => event.type === "thread.state.changed" && (event as { state: string }).state === "session-stopped"),
+      ).toHaveLength(0);
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "again" }));
+    } finally {
+      await stopping.catch(() => undefined);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
+  it("stopAll closes every session even when one interrupt never answers", async () => {
+    // Sessions close concurrently: the session hung in interrupt() waits
+    // out only its own bound while the rest reach close() at once.
+    let queries = 0;
+    let closed = 0;
+    const hangingFirst: ClaudeTransport = {
+      query: () => {
+        queries += 1;
+        const hanging = queries === 1;
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield initMessage();
+            await new Promise<void>(() => undefined);
+          },
+          interrupt: () => (hanging ? new Promise<void>(() => undefined) : Promise.resolve()),
+          setPermissionMode: async () => undefined,
+          setModel: async () => undefined,
+          close: () => {
+            closed += 1;
+          },
+        };
+      },
+    };
+    const driver = new ClaudeDriver({ transport: hangingFirst, stopTimeoutMs: 20 });
+    await Effect.runPromise(driver.startSession(START));
+    await Effect.runPromise(driver.startSession({ threadId: "thread-2", workingDirectory: "/repo" }));
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "thread-2", prompt: "hi" }));
+    const firstOutcome = driver.awaitTurn("thread-1", first.turnId);
+    const secondOutcome = driver.awaitTurn("thread-2", second.turnId);
+    const stopping = Effect.runPromise(driver.stopAll());
+    try {
+      await vi.waitFor(() => expect(closed).toBe(2));
+      await stopping;
+      await expect(firstOutcome).resolves.toMatchObject({ status: "interrupted" });
+      await expect(secondOutcome).resolves.toMatchObject({ status: "interrupted" });
+      expect(await Effect.runPromise(driver.listSessions())).toHaveLength(0);
+    } finally {
+      await stopping.catch(() => undefined);
+    }
+  });
+
+  it("cleans up the session even when close() itself fails", async () => {
+    // A failing close must not leave the session listed: cleanup runs in a
+    // finally, and the wind-down error surfaces only after it.
+    const failing: ClaudeTransport = {
+      query: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield initMessage();
+          await new Promise<void>(() => undefined);
+        },
+        interrupt: () => Promise.resolve(),
+        setPermissionMode: async () => undefined,
+        setModel: async () => undefined,
+        close: () => {
+          throw new Error("close boom");
+        },
+      }),
+    };
+    const driver = new ClaudeDriver({ transport: failing });
+    await Effect.runPromise(driver.startSession(START));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      await expect(Effect.runPromise(driver.stopSession("thread-1"))).rejects.toMatchObject({ code: "CLAUDE_STOP_FAILED" });
+      expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+      await vi.waitFor(() => expect(events.some((event) => event.type === "thread.state.changed")).toBe(true));
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
+  });
+
+  it("settles the running turn when its session stops, publishing the interruption once", async () => {
+    // Without the settle, the pump's `if (session.closed) return` skips its
+    // own and every awaitTurn waiter hangs after stopSession.
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    let status: string | null = null;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId).then((result) => {
+      status = result.status;
+      return result;
+    });
+    try {
+      await Effect.runPromise(driver.stopSession("thread-1"));
+      await vi.waitFor(() => expect(status).toBe("interrupted"));
+      await expect(outcome).resolves.toMatchObject({ status: "interrupted", error: "Session ended." });
+      // The pump drains and retires after the stop; settle happened exactly once.
+      await vi.waitFor(() => expect(events.some((event) => event.type === "thread.state.changed")).toBe(true));
+      expect(events.filter((event) => event.type === "turn.interrupted")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.completed" || event.type === "turn.failed")).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    }
   });
 
   it("probes usage windows best-effort", async () => {
