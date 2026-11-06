@@ -83,6 +83,7 @@ describe("moxen MCP server", () => {
         "task_status",
         "models",
         "context_usage",
+        "usage_status",
         "web_fetch",
         "task_cancel",
         "task_settle",
@@ -124,8 +125,8 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "web_fetch", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
-      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "web_fetch", "memory_read", "memory_search"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();
       await connection.close();
@@ -175,6 +176,36 @@ describe("moxen MCP server", () => {
       for (const entry of batch.tasks) {
         expect(rows.find((row) => row.childThreadId === entry.taskId)?.prompt).toContain("Common rules for this task:\nReport in three bullets.");
       }
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("starts every batch entry in the shared review mode, and refuses a per-entry mode", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        mode: "review",
+        tasks: [
+          { task: "Review the login change", title: "review login" },
+          { task: "Review the billing change", title: "review billing" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<{ taskId: string; title: string }> };
+      expect(batch.tasks).toHaveLength(2);
+      const store = await openThreadStore(harness.root);
+      for (const entry of batch.tasks) {
+        expect((await store.readThreadRecord(entry.taskId))?.interactionMode).toBe("review");
+      }
+      const refused = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        mode: "review",
+        tasks: [{ task: "Review it", title: "review", mode: "review" } as unknown as Record<string, string>],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain('unknown field "mode"');
     } finally {
       await connection.close();
     }
@@ -410,7 +441,7 @@ describe("moxen MCP server", () => {
     }
   });
 
-  it("runs a task in Build or Research as the model asks, and never in Orchestrate", async () => {
+  it("runs a task in Build, Research or Review as the model asks, and never in Orchestrate", async () => {
     const { harness, connection, parentThreadId } = await setup();
     try {
       const modeOf = async (taskId: string) => (await (await openThreadStore(harness.root)).readThreadRecord(taskId))?.interactionMode;
@@ -418,6 +449,8 @@ describe("moxen MCP server", () => {
       expect(await modeOf(build.taskId)).toBe("default");
       const research = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Look into it", title: "look", isolation: "shared", mode: "research" })).text) as { taskId: string };
       expect(await modeOf(research.taskId)).toBe("research");
+      const review = JSON.parse((await callMoxenTool(connection, parentThreadId, "delegate", { task: "Review PR 7", title: "review", isolation: "shared", mode: "review" })).text) as { taskId: string };
+      expect(await modeOf(review.taskId)).toBe("review");
       const refused = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Plan it", title: "plan", isolation: "shared", mode: "orchestrate" });
       expect(refused.isError).toBe(true);
       expect(refused.text).toContain("never runs in Orchestrate");
@@ -653,7 +686,7 @@ describe("moxen web_fetch", () => {
     const result = await callMoxenTool(api, "t1", "delegate", { task: "x" }, { delegated: true });
     expect(result).toMatchObject({ isError: true });
     expect(result.text).toContain("not available in a delegated task");
-    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "web_fetch", "memory_read", "memory_search", "todos"]);
+    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "memory_read", "memory_search", "todos"]);
   });
 
   it("gives a delegated task memory to read, and refuses it the memory writes it is never shown", async () => {

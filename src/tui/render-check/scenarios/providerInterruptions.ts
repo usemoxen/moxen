@@ -325,6 +325,66 @@ export async function runProviderInterruptions(setup: TestRendererSetup): Promis
   }
   if (notified.includes("<task-notification>")) fail("the raw notification text leaked into the transcript");
 
+  // A review task settled: the card names its trailing verdict, and a
+  // review with none reads as unfinished rather than as an ordinary task.
+  await act(async () => {
+    emitLiveRef.current?.({
+      kind: "event",
+      event: {
+        type: "thread.message-sent",
+        payload: {
+          message: {
+            id: "notify-2",
+            role: "user",
+            text: "<task-notification>\nTwo tasks you delegated have settled.\n</task-notification>",
+            turnId: "turn-9",
+            streaming: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            origin: "task-notification",
+            notification: {
+              tasks: [
+                {
+                  taskId: "child-2",
+                  title: "review login",
+                  status: "completed",
+                  durationMs: 60_000,
+                  model: "opencode/gpt-5.6-sol",
+                  branch: "moxen/review-login",
+                  headline: "Two blockers in session handling",
+                  filesChanged: 0,
+                  additions: 0,
+                  deletions: 0,
+                  review: { verdict: "FIX FIRST", sameModel: false, note: null, report: "Two blockers.\n\nVERDICT: FIX FIRST" },
+                },
+                {
+                  taskId: "child-3",
+                  title: "review dao",
+                  status: "completed",
+                  durationMs: 30_000,
+                  model: "opencode/gpt-5.6-sol",
+                  branch: null,
+                  headline: "The full report is delivered above.",
+                  filesChanged: 0,
+                  additions: 0,
+                  deletions: 0,
+                  review: { verdict: null, sameModel: true, note: "no VERDICT", report: "The full report is delivered above." },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  });
+  await setup.flush();
+  await jumpToBottom();
+  const reviewed = setup.captureCharFrame();
+  console.log("--- timeline: review tasks settled ---");
+  console.log(reviewed);
+  if (!reviewed.includes("Verdict: FIX FIRST")) fail("task notification card did not show the review verdict");
+  if (!reviewed.includes("No verdict")) fail("task notification card did not mark a review with no verdict as unfinished");
+
   // The Git tab asked the agent to open a PR: a card, not the steps it reads.
   await act(async () => {
     emitLiveRef.current?.({

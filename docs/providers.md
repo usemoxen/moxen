@@ -581,7 +581,8 @@ Claude Agent SDK 0.3.292 / OpenCode client 2.0.24:
   as uncached input, with cache reads recorded separately. Anthropic-style
   `input_tokens` / `cache_read_input_tokens` are already separate and stay so.
   Existing recorded usage is not rewritten. Estimates do not add reasoning output
-  twice. Unknown model prices stay uncalibrated.
+  twice. A model with no price anywhere stays uncalibrated: neither its past
+turns nor a wrap-up for it are given a cost.
 - [OpenCode v2 API](https://opencode.ai/v2/docs/api): ordinary external-provider
   sessions have no general subscription quota feed. The docs list
   `experimental.usage.limits`, which covers the OpenCode Go/Console workspace's

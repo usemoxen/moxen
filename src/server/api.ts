@@ -89,10 +89,11 @@ export interface ClientApi {
    * Every mutation: thread/project/turn commands, keyed by `type`.
    * `commandId` is optional correlation — a transport assigns one when the
    * caller does not, so clients never hand-roll it.
+   * `signal` stops a wait (`wait: true`): the turn itself keeps running.
    */
-  dispatch<T extends CommandType>(command: CommandOf<T>): Promise<CommandResult<T>>;
+  dispatch<T extends CommandType>(command: CommandOf<T>, options?: { signal?: AbortSignal }): Promise<CommandResult<T>>;
   /** Reads — projects, thread lists and views, task status. Never changes anything. */
-  query<T extends QueryType>(query: QueryOf<T>): Promise<QueryResult<T>>;
+  query<T extends QueryType>(query: QueryOf<T>, options?: { signal?: AbortSignal }): Promise<QueryResult<T>>;
   turnDiff(threadId: string, toTurnCount: number): Promise<string | null>;
   getConfig(): Promise<ConfigPayload>;
 }

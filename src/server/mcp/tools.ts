@@ -22,6 +22,7 @@ import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
+import { usageKeyForInstance } from "../../core/usage/limits.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
@@ -47,6 +48,18 @@ export interface McpTool {
 
 /** Models listed per provider before the rest are only counted: a catalog can run to hundreds. */
 export const MAX_MODELS_PER_PROVIDER = 40;
+/**
+ * How long `usage_status` waits for a cheap fresh usage reading before
+ * answering from the stored one instead. Covers the slowest cheap probe
+ * (OpenCode Go's five-second HTTP read); a slower probe keeps running and
+ * freshens the next call through the normal event path.
+ */
+export const USAGE_REFRESH_TIMEOUT_MS = 8_000;
+/**
+ * A stored usage reading older than this is flagged stale: older than any
+ * live session's reporting rhythm, so it may lag what the provider shows now.
+ */
+export const USAGE_STALE_AFTER_MS = 5 * 60_000;
 export const SUBMIT_HANDOFF_TOOL: McpTool = {
   name: "submit_handoff",
   description: "Submit the handoff summary requested by Moxen. Send only the summary here, using the requestId in the summary request. Acceptance stores it durably; no final-response summary is needed. Moxen owns scheduling and creating the new thread. Unrequested or stale submissions are refused.",
@@ -87,6 +100,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Hand a self-contained task to a new subagent thread, which runs in parallel on any provider and model. " +
       "Only when the user has asked you to delegate (or put the thread in Research or Orchestrate mode): each subagent starts cold and spends their usage, so by default do the work yourself. " +
       "Research defaults to one researcher. For claims that matter and need an adversarial check, propose a full research run with researchProposal (size and optional per-role models). " +
+      "Review delegation reviews a PR or branch: mode review checks the target out in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST; pass target-specific questions to attack in the task. " +
       "A full run costs a lead, researchers, critics and a finalizer. Only the user's answer starts one; without an answering client or after its answer deadline, it runs one researcher instead. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "The default is always a worktree (except fork: true, which shares your checkout): even when your thread's record names no branch, the worktree is cut from the branch your checkout is on. " +
@@ -160,9 +174,11 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         },
         mode: {
           type: "string",
-          enum: ["build", "research"],
+          enum: ["build", "research", "review"],
           description:
             "build (default): the subagent does the task directly. research: the subagent works as a researcher (its own tools, read only) and answers in the research report format. " +
+            "review: the subagent reviews a PR or branch (named in the task) in a scratch worktree, changes nothing in it, proves each finding and ends with VERDICT: MERGE or VERDICT: FIX FIRST. " +
+            "With tasks, the shared mode applies to every entry; entries take no mode of their own. " +
             "A subagent cannot delegate, and Orchestrate is not available to one.",
         },
       },
@@ -192,6 +208,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description:
       "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
       "here, and only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
+      "Those limits can be hours old: usage_status reads them fresh before you decide where there is headroom. " +
       "Pass provider to list just that one.",
     inputSchema: {
       type: "object",
@@ -209,6 +226,17 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "It is the same number the user's Moxen screen shows for this thread, taken from the latest reading Moxen recorded. " +
       "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
       "Use it before deciding to compact or hand off instead of guessing. It takes no argument: always your own thread.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "usage_status",
+    description:
+      "The user's current shared provider usage, for every set-up provider: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
+      "Also which provider your own thread runs on, and what usage protection holds or has queued (a delegated task sees its own held entry only). " +
+      "Call it before fanning work out (Orchestrate: after models, before delegate), and whenever you must decide where there is headroom: the usageLimits in models can be hours old, while this tries a cheap fresh reading first and falls back to the stored one with its age. " +
+      "A provider with no windows has no data, which is not the same as unlimited: key that off the empty windows list, not off stale. " +
+      "Read-only: it never spends provider usage.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
@@ -677,7 +705,7 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
@@ -716,6 +744,8 @@ export async function callMoxenTool(
         return ok(await modelsTool(api, args));
       case "context_usage":
         return ok(await contextUsageTool(api, parentThreadId));
+      case "usage_status":
+        return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS, options.delegated === true));
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
@@ -1082,8 +1112,8 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   }
   const fork = args.fork === true;
   const modeArg = argString(args, "mode");
-  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research") {
-    throw new CliError("INVALID_TOOL_INPUT", "mode must be build or research: a subagent never runs in Orchestrate.");
+  if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research" && modeArg !== "review") {
+    throw new CliError("INVALID_TOOL_INPUT", "mode must be build, research or review: a subagent never runs in Orchestrate.");
   }
   const provider = argString(args, "provider");
   const model = argString(args, "model");
@@ -1103,6 +1133,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(fork ? { fork: true } : {}),
     ...(modeArg === "research" ? { mode: "research" as const } : {}),
+    ...(modeArg === "review" ? { mode: "review" as const } : {}),
     ...(args.researchProposal === undefined ? {} : { researchProposal: args.researchProposal }),
   });
 }
@@ -1151,6 +1182,7 @@ async function delegateManyTool(
         ...((entry.idempotencyKey ?? (shared.idempotencyKey ? batchEntryKey(shared.idempotencyKey, entry.title, entry.task) : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? batchEntryKey(shared.idempotencyKey!, entry.title, entry.task))! } : {}),
         ...(shared.fork ? { fork: true } : {}),
         ...(shared.modeArg === "research" ? { mode: "research" as const } : {}),
+        ...(shared.modeArg === "review" ? { mode: "review" as const } : {}),
       }));
     } catch (cause) {
       // One task failing to start never loses the others: its error is that
@@ -1276,7 +1308,7 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
 async function startDelegation(
   api: ClientApi,
   parentThreadId: string,
-  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research"; researchProposal?: unknown },
+  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research" | "review"; researchProposal?: unknown },
 ) {
   const delegated = await api.dispatch({
     type: "thread.delegate",
@@ -1291,6 +1323,7 @@ async function startDelegation(
     ...(request.effort ? { thinkingEffort: request.effort } : {}),
     ...(request.fork === true ? { fork: true } : {}),
     ...(request.mode === "research" ? { interactionMode: "research" as const } : {}),
+    ...(request.mode === "review" ? { interactionMode: "review" as const } : {}),
     ...(request.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(request.researchProposal) }),
   });
   return {
@@ -1358,6 +1391,9 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    // A review child's verdict and warnings ride with the status; a finished
+    // review with no VERDICT line is said visibly here, not passed on as one.
+    ...(described.review === null ? {} : { review: described.review }),
   };
 }
 
@@ -1416,5 +1452,73 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string) {
     ...(reading.compactedSince
       ? { note: "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that." }
       : {}),
+  };
+}
+
+/**
+ * `usage_status`: the user's current shared provider usage, for an agent
+ * deciding where there is headroom. Every enabled, installed provider keeps
+ * one row: its windows (percent used, reset time, label), when that reading
+ * was taken, and whether it is stale (older than USAGE_STALE_AFTER_MS).
+ * A provider with no windows has no data, which is not unlimited. The
+ * protection snapshot is the same one `moxen usage status` shows: what
+ * usage protection holds or has queued.
+ */
+async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number, delegated: boolean) {
+  const [listed, stored, protection, inspected] = await Promise.all([
+    api.query({ type: "providers.list" }),
+    api.query({ type: "usage.limits" }),
+    api.query({ type: "usage.protection" }),
+    api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null),
+  ]);
+  // A cheap refresh where one exists, bounded: a slow probe costs the
+  // answer's freshness, never the answer. The probe keeps running behind
+  // the fallback and freshens the next call through the normal event path.
+  const refreshed = await withinDeadline(api.query({ type: "usage.refresh" }), timeoutMs).catch(() => "timeout" as const);
+  const snapshot = refreshed === "timeout" ? stored.providers : refreshed.providers;
+  const now = Date.now();
+  const providers = listed.providers
+    .filter((provider) => provider.enabled && provider.installed)
+    .map((provider) => {
+      const usage = snapshot[usageKeyForInstance(provider.instanceId)] ?? snapshot[provider.driver] ?? provider.usageLimits;
+      if (!usage || usage.windows.length === 0) {
+        return {
+          provider: provider.instanceId,
+          displayName: provider.displayName ?? provider.instanceId,
+          enabled: true,
+          checkedAt: usage?.checkedAt ?? null,
+          stale: false,
+          windows: [],
+          note: usage?.unavailable
+            ? `Usage cannot be read for this provider (${usage.unavailable.reason}). No data is not the same as unlimited: do not treat it as headroom.`
+            : "No usage reported for this provider. No data is not the same as unlimited: do not treat it as headroom.",
+        };
+      }
+      const taken = Date.parse(usage.checkedAt);
+      return {
+        provider: provider.instanceId,
+        displayName: provider.displayName ?? provider.instanceId,
+        enabled: true,
+        checkedAt: usage.checkedAt,
+        stale: !Number.isFinite(taken) || now - taken > USAGE_STALE_AFTER_MS,
+        windows: usage.windows.map((window) => ({
+          id: window.id,
+          kind: window.kind,
+          label: window.label,
+          usedPercent: window.usedPercent,
+          resetsAt: window.resetsAt,
+        })),
+        ...(usage.unavailable ? { note: `Usage cannot be read for this provider (${usage.unavailable.reason}).` } : {}),
+      };
+    });
+  return {
+    callerProvider: inspected?.thread.modelSelection?.instanceId ?? null,
+    providers,
+    // A delegated task is denied thread_search/thread_read, so it must not
+    // learn other threads' titles through here either: it keeps its own
+    // held entry, account-level forecasts, and nothing else.
+    protection: delegated
+      ? { ...protection, queue: protection.queue.filter((entry) => entry.threadId === parentThreadId) }
+      : protection,
   };
 }

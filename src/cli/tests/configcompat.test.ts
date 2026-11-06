@@ -94,6 +94,16 @@ describe("config on an older file", () => {
     expect(got).toEqual({ ok: true, data: { key: "ui.autoHandoffPercent", value: 60, explicit: true } });
   });
 
+  it("`config list` names the server's config file, as `config show` does", () => {
+    const listed = cli("config", "list").data as { path: string; exists: boolean };
+    const shown = cli("config", "show").data as { path: string; exists: boolean };
+    // The listing describes the server's settings: its path and reading of
+    // the file must be the server's, not the CLI's own. They only differ
+    // over `--server`, where the CLI has no file of its own to report.
+    expect({ path: listed.path, exists: listed.exists }).toEqual({ path: shown.path, exists: shown.exists });
+    expect(listed).toMatchObject({ path: file, exists: true });
+  });
+
   it("`config list` keeps its fields, and lists the older keys", () => {
     const listed = cli("config", "list").data as { path: string; exists: boolean; settings: Array<Record<string, unknown>> };
     expect(Object.keys(listed)).toEqual(expect.arrayContaining(["path", "exists", "settings"]));

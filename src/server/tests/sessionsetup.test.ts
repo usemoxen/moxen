@@ -69,18 +69,18 @@ describe("Moxen's own tools, switched per provider", () => {
     const knowledge = ["knowledge_read", "knowledge_search"];
     const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
-    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", ...threads, "web_fetch"]);
-    expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", ...threads]);
+    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", ...threads, "usage_status", "web_fetch"]);
+    expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "usage_status", "web_fetch"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", ...threads, "usage_status"]);
   });
 
   it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {
     const noMemory = { memory: false };
     expect(await moxenTools({ orchestration: false, webFetch: false }, noMemory)).toBeNull();
     expect(await moxenTools({ moxenTools: false }, noMemory)).toBeNull();
-    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["context_usage", "knowledge_read", "knowledge_search", "web_fetch"]);
+    expect(await moxenTools({ moxenTools: false, webFetch: true }, noMemory)).toEqual(["context_usage", "knowledge_read", "knowledge_search", "usage_status", "web_fetch"]);
     // Memory alone keeps the server, with its tools only.
-    expect(await moxenTools({ moxenTools: false })).toEqual(["context_usage", "knowledge_read", "knowledge_search", "memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"]);
+    expect(await moxenTools({ moxenTools: false })).toEqual(["context_usage", "knowledge_read", "knowledge_search", "memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search", "usage_status"]);
   });
 });
 
@@ -815,6 +815,71 @@ describe("delegating with an idempotency key, and handing the shared entry back"
       const other = await delegate(randomUUID());
       expect(other.task.taskId).not.toBe(first.task.taskId);
       expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(2);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  /** MXN-290: a retry after the task handed off returns the current incarnation, not a duplicate. */
+  it("follows the continuedIn chain for an idempotency-key retry after the task handed off", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
+    try {
+      const key = randomUUID();
+      const first = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      const continued = await connection.dispatch({ type: "thread.continue", threadId: first.child.id });
+      expect(continued.threadId).not.toBe(first.child.id);
+      const retry = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      expect(retry.child.id).toBe(continued.threadId);
+      expect(retry.task.taskId).toBe(continued.threadId);
+      // No duplicate: the original row plus its continuation, and still one row carrying the key.
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(2);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  /** MXN-290 review: a retry never follows the chain into a home the caller cannot control. */
+  it("delegates anew when the idempotency chain was re-pointed to another thread", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
+    try {
+      const key = randomUUID();
+      const elsewhere = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Other home", wait: true, threadEnvMode: "local" });
+      const rehomed = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Re-homed task", wait: true, threadEnvMode: "local" });
+      const now = new Date().toISOString();
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId, childThreadId: randomUUID(), prompt: "Sub task",
+        status: "running", idempotencyKey: key, continuedIn: rehomed.threadId, createdAt: now, updatedAt: now,
+      });
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId: elsewhere.threadId, childThreadId: rehomed.threadId, prompt: "Sub task",
+        status: "running", createdAt: now, updatedAt: now,
+      });
+      const retry = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      // Not the re-homed task: a fresh delegate under the caller.
+      expect(retry.child.id).not.toBe(rehomed.threadId);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(2);
     } finally {
       await connection.close();
     }

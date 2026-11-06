@@ -43,7 +43,7 @@ import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/self
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
 import type { LatestVersions } from "../core/catalog/update.js";
-import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
+import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
@@ -117,6 +117,7 @@ import {
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
 import {
   armPendingScheduledTurns,
+  recoverTaskNotifications,
   readWorkQueue,
   editWorkQueue,
   pendingHandoff,
@@ -164,7 +165,7 @@ import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
-import { persistUsageLimits, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
@@ -196,6 +197,61 @@ import {
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
+/**
+ * Bound for one driver's freshness probe inside `usage.refresh`: covers the
+ * slowest healthy probe (OpenCode Go's five-second HTTP read) with margin,
+ * well inside the tool's outer eight-second race. A probe slower than this is
+ * cut here, while its late completion still freshens the next call through
+ * the normal event path.
+ */
+const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
+
+/** Config writes in flight, by resolved file: two writers to one file queue, others run together. */
+const configWrites = new Map<string, Promise<unknown>>();
+
+/** An aborted wait ends the wait, never the turn: the run carries on for whoever still listens. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new CliError("CONNECTION_CLOSED", "The connection closed while waiting for the turn to settle.");
+  }
+}
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return new Promise((resolve) => setTimeout(resolve, ms));
+  throwIfAborted(signal);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new CliError("CONNECTION_CLOSED", "The connection closed while waiting for the turn to settle."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortableRun(run: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return run;
+  throwIfAborted(signal);
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(new CliError("CONNECTION_CLOSED", "The connection closed while waiting for the turn to settle."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void run.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (cause) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(cause);
+      },
+    );
+  });
+}
 
 export type { TurnDriverFactories } from "../core/threads/execute.js";
 
@@ -626,6 +682,24 @@ export class DirectConnection implements ClientApi {
     return { path, exists, settings: describeSettings(config) };
   }
 
+  /**
+   * Config writes run one at a time per file: two `settings.set` at once
+   * must not read the same file and revert each other. The path is peeked
+   * first so concurrent writers to one file share a queue, then the queued
+   * body re-reads, so it never writes from a stale read.
+   */
+  private async withConfigWrite<T>(write: () => Promise<T>): Promise<T> {
+    const { path: configPath } = await this.readConfigFile();
+    const key = path.resolve(configPath);
+    const next = (configWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(write);
+    configWrites.set(key, next);
+    try {
+      return await next;
+    } finally {
+      if (configWrites.get(key) === next) configWrites.delete(key);
+    }
+  }
+
   private async store(): Promise<ThreadStore> {
     if (!this.storePromise) this.storePromise = openThreadStore(this.storeRoot);
     return await this.storePromise;
@@ -666,6 +740,11 @@ export class DirectConnection implements ClientApi {
     onScheduledTurnDue(this.onDue);
     void this.context()
       .then((ctx) => armPendingScheduledTurns(ctx))
+      .catch(() => undefined);
+    // A restart inside a task notification's batch window left its batch on
+    // disk: deliver it now, once, rather than losing it.
+    void this.context()
+      .then((ctx) => recoverTaskNotifications(ctx))
       .catch(() => undefined);
     // Finished worktree threads give their checkouts and merged branches back: now, then every few hours.
     void this.pruneFinished();
@@ -718,6 +797,37 @@ export class DirectConnection implements ClientApi {
     if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
     this.ownedDrivers.add(driver);
     return driver;
+  }
+
+  /**
+   * Explicit freshness ask behind `usage_status`: every owned driver re-reads
+   * its subscription windows where that is cheap (an open session or live
+   * connection - never a new session, never a model call), in parallel, and
+   * a probe that lands is recorded under its key. Each probe races its own
+   * deadline, so one hung or slow driver cannot stall the rest: what lands is
+   * recorded, the round returns a partial snapshot, and one driver's failure
+   * never stops the rest. Drivers with nothing cheap to read sit the round out.
+   */
+  private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
+    await Promise.allSettled(
+      [...this.ownedDrivers].map(async (driver) => {
+        // Records on landing, even past the deadline: the round answers from
+        // the partial snapshot, and a late probe freshens the next call.
+        const landed = (async () => await driver.refreshUsage?.())().then(
+          (refreshed) => {
+            if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+            return refreshed;
+          },
+          () => null,
+        );
+        const deadline = new Promise<null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), USAGE_DRIVER_PROBE_TIMEOUT_MS);
+          timer.unref?.();
+        });
+        await Promise.race([landed, deadline]);
+      }),
+    );
+    return usageLimitsSnapshot();
   }
 
   // -- subscriptions -------------------------------------------------------
@@ -828,6 +938,9 @@ export class DirectConnection implements ClientApi {
     let lastVersion: string | null = null;
     let stopped = false;
     let polling = false;
+    // A thread created just after its view opens is still that view's
+    // thread: the first poll says it is missing, later polls send it.
+    let firstPoll = true;
     // When each streamed message first appeared: its place in the
     // timeline, between the tool calls around it.
     const firstSeen = new Map<string, string>();
@@ -848,7 +961,15 @@ export class DirectConnection implements ClientApi {
         if (stopped || this.closed) return;
         if (version === lastVersion) return;
         const detail = await this.threadDetail(threadId);
-        if (!detail) return;
+        if (!detail) {
+          lastVersion = version;
+          if (firstPoll && !stopped && !this.closed) {
+            onError(new CliError("THREAD_NOT_FOUND", `No thread exists with id ${threadId}.`, { exitCode: 3, details: { threadId } }));
+          }
+          firstPoll = false;
+          return;
+        }
+        firstPoll = false;
         lastVersion = version;
         const latest = detail.latestTurn;
         runningTurnId = latest && latest.state === "running" ? latest.turnId : null;
@@ -1026,10 +1147,10 @@ export class DirectConnection implements ClientApi {
     return { onProgress, runningVersions: async () => [readInstall().version] };
   }
 
-  async dispatch<T extends CommandType>(command: CommandOf<T>): Promise<CommandResult<T>> {
+  async dispatch<T extends CommandType>(command: CommandOf<T>, options?: { signal?: AbortSignal }): Promise<CommandResult<T>> {
     if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
     const decoded = decodeCommand(command);
-    const result = await this.run(decoded);
+    const result = await this.run(decoded, options?.signal);
     if (decoded.type === "memory.save" || decoded.type === "memory.edit" || decoded.type === "memory.append" || decoded.type === "memory.delete" || decoded.type === "memory.import-claude") {
       // Writes remain available even when native setup or inference failed.
       const generation = this.embeddingGeneration;
@@ -1041,7 +1162,7 @@ export class DirectConnection implements ClientApi {
     return result as CommandResult<T>;
   }
 
-  private async run(command: Command): Promise<CommandResult> {
+  private async run(command: Command, signal?: AbortSignal): Promise<CommandResult> {
     const accepted = { accepted: true } as const;
     switch (command.type) {
       case "skills.import":
@@ -1070,7 +1191,7 @@ export class DirectConnection implements ClientApi {
       case "thread.create":
         return await this.threadCreate(command);
       case "thread.turn.start":
-        return await this.turnStart(command);
+        return await this.turnStart(command, signal);
       case "thread.turn.interrupt":
         await interruptTurn(await this.store(), command.threadId, command.turnId);
         return accepted;
@@ -1145,7 +1266,7 @@ export class DirectConnection implements ClientApi {
       case "thread.handover": {
         const { type: _type, commandId: _id, wait, ...request } = command;
         const result = await handover(await this.context(), request);
-        return { ...result, started: result.started ? await this.settle(result.started, wait === true) : null };
+        return { ...result, started: result.started ? await this.settle(result.started, wait === true, signal) : null };
       }
       case "thread.delegate": {
         const { type: _type, commandId: _id, ...request } = command;
@@ -1292,49 +1413,61 @@ export class DirectConnection implements ClientApi {
       case "experience.update":
         return await updateExperience(this.storeRoot, command);
       case "settings.set": {
-        // Re-read rather than reusing a cached copy: another client may
-        // have written since, and a settings page that silently reverts a
-        // neighbour's edit is worse than one that is a beat behind.
-        const { config, path } = await this.readConfigFile();
-        let next = await setConfigValueSecure(config, command.key, command.value);
-        if (command.key === "memoryEmbeddings" && next.memoryEmbeddings === true) {
-          try { await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true }); }
-          catch (error) {
-            const current = (await this.readConfigFile()).config;
-            await saveConfig(path, await setConfigValueSecure(current, "memoryEmbeddings", "false"));
-            throw error;
-          }
-          // Setup can take time: preserve edits another client made meanwhile.
-          next = await setConfigValueSecure((await this.readConfigFile()).config, command.key, command.value);
-        }
-        await saveConfig(path, next);
-        if (command.key === "memoryEmbeddings" || command.key === "memoryEmbeddingLoading" || command.key === "memory") {
-          void this.applyEmbeddingPolicy().catch(() => undefined);
-        }
-        if ((command.key === "memoryEmbeddings" && next.memoryEmbeddings !== true) || (command.key === "memory" && next.memory === false)) {
-          this.embeddingGeneration++;
-          this.semanticMemory.cancel();
-          this.embeddingRuntime.close();
-        }
-        if (this.remoteAccess && command.key.startsWith("remote.")) {
-          try {
-            await this.remoteAccess.apply(next.remote);
-          } catch (cause) {
-            // Put back what was listening: a setting that says "on" while
-            // nothing listens would be a lie the next restart repeats.
-            await saveConfig(path, config);
-            await this.remoteAccess.apply(config.remote).catch(() => undefined);
-            throw cause;
+        if (command.key === "memoryEmbeddings") {
+          // Enabling downloads and validates a model, which takes minutes:
+          // it runs outside the write queue so other clients keep writing
+          // meanwhile, and the queued write below re-reads first.
+          const enabling = (await setConfigValueSecure((await this.readConfigFile()).config, command.key, command.value)).memoryEmbeddings === true;
+          if (enabling) {
+            try {
+              await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true });
+            } catch (error) {
+              await this.withConfigWrite(async () => {
+                const { config, path } = await this.readConfigFile();
+                await saveConfig(path, await setConfigValueSecure(config, "memoryEmbeddings", "false"));
+              });
+              throw error;
+            }
           }
         }
-        return { ...(await this.settingsSnapshot()), accepted: true };
+        return await this.withConfigWrite(async () => {
+          // Re-read rather than reusing a cached copy: another client may
+          // have written since, and a settings page that silently reverts a
+          // neighbour's edit is worse than one that is a beat behind.
+          // The queue above makes even that re-read fresh.
+          const { config, path } = await this.readConfigFile();
+          const next = await setConfigValueSecure(config, command.key, command.value);
+          await saveConfig(path, next);
+          if (command.key === "memoryEmbeddings" || command.key === "memoryEmbeddingLoading" || command.key === "memory") {
+            void this.applyEmbeddingPolicy().catch(() => undefined);
+          }
+          if ((command.key === "memoryEmbeddings" && next.memoryEmbeddings !== true) || (command.key === "memory" && next.memory === false)) {
+            this.embeddingGeneration++;
+            this.semanticMemory.cancel();
+            this.embeddingRuntime.close();
+          }
+          if (this.remoteAccess && command.key.startsWith("remote.")) {
+            try {
+              await this.remoteAccess.apply(next.remote);
+            } catch (cause) {
+              // Put back what was listening: a setting that says "on" while
+              // nothing listens would be a lie the next restart repeats.
+              await saveConfig(path, config);
+              await this.remoteAccess.apply(config.remote).catch(() => undefined);
+              throw cause;
+            }
+          }
+          return { ...(await this.settingsSnapshot()), accepted: true };
+        });
       }
       case "settings.duplicate": {
-        const { config, path } = await this.readConfigFile();
-        const entry = listTarget(`${command.key}[${command.id}]`);
-        if (!entry) throw new CliError("INVALID_CONFIG_KEY", `${command.key} is not a list setting.`);
-        await saveConfig(path, normalizeConfig(duplicateListItem(config, entry, command.newId, command.key)));
-        return { ...(await this.settingsSnapshot()), accepted: true };
+        return await this.withConfigWrite(async () => {
+          const { config, path } = await this.readConfigFile();
+          const entry = listTarget(`${command.key}[${command.id}]`);
+          if (!entry) throw new CliError("INVALID_CONFIG_KEY", `${command.key} is not a list setting.`);
+          await saveConfig(path, normalizeConfig(duplicateListItem(config, entry, command.newId, command.key)));
+          return { ...(await this.settingsSnapshot()), accepted: true };
+        });
       }
       case "mcp.server.test": {
         const { config } = await this.readConfigFile();
@@ -1342,19 +1475,21 @@ export class DirectConnection implements ClientApi {
       }
       case "harness.profile.import": {
         const parsed = parseProfileDocument(command.text);
-        const { config, path } = await this.readConfigFile();
-        const existing = config.providers?.harness?.profiles ?? [];
-        const wanted = (command.id ?? parsed.id).toLowerCase();
-        const taken = new Set(existing.map((entry) => entry.id));
-        const mode = command.onConflict ?? "error";
-        if (taken.has(wanted) && mode === "error") {
-          throw new CliError("INVALID_CONFIG", `A harness profile "${wanted}" already exists. Import it under another id, or replace it.`, { details: { profileId: wanted } });
-        }
-        const id = taken.has(wanted) && mode === "rename" ? freeProfileId(wanted, taken) : wanted;
-        const next = { ...parsed, id };
-        const profiles = taken.has(id) ? existing.map((entry) => (entry.id === id ? next : entry)) : [...existing, next];
-        await saveConfig(path, normalizeConfig({ ...config, providers: { ...config.providers, harness: { ...config.providers?.harness, profiles } } }));
-        return { ...(await this.settingsSnapshot()), accepted: true, id, fileId: parsed.id };
+        return await this.withConfigWrite(async () => {
+          const { config, path } = await this.readConfigFile();
+          const existing = config.providers?.harness?.profiles ?? [];
+          const wanted = (command.id ?? parsed.id).toLowerCase();
+          const taken = new Set(existing.map((entry) => entry.id));
+          const mode = command.onConflict ?? "error";
+          if (taken.has(wanted) && mode === "error") {
+            throw new CliError("INVALID_CONFIG", `A harness profile "${wanted}" already exists. Import it under another id, or replace it.`, { details: { profileId: wanted } });
+          }
+          const id = taken.has(wanted) && mode === "rename" ? freeProfileId(wanted, taken) : wanted;
+          const next = { ...parsed, id };
+          const profiles = taken.has(id) ? existing.map((entry) => (entry.id === id ? next : entry)) : [...existing, next];
+          await saveConfig(path, normalizeConfig({ ...config, providers: { ...config.providers, harness: { ...config.providers?.harness, profiles } } }));
+          return { ...(await this.settingsSnapshot()), accepted: true, id, fileId: parsed.id };
+        });
       }
       case "harness.profile.test": {
         const { profile, model } = await this.harnessModel(command.profileId, command.model, false);
@@ -1371,13 +1506,15 @@ export class DirectConnection implements ClientApi {
           const save = command.dryRun !== true && probeSettledSomething(report);
           if (save) {
             // Re-read: the file may have changed during the minutes the probe took.
-            const fresh = await this.readConfigFile();
-            const profiles = (fresh.config.providers?.harness?.profiles ?? []).map((entry) =>
-              entry.id !== profile.id
-                ? entry
-                : { ...entry, models: entry.models.map((m) => (m.id === model.id ? { ...m, probed: mergeProbed(m.probed, report) } : m)) },
-            );
-            await saveConfig(fresh.path, normalizeConfig({ ...fresh.config, providers: { ...fresh.config.providers, harness: { ...fresh.config.providers?.harness, profiles } } }));
+            await this.withConfigWrite(async () => {
+              const fresh = await this.readConfigFile();
+              const profiles = (fresh.config.providers?.harness?.profiles ?? []).map((entry) =>
+                entry.id !== profile.id
+                  ? entry
+                  : { ...entry, models: entry.models.map((m) => (m.id === model.id ? { ...m, probed: mergeProbed(m.probed, report) } : m)) },
+              );
+              await saveConfig(fresh.path, normalizeConfig({ ...fresh.config, providers: { ...fresh.config.providers, harness: { ...fresh.config.providers?.harness, profiles } } }));
+            });
           }
           return { ...report, saved: save };
         } finally {
@@ -1515,7 +1652,7 @@ export class DirectConnection implements ClientApi {
     return { threadId: created.id, accepted: true };
   }
 
-  private async turnStart(command: CommandOf<"thread.turn.start">): Promise<CommandResult<"thread.turn.start">> {
+  private async turnStart(command: CommandOf<"thread.turn.start">, signal?: AbortSignal): Promise<CommandResult<"thread.turn.start">> {
     const { threadId, message } = command;
     await readResearchRun(await this.context(), threadId);
     const thread = await (await this.store()).readThreadRecord(threadId);
@@ -1589,7 +1726,7 @@ export class DirectConnection implements ClientApi {
       // subscriptions register their own callbacks alongside this one.
       onEvent: () => undefined,
     });
-    return { ...(await this.settle(started, command.wait === true)), accepted: true, ...(researchSizePending ? { researchSizePending: true as const } : {}) };
+    return { ...(await this.settle(started, command.wait === true, signal)), accepted: true, ...(researchSizePending ? { researchSizePending: true as const } : {}) };
   }
 
   /**
@@ -1598,13 +1735,13 @@ export class DirectConnection implements ClientApi {
    * queued turn has no run yet, and is started by whichever runner
    * settles the turn ahead of it.
    */
-  private async settle(started: StartedTurn, wait: boolean): Promise<StartedTurnSummary> {
-    if (wait) await started.run;
+  private async settle(started: StartedTurn, wait: boolean, signal?: AbortSignal): Promise<StartedTurnSummary> {
+    if (wait && started.run !== null) await abortableRun(started.run, signal);
     return {
       turnId: started.turn.id,
       messageId: started.messageId,
       delivery: started.delivery,
-      status: wait ? await this.turnSettled(started.turn.threadId, started.turn.id) : await this.turnStatus(started.turn.threadId, started.turn.id),
+      status: wait ? await this.turnSettled(started.turn.threadId, started.turn.id, signal) : await this.turnStatus(started.turn.threadId, started.turn.id),
       ...(started.steerDelivered === undefined ? {} : { steerDelivered: started.steerDelivered }),
     };
   }
@@ -1620,14 +1757,16 @@ export class DirectConnection implements ClientApi {
   /**
    * Follows the ledger rather than a run handle: a queued turn has no run
    * yet, and a turn started by another process has none here at all.
+   * An aborted wait throws: the turn itself is untouched.
    */
-  private async turnSettled(threadId: string, turnId: string): Promise<TurnStatus> {
+  private async turnSettled(threadId: string, turnId: string, signal?: AbortSignal): Promise<TurnStatus> {
     for (let poll = 0; ; poll += 1) {
+      throwIfAborted(signal);
       const status = await this.turnStatus(threadId, turnId);
       if ((status !== "running" && status !== "queued") || this.closed) return status;
       // Every couple of seconds: a turn whose process died never settles.
       if (poll % 20 === 19) await recoverOrphanedTurn(await this.context(), threadId);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await abortableSleep(100, signal);
     }
   }
 
@@ -1764,12 +1903,12 @@ export class DirectConnection implements ClientApi {
   // -- queries ---------------------------------------------------------------
 
   /** Reads; decoded like commands, for the same reason. */
-  async query<T extends QueryType>(query: QueryOf<T>): Promise<QueryResult<T>> {
+  async query<T extends QueryType>(query: QueryOf<T>, options?: { signal?: AbortSignal }): Promise<QueryResult<T>> {
     if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
-    return (await this.answer(decodeQuery(query))) as QueryResult<T>;
+    return (await this.answer(decodeQuery(query), options?.signal)) as QueryResult<T>;
   }
 
-  private async answer(query: Query): Promise<QueryResult> {
+  private async answer(query: Query, signal?: AbortSignal): Promise<QueryResult> {
     // The shipped manual must still work when configuration cannot be loaded.
     if (query.type === "knowledge.search") return searchKnowledge(query.query);
     if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
@@ -1791,7 +1930,8 @@ export class DirectConnection implements ClientApi {
         const store = await this.store();
         const [caller, target] = await Promise.all([store.readThreadRecord(query.callerThreadId), store.readThreadRecord(query.threadId)]);
         if (!target) throw new CliError("THREAD_NOT_FOUND", `No thread ${query.threadId}.`, { exitCode: 4, details: { threadId: query.threadId } });
-        if ((query.scope ?? "project") === "project" && caller && caller.projectId !== target.projectId) {
+        if (!caller) throw new CliError("THREAD_NOT_FOUND", `No thread ${query.callerThreadId}.`, { exitCode: 4, details: { threadId: query.callerThreadId } });
+        if ((query.scope ?? "project") === "project" && caller.projectId !== target.projectId) {
           throw new CliError("THREAD_OUT_OF_SCOPE", `Thread ${query.threadId} belongs to another project: read it with scope "all".`, { exitCode: 2, details: { threadId: query.threadId } });
         }
         const budget = agentReadBudget(await latestContextUsage(store, query.callerThreadId), query.maxChars);
@@ -1838,7 +1978,7 @@ export class DirectConnection implements ClientApi {
         await requireResearchRole(ctx, query.leadThreadId, query.taskId);
         return await describeTask(ctx, query.leadThreadId, query.taskId);
       case "thread.turn.await":
-        return { status: await this.turnSettled(query.threadId, query.turnId) };
+        return { status: await this.turnSettled(query.threadId, query.turnId, signal) };
       case "providers.list":
         return { providers: withLiveUsage(await this.providers()) };
       case "doctor": {
@@ -1884,6 +2024,8 @@ export class DirectConnection implements ClientApi {
         return await this.checkAppUpdate();
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "usage.refresh":
+        return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
         return this.usageProtection.read();
       case "queue.read":
@@ -1891,9 +2033,9 @@ export class DirectConnection implements ClientApi {
       case "handoff.pending":
         return { requestId: await pendingHandoff(await this.context(), query.threadId) };
       case "usage.stats":
-        return await readUsageStats(await this.store(), query.range ?? "all");
+        return await readUsageStats(await this.store(), query.range ?? "all", new Date(), ctx.config);
       case "usage.card":
-        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette);
+        return await readUsageCard(await this.store(), query.range ?? "all", new Date(), query.palette, ctx.config);
       case "remote.devices":
         return {
           devices: this.remoteAccess
