@@ -699,6 +699,8 @@ export const en = {
   "send.queuedAfterContinue": "Queued: goes out after the continue at {at} (see Queued, above)",
   "send.scheduledFor": "Scheduled for {when} (see Queued, above)",
   "send.researchSizePending": "Run size still to choose — the next send asks for it",
+  "send.scheduleDropped": "The scheduled message was not sent",
+  "send.modeSwitchTimeout": "The mode switch is taking too long — the message was not sent",
   "send.cannot": "Cannot send: {why}",
   "send.notAttached": "Not attached: {why}",
   "title.working": "{frame} {title} — working {time}",
