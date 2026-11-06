@@ -5,7 +5,7 @@ import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { UsageProtection } from "../../usage/protection.js";
-import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn } from "../threads.js";
+import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread } from "../threads.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
@@ -272,5 +272,61 @@ describe("explicit handoff submissions", () => {
     }, { timeout: 5000 });
     await runWorkQueue(w.ctx, now + 62_000); await settleRuns();
     expect(w.sent.at(-1)?.threadId).toBe(dependent.id);
+  });
+});
+
+/**
+ * A plain queued turn held at settle — by snooze (MXN-278) or by an
+ * exhausted provider (MXN-276) — sits on an idle thread with no runner.
+ * The admission path must start it once nothing blocks it, with no further
+ * user message: it takes plain turns the thread is free for, through the
+ * same `queueAdmission` every other entry goes through.
+ */
+describe("admission of held plain queued turns", () => {
+  it("starts a snooze-held plain turn once the snooze is cleared, with no further message", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued while snoozed", delivery: "queue" });
+    await snoozeThread(w.store, thread.id, new Date(now + 3600_000).toISOString());
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("queued");
+    // Idle but still snoozed: the pass admits nothing.
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    // Snooze cleared: the next pass starts it.
+    await unsnoozeThread(w.store, thread.id);
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent.map((turn) => turn.prompt)).toContain("queued while snoozed");
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("starts a snooze-held plain turn once the snooze expires, without an unsnooze", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the snooze", delivery: "queue" });
+    await snoozeThread(w.store, thread.id, new Date(now + 60_000).toISOString());
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("queued");
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    // Past expiry, never unsnoozed: the pass starts it.
+    await runWorkQueue(w.ctx, now + 61_000); await settleRuns();
+    expect(w.sent.map((turn) => turn.prompt)).toContain("queued past the snooze");
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("starts an exhaustion-held plain turn once the reset passes, with no further message", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the limit", delivery: "queue" });
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("queued");
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    // The reset lapsed, so the snapshot no longer reports exhaustion.
+    await runWorkQueue(w.ctx, now + 3600_000 + 1000); await settleRuns();
+    expect(w.sent.map((turn) => turn.prompt)).toContain("queued past the limit");
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
   });
 });

@@ -178,6 +178,14 @@ export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "inj
 export interface StoredTurn {
   readonly usagePause?: TurnUsagePause;
   readonly queue?: QueuePolicy;
+  /**
+   * Settle left this plain turn queued because the thread was snoozed or
+   * settled, or its provider was exhausted — states the admission path
+   * reports as blocked. The admission path may start it once nothing blocks
+   * it; cleared when it is promoted. Absent otherwise: an ordinary queued
+   * turn still waits for the running turn's settle.
+   */
+  readonly heldAtSettle?: boolean | undefined;
   readonly handoff?: {
     readonly requestId: string;
     readonly destinationThreadId: string;

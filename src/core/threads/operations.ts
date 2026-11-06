@@ -480,8 +480,13 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   if (thread && index >= 0) rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
+  const idle = !openTurn([...row.turns]);
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
-    if (candidate.status !== "queued" || !candidate.queue && !candidate.scheduledFor) continue;
+    if (candidate.status !== "queued") continue;
+    // A plain turn still waits for the running turn's settle unless settle
+    // held it for admission (a snoozed or settled thread, or an exhausted
+    // provider) and the thread is idle now.
+    if (!candidate.queue && !candidate.scheduledFor && (!candidate.heldAtSettle || !idle)) continue;
     const pause = row.thread.usagePause;
     if (pause?.forced) continue;
     if (candidate.queue?.continuation && candidate.queue.continuation !== "same-thread") continue;
