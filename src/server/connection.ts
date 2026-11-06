@@ -43,7 +43,7 @@ import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/self
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
 import type { LatestVersions } from "../core/catalog/update.js";
-import { EMPTY_SKILL_INVENTORY, type ProviderSummary } from "../core/catalog/summary.js";
+import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, defaultConfigPath, loadConfig, normalizeConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
@@ -163,7 +163,7 @@ import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
-import { persistUsageLimits, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
+import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
@@ -717,6 +717,23 @@ export class DirectConnection implements ClientApi {
     if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
     this.ownedDrivers.add(driver);
     return driver;
+  }
+
+  /**
+   * Explicit freshness ask behind `usage_status`: every owned driver re-reads
+   * its subscription windows where that is cheap (an open session or live
+   * connection - never a new session, never a model call), in parallel, and
+   * a probe that lands is recorded under its key. Drivers with nothing cheap
+   * to read sit the round out, and one driver's failure never stops the rest.
+   */
+  private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
+    await Promise.allSettled(
+      [...this.ownedDrivers].map(async (driver) => {
+        const refreshed = await driver.refreshUsage?.();
+        if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+      }),
+    );
+    return usageLimitsSnapshot();
   }
 
   // -- subscriptions -------------------------------------------------------
@@ -1878,6 +1895,8 @@ export class DirectConnection implements ClientApi {
         return await this.checkAppUpdate();
       case "usage.limits":
         return { providers: usageLimitsSnapshot() };
+      case "usage.refresh":
+        return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
         return this.usageProtection.read();
       case "queue.read":

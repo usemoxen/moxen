@@ -47,6 +47,7 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   SideAnswer,
   SideQuestionInput,
   SubagentHistoryItem,
@@ -959,6 +960,22 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // Advisory, like every context reading.
     }
   }
+
+  /**
+   * Explicit freshness ask: re-read Go's experimental route on servers
+   * already running, never start one. Other OpenCode providers have no
+   * quota feed, so a directory serving only those answers nothing.
+   */
+  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    for (const [directory, connection] of this.liveConnections) {
+      const windows = await connection.usageLimits().catch(() => null);
+      if (windows && windows.length > 0) {
+        this.goUsageReadAt.set(directory, Date.now());
+        return { key: OPENCODE_GO_INSTANCE, windows };
+      }
+    }
+    return null;
+  };
 
   /** The reading above, broken down by estimate from the session's messages. */
   readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {

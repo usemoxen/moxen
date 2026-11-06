@@ -19,7 +19,7 @@ import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
 import type { SkillInventory } from "../catalog/summary.js";
-import type { BackgroundTaskSummary } from "../providers/spi.js";
+import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
@@ -95,6 +95,16 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** Optional only so a test double need not implement it; all four drivers do. */
   resumeCursor?(threadId: string): string | null;
   contextUsage?(threadId: string): Promise<ContextWindowUsage | null>;
+  /**
+   * A cheap, usage-free re-read of the provider's subscription windows for an
+   * explicit freshness ask (usage.refresh, behind the usage_status tool):
+   * the same probe a live session already runs, on a session or connection
+   * already open. Never starts anything, never a model call. Null when there
+   * is nothing cheap to read: no open session, or no quota feed at all
+   * (the Harness, a non-Go OpenCode provider). Key is the usage-registry
+   * entry the windows belong under (an account, or one OpenCode Go instance).
+   */
+  refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow> } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[]): Effect.Effect<void, CliError>;

@@ -21,6 +21,7 @@ import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
+import { usageKeyForInstance } from "../../core/usage/limits.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
@@ -46,6 +47,18 @@ export interface McpTool {
 
 /** Models listed per provider before the rest are only counted: a catalog can run to hundreds. */
 export const MAX_MODELS_PER_PROVIDER = 40;
+/**
+ * How long `usage_status` waits for a cheap fresh usage reading before
+ * answering from the stored one instead. Covers the slowest cheap probe
+ * (OpenCode Go's five-second HTTP read); a slower probe keeps running and
+ * freshens the next call through the normal event path.
+ */
+export const USAGE_REFRESH_TIMEOUT_MS = 8_000;
+/**
+ * A stored usage reading older than this is flagged stale: older than any
+ * live session's reporting rhythm, so it may lag what the provider shows now.
+ */
+export const USAGE_STALE_AFTER_MS = 5 * 60_000;
 export const SUBMIT_HANDOFF_TOOL: McpTool = {
   name: "submit_handoff",
   description: "Submit the handoff summary requested by Moxen. Send only the summary here, using the requestId in the summary request. Acceptance stores it durably; no final-response summary is needed. Moxen owns scheduling and creating the new thread. Unrequested or stale submissions are refused.",
@@ -162,6 +175,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description:
       "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
       "here, and only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
+      "Those limits can be hours old: usage_status reads them fresh before you decide where there is headroom. " +
       "Pass provider to list just that one.",
     inputSchema: {
       type: "object",
@@ -179,6 +193,17 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "It is the same number the user's Moxen screen shows for this thread, taken from the latest reading Moxen recorded. " +
       "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
       "Use it before deciding to compact or hand off instead of guessing. It takes no argument: always your own thread.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "usage_status",
+    description:
+      "The user's current shared provider usage, for every set-up provider: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
+      "Also which provider your own thread runs on, and what usage protection holds or has queued. " +
+      "Call it before fanning work out (Orchestrate: after models, before delegate), and whenever you must decide where there is headroom: the usageLimits in models can be hours old, while this tries a cheap fresh reading first and falls back to the stored one with its age. " +
+      "A provider with no windows has no data, which is not the same as unlimited. " +
+      "Read-only: it never spends provider usage.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
@@ -625,7 +650,7 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
@@ -664,6 +689,8 @@ export async function callMoxenTool(
         return ok(await modelsTool(api, args));
       case "context_usage":
         return ok(await contextUsageTool(api, parentThreadId));
+      case "usage_status":
+        return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS));
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
@@ -1086,5 +1113,68 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string) {
     ...(reading.compactedSince
       ? { note: "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that." }
       : {}),
+  };
+}
+
+/**
+ * `usage_status`: the user's current shared provider usage, for an agent
+ * deciding where there is headroom. Every enabled, installed provider keeps
+ * one row: its windows (percent used, reset time, label), when that reading
+ * was taken, and whether it is stale (older than USAGE_STALE_AFTER_MS).
+ * A provider with no windows has no data, which is not unlimited. The
+ * protection snapshot is the same one `moxen usage status` shows: what
+ * usage protection holds or has queued.
+ */
+async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number) {
+  const [listed, stored, protection, inspected] = await Promise.all([
+    api.query({ type: "providers.list" }),
+    api.query({ type: "usage.limits" }),
+    api.query({ type: "usage.protection" }),
+    api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null),
+  ]);
+  // A cheap refresh where one exists, bounded: a slow probe costs the
+  // answer's freshness, never the answer. The probe keeps running behind
+  // the fallback and freshens the next call through the normal event path.
+  const refreshed = await withinDeadline(api.query({ type: "usage.refresh" }), timeoutMs).catch(() => "timeout" as const);
+  const snapshot = refreshed === "timeout" ? stored.providers : refreshed.providers;
+  const now = Date.now();
+  const providers = listed.providers
+    .filter((provider) => provider.enabled && provider.installed)
+    .map((provider) => {
+      const usage = snapshot[usageKeyForInstance(provider.instanceId)] ?? snapshot[provider.driver] ?? provider.usageLimits;
+      if (!usage || usage.windows.length === 0) {
+        return {
+          provider: provider.instanceId,
+          displayName: provider.displayName ?? provider.instanceId,
+          enabled: true,
+          checkedAt: usage?.checkedAt ?? null,
+          stale: false,
+          windows: [],
+          note: usage?.unavailable
+            ? `Usage cannot be read for this provider (${usage.unavailable.reason}). No data is not the same as unlimited: do not treat it as headroom.`
+            : "No usage reported for this provider. No data is not the same as unlimited: do not treat it as headroom.",
+        };
+      }
+      const taken = Date.parse(usage.checkedAt);
+      return {
+        provider: provider.instanceId,
+        displayName: provider.displayName ?? provider.instanceId,
+        enabled: true,
+        checkedAt: usage.checkedAt,
+        stale: !Number.isFinite(taken) || now - taken > USAGE_STALE_AFTER_MS,
+        windows: usage.windows.map((window) => ({
+          id: window.id,
+          kind: window.kind,
+          label: window.label,
+          usedPercent: window.usedPercent,
+          resetsAt: window.resetsAt,
+        })),
+        ...(usage.unavailable ? { note: `Usage cannot be read for this provider (${usage.unavailable.reason}).` } : {}),
+      };
+    });
+  return {
+    callerProvider: inspected?.thread.modelSelection?.instanceId ?? null,
+    providers,
+    protection,
   };
 }

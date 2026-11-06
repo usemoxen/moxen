@@ -146,13 +146,13 @@ tools behave on this machine, how to use Moxen memory and the web tools it
 has — under one heading per subject, and end with the user's own
 instructions. Every top-level thread also gets the `moxen` MCP server
 (`delegate`, `task_status`, `task_cancel`, `task_send`, `task_ask`, `message_queue`,
-`models`, `context_usage`), so an agent can hand work to a
+`models`, `context_usage`, `usage_status`), so an agent can hand work to a
 subagent thread in a worktree of its own, find and read other threads
 (`thread_search`, `thread_read`), consult the shipped [knowledge base](knowledge.md)
 (`knowledge_search`, `knowledge_read`), keep Moxen memory (`memory_*`, see
 [threads.md](threads.md#memory)), and see how full its own context window is.
 Delegated threads retain knowledge search/read,
-`web_fetch`, `context_usage` and memory read/search when enabled, but cannot delegate or write
+`web_fetch`, `context_usage`, `usage_status` and memory read/search when enabled, but cannot delegate or write
 memory; `"moxen": null` in project `mcpServers` turns it off.
 
 `context_usage` answers with the calling thread's tokens used, window size,
@@ -161,6 +161,13 @@ composer shows, totals only. It never estimates: a thread with no reading yet
 is told so, and a reading from before a compaction is returned with its time
 and marked not current, since Moxen records a fresh one when the compaction
 ends.
+
+`usage_status` answers with every set-up provider's allowance: each window's
+percent used, reset time and label, when that reading was taken, and whether
+it is stale — plus which provider the calling thread runs on, and what usage
+protection holds or has queued. It tries a cheap fresh reading first, bounded,
+and falls back to the stored one with its age. A provider with no windows has
+no data, which is not the same as unlimited.
 
 `thread_read` never floods the caller's context: it returns an outline (one
 line per turn, newest first), then the turns asked for (each tool call one

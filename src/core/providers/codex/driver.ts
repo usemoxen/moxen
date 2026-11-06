@@ -44,6 +44,7 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   ThreadId,
   TokenUsageDelta,
   TurnId,
@@ -479,6 +480,19 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
 
+  /**
+   * Explicit freshness ask: re-read the limits on an already-open session,
+   * never start one. The read publishes through the normal event path too;
+   * the returned windows let the caller record them without waiting for
+   * the pump.
+   */
+  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
+    if (!session) return null;
+    const windows = await this.probeRateLimits(session);
+    return windows.length > 0 ? { key: "codex", windows } : null;
+  };
+
   readonly contextBreakdown = async (threadId: string): Promise<ContextBreakdown | null> => {
     const session = this.sessions.get(threadId);
     if (!session?.context || !session.codexThreadId) return null;
@@ -545,20 +559,21 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     };
   }
 
-  private async probeRateLimits(session: CodexSession): Promise<void> {
+  private async probeRateLimits(session: CodexSession): Promise<RateLimitWindow[]> {
     try {
       const snapshot = await session.peer.request(
         CODEX_METHODS.rateLimitsRead,
         {},
         this.rateLimitsTimeoutMs,
       );
-      this.applyRateSnapshot(session, snapshot);
+      return this.applyRateSnapshot(session, snapshot);
     } catch {
       // Degrade to a message: live updates still arrive mid-turn.
+      return [];
     }
   }
 
-  private applyRateSnapshot(session: CodexSession, snapshot: unknown): void {
+  private applyRateSnapshot(session: CodexSession, snapshot: unknown): RateLimitWindow[] {
     const record = asRecord(snapshot) ?? {};
     const inner = asRecord(record["rateLimits"]) ?? record;
     const windows = codexWindowsOf({
@@ -577,6 +592,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       windows,
       raw: { planType: inner["planType"] ?? null },
     });
+    return windows;
   }
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>

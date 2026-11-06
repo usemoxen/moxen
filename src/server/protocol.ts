@@ -595,6 +595,13 @@ export type Query =
    */
   | { readonly type: "usage.limits" }
   | { readonly type: "usage.protection" }
+  /**
+   * Ask every owned driver for a fresh usage reading where that is cheap (an
+   * open session or live connection - never a new session, never a model
+   * call), then answer the stored snapshot, refreshed where the probe
+   * landed. Read-only; drivers with nothing cheap to read sit the round out.
+   */
+  | { readonly type: "usage.refresh" }
   | { readonly type: "queue.read" }
   | { readonly type: "handoff.pending"; readonly threadId: string }
   /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
@@ -728,6 +735,7 @@ export interface QueryResults {
   "usage.stats": UsageStats;
   "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
+  "usage.refresh": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "usage.protection": UsageProtectionSnapshot;
   "queue.read": { readonly entries: readonly WorkQueueEntry[] };
   "handoff.pending": { readonly requestId: string | null };
@@ -1626,6 +1634,7 @@ export function decodeQuery(value: unknown): Query {
     case "usage.stats":
       return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
+    case "usage.refresh":
     case "usage.protection":
     case "queue.read":
     case "remote.status":
