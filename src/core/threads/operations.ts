@@ -36,6 +36,7 @@ import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
+import { writeAtomic } from "../infra/atomic.js";
 import {
   ensureStoredProject,
   listStoredProjects,
@@ -2172,15 +2173,70 @@ export const TASK_NOTIFICATION_BATCH_MS = 2_000;
 
 const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; taskIds: string[] }>();
 
+/** Pending notification batches beside the thread store, so a server restart inside the batch window loses nothing. */
+const TASK_NOTIFICATION_BATCHES_FILE = "task-notification-batches.json";
+
+function taskNotificationBatchesFile(storeRoot: string): string {
+  return path.join(storeRoot, TASK_NOTIFICATION_BATCHES_FILE);
+}
+
+async function readTaskNotificationBatches(storeRoot: string): Promise<Record<string, string[]>> {
+  try {
+    const raw = JSON.parse(await readFile(taskNotificationBatchesFile(storeRoot), "utf8")) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const batches: Record<string, string[]> = {};
+    for (const [parent, taskIds] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof parent === "string" && Array.isArray(taskIds) && taskIds.every((id): id is string => typeof id === "string" && id.length > 0)) batches[parent] = [...new Set(taskIds)];
+    }
+    return batches;
+  } catch {
+    return {};
+  }
+}
+
+/** File writes chain behind each other, so batches queued on different parents cannot drop each other's entries. */
+let batchFileChain: Promise<unknown> = Promise.resolve();
+
+async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, string[]>) => void): Promise<void> {
+  const run = batchFileChain.then(async () => {
+    const batches = await readTaskNotificationBatches(storeRoot);
+    update(batches);
+    await writeAtomic(taskNotificationBatchesFile(storeRoot), `${JSON.stringify(batches)}\n`);
+  });
+  batchFileChain = run.catch(() => undefined);
+  await run.catch(() => undefined);
+}
+
 /** Move an in-flight notification batch onto a newly protected thread's durable queue. */
 export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
     const pending = pendingNotifications.get(parentThreadId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    pendingNotifications.delete(parentThreadId);
-    await deliverTaskNotifications(ctx, parentThreadId, pending.taskIds);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingNotifications.delete(parentThreadId);
+    }
+    // Forgotten before it is delivered, under the same lock every flush and
+    // replay takes: one batch goes out once, never lost, never duplicated.
+    let replay: string[] = [];
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      replay = batches[parentThreadId] ?? [];
+      delete batches[parentThreadId];
+    });
+    await deliverTaskNotifications(ctx, parentThreadId, [...new Set([...(pending?.taskIds ?? []), ...replay])]);
   });
+}
+
+/**
+ * Deliver notification batches a restarted server inherited: tasks that
+ * settled inside the batch window before the previous process died. Called
+ * once at startup; each batch is forgotten as it is delivered, so replaying
+ * finds nothing left and delivers nothing twice.
+ */
+export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
+  const batches = await readTaskNotificationBatches(ctx.storeRoot);
+  for (const parentThreadId of Object.keys(batches)) {
+    await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
+  }
 }
 
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
@@ -2195,6 +2251,11 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
       const pending = pendingNotifications.get(parentThreadId);
       if (pending) clearTimeout(pending.timer);
       const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
+      // Persisted before the timer is armed: a restart inside the batch
+      // window replays the file, and the replay unions what is on disk.
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        batches[parentThreadId] = [...new Set([...(batches[parentThreadId] ?? []), ...taskIds])];
+      });
       const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
       timer.unref?.();
       pendingNotifications.set(parentThreadId, { timer, taskIds });

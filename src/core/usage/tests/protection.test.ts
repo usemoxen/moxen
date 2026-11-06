@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settleRuns } from "../../testing/turns.js";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as Effect from "effect/Effect";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -9,7 +9,7 @@ import { FakeTransport, initMessage, successResult } from "../../providers/claud
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, editWorkQueue, queueTaskNotification, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
+import { continueThread, editWorkQueue, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -183,8 +183,55 @@ describe("usage protection", () => {
     } finally { w.guard.close(); }
   });
 
-  it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {
+  it("delivers a task notification batch held in the batch window across restart, exactly once", async () => {
     const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const child = await w.make("child report");
+    await completeTurn(w.store, child, openTurn(await w.store.readTurns(child))!.id, { text: "Delivered the exact task report" });
+    try {
+      await queueTaskNotification(w.ctx, parent, child);
+      // Durable before the timer fires: the sidecar names the batch.
+      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, string[]>;
+      expect(persisted[parent]).toEqual([child]);
+      // A restart before the timer fires replays the batch...
+      const store = await openThreadStore(w.root);
+      const ctx = { ...w.ctx, store };
+      await recoverTaskNotifications(ctx);
+      await settleRuns();
+      const messages = (await store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks.map((task) => task.taskId)).toEqual([child]);
+      // ...and replaying finds nothing left: still exactly one.
+      await recoverTaskNotifications(ctx);
+      await settleRuns();
+      expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(1);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+    } finally { w.guard.close(); }
+  });
+
+  it("batches tasks settling inside the window into one notification, and only once", async () => {
+    const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const first = await w.make("first report");
+    await completeTurn(w.store, first, openTurn(await w.store.readTurns(first))!.id, { text: "one" });
+    const second = await w.make("second report");
+    await completeTurn(w.store, second, openTurn(await w.store.readTurns(second))!.id, { text: "two" });
+    try {
+      await queueTaskNotification(w.ctx, parent, first);
+      await queueTaskNotification(w.ctx, parent, second);
+      await new Promise((resolve) => setTimeout(resolve, TASK_NOTIFICATION_BATCH_MS + 500));
+      await settleRuns();
+      const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks.map((task) => task.taskId).sort()).toEqual([first, second].sort());
+      await settleRuns();
+      expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(1);
+    } finally { w.guard.close(); }
+  });
+
+  it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {    const w = await world();
     const id = await w.make("put away");
     await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
     try {
