@@ -68,8 +68,16 @@ export function relabelImageTokens(
   let out = "";
   let last = 0;
   for (const match of text.matchAll(TOKEN)) {
+    if (match.index === undefined) break;
     const name = names[spans.length];
-    if (name === undefined || match.index === undefined) break;
+    if (name === undefined) {
+      // No recovered image behind this token (its file went missing since
+      // the copy): leave the token out instead of a dangling "[Image #N]"
+      // with nothing behind it. The text around it stays.
+      out += text.slice(last, match.index);
+      last = match.index + match[0].length;
+      continue;
+    }
     const label = nextImageLabel(labels);
     labels.push(label);
     out += text.slice(last, match.index);

@@ -58,6 +58,7 @@ import { runSidebarTree } from "./scenarios/sidebarTree.js";
 import { runSidebarSearch } from "./scenarios/sidebarSearch.js";
 import { runRemoteAccess } from "./scenarios/remoteAccess.js";
 import { runProtectThread } from "./scenarios/protectThread.js";
+import { runThreadAffinity } from "./scenarios/threadAffinity.js";
 import { runServerLink } from "./scenarios/serverLink.js";
 import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
@@ -66,6 +67,8 @@ import { runUpdateScreen } from "./scenarios/updateScreen.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
 import { runResearchRun } from "./scenarios/researchRun.js";
+import { runNewThreadResearch } from "./scenarios/newThreadResearch.js";
+import { runSendGate } from "./scenarios/sendGate.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -163,6 +166,9 @@ export async function runWalkthrough(): Promise<void> {
   await runModalInput();
   await runWorkQueueModal();
   await runResearchRun();
+  await runNewThreadResearch();
+  await runSendGate();
   await runProtectThread();
+  await runThreadAffinity();
 
 }

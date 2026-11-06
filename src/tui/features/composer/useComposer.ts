@@ -1,5 +1,5 @@
 import { t } from "../../i18n/index.js";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "../../hooks/useClipboard.js";
 import type { useToasts } from "../../hooks/useToasts.js";
@@ -13,6 +13,25 @@ import {
 import type { ImageAttachmentUpload } from "../../../core/attachments.js";
 import { COPY_TOAST_MS } from "../../app/constants.js";
 import { copiedToast, copyPrompt } from "../../model/copystash.js";
+
+/** What identifies an unsent image while it moves back into the draft store. */
+const attachmentKey = (attachment: Pick<ImageAttachmentUpload, "name" | "sizeBytes" | "mimeType">): string =>
+  `${attachment.name}\n${attachment.sizeBytes}\n${attachment.mimeType}`;
+
+/**
+ * Merges images that went out with a failed send back over whatever was
+ * attached meanwhile, without duplicating either. Pure, so the merge itself
+ * is unit-tested; the hook wrapper below applies it to the draft store.
+ */
+export function mergeAttachments(
+  current: readonly ImageAttachmentUpload[],
+  snapshot: readonly ImageAttachmentUpload[],
+): ImageAttachmentUpload[] {
+  if (snapshot.length === 0) return [...current];
+  const seen = new Set(current.map(attachmentKey));
+  const missing = snapshot.filter((attachment) => !seen.has(attachmentKey(attachment)));
+  return missing.length === 0 ? [...current] : [...current, ...missing];
+}
 
 /**
  * Composition is per thread: switching threads stashes the draft and
@@ -51,6 +70,12 @@ export function useComposer(
   const draftKey = openThreadId ?? "__creating__";
   const draft = drafts[draftKey] ?? "";
   const pending = pendings[draftKey] ?? [];
+  // Async completions (a clipboard read, a dialog) land after `await`: a
+  // thread switch behind them must not strand the result on the old thread.
+  const draftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    draftKeyRef.current = draftKey;
+  }, [draftKey]);
 
   /** The draft with its pasted images: pasting it back into moxen attaches them again (see `model/copystash.ts`). */
   const copyDraft = () => {
@@ -91,6 +116,32 @@ export function useComposer(
     setComposerResetCounter((count) => count + 1);
   };
 
+  /**
+   * Puts an unsent prompt back after Enter consumed the draft: anything typed
+   * while the send waited lands ahead of nothing — it was written first, so
+   * the restored text goes first and the newer typing stays after it. Reads
+   * fresh state in the update, since the waiter holding the text rendered
+   * before that typing happened.
+   */
+  const restoreUnsentDraft = (id: string, snapshot: string) => {
+    setDrafts((current) => {
+      const typed = (current[id] ?? "").trim();
+      const value = typed.length === 0 ? snapshot : `${snapshot}\n${typed}`;
+      if (current[id] === value) return current;
+      return { ...current, [id]: value };
+    });
+    setComposerResetCounter((count) => count + 1);
+  };
+
+  /** Puts images that went out with a failed send back (see `mergeAttachments`). */
+  const restoreUnsentAttachments = (id: string, snapshot: readonly ImageAttachmentUpload[]) => {
+    if (snapshot.length === 0) return;
+    setPendings((current) => {
+      const merged = mergeAttachments(current[id] ?? [], snapshot);
+      return merged.length === (current[id] ?? []).length ? current : { ...current, [id]: merged };
+    });
+  };
+
   const writePending = (id: string, next: ImageAttachmentUpload[]) => {
     setPendings((current) => {
       if (next.length === 0) {
@@ -104,7 +155,7 @@ export function useComposer(
   };
 
   const setPending = (next: ImageAttachmentUpload[] | ((current: ImageAttachmentUpload[]) => ImageAttachmentUpload[])) => {
-    const id = draftKey;
+    const id = draftKeyRef.current;
     if (typeof next === "function") {
       setPendings((current) => {
         const resolved = (next as (current: ImageAttachmentUpload[]) => ImageAttachmentUpload[])(current[id] ?? []);
@@ -187,6 +238,8 @@ export function useComposer(
     setDraft,
     resetDraft,
     restoreDraft,
+    restoreUnsentDraft,
+    restoreUnsentAttachments,
     writePending,
     setPending,
     editDraftExternally,

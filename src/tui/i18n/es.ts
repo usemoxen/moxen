@@ -692,6 +692,8 @@ export const es: Catalog = {
   "send.queuedAfterContinue": "En cola: sale después del «continuar» de las {at} (mira En cola, arriba)",
   "send.scheduledFor": "Programado para {when} (mira En cola, arriba)",
   "send.researchSizePending": "Falta elegir el tamaño de la investigación: el próximo envío lo pregunta",
+  "send.scheduleDropped": "El mensaje programado no se ha enviado",
+  "send.modeSwitchTimeout": "El cambio de modo está tardando demasiado: el mensaje no se ha enviado",
   "send.cannot": "No se puede enviar: {why}",
   "send.notAttached": "No se ha adjuntado: {why}",
   "title.working": "{frame} {title} — trabajando {time}",

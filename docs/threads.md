@@ -149,10 +149,12 @@ subscription does not count. Opt in before requesting research.
 `/research` (`interactionMode: "research"` on `thread.turn.start`) uses this
 same surface. After approval, the user's own thread is the lead; no delegated
 lead is created. With a single-researcher answer or no answering client, it
-researches directly without role tools. The picker shows only for `/research`
-and for the first prompt after the user switches the thread into Research mode
-(the thread keeps a `researchPicker` mark until then), not on every message of a
-thread that stays in Research mode. Clients that have not opted in keep the
+researches directly without role tools. The picker shows for `/research`,
+for the first prompt after the user switches the thread into Research mode,
+and for the first prompt of a thread created in Research mode (a new-thread
+draft sent while Research is picked): the thread keeps a `researchPicker` mark
+until that first prompt, not on every message of a thread that stays in
+Research mode. Clients that have not opted in keep the
 single-researcher behavior.
 
 A full-run lead's `thread.json` stores a
@@ -202,7 +204,10 @@ one task id, one final report and one notification.
 
 A busy `/research` never opens a proposal. It follows the same send policy as
 the single-researcher fallback: existing mode locks, queue and delivery rules
-still apply, so a mode change during a running turn can be refused.
+still apply, so a mode change during a running turn can be refused. Maintenance
+turns never ask and never spend the question either: a bare `/compact`, a
+usage-limit continue, and a held work-queue entry run as they are, leaving the
+run-size mark for the first real prompt.
 
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds
@@ -599,7 +604,8 @@ model that fits it, checking budget, memory and isolation before delegating.
   (a handoff document, say) ahead of it, up to the last turn the provider
   answered, along with the mode block.
 - A new thread starts in Build unless a mode is picked while drafting it,
-  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate.
+  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate. A thread
+  drafted in Research mode asks for the run size on its first prompt.
 - The TUI shows the mode as the composer's left-edge colour (Build sky,
   Research violet, Orchestrate fuchsia), its running pulse, and in the
   footer.
@@ -778,6 +784,52 @@ copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
 than an error, so the orchestrator can fall back to `thread_read`. The call
 waits at most 45 seconds, then returns a `timedOut` result; the task is
 unchanged either way.
+
+### Where a delegated task works
+
+`delegate` defaults to a worktree: the child gets its own checkout on a new
+branch cut from the parent's, so two agents never edit the same files at
+once. The branch is read from the parent's checkout, even when the parent
+thread's record names none (threads the TUI creates record none). A
+`fork: true` task always shares the parent's checkout, since its copied
+conversation belongs to the directory it runs in, and an explicit
+`isolation: "shared"` is for read-only work, or when nothing else writes at
+the same time. Where there is no branch to cut from — a detached HEAD, or a
+project that is not a git repository at all — there is no worktree to give,
+so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
+`isolation: "shared"`. It never quietly shares your checkout.
+
+### Starting several tasks in one call (`delegate`)
+
+One `delegate` call takes shared settings (`provider`, `model`, `effort`,
+`isolation`, plus `rules`: instructions appended to every task's prompt
+under "Common rules for this task") beside a `tasks` list of at most 20
+entries. Each entry has its own `title` and `task` text and may override
+`provider`, `model`, `effort` or `isolation`; an entry takes no other field.
+An entry on another provider does not inherit the shared `model` or
+`effort`: it names its own model, or its start fails. `mode` and `fork` are
+shared by the whole call. The single-task form (`task` plus `title`) keeps
+working unchanged, and `researchProposal` cannot be combined with `tasks`.
+
+What is bad on its face — a malformed entry or list, a forked task in a
+worktree, a provider with no model anywhere — fails the whole call with
+nothing started. Once starting, each task is on its own: one that fails to
+start is reported as that entry's `error` while the rest still start, so the
+others are neither lost nor silently doubled. A top-level `idempotencyKey`
+is derived per entry from the key plus the entry's own title and task, so
+retrying the whole call — in any order, with entries added or removed —
+returns each original task instead of starting duplicates; a task's own
+`idempotencyKey` wins for that entry. The result lists every task's `taskId`
+and `isolation`, with one `warning` when any task shares your checkout.
+
+### Stopping several tasks at once (`task_cancel`)
+
+`task_cancel` takes `taskId` for one task or `taskIds` for several; its
+thread and worktree are kept either way. Each task's outcome
+(`cancelRequested`, `status`) is reported separately, and one bad id is that
+entry's `error` rather than a failed call, so it never stops the others. A
+repeated id stops once, in order. When the parent itself is missing, the
+call fails as the single form does instead of reporting one error per id.
 
 ### Queueing a message from an agent (`message_queue`)
 
