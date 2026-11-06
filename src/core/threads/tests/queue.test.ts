@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
+import { writeFile } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -440,6 +442,62 @@ describe("admission of held plain queued turns", () => {
     await settleRuns();
     expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
     expect(w.sent.map((turn) => turn.prompt)).toEqual(["queued past the limit\n\nnewer message"]);
+  });
+
+  it("resumes a held turn with current native tools and rule changes", async () => {
+    const w = await world(); const thread = await w.make("claudeAgent"); const now = Date.now();
+    // Park the first turn's completion so the second queues behind a live run.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveGate = resolve; });
+    const driver = w.ctx.driverFor("claudeAgent");
+    const awaitTurn = driver.awaitTurn.bind(driver);
+    driver.awaitTurn = async (...args) => { await gate; return awaitTurn(...args); };
+    const first = await startTurn(w.ctx, { threadId: thread.id, prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the limit", delivery: "queue" });
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    // The session started with no rule files; change them while it sits idle.
+    await writeFile(path.join(w.work, "AGENTS.md"), "Never force-push without a confirming flag.\n");
+    await completeTurn(w.store, thread.id, first.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    const nativeTools: { threadId: string; names: readonly string[]; moxenPrompt?: boolean }[] = [];
+    driver.updateNativeTools = async (threadId, names, moxenPrompt) => { nativeTools.push({ threadId, names, moxenPrompt }); };
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
+    await runWorkQueue(w.ctx, now);
+    resolveGate();
+    await settleRuns();
+    // The resume re-registers native tools and carries the rule change ahead
+    // of the prompt, like a fresh send does. (The first turn never reached
+    // the provider: it was completed while its session was still starting,
+    // so the resumed prompt is the only one the driver sees.)
+    expect(nativeTools).toHaveLength(1);
+    expect(nativeTools[0]?.threadId).toBe(thread.id);
+    expect(w.sent.at(-1)?.prompt).toContain("<moxen-context-update>");
+    expect(w.sent.at(-1)?.prompt).toContain("force-push");
+    expect(w.sent.at(-1)?.prompt).toContain("queued past the limit");
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
+  });
+
+  it("carries rule changes into a turn promoted at settle on a warm session", async () => {
+    const w = await world(); const thread = await w.make("claudeAgent");
+    await writeFile(path.join(w.work, "AGENTS.md"), "Keep functions small.\n");
+    // Park the first turn's completion so the second queues behind a live run.
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveGate = resolve; });
+    const driver = w.ctx.driverFor("claudeAgent");
+    const awaitTurn = driver.awaitTurn.bind(driver);
+    driver.awaitTurn = async (...args) => { await gate; return awaitTurn(...args); };
+    const first = await startTurn(w.ctx, { threadId: thread.id, prompt: "work" });
+    await sendTurn(w.store, thread.id, { prompt: "queued behind it", delivery: "queue" });
+    // Change the rules after the session read them; the settle-promoted run
+    // takes the patch ahead of its prompt.
+    await writeFile(path.join(w.work, "AGENTS.md"), "Keep functions small.\nNever force-push without a confirming flag.\n");
+    resolveGate();
+    await first.run;
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.prompt)).toHaveLength(2);
+    expect(w.sent[1]?.prompt).toContain("<moxen-context-update>");
+    expect(w.sent[1]?.prompt).toContain("force-push");
+    expect(w.sent[1]?.prompt).toContain("queued behind it");
   });
 
   it("holds a queued send behind a held turn that cannot run yet, reporting it queued", async () => {

@@ -436,7 +436,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
     setup = await sessionSetup(ctx, turnThread, selection.instanceId);
     await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
-    await driver.updateMcpServers?.(threadId, setup.mcpServers);
+    await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
+    // Config or rule files changed while the session sat idle: a live session
+    // takes them now, like a fresh send does — never a reason to fail the resume.
+    await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
   } catch (cause) {
     const error = cause instanceof Error ? cause.message : String(cause);
     await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
@@ -446,14 +449,16 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
     return;
   }
+  // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
+  const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
   const images = await imagesOf(message.attachments);
-  const steps = deliveredSteps(setup);
+  const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
   void executeTurn({
     store,
     driver,
     threadId,
     storeTurnId: turn.id,
-    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup),
+    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
     ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
     ...(setup.fresh ? { freshConversation: true } : {}),
     interactionMode: turn.interactionMode,
