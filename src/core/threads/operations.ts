@@ -61,7 +61,7 @@ import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type Pro
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
-import { driverKey, ensureDriverSession, executeTurn, imagesOf, type TurnDriver } from "./execute.js";
+import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
@@ -1273,6 +1273,9 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
   const turnThread: StoredThread = { ...sent.thread, modelSelection: turnModel, interactionMode: sent.turn.interactionMode };
+  // Whether this send opened the session: a turn stopped while it started
+  // leaves a session nobody will use, so it is closed again below.
+  const hadSession = await Effect.runPromise(driver.hasSession(thread.id)).catch(() => false);
   let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
   let startFailure: unknown = null;
   try {
@@ -1286,6 +1289,41 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    return { ...sent, run: Promise.resolve() };
+  }
+  // A stop that landed while the session was starting already settled the
+  // turn: sending now would orphan a provider run with no store turn.
+  const current = (await store.readTurns(thread.id)).find((turn) => turn.id === sent.turn.id);
+  if (!current || current.status !== "running") {
+    // The session may since have a newer turn on it: only stop a session
+    // nobody uses. Checked and stopped under the thread lock, so a send
+    // cannot start on it in between; driver stops never take the store
+    // lock, so this cannot deadlock.
+    const stopSession = !hadSession ? driver.stopSession : undefined;
+    if (stopSession) {
+      await store.withThreadLock(thread.id, async () => {
+        if (openTurn(await store.readTurns(thread.id)) !== null) return;
+        await Effect.runPromise(stopSession(thread.id)).catch(() => undefined);
+      });
+    }
+    // The stop may have promoted a queued turn: it has an owner but no
+    // runner, and this send never reached `executeTurn` to hand it one.
+    // Run it through the same claim path as a settling runner, and wait
+    // for the handoff before returning, so the promoted turn is claimed
+    // by the time the stop is acknowledged.
+    await runPromotedTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: sent.turn.id,
+      prompt: "",
+      modelSelection: turnModel,
+      interactionMode: sent.turn.interactionMode,
+      workingDirectory: sent.thread.env.path,
+      ...(onEvent ? { onEvent } : {}),
+      ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
+      ...longThreadHook(ctx, thread.id),
+    });
     return { ...sent, run: Promise.resolve() };
   }
   const images = providerImages(uploads);
