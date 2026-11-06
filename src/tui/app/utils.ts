@@ -25,6 +25,18 @@ export function clock(value: string): string {
 }
 
 /**
+ * Stable identity of the compact notice over the composer. Keyed per thread
+ * only: the usage figure it shows keeps moving while the notice is up, and a
+ * key that moved with it would reset the notice pager to the first page on
+ * every usage update (see `useNoticePager`). Null with no open thread or no
+ * usage snapshot, when there is no notice to key.
+ */
+export function compactNoticeKey(openThreadId: string | null, usedTokens: number | null): string | null {
+  if (openThreadId === null || usedTokens === null) return null;
+  return `compact:${openThreadId}`;
+}
+
+/**
  * Where a launch lands. Production opens on the new-thread screen, the latest
  * thread only lending its project and model — unless a thread is working or
  * waiting on the user, which is where they were: that one opens on its
