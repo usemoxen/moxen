@@ -9,7 +9,7 @@ import { FakeTransport, initMessage, successResult } from "../../providers/claud
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, editWorkQueue, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, TASK_NOTIFICATION_BATCH_MS, type OperationContext } from "../../threads/operations.js";
+import { continueThread, editWorkQueue, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -221,7 +221,9 @@ describe("usage protection", () => {
     try {
       await queueTaskNotification(w.ctx, parent, first);
       await queueTaskNotification(w.ctx, parent, second);
-      await new Promise((resolve) => setTimeout(resolve, TASK_NOTIFICATION_BATCH_MS + 500));
+      // The timer batches what settles inside the window: one message for
+      // both tasks, and nothing more afterwards.
+      await expect.poll(async () => (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification"), { timeout: 10_000, interval: 50 }).toHaveLength(1);
       await settleRuns();
       const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
       expect(messages).toHaveLength(1);

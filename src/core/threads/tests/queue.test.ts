@@ -459,7 +459,7 @@ describe("admission of held plain queued turns", () => {
     await writeFile(path.join(w.work, "AGENTS.md"), "Never force-push without a confirming flag.\n");
     await completeTurn(w.store, thread.id, first.turn.id, { text: "done" });
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
-    const nativeTools: { threadId: string; names: readonly string[]; moxenPrompt?: boolean }[] = [];
+    const nativeTools: { threadId: string; names: readonly string[]; moxenPrompt?: boolean | undefined }[] = [];
     driver.updateNativeTools = async (threadId, names, moxenPrompt) => { nativeTools.push({ threadId, names, moxenPrompt }); };
     recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
     await runWorkQueue(w.ctx, now);
