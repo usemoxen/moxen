@@ -536,8 +536,8 @@ export type Query =
       readonly type: "opencode.session-thread";
       readonly nativeSessionId: string;
     }
-  /** How many live native sessions the server's drivers hold: more than one makes a call without session identity ambiguous. */
-  | { readonly type: "opencode.session-count" }
+  /** How many live sessions could place calls on a thread's entry: more than one makes a call without session identity ambiguous. */
+  | { readonly type: "thread.entry-sessions"; readonly threadId: string }
   | { readonly type: "research.proposals"; readonly threadId: string }
   | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
@@ -717,7 +717,7 @@ export interface QueryResults {
     readonly memory: "write" | "read" | "off";
     readonly checklist: boolean;
   } | null;
-  "opencode.session-count": { readonly count: number };
+  "thread.entry-sessions": { readonly count: number };
   "research.proposals": readonly ResearchProposal[];
   "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
@@ -1619,8 +1619,8 @@ export function decodeQuery(value: unknown): Query {
       return { type, threadId: requireThreadId(record.threadId) };
     case "opencode.session-thread":
       return { type, nativeSessionId: requireField(record.nativeSessionId, type, "nativeSessionId") };
-    case "opencode.session-count":
-      return { type };
+    case "thread.entry-sessions":
+      return { type, threadId: requireThreadId(record.threadId) };
     case "research.role.report":
       return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };
     case "thread.task.status":

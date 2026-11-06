@@ -586,9 +586,9 @@ function sessionOf(params: Record<string, unknown>): string | null {
  * another thread. A request without one falls back to the entry's own
  * thread — except a `tools/call`, which would otherwise silently execute as
  * the owner (a `delegate` creating the owner's task, a `memory_save` in the
- * owner's scope): with more than one live session the call is ambiguous, so
- * it fails naming the missing key, and with one at most the fallback cannot
- * land on another thread.
+ * owner's scope): when sessions share the entry the call is ambiguous, so
+ * it fails naming the missing key, and with one session at most the
+ * fallback cannot land on another thread.
  */
 export async function routeMcpSession(
   api: ClientApi,
@@ -599,11 +599,16 @@ export async function routeMcpSession(
   const nativeSessionId = sessionOf(params);
   if (nativeSessionId === null) {
     if (!requireSession) return fallback;
-    let sessions = 0;
+    // Sessions that could have placed this call on the entry: one at most
+    // and the fallback cannot land on another thread; more and the call is
+    // ambiguous, so it fails naming the missing key. Anything unparsable
+    // fails closed too.
+    let sessions = 2;
     try {
-      sessions = (await api.query({ type: "opencode.session-count" })).count;
+      const answer = await api.query({ type: "thread.entry-sessions", threadId: fallback.threadId });
+      if (typeof answer?.count === "number") sessions = answer.count;
     } catch (cause) {
-      return { error: `Could not count this server's live sessions: ${cause instanceof Error ? cause.message : String(cause)}` };
+      return { error: `Could not count the sessions sharing this entry: ${cause instanceof Error ? cause.message : String(cause)}` };
     }
     if (sessions <= 1) return fallback;
     return {

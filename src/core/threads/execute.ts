@@ -121,12 +121,13 @@ export interface TurnDriver extends ProviderSessionTitles {
    */
   threadForNativeSession?(nativeSessionId: string): string | null;
   /**
-   * How many live native sessions this driver holds, for deciding whether a
-   * tool call without session identity is unambiguous: with one live session
-   * at most, the entry owner's fallback cannot land on another thread.
-   * Absent where the provider sends no session id with its tool calls.
+   * How many live sessions could place calls on this thread's entry: more
+   * than one makes a tool call without session identity ambiguous, so it
+   * fails instead of running as the entry owner's thread. One at most (an
+   * entry that serves only its own thread) keeps the owner's fallback.
+   * Absent where entries are never shared: one.
    */
-  liveSessionCount?(): number;
+  entrySessionCount?(threadId: string): number;
   /**
    * The provider tools to leave off, as the setting says now, for a session already running. OpenCode's are part of
    * its server's config, so it restarts the server once nothing runs on it. Absent where a live session cannot

@@ -809,7 +809,10 @@ own tools — a delegated task's `delegate` call is refused even though the
 shared listing shows the owner's catalog. A call naming a session that is
 not live fails instead of landing on another thread; a call with no session
 at all fails too while sessions share the server, and otherwise runs as the
-entry owner's thread.
+entry owner's thread. Changing the entry itself — the owning thread's own
+tool settings changing — still restarts that checkout's server, interrupting
+whatever else is running on it; nothing else on the server re-registers, so
+nothing else pays that price.
 
 ### Starting several tasks in one call (`delegate`)
 

@@ -1768,6 +1768,17 @@ export class DirectConnection implements ClientApi {
     // The shipped manual must still work when configuration cannot be loaded.
     if (query.type === "knowledge.search") return searchKnowledge(query.query);
     if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
+    // Routing a call without session identity needs no configuration either:
+    // the thread record names the driver, which counts the sessions sharing
+    // the entry — so an offline knowledge call never fails on config. A
+    // thread with no record (or no driver) keeps the entry owner's fallback:
+    // the entry serves it alone until anything proves otherwise.
+    if (query.type === "thread.entry-sessions") {
+      const record = await (await this.store()).readThreadRecord(query.threadId).catch(() => null);
+      const instanceId = record?.modelSelection.instanceId ?? null;
+      if (!record || !instanceId) return { count: 1 };
+      return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
+    }
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":
@@ -1835,14 +1846,6 @@ export class DirectConnection implements ClientApi {
           return await moxenRoutingFor(ctx, threadId);
         }
         return null;
-      }
-      case "opencode.session-count": {
-        // Live native sessions across this server's drivers: more than one
-        // makes a tool call without session identity ambiguous, so it fails
-        // instead of running as the entry owner's thread.
-        let count = 0;
-        for (const driver of this.ownedDrivers) count += driver.liveSessionCount?.() ?? 0;
-        return { count };
       }
       case "research.proposals":
         this.expireResearchProposals();

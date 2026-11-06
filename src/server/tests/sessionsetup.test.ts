@@ -819,6 +819,18 @@ describe("delegating with an idempotency key, and routing the shared entry per c
     }
   });
 
+  it("counts the sessions sharing a thread's entry as one for unshared drivers, and one for unknown threads", async () => {
+    const { connection, parentThreadId } = await sharedWorld();
+    try {
+      // Harness endpoints serve one thread each, so a call without session
+      // identity falls back to the entry's thread.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: parentThreadId })).toEqual({ count: 1 });
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: "missing-thread" })).toEqual({ count: 1 });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("resolves a live native session to its thread, with that thread's gating", async () => {
     const { connection, parentThreadId } = await sharedWorld();
     try {

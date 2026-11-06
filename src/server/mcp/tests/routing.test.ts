@@ -25,7 +25,7 @@ function stubApi(
       switch (query.type) {
         case "opencode.session-thread":
           return resolved;
-        case "opencode.session-count":
+        case "thread.entry-sessions":
           return { count: liveSessions };
         case "research.run":
           return null;

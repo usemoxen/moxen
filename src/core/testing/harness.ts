@@ -90,11 +90,6 @@ class HarnessDriver implements TurnDriver {
     return null;
   }
 
-  /** Live sessions, for deciding whether a call without session identity is unambiguous. */
-  liveSessionCount(): number {
-    return this.sessions.size;
-  }
-
   hasSession(threadId: string): Effect.Effect<boolean, CliError> {
     return Effect.succeed(this.sessions.has(threadId));
   }

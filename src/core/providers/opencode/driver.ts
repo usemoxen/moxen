@@ -540,10 +540,20 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     return null;
   };
 
-  /** Live native sessions on this driver's servers: more than one makes a call without session identity ambiguous. */
-  readonly liveSessionCount = (): number => {
+  /**
+   * Live sessions that could place calls on this thread's entry: every live
+   * session on its server, since the directory's single `moxen` entry serves
+   * them all. More than one makes a call without session identity ambiguous,
+   * so it fails instead of running as the entry owner's thread. A thread
+   * with no live session is not provably single, so it counts as shared.
+   */
+  readonly entrySessionCount = (threadId: string): number => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return 2;
     let count = 0;
-    for (const session of this.sessions.values()) if (!session.closed) count += 1;
+    for (const candidate of this.sessions.values()) {
+      if (!candidate.closed && candidate.workingDirectory === session.workingDirectory) count += 1;
+    }
     return count;
   };
 
