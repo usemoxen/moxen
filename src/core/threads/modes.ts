@@ -51,7 +51,8 @@ const SHARED_STEPS = [
   "- `shared`: the child works in your checkout. Only for read-only work, or when nothing else writes at the same time.",
   "- `fork: true` starts the child from a copy of your conversation; it runs on your provider in your checkout, so keep it read-only.",
   "- Merging is yours: review a child's branch (`git diff <yours>...<branch>`) before taking anything, one branch at a time, testing between merges. " +
-    "Cancel a runaway task with `task_cancel`; its thread and worktree are kept.",
+    "Cancel a runaway task with `task_cancel`; its thread and worktree are kept. Pass `taskIds` (several) to stop more than one: " +
+    "each outcome is reported separately, and one bad id does not stop the others.",
   "- To correct or redirect a task instead of cancelling it, send it a message with `task_send` and read `outcome` — `steered` (the running turn took it) and `started` (a new turn began) mean the task has the message; " +
     "`queued` means the task is busy and cannot take input mid-turn, so the message waits for its next turn and the task has not read it yet (do not assume it acted on it); " +
     "`not_delivered` means send it again once the task settles. A finished or settled task is refused unless you pass `wake: true`, which starts a new turn (spending usage); " +
@@ -61,6 +62,10 @@ const SHARED_STEPS = [
   "- `message_queue` queues or schedules a message on your own thread or on a task you delegated, to run later (after a usage reset, at a time, once another thread finishes); it never steers, shows in the user's Work queue, and `threadId` defaults to your own thread.",
   "- Your provider's own subagents are for quick same-model side work inside your turn; `delegate` is for another provider or model, " +
     "a specific effort, its own branch, or a thread the user should be able to open and steer.",
+  "- Several tasks at once: one `delegate` call takes `tasks` (each with `title` and `task`, overriding `provider`, `model`, `effort` or `isolation` where it differs) " +
+    "beside the shared settings, plus `rules` for instructions every task gets. What is bad on its face fails the whole call before anything starts; " +
+    "once starting, a failure to start one task never stops or duplicates the others; " +
+    "the result lists each task's id and isolation, with one warning when any task shares your checkout.",
   "",
   "## Verify, then trust",
   "A child's report is a claim. Check the load-bearing ones against ground truth (run the tests, read the diff, open the cited source) " +

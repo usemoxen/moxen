@@ -54,6 +54,7 @@ import type {
   ThreadId,
   TurnId,
 } from "../spi.js";
+import { dropTurnWaiter } from "../spi.js";
 import { BackgroundShells, type BackgroundEvent, type BackgroundTask } from "./background.js";
 import { compact, leadLength, MAX_CONSECUTIVE_FAILURES, type CompactReason, type Summarise } from "./compact.js";
 import { autoCompactThreshold, loopCompactThreshold } from "./compactsettings.js";
@@ -201,6 +202,8 @@ function summarizeArguments(raw: string): string {
 
 const WAKE_DEBOUNCE_MS = 600;
 const MAX_WAKES_IN_A_ROW = 6;
+/** How long a stop waits for a session's MCP servers to finish closing before going on without them. */
+const MCP_CLOSE_WAIT_MS = 5_000;
 /** How much of a finished task's output goes into the message that tells the model. */
 const NOTE_OUTPUT_CHARS = 3500;
 
@@ -811,8 +814,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       signal?.addEventListener(
         "abort",
         () => {
-          const at = turn.waiters.indexOf(waiter);
-          if (at >= 0) turn.waiters.splice(at, 1);
+          dropTurnWaiter(turn.waiters, waiter);
           reject(new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, { details: { threadId, turnId } }));
         },
         { once: true },
@@ -1379,7 +1381,18 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   // -- stopping ------------------------------------------------------------------
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("HARNESS_STOP_FAILED", `Could not stop the harness session for thread ${threadId}`, () => {
+    this.attempt("HARNESS_STOP_FAILED", `Could not stop the harness session for thread ${threadId}`, async () => {
+      // A start in flight is not in `sessions` yet: take over its outcome
+      // first, then stop what it made. Otherwise it resolves live after this
+      // returns, with a pool nobody closes.
+      const pending = this.starting.get(threadId);
+      if (pending) {
+        try {
+          await pending;
+        } catch {
+          // The start failed: nothing it made to stop.
+        }
+      }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
       session.closed = true;
@@ -1390,21 +1403,38 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       this.sessions.delete(threadId);
       // The servers' processes end with the session; the signals go out now, the wait is only for the tidy-up.
       session.background.stopAll();
-      void session.mcp.close();
+      await this.closeMcp(session);
     });
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
-    Effect.sync(() => {
+    this.attempt("HARNESS_STOP_FAILED", "Could not stop the harness driver", async () => {
+      const pendings = [...this.starting.values()];
+      if (pendings.length > 0) await Promise.allSettled(pendings);
       for (const session of this.sessions.values()) {
         session.closed = true;
+        if (session.wakeTimer) clearTimeout(session.wakeTimer);
         const turn = this.openTurn(session);
         turn?.controller.abort();
         if (turn) this.settle(session, turn, { status: "interrupted", text: "", error: "Driver stopped.", usage: null });
         session.background.stopAll();
-        void session.mcp.close();
+        await this.closeMcp(session);
       }
       this.sessions.clear();
     });
+
+  /**
+   * The session's MCP servers are already told to stop; waiting this long for
+   * their tidy-up is enough. A hung close must not hang the stop itself.
+   */
+  private async closeMcp(session: HarnessSession): Promise<void> {
+    await Promise.race([
+      session.mcp.close().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, MCP_CLOSE_WAIT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  }
 
   // -- reading and rewinding -------------------------------------------------------
 

@@ -96,7 +96,7 @@ describe("opencode config", () => {
     const off = JSON.parse(buildServerConfigContent(undefined, {}, undefined, false));
     expect(off).not.toHaveProperty("agents");
     const content = JSON.parse(buildServerConfigContent(JSON.stringify({ agents: { plan: { description: "Plans" }, reviewer: { system: "Review only." } } }), {}, "webfetch", true));
-    expect(content.agents.build.system).toContain("running in the user's terminal, in OpenCode's harness");
+    expect(content.agents.build.system).toContain("running in the user's terminal, in OpenCode's harness, driven by Moxen as one of its threads");
     // Moxen's sessions never run OpenCode's plan agent (no plan mode, MXN-136): it is left as the user has it.
     expect(content.agents.plan).toEqual({ description: "Plans" });
     expect(content.agents.reviewer).toEqual({ system: "Review only." });

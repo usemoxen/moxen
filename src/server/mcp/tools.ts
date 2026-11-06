@@ -11,6 +11,7 @@
  */
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { CliError } from "../../core/errors.js";
 import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js";
@@ -89,6 +90,16 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Research defaults to one researcher. For claims that matter and need an adversarial check, propose a full research run with researchProposal (size and optional per-role models). " +
       "A full run costs a lead, researchers, critics and a finalizer. Only the user's answer starts one; without an answering client or after its answer deadline, it runs one researcher instead. " +
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
+      "The default is always a worktree (except fork: true, which shares your checkout): even when your thread's record names no branch, the worktree is cut from the branch your checkout is on. " +
+      "Where there is no branch to cut from, the call fails and tells you to pass isolation shared instead of quietly sharing your checkout. " +
+      "One call can start several tasks (at most 20): pass tasks (each with title and task, overriding provider, model, effort or isolation where it differs) beside the shared settings, plus rules for instructions every task gets. " +
+      "A task entry takes only task, title, provider, model, effort, isolation and idempotencyKey; anything else is refused. " +
+      "An entry on another provider does not inherit the shared model or effort: it names its own model, or its start fails. " +
+      "What is bad on its face — a malformed entry, a forked task in a worktree, a provider with no model anywhere — fails the whole call with nothing started. " +
+      "Once starting, each task is on its own: one that fails to start is reported as that entry's error while the rest still start. " +
+      "A top-level idempotencyKey is derived per entry from the key plus the entry's own title and task, so retrying the whole call — in any order, with entries added or removed — returns each original task instead of starting duplicates; a task's own idempotencyKey wins. " +
+      "Each task starts on its own: one that fails to start is reported as that entry's error while the rest still start. " +
+      "The result lists every task's taskId and isolation, with one warning when any task shares your checkout. " +
       "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
     inputSchema: {
       type: "object",
@@ -104,11 +115,30 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
           },
           required: ["size"], additionalProperties: false,
         },
-        task: { type: "string", description: "Everything the subagent needs: it sees none of your conversation." },
+        task: { type: "string", description: "Everything the subagent needs: it sees none of your conversation. Pass this and title for one task, or tasks for several (not both)." },
         title: {
           type: "string",
           description: "Short name for the subagent's thread, a few words (\"fix login redirect\"). It also names its worktree branch, moxen/<name>.",
         },
+        tasks: {
+          type: "array",
+          description: "Several tasks to start in one call, each with its own title and task and able to override provider, model, effort or isolation. Not with task, title or researchProposal.",
+          items: {
+            type: "object",
+            properties: {
+              task: { type: "string", description: "Everything this subagent needs: it sees none of your conversation." },
+              title: { type: "string", description: "Short name for this subagent's thread, a few words. It also names its worktree branch, moxen/<name>." },
+              provider: { type: "string", description: "Provider instance id for this task; defaults to the shared provider." },
+              model: { type: "string", description: "Model slug on that provider for this task; defaults to the shared model." },
+              effort: { type: "string", description: "Reasoning effort for this task; defaults to the shared effort." },
+              isolation: { type: "string", enum: ["worktree", "shared"], description: "Isolation for this task; defaults to the shared isolation." },
+              idempotencyKey: { type: "string", description: "A UUID you generate for this task (one per new task). Wins over a call-level idempotencyKey for this entry." },
+            },
+            required: ["task", "title"],
+            additionalProperties: false,
+          },
+        },
+        rules: { type: "string", description: "Shared instructions appended to every task's prompt under \"Common rules for this task\" (report format, limits on side effects). Only with tasks." },
         idempotencyKey: {
           type: "string",
           description:
@@ -121,7 +151,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         isolation: {
           type: "string",
           enum: ["worktree", "shared"],
-          description: "worktree (default): its own checkout and branch. shared: works in your checkout.",
+          description: "worktree (default, except for a fork): its own checkout and branch. shared: works in your checkout, for read-only work. Omit it for the default: where there is no branch to cut from, omitting it fails plainly instead of sharing your checkout.",
         },
         fork: {
           type: "boolean",
@@ -137,7 +167,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
             "A subagent cannot delegate, and Orchestrate is not available to one.",
         },
       },
-      required: ["task", "title"],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -204,11 +234,14 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   },
   {
     name: "task_cancel",
-    description: "Stop a delegated task that is still running. Its thread and worktree are kept.",
+    description: "Stop a delegated task that is still running. Its thread and worktree are kept. Pass taskIds (several) to stop more than one: each task's outcome is reported separately, and one bad id does not stop the others.",
     inputSchema: {
       type: "object",
-      properties: { taskId: { type: "string" } },
-      required: ["taskId"],
+      properties: {
+        taskId: { type: "string", description: "One delegated task to stop. Not with taskIds." },
+        taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to stop, each reported separately. Not with taskId." },
+      },
+      required: [],
       additionalProperties: false,
     },
   },
@@ -745,9 +778,24 @@ export async function callMoxenTool(
       case "memory_delete":
         return ok(await api.dispatch({ type: "memory.delete", threadId: parentThreadId, name: argString(args, "name", true)!, scope: argString(args, "scope", true)! as "project" }));
       case "task_cancel": {
-        const taskId = argString(args, "taskId", true)!;
-        const cancelled = await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId });
-        return ok({ taskId, cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
+        const ids = cancelIds(args);
+        if (args.taskIds === undefined) {
+          const cancelled = await cancelOne(api, parentThreadId, ids[0]!);
+          return ok({ taskId: ids[0], cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
+        }
+        const tasks: Array<Record<string, unknown>> = [];
+        let firstFailure: unknown;
+        for (const taskId of ids) {
+          try {
+            const cancelled = await cancelOne(api, parentThreadId, taskId);
+            tasks.push({ taskId, cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
+          } catch (cause) {
+            firstFailure ??= cause;
+            tasks.push({ taskId, error: toolErrorText(cause) });
+          }
+        }
+        await throwIfParentMissing(api, parentThreadId, tasks, firstFailure);
+        return ok({ tasks });
       }
       case "task_send": {
         if (args.wake !== undefined && typeof args.wake !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "wake must be true or false.");
@@ -962,7 +1010,6 @@ async function imageGenerationTool(api: ClientApi, parentThreadId: string, args:
 }
 
 async function delegateTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>) {
-  const task = argString(args, "task", true)!;
   const isolationArg = argString(args, "isolation");
   if (isolationArg !== undefined && isolationArg !== "worktree" && isolationArg !== "shared") {
     throw new CliError("INVALID_TOOL_INPUT", "isolation must be worktree or shared.");
@@ -972,39 +1019,254 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   if (modeArg !== undefined && modeArg !== "build" && modeArg !== "research") {
     throw new CliError("INVALID_TOOL_INPUT", "mode must be build or research: a subagent never runs in Orchestrate.");
   }
-  const parent = await api.query({ type: "thread.inspect", threadId: parentThreadId });
-  // Worktree by default, when there is a branch to cut one from — except a
-  // fork, whose copied conversation lives with the parent's checkout.
-  const isolation = isolationArg ?? (fork ? "shared" : parent.thread.branch ? "worktree" : "shared");
-  const title = argString(args, "title", true)!;
-  const idempotencyKey = argString(args, "idempotencyKey");
   const provider = argString(args, "provider");
   const model = argString(args, "model");
   const effort = argString(args, "effort");
+  const idempotencyKey = argString(args, "idempotencyKey");
+  const rules = argString(args, "rules");
+  if (args.tasks !== undefined) return await delegateManyTool(api, parentThreadId, args, { isolationArg: isolationArg === "worktree" || isolationArg === "shared" ? isolationArg : undefined, fork, modeArg, provider, model, effort, idempotencyKey, rules });
+  if (rules !== undefined) throw new CliError("INVALID_TOOL_INPUT", "rules needs tasks: it is shared instructions for several tasks.");
+  const task = argString(args, "task", true)!;
+  const title = argString(args, "title", true)!;
+  return await startDelegation(api, parentThreadId, {
+    task, title,
+    isolation: isolationArg ?? (fork ? "shared" : "worktree"),
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    ...(fork ? { fork: true } : {}),
+    ...(modeArg === "research" ? { mode: "research" as const } : {}),
+    ...(args.researchProposal === undefined ? {} : { researchProposal: args.researchProposal }),
+  });
+}
+
+/** One `delegate` call starting several tasks: shared settings beside a list of entries, each with its own title and task. */
+async function delegateManyTool(
+  api: ClientApi,
+  parentThreadId: string,
+  args: Record<string, unknown>,
+  shared: { isolationArg: "worktree" | "shared" | undefined; fork: boolean; modeArg: string | undefined; provider: string | undefined; model: string | undefined; effort: string | undefined; idempotencyKey: string | undefined; rules: string | undefined },
+) {
+  if (args.task !== undefined || args.title !== undefined) {
+    throw new CliError("INVALID_TOOL_INPUT", "Pass either task and title for one task, or tasks for several — not both.");
+  }
+  if (args.researchProposal !== undefined) {
+    throw new CliError("INVALID_TOOL_INPUT", "researchProposal proposes one full run: it cannot be combined with tasks.");
+  }
+  if (!Array.isArray(args.tasks) || args.tasks.length === 0) {
+    throw new CliError("INVALID_TOOL_INPUT", "tasks must be a non-empty array of {task, title}.");
+  }
+  if (args.tasks.length > MAX_BATCH_TASKS) {
+    throw new CliError("INVALID_TOOL_INPUT", `tasks holds at most ${MAX_BATCH_TASKS} entries: split the work across calls.`);
+  }
+  const entries = args.tasks.map((entry, index) => readBatchEntry(entry, index));
+  // A worktree whenever the caller did not ask, except a fork: the server
+  // cuts it from the checkout's branch, or refuses plainly where there is none.
+  const sharedIsolation = shared.isolationArg ?? (shared.fork ? "shared" : "worktree");
+  preflightBatch(entries, shared, sharedIsolation);
+  const started: Array<Record<string, unknown>> = [];
+  let firstFailure: unknown;
+  for (const entry of entries) {
+    const crossProvider = entry.provider !== undefined && entry.provider !== shared.provider;
+    // A shared model or effort belongs to the shared provider: an entry on
+    // another provider takes its own, or the provider's default rules apply.
+    const model = crossProvider ? entry.model : (entry.model ?? shared.model);
+    const effort = crossProvider ? entry.effort : (entry.effort ?? shared.effort);
+    const isolation = entry.isolation ?? sharedIsolation;
+    try {
+      started.push(await startDelegation(api, parentThreadId, {
+        task: shared.rules === undefined ? entry.task : `${entry.task}\n\nCommon rules for this task:\n${shared.rules}`,
+        title: entry.title,
+        isolation,
+        ...((entry.provider ?? shared.provider) ? { provider: (entry.provider ?? shared.provider)! } : {}),
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        ...((entry.idempotencyKey ?? (shared.idempotencyKey ? batchEntryKey(shared.idempotencyKey, entry.title, entry.task) : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? batchEntryKey(shared.idempotencyKey!, entry.title, entry.task))! } : {}),
+        ...(shared.fork ? { fork: true } : {}),
+        ...(shared.modeArg === "research" ? { mode: "research" as const } : {}),
+      }));
+    } catch (cause) {
+      // One task failing to start never loses the others: its error is that
+      // entry's report, and the rest still start on their own keys.
+      firstFailure ??= cause;
+      started.push({ title: entry.title, error: toolErrorText(cause) });
+    }
+  }
+  await throwIfParentMissing(api, parentThreadId, started, firstFailure);
+  const checkout = started.filter((entry) => entry["isolation"] === "shared");
+  return {
+    tasks: started,
+    ...(checkout.length === 0
+      ? {}
+      : { warning: `${checkout.length === 1 ? "One task runs" : `${checkout.length} tasks run`} in your checkout (isolation "shared"): ${checkout.map((entry) => JSON.stringify(entry["title"])).join(", ")}. Only use shared for read-only work, or when nothing else writes at the same time.` }),
+  };
+}
+
+interface BatchEntry {
+  readonly task: string;
+  readonly title: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly isolation?: "worktree" | "shared";
+  readonly idempotencyKey?: string;
+}
+
+/**
+ * One entry's idempotency key: the call's key plus a hash of the entry's own
+ * title and task. A retry in any order meets its original entry, a removed
+ * entry is simply not met, and a new entry starts — none of which a
+ * positional suffix survives.
+ */
+function batchEntryKey(key: string, title: string, task: string): string {
+  const digest = createHash("sha256").update(`moxen-delegate-v1\n${title}\n${task}`, "utf8").digest("hex").slice(0, 16);
+  return `${key}#${digest}`;
+}
+
+/** One `delegate` call starts this many tasks at most: ten at once is normal use, past this split the work. */
+const MAX_BATCH_TASKS = 20;
+
+/** The fields one `tasks` entry takes: anything else is refused, naming the key, with nothing started. */
+const BATCH_ENTRY_FIELDS: ReadonlySet<string> = new Set(["task", "title", "provider", "model", "effort", "isolation", "idempotencyKey"]);
+
+/**
+ * What is cheap and pure to check before starting any entry: a forked task in
+ * a worktree, or a provider with no model anywhere in the call. Either fails
+ * the whole call with nothing started. Everything that needs the run itself
+ * stays per-entry: partial start is the contract once starting begins.
+ */
+function preflightBatch(
+  entries: readonly BatchEntry[],
+  shared: { fork: boolean; provider: string | undefined; model: string | undefined },
+  sharedIsolation: "worktree" | "shared",
+): void {
+  entries.forEach((entry, index) => {
+    const nth = `tasks[${index + 1}]`;
+    if (shared.fork && (entry.isolation ?? sharedIsolation) === "worktree") {
+      throw new CliError("FORK_NEEDS_SHARED", `${nth} asks for a worktree fork: a forked task runs in its parent's checkout — delegate it with isolation "shared".`, {
+        exitCode: 2,
+        details: { title: entry.title },
+      });
+    }
+    if (entry.provider !== undefined && entry.model === undefined && shared.model === undefined) {
+      throw new CliError("INVALID_TOOL_INPUT", `${nth} names provider "${entry.provider}" but no model: name its model too — the call shares none.`);
+    }
+  });
+}
+
+/**
+ * Every entry failed: when the parent itself is missing, fail the call with
+ * the first entry's error — exactly what the single form answers — rather
+ * than N identical entry reports.
+ */
+async function throwIfParentMissing(api: ClientApi, parentThreadId: string, started: ReadonlyArray<Record<string, unknown>>, firstFailure: unknown): Promise<void> {
+  if (firstFailure === undefined || !started.every((entry) => "error" in entry)) return;
+  const parent = await api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null);
+  if (parent === null) throw firstFailure;
+}
+
+/** One entry of a `tasks` list: its own title and task, able to override a shared setting. */
+function readBatchEntry(entry: unknown, index: number): BatchEntry {
+  const nth = `tasks[${index + 1}]`;
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new CliError("INVALID_TOOL_INPUT", `${nth} must be an object with task and title.`);
+  }
+  const record = entry as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!BATCH_ENTRY_FIELDS.has(key)) {
+      throw new CliError("INVALID_TOOL_INPUT", `${nth}: unknown field "${key}". A task entry takes task, title, provider, model, effort, isolation and idempotencyKey.`);
+    }
+  }
+  const field = (key: string): string | undefined => {
+    const value = record[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== "string" || !value.trim()) throw new CliError("INVALID_TOOL_INPUT", `${nth}: ${key} must be a non-empty string.`);
+    return value.trim();
+  };
+  const task = field("task");
+  if (task === undefined) throw new CliError("INVALID_TOOL_INPUT", `${nth}: task is required.`);
+  const title = field("title");
+  if (title === undefined) throw new CliError("INVALID_TOOL_INPUT", `${nth}: title is required.`);
+  const isolation = field("isolation");
+  if (isolation !== undefined && isolation !== "worktree" && isolation !== "shared") {
+    throw new CliError("INVALID_TOOL_INPUT", `${nth}: isolation must be worktree or shared.`);
+  }
+  const provider = field("provider");
+  const model = field("model");
+  const effort = field("effort");
+  const idempotencyKey = field("idempotencyKey");
+  return {
+    task, title,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+    ...(isolation === "worktree" || isolation === "shared" ? { isolation } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  };
+}
+
+/** Start one delegation and shape its report: the single-task result, and each entry of a batch. */
+async function startDelegation(
+  api: ClientApi,
+  parentThreadId: string,
+  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research"; researchProposal?: unknown },
+) {
   const delegated = await api.dispatch({
     type: "thread.delegate",
     parentThreadId,
-    task,
+    task: request.task,
     wait: false,
-    isolation,
-    title,
-    ...(idempotencyKey ? { idempotencyKey } : {}),
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
-    ...(effort ? { thinkingEffort: effort } : {}),
-    ...(fork ? { fork: true } : {}),
-    ...(modeArg === "research" ? { interactionMode: "research" as const } : {}),
-    ...(args.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(args.researchProposal) }),
+    isolation: request.isolation,
+    title: request.title,
+    ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+    ...(request.provider ? { provider: request.provider } : {}),
+    ...(request.model ? { model: request.model } : {}),
+    ...(request.effort ? { thinkingEffort: request.effort } : {}),
+    ...(request.fork === true ? { fork: true } : {}),
+    ...(request.mode === "research" ? { interactionMode: "research" as const } : {}),
+    ...(request.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(request.researchProposal) }),
   });
   return {
     taskId: delegated.task.taskId,
     title: delegated.child.title,
     status: delegated.task.status,
     model: `${delegated.modelSelection.instanceId}/${delegated.modelSelection.model}`,
-    isolation,
+    isolation: request.isolation,
     ...(delegated.worktree ? { worktree: delegated.worktree.path, branch: delegated.worktree.branch } : {}),
     next: "Running. Do not poll task_status: a task notification arrives when it settles. Keep working or end your turn.",
   };
+}
+
+/** Exactly one of `taskId` (one task) or `taskIds` (several): one bad id never stops the others. */
+function cancelIds(args: Record<string, unknown>): string[] {
+  const single = argString(args, "taskId");
+  const many = args.taskIds;
+  if (single !== undefined && many !== undefined) {
+    throw new CliError("INVALID_TOOL_INPUT", "Pass either taskId for one task, or taskIds for several — not both.");
+  }
+  if (many !== undefined) {
+    if (!Array.isArray(many) || many.length === 0) throw new CliError("INVALID_TOOL_INPUT", "taskIds must be a non-empty array of task ids.");
+    const ids = many.map((id, index) => {
+      if (typeof id !== "string" || !id.trim()) throw new CliError("INVALID_TOOL_INPUT", `taskIds[${index + 1}] must be a non-empty string.`);
+      return id.trim();
+    });
+    // A repeated id stops once, in order.
+    return [...new Set(ids)];
+  }
+  if (single === undefined) throw new CliError("INVALID_TOOL_INPUT", "Pass taskId for one task, or taskIds for several.");
+  return [single];
+}
+
+async function cancelOne(api: ClientApi, parentThreadId: string, taskId: string) {
+  return await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId });
+}
+
+/** A failure as a batch entry carries it: the code the handler would have answered with, never a protocol error. */
+function toolErrorText(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (cause instanceof CliError) return `${cause.code}: ${message}`;
+  return `TASK_START_FAILED: ${message}`;
 }
 
 async function statusTool(
