@@ -40,8 +40,8 @@ export async function runTaskSummary(): Promise<void> {
   for (const language of ["en", "es-ES"] as const) {
     await act(async () => applyLanguage(language));
     const expected = language === "en"
-      ? "Used 2 tools, ran 1 command, delegated 1 task, messaged 1 task"
-      : "Ha usado 2 herramientas, ha ejecutado 1 comando, ha delegado 1 tarea, ha enviado un mensaje a 1 tarea";
+      ? "Delegated 1 task, messaged 1 task, used 2 tools, ran 1 command"
+      : "Ha delegado 1 tarea, ha enviado un mensaje a 1 tarea, ha usado 2 herramientas, ha ejecutado 1 comando";
     for (const width of [140, 64]) {
       const setup = await testRender(<Host width={width} />, { width, height: 22, exitOnCtrlC: false });
       try {

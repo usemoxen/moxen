@@ -348,7 +348,8 @@ export function clockTime(value: string, now: number): string {
  * One-line aggregate of a finished turn's tool calls: "Ran 3 commands,
  * read 2 files, asked 1 question". Counts every countable tool row across
  * the whole turn (never per-tool stacks), highest count first, first-seen
- * order breaking ties. Non-tool rows (notes, plan echoes) never count.
+ * order breaking ties — except moxen's task words, which lead in a fixed
+ * order. Non-tool rows (notes, plan echoes) never count.
  * Returns null when there is nothing countable to say.
  */
 export function summarizeWork(entries: readonly TimelineEntry[]): string | null {
@@ -426,9 +427,15 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
     }
   }
   if (counts.size === 0) return null;
-  const ranked = [...counts].sort(
-    ([keyA, a], [keyB, b]) => b.count - a.count || a.seen - b.seen,
-  );
+  const ranked = [...counts].sort(([keyA, a], [keyB, b]) => {
+    // moxen's task words lead the heading in a fixed order — they are its
+    // point, and a narrow pane cuts the tail first. Everything else keeps
+    // its count-then-first-seen order after them.
+    const orderA = AGENT_SUMMARY_ORDER[keyA] ?? Number.MAX_SAFE_INTEGER;
+    const orderB = AGENT_SUMMARY_ORDER[keyB] ?? Number.MAX_SAFE_INTEGER;
+    if (orderA !== orderB) return orderA - orderB;
+    return b.count - a.count || a.seen - b.seen;
+  });
   const parts = ranked.map(([key, slot]) => summarizePart(key, slot.count));
   const [first, ...rest] = parts;
   if (first === undefined) return null;
@@ -447,6 +454,16 @@ const AGENT_SUMMARY_KEY: Readonly<Record<string, string>> = {
   task_cancel: "task_cancel",
   task_ask: "task_ask",
   message_queue: "message_queue",
+};
+
+/** Where a moxen task word sits in a heading: delegated, messaged, asked, checked, cancelled, queued. */
+const AGENT_SUMMARY_ORDER: Readonly<Record<string, number>> = {
+  delegate: 0,
+  task_send: 1,
+  task_ask: 2,
+  task_status: 3,
+  task_cancel: 4,
+  message_queue: 5,
 };
 
 function summarizePart(key: string, count: number): string {

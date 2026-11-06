@@ -160,12 +160,12 @@ describe("summarizeWork", () => {
       moxen("d1", "mcp__moxen__delegate", { title: "Stop button race on new threads", task: "Investigate." }, JSON.stringify({ taskId: "t1", title: "Stop button race on new threads", status: "running" })),
       moxen("s1", "mcp__moxen__task_send", { taskId: "t1", message: "go" }, JSON.stringify({ taskId: "t1", outcome: "queued", status: "running" })),
     ];
-    expect(summarizeWork(entries)).toBe("Used 3 tools, ran 1 command, delegated 1 task, messaged 1 task");
+    expect(summarizeWork(entries)).toBe("Delegated 1 task, messaged 1 task, used 3 tools, ran 1 command");
   });
 
   it.each([
-    ["en", "Delegated 1 task, messaged 1 task, checked 1 task, cancelled 1 task, asked 1 task, queued 1 message"],
-    ["es-ES", "Ha delegado 1 tarea, ha enviado un mensaje a 1 tarea, ha comprobado 1 tarea, ha cancelado 1 tarea, ha preguntado a 1 tarea, ha puesto en cola 1 mensaje"],
+    ["en", "Delegated 1 task, messaged 1 task, asked 1 task, checked 1 task, cancelled 1 task, queued 1 message"],
+    ["es-ES", "Ha delegado 1 tarea, ha enviado un mensaje a 1 tarea, ha preguntado a 1 tarea, ha comprobado 1 tarea, ha cancelado 1 tarea, ha puesto en cola 1 mensaje"],
   ])("counts every moxen task tool in its own words on OpenCode namespacing (%s)", (language, heading) => {
     const moxen = (id: string, tool: string, input: Record<string, unknown>, output: string): TimelineEntry =>
       toolEntry(id, "tool.completed", {
@@ -203,11 +203,12 @@ describe("summarizeWork", () => {
         data: { toolName: tool, state: { status: "completed", input: { taskId: "t1" } } },
       });
     expect(summarizeWork([
-      moxen("a", "mcp__moxen__delegate"),
-      moxen("b", "moxen.delegate"),
-      moxen("c", "moxen/task_send"),
-      moxen("d", "moxen_task_status"),
-    ])).toBe("Delegated 2 tasks, messaged 1 task, checked 1 task");
+      moxen("a", "moxen_task_status"),
+      moxen("b", "moxen/task_send"),
+      moxen("c", "mcp__moxen__delegate"),
+      moxen("d", "moxen.delegate"),
+      moxen("e", "moxen_task_status"),
+    ])).toBe("Delegated 2 tasks, messaged 1 task, checked 2 tasks");
     const native = toolEntry("n1", "tool.completed", {
       itemType: "dynamic_tool_call",
       toolCallId: "n1",
