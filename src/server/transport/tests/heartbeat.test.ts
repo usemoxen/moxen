@@ -112,6 +112,56 @@ describe("heartbeat", () => {
     expect((error as CliError).message).toMatch(/did not answer within/);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
+
+  it("drives reconnect and link state for a one-shot request with no subscription", async () => {
+    // A `send --wait` has no subscription: only its in-flight await is
+    // around when the server goes quiet. It must still see the link drop
+    // and come back, rather than fail once while the link claims connected.
+    const endpoint = testEndpoint();
+    let muted = false;
+    const sockets = new Set<net.Socket>();
+    const serveOne = (): Promise<net.Server> =>
+      new Promise<net.Server>((resolve) => {
+        const server = net.createServer((socket) => {
+          sockets.add(socket);
+          socket.setEncoding("utf8");
+          socket.on("error", () => undefined);
+          socket.once("close", () => sockets.delete(socket));
+          const reader = new LineReader();
+          socket.on("data", (chunk: string) => {
+            for (const line of reader.push(chunk)) {
+              if (muted) continue;
+              const message = JSON.parse(line) as { id: number; method: string };
+              if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+              else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+              else if (message.method === "query" || message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
+            }
+          });
+        });
+        server.listen(endpoint, () => resolve(server));
+      });
+    const server = await serveOne();
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint, FAST);
+    teardown.push(() => client.close());
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+    expect(client.linkState).toEqual({ status: "connected" });
+
+    muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    muted = false;
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
 });
 
 describe("server side", () => {

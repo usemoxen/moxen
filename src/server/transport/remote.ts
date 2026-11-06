@@ -4,10 +4,12 @@
  *
  * Requests are matched to responses by id. A dropped connection rejects
  * whatever was in flight with `SERVER_DISCONNECTED` — a command may or may
- * not have run, and only the caller can decide whether to retry it — but
- * subscriptions survive: the client reconnects and re-subscribes, and
- * because every subscription opens with a full snapshot, the subscriber
- * is back in sync on the first frame, with nothing to replay.
+ * not have run, and only the caller can decide whether to retry it — and
+ * the client starts reconnecting, with or without subscriptions: a one-shot
+ * wait (`send --wait`) retries its read behind the reconnect, which is safe
+ * because the read follows the ledger. Every subscription re-subscribes on
+ * the new socket, and because each opens with a full snapshot, the
+ * subscriber is back in sync on the first frame, with nothing to replay.
  *
  * A server can also die without closing the socket: frozen, its machine
  * asleep, the network gone. So connecting and the hello have a deadline,
@@ -327,6 +329,15 @@ export class RemoteConnection implements ClientApi {
   private send(method: Method, params?: unknown): { id: number | null; response: Promise<unknown> } {
     const socket = this.socket;
     if (this.closed || socket === null || socket.destroyed) {
+      // The server went away between requests: come back in the background
+      // while the caller decides whether to ask again (a `send --wait`
+      // retry does). Never from a refusal no retry can fix.
+      if (!this.closed && this.socket === null && this.options.reconnect !== false && this.link.status !== "failed") {
+        if (this.link.status === "connected") {
+          this.setLink({ status: "reconnecting", since: Date.now(), attempts: 0, reason: "the connection closed" });
+        }
+        void this.reconnect();
+      }
       return {
         id: null,
         response: Promise.reject(
@@ -360,7 +371,10 @@ export class RemoteConnection implements ClientApi {
     for (const pending of inFlight) {
       pending.reject(new CliError("SERVER_DISCONNECTED", message, { details: { endpoint: this.endpoint } }));
     }
-    if (!this.closed && this.options.reconnect !== false && this.subscriptions.size > 0) {
+    // A one-shot request has no subscription to keep the link honest, but
+    // its failure is still the link going down: reconnect while it may come
+    // back, whether or not anyone subscribed.
+    if (!this.closed && this.options.reconnect !== false && (this.subscriptions.size > 0 || inFlight.length > 0)) {
       const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
       const attempts = this.link.status === "reconnecting" ? this.link.attempts : 0;
       this.setLink({ status: "reconnecting", since, attempts, reason: dropped === null ? "the connection closed" : dropped });
@@ -372,8 +386,15 @@ export class RemoteConnection implements ClientApi {
     this.reconnecting ??= (async () => {
       let delay = RECONNECT_MIN_MS;
       let attempts = 0;
-      while (!this.closed && this.socket === null && this.subscriptions.size > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
+      // A reconnecting link keeps the loop alive past the last
+      // subscription: a one-shot wait may still be retrying behind it.
+      while (!this.closed && this.socket === null && (this.subscriptions.size > 0 || this.link.status === "reconnecting")) {
+        await new Promise<void>((resolve) => {
+          // Never the reason a one-shot command stays alive: the caller's
+          // own wait holds the loop while it still wants the answer.
+          const timer = setTimeout(resolve, delay);
+          timer.unref?.();
+        });
         try {
           await this.open();
           this.setLink({ status: "connected" });

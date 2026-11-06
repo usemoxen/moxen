@@ -208,6 +208,14 @@ const PRUNE_INTERVAL_MS = 6 * 3_600_000;
  */
 const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
 
+/**
+ * Bound for every driver's `stopAll` inside `close()`: shutdown (SIGTERM,
+ * `server stop`) must not hang on one stuck driver, nor starve the rest
+ * behind it. Every driver is still asked — all stops start together — only
+ * the wait is bounded.
+ */
+const CLOSE_DRIVER_TIMEOUT_MS = 5_000;
+
 /** Config writes in flight, by resolved file: two writers to one file queue, others run together. */
 const configWrites = new Map<string, Promise<unknown>>();
 
@@ -318,6 +326,8 @@ export class DirectConnection implements ClientApi {
   private readonly rollbackApp: (options: UpdateOptions) => Promise<RollbackResult>;
   /** Shell subscribers, who are told where an update is. */
   private readonly updateListeners = new Set<(frame: ShellFrame) => void>();
+  /** Poll intervals with a live subscription; `close()` clears them all. */
+  private readonly pollTimers = new Set<ReturnType<typeof setInterval>>();
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
@@ -947,10 +957,12 @@ export class DirectConnection implements ClientApi {
       if (!stopped && !this.closed) onItem({ kind: "synchronized" });
     });
     const timer = setInterval(() => void poll(), this.shellPollMs);
+    this.pollTimers.add(timer);
     return () => {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      this.pollTimers.delete(timer);
       this.updateListeners.delete(onUpdateFrame);
       for (const threadId of answering) {
         const count = (this.researchResponders.get(threadId) ?? 1) - 1;
@@ -1123,9 +1135,11 @@ export class DirectConnection implements ClientApi {
       void poll();
       void ensureBridge();
     }, this.threadPollMs);
+    this.pollTimers.add(timer);
     return () => {
       stopped = true;
       clearInterval(timer);
+      this.pollTimers.delete(timer);
       unsubscribeBridge?.();
     };
   }
@@ -2302,6 +2316,8 @@ export class DirectConnection implements ClientApi {
   async close(): Promise<void> {
     this.closed = true;
     for (const entry of this.researchProposals.values()) entry.answer(null);
+    for (const timer of this.pollTimers) clearInterval(timer);
+    this.pollTimers.clear();
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
     this.usageProtection.close();
     for (const unsubscribe of this.usageSubscriptions) unsubscribe();
@@ -2314,13 +2330,26 @@ export class DirectConnection implements ClientApi {
     if (this.schedulingStarted) onScheduledTurnDue(null);
     await this.mcpHttp?.close().catch(() => undefined);
     this.mcpHttp = null;
-    for (const driver of this.ownedDrivers) {
-      try {
-        await Effect.runPromise(driver.stopAll?.() ?? Effect.void);
-      } catch {
-        // Best effort: servers may already be gone.
-      }
-    }
+    // Every stop starts before any is awaited, so one stuck driver cannot
+    // starve the rest; each then races its own deadline, so one stuck
+    // driver cannot hang shutdown either.
+    await Promise.allSettled(
+      [...this.ownedDrivers].map(async (driver) => {
+        const stopping = (async () => {
+          await Effect.runPromise(driver.stopAll?.() ?? Effect.void);
+        })().catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), CLOSE_DRIVER_TIMEOUT_MS);
+          timer.unref?.();
+        });
+        try {
+          await Promise.race([stopping, deadline]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }),
+    );
     this.ownedDrivers.clear();
   }
 }
