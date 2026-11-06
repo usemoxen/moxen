@@ -144,6 +144,20 @@ describe("a thread continued in a new one", () => {
     expect((await w.store.readThreadRecord(movedPlain.threadId))?.researchPicker).toBeUndefined();
   });
 
+  it("carries an unclaimed run-size mark into an existing destination that has none", async () => {
+    const w = await world();
+    const marked = await w.make("researching");
+    await updateThreadMeta(w.store, marked.id, { interactionMode: "research" });
+    const plain = await w.make("destination");
+    const moved = await continueThread(w.ctx, { threadId: marked.id, destinationThreadId: plain.id });
+    expect(moved.threadId).toBe(plain.id);
+    expect((await w.store.readThreadRecord(plain.id))?.researchPicker).toBe(true);
+    const other = await w.make("unmarked");
+    const elsewhere = await w.make("elsewhere");
+    await continueThread(w.ctx, { threadId: other.id, destinationThreadId: elsewhere.id });
+    expect((await w.store.readThreadRecord(elsewhere.id))?.researchPicker).toBeUndefined();
+  });
+
   it("ends its session so a background task cannot wake it, and leaves every other thread's session alone", async () => {
     const w = await world();
     const old = await w.make("old");

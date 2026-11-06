@@ -1061,9 +1061,10 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   }
   // An unclaimed run-size question moves with the thread: the continuation
   // has not been offered one either, so its first real prompt still asks.
-  if (!existing && source.researchPicker === true) {
-    await store.withThreadLock(created.id, async () => {
-      const current = await store.readThreadRecord(created.id);
+  if (source.researchPicker === true) {
+    const targetId = existing ? existing.id : created.id;
+    await store.withThreadLock(targetId, async () => {
+      const current = await store.readThreadRecord(targetId);
       if (current && current.researchPicker !== true) await store.writeThreadRecord({ ...current, researchPicker: true });
     });
   }
