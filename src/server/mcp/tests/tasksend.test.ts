@@ -255,13 +255,10 @@ describe("task handoff on continue (MXN-300)", () => {
       expect(asked.isError).toBe(false);
       expect(JSON.parse(asked.text)).toMatchObject({ taskId: idle });
 
-      // The old parent lost steering: no sending, no questions, no queueing.
-      // It keeps read access: task_status is project-scoped like thread_read,
-      // so the old thread can still see what its former task did.
+      // The old parent lost the task entirely: steering, reads, questions
+      // and queueing all read as TASK_NOT_FOUND there now.
       expect((await t.send(t.orchestrator, running, "Old thread")).text).toContain("TASK_NOT_FOUND");
-      expect(JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId: idle })).text)).toMatchObject(
-        { taskId: idle, status: "completed", finished: true },
-      );
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId: idle })).text).toContain("TASK_NOT_FOUND");
       expect((await callMoxenTool(t.connection, t.orchestrator, "task_ask", { taskId: idle, question: "x" })).text).toContain("TASK_NOT_FOUND");
       expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue", { message: "x", threadId: idle })).text).toContain("TASK_NOT_FOUND");
 

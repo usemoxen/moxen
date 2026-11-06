@@ -412,9 +412,9 @@ A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
 that continues hands every task it delegated to the new thread, running and
-idle alike: the handoff lists them, and from then on steering and completion
-notifications resolve against the new parent while the old one reads
-`TASK_NOT_FOUND` (its `task_status` reads still work project-wide). A
+idle alike: the handoff lists them, and from then on steering, `task_status`
+and completion notifications resolve against the new parent while the old one
+reads `TASK_NOT_FOUND`. A
 continuation can also change the model: continuing in a new thread keeps the
 project, the checkout and the handoff, and takes an optional target
 model/provider — the palette's second continue row, or `moxen threads
@@ -774,12 +774,12 @@ run: the notification is not one-shot, and covers a queued message's turn too.
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the
 new thread — running and idle alike — so from then on `task_send`,
-`task_ask`, `message_queue` and `task_cancel` resolve against the new parent
-and read as `TASK_NOT_FOUND` on the old one, stranger or not. Reading is not
-ownership: `task_status` stays project-scoped like `thread_read`, so the old
-thread can still see what its former task did. A task keeps its own provider,
-model and modes; only the parent link moves, across providers and models
-alike, so the handoff grants the new thread no extra access. A `fork: true`
+`task_ask`, `message_queue`, `task_cancel` and `task_status` resolve against
+the new parent and read as `TASK_NOT_FOUND` on the old one, stranger or not.
+Reading the task's thread itself stays project-scoped (`thread_read`), so
+the old thread can still look at what its former task did. A task keeps its
+own provider, model and modes; only the parent link moves, across providers
+and models alike, so the handoff grants the new thread no extra access. A `fork: true`
 task moves the same way: its conversation was copied at delegate time, and
 the continuation shares the checkout, so one owner stays unambiguous.
 A research run's lead and roles are never reachable (`TASK_SEND_RESEARCH`):
@@ -800,8 +800,7 @@ task answers from its recorded session; a task with no session yet answers
 without its context, and the result says that too.
 
 The ownership rule is `task_send`'s: the thread that owns the task asks, and
-any other thread reads `TASK_NOT_FOUND` (reading the report with
-`task_status` still works project-wide). A research run's lead and roles are
+any other thread reads `TASK_NOT_FOUND`. A research run's lead and roles are
 refused (`TASK_ASK_RESEARCH`). A provider that cannot
 copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
 than an error, so the orchestrator can fall back to `thread_read`. The call
