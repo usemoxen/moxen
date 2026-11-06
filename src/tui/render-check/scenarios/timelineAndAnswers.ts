@@ -9,6 +9,21 @@ import { emitLiveRef, userInputRequestedFrame } from "../fixtures.js";
     live, answering it, the toast-dismiss swallow window, and the reply
     click past that window opening message actions. */
 export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // ModalShell fades and the toast stack shifts with timing (auto-expiry), so
+  // every step below waits for the frame it needs instead of a fixed delay a
+  // loaded renderer overruns.
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
   // The assistant's closing reply opens the same modal: back to the top and
   // click the reply card below the prompt.
   await act(async () => setup.mockInput.pressKey("HOME"));
@@ -94,20 +109,22 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   // hardcoding its row.
   // Let any earlier dismiss window expire, so the toast assertion below
   // proves the × click's own mark rather than a stale one (the 2500ms toast
-  // easily survives the wait).
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  const answerToastRows = setup.captureCharFrame().split("\n");
+  // easily survives the wait): wait for the expiry, not a fixed delay.
+  await waitFor("an earlier dismiss window never expired", () => !wasModalJustDismissed());
+  const answerToastRows = frame().split("\n");
   const answerToastRow = answerToastRows.findIndex((line) => line.includes("Answer submitted"));
   if (answerToastRow === -1) fail("expected Answer submitted toast");
   const answerToastX = answerToastRows[answerToastRow]?.lastIndexOf("×") ?? -1;
   if (answerToastX === -1) fail("Answer submitted toast has no ×");
   await act(async () => setup.mockMouse.click(answerToastX, answerToastRow));
   await setup.flush();
+  // The mark lives for 250ms: assert it while the dismissal it came with is
+  // still on screen, so a slow harness reads as a harness failure.
   if (!wasModalJustDismissed()) fail("toast × did not mark the dismiss window");
+  await waitFor("toast × did not dismiss", () => !frame().includes("Answer submitted"));
   console.log("--- toast dismissed (manual ×) ---");
-  const toastDismissedFrame = setup.captureCharFrame();
+  const toastDismissedFrame = frame();
   console.log(toastDismissedFrame);
-  if (toastDismissedFrame.includes("Answer submitted")) fail("toast × did not dismiss");
 
   // A reply click inside the window is swallowed — no message-actions modal.
   // Assert the window is still held first, so a slow harness reads as a
