@@ -93,6 +93,21 @@ export interface HarnessDriverOptions {
   readonly connectMcp?: ConnectMcp;
   /** The home directory whose skill folders count as the user's own. */
   readonly home?: string;
+  /** How long a stop waits for an in-flight start before abandoning it (default 2 s, well under the server's per-driver stop budget). */
+  readonly stopWaitMs?: number;
+}
+
+/** How long a stop waits for an in-flight start before abandoning it (see `stopWaitMs`). */
+const STOP_WAIT_MS = 2_000;
+
+/** An `openSession` still running: a stop waits for it, bounded, then abandons it. */
+interface PendingStart {
+  readonly promise: Promise<ProviderSession>;
+  abandoned: boolean;
+  /** A stop is waiting on this start: whatever it registers will be closed, so a joiner starts fresh instead. */
+  stopping: boolean;
+  /** The session this start registered, once it has: a stop closes only its own start's session. */
+  session?: HarnessSession;
 }
 
 interface HarnessTurn {
@@ -244,10 +259,11 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private readonly transport: TurnConfig["transport"] | undefined;
   private readonly sleep: TurnConfig["sleep"] | undefined;
   private readonly sessions = new Map<ThreadId, HarnessSession>();
-  /** Sessions being started (their MCP servers are connecting): a second start for the thread waits for the first. */
-  private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
+  /** Starts in flight, by thread: a stop waits for the start bounded, then abandons it. */
+  private readonly starting = new Map<ThreadId, PendingStart>();
   private readonly connectMcp: ConnectMcp | undefined;
   private readonly home: string | undefined;
+  private readonly stopWaitMs: number;
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent, Done>());
   /** Titles being made, by session id, so a second ask waits for the first instead of paying for another request. */
   private readonly titling = new Map<string, Promise<string | null>>();
@@ -262,6 +278,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     this.sleep = options.sleep;
     this.connectMcp = options.connectMcp;
     this.home = options.home;
+    this.stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS;
   }
 
   /** Profiles and compaction settings are read on every use, so an edit reaches the next turn of a running session. */
@@ -308,16 +325,36 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   readonly startSession = (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, CliError> =>
     this.attempt("HARNESS_START_FAILED", `Could not start a harness session for thread ${input.threadId}`, async () => {
-      const existing = this.sessions.get(input.threadId);
-      if (existing && !existing.closed) return this.describe(existing);
-      const pending = this.starting.get(input.threadId);
-      if (pending) return await pending;
-      const started = this.openSession(input);
-      this.starting.set(input.threadId, started);
-      try {
-        return await started;
-      } finally {
-        this.starting.delete(input.threadId);
+      // `fresh` skips the live check once: a joiner whose start a stop
+      // overlapped must not return the session that stop is closing.
+      let fresh = false;
+      for (;;) {
+        const existing = this.sessions.get(input.threadId);
+        if (existing && !existing.closed && !fresh) return this.describe(existing);
+        fresh = false;
+        // A start in flight is not in `sessions` yet: a second start for the
+        // thread waits for the first instead of opening a second session.
+        const pending = this.starting.get(input.threadId);
+        if (!pending) {
+          const started = this.openSession(input);
+          const entry: PendingStart = { promise: started, abandoned: false, stopping: false };
+          this.starting.set(input.threadId, entry);
+          try {
+            return await started;
+          } finally {
+            if (this.starting.get(input.threadId) === entry) this.starting.delete(input.threadId);
+          }
+        }
+        // Join the in-flight start, failure included. A stop may have
+        // overlapped it (`stopping`): whatever it registered is being closed,
+        // so loop and start fresh instead of handing back a dead session.
+        await pending.promise;
+        if (pending.stopping) {
+          fresh = true;
+          continue;
+        }
+        const joined = this.sessions.get(input.threadId);
+        if (joined && !joined.closed) return this.describe(joined);
       }
     });
 
@@ -382,6 +419,16 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
           if (guidance !== "") transcript.append({ role: "system", content: `This session now has tools from MCP servers. ${guidance}` });
         }
       }
+      // A stop that gave up waiting abandons the start: fail instead of
+      // registering a session nobody owns (the `catch` below closes the
+      // pool). The entry is still this start's (only its wrapper deletes it,
+      // after this settles), and the check is synchronous with the `set`, so
+      // no stop can slip between the check and the registration.
+      const entry = this.starting.get(input.threadId);
+      if (entry?.abandoned === true) {
+        throw new Error(`Start for thread ${input.threadId} was abandoned by a stop.`);
+      }
+      if (entry) entry.session = session;
       this.sessions.set(input.threadId, session);
       return this.describe(session);
     } catch (error) {
@@ -1390,21 +1437,47 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   // -- stopping ------------------------------------------------------------------
 
+  /**
+   * Wait for in-flight starts, at most `stopWaitMs`: a wedged MCP connect
+   * must not hang a stop. The timer is unref'd and cleared; unsettled
+   * entries stay registered, so the caller can abandon exactly those.
+   */
+  private async awaitStarts(starts: ReadonlyArray<PendingStart>): Promise<void> {
+    if (starts.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(starts.map((start) => start.promise)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.stopWaitMs);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
     this.attempt("HARNESS_STOP_FAILED", `Could not stop the harness session for thread ${threadId}`, async () => {
-      // A start in flight is not in `sessions` yet: take over its outcome
-      // first, then stop what it made. Otherwise it resolves live after this
-      // returns, with a pool nobody closes.
-      const pending = this.starting.get(threadId);
-      if (pending) {
-        try {
-          await pending;
-        } catch {
-          // The start failed: nothing it made to stop.
-        }
+      // A start in flight is not in `sessions` yet: wait for its outcome
+      // bounded, then stop what it made. On timeout the start is abandoned:
+      // its late resolution closes its pool instead of registering.
+      const entry = this.starting.get(threadId);
+      if (entry) {
+        // Marked before waiting: a joiner resolving alongside this stop
+        // starts fresh, since whatever this start registers is closed below.
+        entry.stopping = true;
+        await this.awaitStarts([entry]);
+        // Still registered means still unsettled (the wrapper deletes on
+        // settle); a start that settled just in time is stopped below.
+        if (this.starting.get(threadId) === entry) entry.abandoned = true;
       }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
+      // A stop that overlapped a start closes only that start's session: a
+      // joiner's fresh start that already replaced it is not this stop's.
+      if (entry?.session && session !== entry.session) return;
       session.closed = true;
       if (session.wakeTimer) clearTimeout(session.wakeTimer);
       const turn = this.openTurn(session);
@@ -1418,8 +1491,17 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     this.attempt("HARNESS_STOP_FAILED", "Could not stop the harness driver", async () => {
-      const pendings = [...this.starting.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
+      // Starts in flight are not in `sessions` yet: wait for the outcomes
+      // bounded, then stop what they made. Timed-out starts are abandoned:
+      // their late resolutions close their pools instead of registering.
+      const entries = [...this.starting.entries()];
+      if (entries.length > 0) {
+        for (const [, entry] of entries) entry.stopping = true;
+        await this.awaitStarts(entries.map(([, entry]) => entry));
+        for (const [threadId, entry] of entries) {
+          if (this.starting.get(threadId) === entry) entry.abandoned = true;
+        }
+      }
       for (const session of this.sessions.values()) {
         session.closed = true;
         if (session.wakeTimer) clearTimeout(session.wakeTimer);

@@ -110,6 +110,8 @@ export interface OpenCodeDriverOptions {
   readonly interruptAckTimeoutMs?: number;
   /** How long a server stays quiet before a pending tool-settings restart (default 1.5 s; see `reconcileServers`). */
   readonly reconcileDelayMs?: number;
+  /** How long a stop waits for an in-flight start before abandoning it (default 2 s, well under the server's per-driver stop budget). */
+  readonly stopWaitMs?: number;
 }
 
 /** Default `stallTimeoutMs`: a turn with zero provider events for this long is failed, never left running. */
@@ -292,6 +294,20 @@ function subagentHistoryItems(messages: ReadonlyArray<OpencodeMessage>): Subagen
 
 /** How long a server stays up after it goes quiet before a pending tool-settings restart (see `reconcileServers`). */
 const RECONCILE_DELAY_MS = 1_500;
+
+/** How long a stop waits for an in-flight start before abandoning it (see `stopWaitMs`). */
+const STOP_WAIT_MS = 2_000;
+
+/** An `openSession` still running: a stop waits for it, bounded, then abandons it (see `abandonStart`). */
+interface PendingStart {
+  readonly promise: Promise<ProviderSession>;
+  readonly workingDirectory: string;
+  abandoned: boolean;
+  /** A stop is waiting on this start: whatever it registers will be closed, so a joiner starts fresh instead. */
+  stopping: boolean;
+  /** The session this start registered, once it has: a stop closes only its own start's session. */
+  session?: OpenCodeSession;
+}
 
 /** What the server's config holds that Moxen decides: the tools left off, and whether its own prompt replaces OpenCode's. */
 interface ServerShape {
@@ -618,10 +634,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly interruptTailMs = 3_000;
   private readonly interruptAckTimeoutMs: number;
   private readonly reconcileDelayMs: number;
+  private readonly stopWaitMs: number;
   private readonly stallTimers = new Map<TurnId, ReturnType<typeof setTimeout>>();
   private readonly sessions = new Map<ThreadId, OpenCodeSession>();
-  /** Sessions being started: a stop for the thread waits for the start first, so it stops what the start made. */
-  private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
+  /** Starts in flight, by thread: a stop waits for the start bounded, then abandons it (see `abandonStart`). */
+  private readonly starting = new Map<ThreadId, PendingStart>();
   private readonly connections = new Map<string, Promise<OpencodeServerConnection>>();
   /**
    * The tools OpenCode's own server is told to leave off, and whether Moxen's prompt replaces its own, are part of
@@ -663,6 +680,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.toolStallTimeoutMs = options.toolStallTimeoutMs ?? this.stallTimeoutMs * 6;
     this.interruptAckTimeoutMs = options.interruptAckTimeoutMs ?? 3000;
     this.reconcileDelayMs = options.reconcileDelayMs ?? RECONCILE_DELAY_MS;
+    this.stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS;
   }
 
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
@@ -818,6 +836,64 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     pump?.controller.abort();
     this.failServerTurns(key, `Lost the OpenCode server (${reason.slice(0, 200)}).`);
     void connection.dispose().catch(() => undefined);
+  }
+
+  /**
+   * Wait for in-flight starts, at most `stopWaitMs`: a wedged transport must
+   * not hang a stop. The timer is unref'd and cleared; unsettled entries stay
+   * registered, so the caller can abandon exactly those.
+   */
+  private async awaitStarts(starts: ReadonlyArray<PendingStart>): Promise<void> {
+    if (starts.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(starts.map((start) => start.promise)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.stopWaitMs);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Give up on a wedged start: its late resolution tears itself down instead
+   * of registering (see `openSession`), and whatever it already holds is
+   * dropped now so the wedge is killed.
+   */
+  private abandonStart(entry: PendingStart): void {
+    entry.abandoned = true;
+    const live = this.liveConnections.get(entry.workingDirectory);
+    if (live) this.dropConnection(entry.workingDirectory, live, "a stop timed out waiting for its start");
+  }
+
+  /**
+   * The connection an abort may use: a live one, one already being
+   * established, or a reattach to an external server (whose address is
+   * configured, so no process is spawned). Null when reaching the server
+   * would spawn a process: never start a server just to deliver an abort.
+   */
+  private async connectionForAbort(session: OpenCodeSession): Promise<OpencodeServerConnection | null> {
+    const key = session.workingDirectory;
+    const live = this.liveConnections.get(key);
+    if (live) return live;
+    const inFlight = this.connections.get(key);
+    if (inFlight) {
+      try {
+        return await inFlight;
+      } catch {
+        return null;
+      }
+    }
+    if (this.settings.serverUrl.trim().length === 0) return null;
+    try {
+      return await this.connectionFor(session);
+    } catch {
+      return null;
+    }
   }
 
   private async connectionFor(session: OpenCodeSession): Promise<OpencodeServerConnection> {
@@ -1043,18 +1119,36 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   readonly startSession = (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, CliError> =>
     this.attempt("OPENCODE_SPAWN_FAILED", `Could not start an OpenCode session for thread ${input.threadId}`, async () => {
-      const existing = this.sessions.get(input.threadId);
-      if (existing && !existing.closed) return this.describeSession(existing);
-      // A start in flight is not in `sessions` yet: a second start for the
-      // thread waits for the first instead of opening a second session.
-      const pending = this.starting.get(input.threadId);
-      if (pending) return await pending;
-      const started = this.openSession(input, existing);
-      this.starting.set(input.threadId, started);
-      try {
-        return await started;
-      } finally {
-        this.starting.delete(input.threadId);
+      // `fresh` skips the live check once: a joiner whose start a stop
+      // overlapped must not return the session that stop is closing.
+      let fresh = false;
+      for (;;) {
+        const existing = this.sessions.get(input.threadId);
+        if (existing && !existing.closed && !fresh) return this.describeSession(existing);
+        fresh = false;
+        // A start in flight is not in `sessions` yet: a second start for the
+        // thread waits for the first instead of opening a second session.
+        const pending = this.starting.get(input.threadId);
+        if (!pending) {
+          const started = this.openSession(input, existing);
+          const entry: PendingStart = { promise: started, workingDirectory: input.workingDirectory, abandoned: false, stopping: false };
+          this.starting.set(input.threadId, entry);
+          try {
+            return await started;
+          } finally {
+            if (this.starting.get(input.threadId) === entry) this.starting.delete(input.threadId);
+          }
+        }
+        // Join the in-flight start, failure included. A stop may have
+        // overlapped it (`stopping`): whatever it registered is being closed,
+        // so loop and start fresh instead of handing back a dead session.
+        await pending.promise;
+        if (pending.stopping) {
+          fresh = true;
+          continue;
+        }
+        const joined = this.sessions.get(input.threadId);
+        if (joined && !joined.closed) return this.describeSession(joined);
       }
     });
 
@@ -1110,6 +1204,18 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         context: null,
         startedAt: new Date().toISOString(),
       };
+      // A stop that gave up waiting abandons the start: tear down instead of
+      // registering a session nobody owns. The entry is still this start's
+      // (only its wrapper deletes it, after this settles), and the check is
+      // synchronous with the `set`, so no stop can slip between them.
+      const entry = this.starting.get(input.threadId);
+      if (entry?.abandoned === true) {
+        this.dropConnection(input.workingDirectory, connection, "its start was abandoned by a stop");
+        throw new CliError("OPENCODE_START_ABANDONED", `Start for thread ${input.threadId} was abandoned by a stop.`, {
+          details: { threadId: input.threadId },
+        });
+      }
+      if (entry) entry.session = session;
       this.sessions.set(input.threadId, session);
       // A Go thread learns its plan from the server it just started or attached to,
       // without making the first message wait for that reading.
@@ -1308,8 +1414,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       if (turn) turn.interrupting = true;
       // Parked permission/question prompts hold the turn open server-side;
       // reject them first so abort settles instead of hanging.
-      // Only a live connection can have anything to stop: never start a server just to deliver an abort.
-      const connection = this.liveConnections.get(session.workingDirectory) ?? null;
+      // Only a connection that needs no spawn can have anything to stop:
+      // never start a server just to deliver an abort.
+      const connection = await this.connectionForAbort(session);
       await this.rejectParked(session, connection, "Interrupted.");
       if (connection) {
         try {
@@ -1327,7 +1434,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // after this call returns. Settling before it would let a prompt sent
       // right away be completed by the old run's confirmation.
       // (It may already have: the event can beat the HTTP reply.)
-      // Without a live connection no server can confirm: settle at once.
+      // Without a connection no server can confirm: settle at once.
       if (connection && turn && turn.status === "running" && !turn.interruptAcked) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, this.interruptAckTimeoutMs);
@@ -1522,23 +1629,28 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
     this.attempt("OPENCODE_STOP_FAILED", `Could not stop the OpenCode session for thread ${threadId}`, async () => {
-      // A start in flight is not in `sessions` yet: take over its outcome
-      // first, then stop what it made. Otherwise it resolves live after this
-      // returns, holding a server until stopAll.
-      const pending = this.starting.get(threadId);
-      if (pending) {
-        try {
-          await pending;
-        } catch {
-          // The start failed: nothing it made to stop.
-        }
+      // A start in flight is not in `sessions` yet: wait for its outcome
+      // bounded, then stop what it made. On timeout the start is abandoned:
+      // its late resolution tears itself down instead of registering.
+      const entry = this.starting.get(threadId);
+      if (entry) {
+        // Marked before waiting: a joiner resolving alongside this stop
+        // starts fresh, since whatever this start registers is closed below.
+        entry.stopping = true;
+        await this.awaitStarts([entry]);
+        // Still registered means still unsettled (the wrapper deletes on
+        // settle); a start that settled just in time is stopped below.
+        if (this.starting.get(threadId) === entry) this.abandonStart(entry);
       }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
+      // A stop that overlapped a start closes only that start's session: a
+      // joiner's fresh start that already replaced it is not this stop's.
+      if (entry?.session && session !== entry.session) return;
       session.closed = true;
       this.settleOpenTurn(session, "interrupted", "Session stopped.");
-      // Best effort, and never a reason to start a server: the server may already be gone.
-      const connection = this.liveConnections.get(session.workingDirectory);
+      // Best effort, and never a reason to spawn a server: the server may already be gone.
+      const connection = await this.connectionForAbort(session);
       if (connection) {
         try {
           await connection.abortSession(session.nativeSessionId);
@@ -1636,9 +1748,17 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     Effect.tryPromise({
       try: async () => {
-        // A start in flight is not in `sessions` yet: let it finish first, so nothing is left running after this returns.
-        const pendings = [...this.starting.values()];
-        if (pendings.length > 0) await Promise.allSettled(pendings);
+        // A start in flight is not in `sessions` yet: wait for the outcomes
+        // bounded, then stop what they made. Timed-out starts are abandoned:
+        // their late resolutions tear themselves down instead of registering.
+        const entries = [...this.starting.entries()];
+        if (entries.length > 0) {
+          for (const [, entry] of entries) entry.stopping = true;
+          await this.awaitStarts(entries.map(([, entry]) => entry));
+          for (const [threadId, entry] of entries) {
+            if (this.starting.get(threadId) === entry) this.abandonStart(entry);
+          }
+        }
         for (const session of this.sessions.values()) {
           session.closed = true;
           this.settleOpenTurn(session, "interrupted", "Driver stopped.");
