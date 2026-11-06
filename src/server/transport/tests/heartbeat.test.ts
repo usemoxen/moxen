@@ -162,6 +162,52 @@ describe("heartbeat", () => {
     await waitFor("connected again", () => client.linkState.status === "connected");
     await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
   });
+
+  it("leaves no live socket behind when close lands mid-reconnect", async () => {
+    // The reconnect's hello is still waiting for its reply when the client
+    // closes: answering it afterwards must not report a closed client as
+    // connected, nor leave its socket open.
+    const endpoint = testEndpoint();
+    let holdHellos = false;
+    let held: { socket: net.Socket; id: number } | null = null;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("error", () => undefined);
+      socket.once("close", () => sockets.delete(socket));
+      const reader = new LineReader();
+      socket.on("data", (chunk: string) => {
+        for (const line of reader.push(chunk)) {
+          const message = JSON.parse(line) as { id: number; method: string };
+          if (message.method !== "hello") continue;
+          if (holdHellos) held = { socket, id: message.id };
+          else socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint);
+    teardown.push(() => client.close());
+    client.subscribeShell({}, () => undefined, () => undefined);
+    await waitFor("the subscription", () => [...sockets].length === 1);
+
+    holdHellos = true;
+    // Drop the one socket: the reconnect's next hello waits for its reply.
+    for (const socket of [...sockets]) socket.destroy();
+    await waitFor("the reconnect's held hello", () => held !== null);
+
+    await client.close();
+    held!.socket.write(encode({ id: held!.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+    await waitFor("the held hello to settle", () => sockets.size === 0 || client.linkState.status === "connected");
+    expect(client.linkState.status).not.toBe("connected");
+    expect(sockets.size).toBe(0);
+  });
 });
 
 describe("server side", () => {

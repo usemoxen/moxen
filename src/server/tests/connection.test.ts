@@ -2356,7 +2356,7 @@ describe("DirectConnection close", () => {
     const stuck = new CloseDriver("stuck", asked, () => Effect.never);
     const quick = new CloseDriver("quick", asked, () => Effect.void);
     const harness = await testHarness({ drivers: { claude: () => stuck, codex: () => quick } });
-    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, closeDriverTimeoutMs: 50 });
     try {
       const workspaceRoot = await realpath(harness.work);
       const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
@@ -2370,7 +2370,7 @@ describe("DirectConnection close", () => {
     } finally {
       await connection.close();
     }
-  }, 20_000);
+  });
 
   it("clears the subscription poll timers, so a closed connection holds nothing open", async () => {
     const harness = await testHarness();

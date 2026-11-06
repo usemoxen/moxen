@@ -212,7 +212,10 @@ const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
  * Bound for every driver's `stopAll` inside `close()`: shutdown (SIGTERM,
  * `server stop`) must not hang on one stuck driver, nor starve the rest
  * behind it. Every driver is still asked — all stops start together — only
- * the wait is bounded.
+ * the wait is bounded. A stop slower than this loses the race (its late
+ * completion is dropped, never awaited) and shutdown resolves without it,
+ * so the server process exits on schedule; a stuck driver is left for the
+ * process exit to reap rather than shut down cleanly.
  */
 const CLOSE_DRIVER_TIMEOUT_MS = 5_000;
 
@@ -270,6 +273,8 @@ export interface DirectConnectionOptions {
   readonly drivers?: TurnDriverFactories;
   readonly shellPollMs?: number;
   readonly threadPollMs?: number;
+  /** Bound for every driver's `stopAll` inside `close()`; defaults to `CLOSE_DRIVER_TIMEOUT_MS` (tests pass milliseconds). */
+  readonly closeDriverTimeoutMs?: number;
   /** Provider source override (tests); defaults to probing the live providers. */
   readonly providers?: () => Promise<ProviderSummary[]>;
   /** Catalog source override (tests); defaults to the providers above, reshaped. */
@@ -310,6 +315,7 @@ export class DirectConnection implements ClientApi {
   private readonly factories: TurnDriverFactories;
   private readonly shellPollMs: number;
   private readonly threadPollMs: number;
+  private readonly closeDriverTimeoutMs: number;
   private readonly catalog: () => Promise<ConfigPayload>;
   private readonly providers: () => Promise<ProviderSummary[]>;
   private readonly loadConfig: () => Promise<CliConfig>;
@@ -352,6 +358,7 @@ export class DirectConnection implements ClientApi {
     this.harnessFetch = options.harnessFetch;
     this.shellPollMs = options.shellPollMs ?? 1500;
     this.threadPollMs = options.threadPollMs ?? 750;
+    this.closeDriverTimeoutMs = options.closeDriverTimeoutMs ?? CLOSE_DRIVER_TIMEOUT_MS;
     this.providers = options.providers ?? (async () => {
       // A config that cannot be read must not hide the providers that need none of it.
       const providers = await this.readConfigFile().then((read) => read.config.providers, () => undefined);
@@ -2340,7 +2347,7 @@ export class DirectConnection implements ClientApi {
         })().catch(() => undefined);
         let timer: ReturnType<typeof setTimeout> | undefined;
         const deadline = new Promise<null>((resolve) => {
-          timer = setTimeout(() => resolve(null), CLOSE_DRIVER_TIMEOUT_MS);
+          timer = setTimeout(() => resolve(null), this.closeDriverTimeoutMs);
           timer.unref?.();
         });
         try {

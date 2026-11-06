@@ -161,7 +161,7 @@ export class RemoteConnection implements ClientApi {
     return this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
   }
 
-  private async open(): Promise<void> {
+  private async open(): Promise<net.Socket> {
     const socket = this.options.tls ? await this.openTls(this.options.tls) : await this.openLocal();
     socket.setEncoding("utf8");
     const reader = new LineReader();
@@ -192,6 +192,7 @@ export class RemoteConnection implements ClientApi {
     }
     this.startHeartbeat(socket);
     for (const subscription of this.subscriptions) await this.resubscribe(subscription);
+    return socket;
   }
 
   /**
@@ -396,7 +397,17 @@ export class RemoteConnection implements ClientApi {
           timer.unref?.();
         });
         try {
-          await this.open();
+          const socket = await this.open();
+          if (this.closed) {
+            // `close()` ran mid-open: the socket it ended is not (or no
+            // longer) this one, so destroy what the open left behind, stop
+            // its heartbeat, and leave the link (and its listeners, which
+            // `close()` cleared) alone.
+            this.stopHeartbeat();
+            socket.destroy();
+            if (this.socket === socket) this.socket = null;
+            return;
+          }
           this.setLink({ status: "connected" });
         } catch (cause) {
           if (cause instanceof CliError && FATAL_HELLO_CODES.has(cause.code)) {
