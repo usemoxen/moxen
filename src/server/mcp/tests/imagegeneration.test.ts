@@ -15,7 +15,7 @@ it("does not offer image generation without eligibility, or to a delegated task"
 
 it("does not treat an agent's claimed image path or a failed native event as an image", async () => {
   const image = path.resolve("generated.png");
-  const api = { query: vi.fn(async (query: { type: string }) => query.type === "thread.task.status" ? { task: { status: "completed", summary: `Saved ${image}` }, child: {} } : { thread: { view: "turn-items", items: [
+  const api = { query: vi.fn(async (query: { type: string }) => query.type === "thread.task.status" ? { task: { status: "completed", summary: `Saved ${image}` }, child: {}, background: { unknown: false, tasks: [] } } : { thread: { view: "turn-items", items: [
     { payload: { itemType: "image_generation", toolCallId: "one", data: { state: { status: "completed", input: { path: image } } } } },
     { payload: { itemType: "image_generation", toolCallId: "one", data: { state: { status: "failed", input: { path: image } } } } },
   ] } }) } as unknown as ClientApi;
@@ -28,7 +28,7 @@ it("does not treat an agent's claimed image path or a failed native event as an 
 
 it("returns only native image-generation paths after checking task ownership", async () => {
   const image = path.resolve("generated.png");
-  const query = vi.fn(async (request: { type: string }) => request.type === "thread.task.status" ? { task: { status: "completed", summary: "done" }, child: {} } : { thread: { view: "turn-items", items: [
+  const query = vi.fn(async (request: { type: string }) => request.type === "thread.task.status" ? { task: { status: "completed", summary: "done" }, child: {}, background: { unknown: false, tasks: [] } } : { thread: { view: "turn-items", items: [
     { payload: { itemType: "image_generation", toolCallId: "one", data: { state: { status: "completed", input: { path: image } } } } },
   ] } });
   const api = { query } as unknown as ClientApi;

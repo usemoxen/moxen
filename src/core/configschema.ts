@@ -756,6 +756,14 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     appliesAt: "next-session",
   },
   {
+    key: "backgroundForgottenAfter",
+    label: "Flag background work as forgotten after",
+    description: "Background work a delegated task left running past this age is flagged as probably forgotten in task_status. Moxen never stops it on its own.",
+    section: "sessions",
+    kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Sooner", high: "Later" } },
+    defaultValue: "30m",
+  },
+  {
     key: "usageProtection",
     label: "Usage protection",
     description: "Warn before a shared plan allowance runs out, or pause work and request an orderly wrap-up automatically. Only providers reporting quota windows participate; estimates cannot guarantee avoiding a limit.",

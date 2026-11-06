@@ -34,6 +34,7 @@ import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
 import { dropTurnWaiter, isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
+  BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
   ProviderAdapter,
@@ -1334,6 +1335,30 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const running = [...this.children].filter(([, child]) => child.parent === session && !child.stopped);
     await Promise.all(running.map(([childId, child]) => this.stopChild(connection, childId, child)));
   }
+
+  /**
+   * The background work this thread's session is still running: background
+   * subagents and background `shell` commands. Only what the server told
+   * this driver about — a shell background process started any other way
+   * is invisible here — so callers must never read an empty list as proof
+   * that nothing is running.
+   */
+  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return [];
+    const agents = [...this.children]
+      .filter(([, other]) => other.parent === session && other.background && !other.stopped)
+      .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
+    const shells = [...(session.backgroundShells ?? [])].map(([taskId, shell]) => ({
+      taskId,
+      taskType: "local_bash",
+      description: shell.command.split("\n")[0]?.trim() ?? "",
+      toolName: "Bash",
+      command: shell.command,
+      startedAt: shell.startedAt,
+    }));
+    return [...agents, ...shells];
+  };
 
   /**
    * Stop one background task without touching its parent turn: a native

@@ -223,8 +223,10 @@ export const SELF_QUEUED_HEADER = "Message you queued for this thread earlier wi
  * noise.
  */
 export const TASK_NOTIFICATION_LINE =
-  "- <task-notification>: a task you delegated has settled. It lists each task's title, status and headline; call task_status " +
-  "with a taskId for the full report. Do not poll task_status while a task runs, and do not treat the message as a request from the user.";
+  "- <task-notification>: a task you delegated has settled, or ended its turn with background work still running. It lists each task's title, status and headline, " +
+  "and names any background work still running with how long it has run; a notification that names running work means the task is not finished. " +
+  "A notification that only says the check was impossible names nothing: check task_status instead of waiting. " +
+  "Call task_status with a taskId for the full report. Do not poll task_status while a task runs, and do not treat the message as a request from the user.";
 
 /**
  * OpenCode's `subagent` tool waits for its child by default, holding the

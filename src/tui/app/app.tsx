@@ -3294,6 +3294,7 @@ export function App({
                 ) : (
                   <BackgroundTab
                     tasks={background}
+                    partial={currentProvider?.driver === "opencode"}
                     width={diffPanel.diffWidth}
                     now={now}
                     onOpen={(taskId) => (setBackgroundTaskId(taskId), setPicker("background-tasks"))}

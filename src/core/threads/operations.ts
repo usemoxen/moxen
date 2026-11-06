@@ -16,7 +16,7 @@
  * own compatibility surface and stay there.
  */
 import { removeProjectSkills } from "../skills/projectskills.js";
-import { sessionTtlFor } from "./idle.js";
+import { sessionTtlFor, durationMs } from "./idle.js";
 import * as Effect from "effect/Effect";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
@@ -59,7 +59,7 @@ import type {
   WorkspaceMode,
   WorkspaceResolution,
 } from "../types.js";
-import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
+import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
@@ -96,7 +96,7 @@ import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhaust
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
-import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
@@ -2393,6 +2393,83 @@ async function taskHasSettledForGood(ctx: OperationContext, childThreadId: strin
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
 }
 
+/** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
+async function settledTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
+  const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
+  return turns.filter((turn) => turn.completedAt !== null).length;
+}
+
+/** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
+const BACKGROUND_FORGOTTEN_AFTER_DEFAULT_MS = 30 * 60_000;
+
+/** Past this age, background work a task left running is flagged as probably forgotten (`backgroundForgottenAfter`). */
+export function backgroundForgottenAfterMs(config: CliConfig): number {
+  return durationMs(config.backgroundForgottenAfter) ?? BACKGROUND_FORGOTTEN_AFTER_DEFAULT_MS;
+}
+
+/** One background task still running on a delegated task's thread. */
+export interface TaskBackgroundWork extends BackgroundWorkNote {
+  /** How long it had been running when read; null when its start is unknown. */
+  readonly ageMs: number | null;
+  /** Past `backgroundForgottenAfter`: worth asking about, never stopped. */
+  readonly probablyForgotten: boolean;
+}
+
+/** The background work a delegated task's thread is still running, if Moxen can tell. */
+export interface TaskBackgroundState {
+  /** True when Moxen could not check (no live session here, or the provider cannot report it all). */
+  readonly unknown: boolean;
+  readonly tasks: readonly TaskBackgroundWork[];
+}
+
+/**
+ * What background work a task's thread is still running. Best-effort and
+ * never blocking: no live session in this process (or no driver support)
+ * reads as unknown rather than empty, and OpenCode's list is partial — it
+ * reports only the background shells and subagents its own server started,
+ * so its list never proves nothing is running.
+ */
+async function taskBackgroundState(
+  ctx: OperationContext,
+  childThreadId: string,
+  modelSelection: ModelSelection | null,
+  nowMs: number = Date.now(),
+): Promise<TaskBackgroundState> {
+  const unknown: TaskBackgroundState = { unknown: true, tasks: [] };
+  if (!modelSelection) return unknown;
+  let driver: TurnDriver;
+  try {
+    driver = ctx.driverFor(modelSelection.instanceId);
+  } catch {
+    return unknown;
+  }
+  const live = await Effect.runPromise(driver.hasSession(childThreadId)).catch(() => false);
+  if (!live) return unknown;
+  let summaries: readonly BackgroundTaskSummary[];
+  try {
+    summaries = driver.backgroundTasks?.(childThreadId) ?? [];
+  } catch {
+    return unknown;
+  }
+  const forgottenAfter = backgroundForgottenAfterMs(ctx.config);
+  return {
+    unknown: driver.backgroundTasks === undefined || driverKey(modelSelection.instanceId) === "opencode",
+    tasks: summaries.map((task) => {
+      const startedAt = task.startedAt ?? null;
+      const rawAge = startedAt === null ? null : nowMs - Date.parse(startedAt);
+      const ageMs = rawAge === null || !Number.isFinite(rawAge) || rawAge < 0 ? null : rawAge;
+      return {
+        taskId: task.taskId,
+        description: task.description,
+        command: task.command ?? null,
+        startedAt,
+        ageMs,
+        probablyForgotten: ageMs !== null && ageMs >= forgottenAfter,
+      };
+    }),
+  };
+}
+
 /**
  * A review child's facts for its parent, pinned at settle. The pin lives on
  * the delegation row — the verdict and report of the newest settled turn
@@ -2480,6 +2557,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  const background = await taskBackgroundState(ctx, childThreadId, child.modelSelection ?? null);
   // A review task's verdict and findings ride in the notification itself, and a
   // missing verdict (or a reviewer on the parent's own model) is said visibly.
   // The facts are pinned at settle on the delegation row, so a follow-up
@@ -2500,6 +2578,13 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     filesChanged: changes?.files ?? null,
     additions: changes?.additions ?? null,
     deletions: changes?.deletions ?? null,
+    background: background.tasks.map((work) => ({
+      taskId: work.taskId,
+      description: work.description,
+      command: work.command,
+      startedAt: work.startedAt,
+    })),
+    backgroundUnknown: background.unknown,
     ...(facts === null ? {} : { review: facts }),
   };
 }
@@ -2536,14 +2621,39 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     (id): id is string => id !== null,
   );
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
+  // The settle generation each snapshot was taken at: a turn settling between
+  // the snapshot and the arming below must still report at once (finding: the
+  // gap), rather than arming a watcher that only hears future settles.
+  const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
+    const since = await settledTurnCount(ctx, id);
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
+    if (task) generations.set(task.taskId, since);
     return task && from ? { ...task, continuedFrom: from } : task;
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
   if (tasks.length === 0) return;
+  // A task that ended its turn with background work still running is not
+  // done: when that work ends, the provider wakes the task where it can, and
+  // the parent hears again once the task next has nothing left to run. Work
+  // that never ends wakes nothing, so it sends nothing further and blocks nothing.
+  for (const task of tasks) {
+    const row = rows.find(
+      (candidate) =>
+        candidate.childThreadId === task.taskId &&
+        candidate.parentThreadId === parentThreadId &&
+        candidate.notify === true &&
+        candidate.continuedIn === undefined,
+    );
+    if (!row) continue;
+    const child = await ctx.store.readThreadRecord(task.taskId);
+    if (!child || threadStatus(child) === "settled") continue;
+    if (task.background.length > 0 || task.backgroundUnknown) {
+      notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true, generations.get(task.taskId) ?? null);
+    }
+  }
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return;
   if (parent.deletedAt != null) {
@@ -3166,6 +3276,8 @@ export interface DescribedTask {
   readonly parent: ThreadEnvelope;
   readonly child: ThreadEnvelope;
   readonly task: TaskView;
+  /** Background work still running on the task's thread, if Moxen can tell. */
+  readonly background: TaskBackgroundState;
   /**
    * A review child's verdict, warnings and finished state; null for any
    * other task. `task_status` and the task notification read this rather
@@ -3211,6 +3323,7 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
     parent,
     child: seen,
     task,
+    background: await taskBackgroundState(ctx, child.id, child.modelSelection ?? null),
     review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
 }
@@ -3734,8 +3847,22 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * Tell a task's parent when the task next has nothing left to run. Watches the
  * ledger's turn events rather than one run: a message queued behind a running
  * turn is run by that turn's runner, which nothing awaits.
+ *
+ * `onlyFutureSettles` skips the check of the task as it stands: the caller
+ * just reported this settle, so only a later turn settling may report again.
+ * Without it, arming on an already-settled task would notify at once.
+ * `sinceGeneration` is the settle generation the caller's snapshot was taken
+ * at: when set, a settle that landed between the snapshot and this arming
+ * reports at once instead of being lost. A task that has not settled since
+ * keeps waiting for a future one.
  */
-function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, childThreadId: string): void {
+function notifyWhenTaskSettles(
+  ctx: OperationContext,
+  parentThreadId: string,
+  childThreadId: string,
+  onlyFutureSettles = false,
+  sinceGeneration: number | null = null,
+): void {
   let done = false;
   let checking = false;
   let again = false;
@@ -3752,6 +3879,11 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
       do {
         again = false;
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
+        if (sinceGeneration !== null && (await settledTurnCount(ctx, childThreadId)) <= sinceGeneration) {
+          // No settle since the caller's snapshot: a turn settling in the gap
+          // would have moved the generation. Keep waiting for a future one.
+          continue;
+        }
         done = true;
         stop();
         await queueTaskNotification(ctx, parentThreadId, childThreadId);
@@ -3760,7 +3892,8 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
       checking = false;
     }
   };
-  void check();
+  if (!onlyFutureSettles) void check();
+  else if (sinceGeneration !== null) void check();
 }
 
 /** One checklist item, as the tasks panel reads it (`turn.plan.updated`'s `plan`). */

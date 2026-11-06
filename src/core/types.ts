@@ -35,6 +35,8 @@ export interface CliConfig {
   runtimeMode: RuntimeMode;
   interactionMode: InteractionMode;
   sessionTtl: string;
+  /** Past this age, background work a delegated task left running is flagged as probably forgotten in task_status (`30m`, `2h`). Moxen never stops it. */
+  backgroundForgottenAfter?: string;
   provider?: string;
   model?: string;
   /** The provider and model the composer's improve action rewrites a draft with. */

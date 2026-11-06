@@ -845,7 +845,7 @@ export async function revertConversation(
 export async function listBackgroundTasks(config: CliConfig, rawThreadId: string) {
   const threadId = requireThreadId(rawThreadId);
   const result = await (await cliClient(config)).query({ type: "thread.background.list", threadId });
-  return { runtime: directRuntime(), auth: directAuth(), threadId, live: result.live, tasks: [...result.tasks] };
+  return { runtime: directRuntime(), auth: directAuth(), threadId, live: result.live, partial: result.partial, tasks: [...result.tasks] };
 }
 
 export async function stopBackgroundTask(config: CliConfig, rawThreadId: string, taskId: string) {
