@@ -53,18 +53,21 @@ export interface TaskNotification {
 export type ReviewVerdict = "MERGE" | "FIX FIRST";
 
 /**
- * The verdict a review report ends with: the last `VERDICT: MERGE` or
- * `VERDICT: FIX FIRST` line. Null when the final message holds none — the
- * past failure was a report whose last word was "the full report is
- * delivered above", so the report held nothing.
+ * The verdict a review report ends with: `VERDICT: MERGE` or
+ * `VERDICT: FIX FIRST` on the report's last non-empty line, and nothing
+ * else. A verdict line followed by more prose — or quoted target content
+ * landing after the reviewer's own verdict — is no verdict at all. Null
+ * when the final message holds none: the past failure was a report whose
+ * last word was "the full report is delivered above", so the report held
+ * nothing.
  */
 export function reviewVerdictOf(report: string | null): ReviewVerdict | null {
   if (report === null) return null;
   const lines = report.split(/\r?\n/u);
   for (let at = lines.length - 1; at >= 0; at -= 1) {
     const line = lines[at]!.trim();
-    if (line === "VERDICT: MERGE") return "MERGE";
-    if (line === "VERDICT: FIX FIRST") return "FIX FIRST";
+    if (line === "") continue;
+    return line === "VERDICT: MERGE" ? "MERGE" : line === "VERDICT: FIX FIRST" ? "FIX FIRST" : null;
   }
   return null;
 }

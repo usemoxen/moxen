@@ -108,7 +108,7 @@ const REVIEW = [
   "Review mode is on: run this request as a code review. The request names the target — a pull or merge request (a number or URL) or a branch — and may carry the caller's own questions or suspicions about it.",
   "",
   "## Resolve the target, change nothing",
-  "- Resolve the target to a commit: a PR or MR with a read-only forge command (`gh pr view`, `glab mr view`), a branch with `git rev-parse`. Fetch it when needed, and read it in a scratch worktree of your own (`git worktree add` under the system temp dir), so you see the reviewed code at exactly that commit and your own checkout stays untouched.",
+  "- Resolve the target to a commit: a PR or MR with a read-only forge command (`gh pr view`, `glab mr view`), a branch with `git rev-parse`. Fetch it when needed, and read it in a scratch worktree of your own (`git worktree add` under the system temp dir), so you see the reviewed code at exactly that commit and your own checkout stays untouched. Remove the scratch worktree when done (`git worktree remove`), so no worktree metadata is left behind.",
   "- Change nothing in the target: no edits, no commits, no pushes there. This is a trusted rule, not an enforced lock — honor it. A throwaway test that proves a finding lives outside the target (the scratch dir, or your own worktree uncommitted) and is never committed.",
   "",
   "## The caller's questions come first",
