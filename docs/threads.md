@@ -930,6 +930,42 @@ entry's `error` rather than a failed call, so it never stops the others. A
 repeated id stops once, in order. When the parent itself is missing, the
 call fails as the single form does instead of reporting one error per id.
 
+### Settling a delegated task (`task_settle`)
+
+`task_settle` marks a delegated task finished once its work is done and
+reviewed: use it (not `task_cancel`) when the report is in and nothing is
+left to run. It takes `taskId` (or `taskIds` for several, each reported
+separately so one bad id never stops the others), plus two optional flags.
+It goes through the same settle path as `threads settle`: the task and the
+tasks it delegated settle, the parent and siblings are untouched, and a task
+that is still running is refused unless `stop: true` ends its work first, as
+with `threads settle --stop`. The task's thread and branch are always kept.
+
+With `removeWorktree: true` the task's worktree checkout goes too, once it is
+safe to lose: only a Moxen-managed checkout belonging to that task's own
+thread (never a shared checkout, never the parent's own directory), with no
+uncommitted or untracked changes (ignored files like build output don't
+count), and only when its branch is merged into the default branch or it
+never committed. Ancestry alone says "not merged" for squash-merged work, so
+an equivalent patch upstream (`git cherry` `-`) and an empty merge
+(`git merge-tree` giving the default branch's own tree) count as merged too;
+anything inconclusive refuses, and the branch stays either way. An idle
+provider session in that checkout is closed first, so nothing keeps running in
+a deleted directory, and a removal the OS refuses (a locked directory on
+Windows) is reported rather than thrown. Settling still happens when the
+removal is refused: the result says `settled` with `worktreeRemoved: false`
+and the reason, so a refusal never looks like a failed settle. Waking a task
+whose worktree is gone (`task_send` with `wake: true`) fails plainly
+(`TASK_WORKTREE_REMOVED`): re-delegate the follow-up as a new task.
+
+Only the thread that owns a task settles it: the one that delegated it, or
+the continuation that took it over — exactly like `task_cancel`. Continuing
+hands every delegation row to the new thread, so from then on `task_settle`
+resolves against the new parent and reads as `TASK_NOT_FOUND` on the old one.
+A research run's lead and roles have no
+delegation rows, so they are refused with the same `TASK_NOT_FOUND` another
+thread's id gets.
+
 ### Queueing a message from an agent (`message_queue`)
 
 An agent can queue or schedule a message on a thread without a shell:

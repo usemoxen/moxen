@@ -18,6 +18,7 @@
 import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor } from "./idle.js";
 import * as Effect from "effect/Effect";
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -83,6 +84,8 @@ import {
   openTurn,
   promoteDueScheduledTurn,
   sendTurn,
+  settleThread,
+  threadFamily,
   turnPrompt,
   updateThreadMeta,
   type SendTurnResult,
@@ -3316,6 +3319,175 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   };
 }
 
+export interface SettledTask extends Omit<DescribedTask, "task"> {
+  readonly task: Omit<TaskView, "status"> & { readonly status: DelegatedTaskStatus };
+  /** A running task is refused without `stop`; true when this call ended running work first. */
+  readonly stopped: boolean;
+  /** Only with `removeWorktree`: whether the task's checkout is gone. A refusal still settled the task. */
+  readonly worktreeRemoved?: boolean;
+  /** Only with `removeWorktree`, when the checkout was kept: why. */
+  readonly worktreeReason?: string;
+}
+
+/**
+ * Settle a delegated task through the same path as `threads settle`: the
+ * task and its own delegated tasks settle, the parent and siblings are
+ * untouched, and running or blocked work refuses (`THREAD_SETTLE_BLOCKED`)
+ * unless `stop` ends it first. Only the thread that owns the task may — the
+ * one that delegated it, or the continuation a continue handed it to —
+ * exactly like `task_cancel`: a research run's roles and lead have no
+ * delegation rows, so they are refused with the same `TASK_NOT_FOUND`.
+ * With `removeWorktree`
+ * the task's worktree checkout goes too, once it is safe; the branch stays.
+ */
+export async function settleTask(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+  options: { readonly stop?: boolean; readonly removeWorktree?: boolean } = {},
+): Promise<SettledTask> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
+  const described = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const family = await threadFamily(ctx.store, described.child.id);
+  let hadRunning = false;
+  for (const id of family) {
+    if (openTurn(await ctx.store.readTurns(id)) !== null) {
+      hadRunning = true;
+      break;
+    }
+  }
+  await settleThread(ctx.store, described.child.id, options.stop === true ? { stop: true } : {});
+  const after = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const stopped = options.stop === true && hadRunning;
+  if (options.removeWorktree !== true) return { ...after, stopped };
+  const parentRecord = await ctx.store.readThreadRecord(parentThreadId);
+  const childRecord = await ctx.store.readThreadRecord(after.child.id);
+  const removal =
+    parentRecord && childRecord
+      ? await removeSettledTaskWorktree(ctx, parentRecord, childRecord)
+      : { removed: false as const, reason: "the task's thread no longer exists" };
+  return {
+    ...after,
+    stopped,
+    worktreeRemoved: removal.removed,
+    ...(removal.reason === undefined ? {} : { worktreeReason: removal.reason }),
+  };
+}
+
+/** Running `git` for a worktree-removal check: null when it cannot answer. */
+async function removalGit(cwd: string, args: readonly string[], options: { readonly timeoutMs?: number; readonly noPrompt?: boolean } = {}): Promise<string | null> {
+  try {
+    const result = await runProcess("git", [...args], {
+      cwd,
+      timeoutMs: options.timeoutMs ?? 30_000,
+      allowFailure: true,
+      // A fetch must never wait on a credential prompt inside a tool call.
+      ...(options.noPrompt === true ? { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } } : {}),
+    });
+    return result.exitCode === 0 ? result.stdout.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The default branch's up-to-date ref to judge a removed worktree against:
+ * `origin/<name>` (fetched first, best effort) when there is one, else the
+ * local `<name>`. Null when no default branch can be named — refusing then
+ * is safer than guessing.
+ */
+async function removalDefaultRef(repo: string): Promise<{ readonly name: string; readonly ref: string } | null> {
+  const originHead = await removalGit(repo, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  const names = originHead?.startsWith("origin/") ? [originHead.slice("origin/".length)] : ["main", "master"];
+  for (const name of names) {
+    if (originHead?.startsWith("origin/")) {
+      // Best effort: a squash-merge that landed on the forge is not in a stale local ref yet.
+      await removalGit(repo, ["fetch", "origin", name], { timeoutMs: 20_000, noPrompt: true });
+      if ((await removalGit(repo, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`])) !== null) {
+        return { name, ref: `refs/remotes/origin/${name}` };
+      }
+    }
+    if ((await removalGit(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`])) !== null) {
+      return { name, ref: `refs/heads/${name}` };
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the checkout at `repo` holds nothing worth keeping against
+ * `defRef`: every commit of its own is already there. Ancestry alone says
+ * "not merged" for squash-merged work, so a `-` from `git cherry` (an
+ * equivalent patch upstream) and an empty merge ( folding the branch changes
+ * nothing) count as merged too. Anything inconclusive refuses: a false
+ * refusal keeps a checkout, a false removal loses work.
+ */
+async function removalMergedState(repo: string, defRef: string): Promise<{ readonly merged: boolean; readonly unmergedCommits: number | null }> {
+  if ((await removalGit(repo, ["merge-base", "--is-ancestor", "HEAD", defRef])) !== null) return { merged: true, unmergedCommits: 0 };
+  const cherry = await removalGit(repo, ["cherry", defRef, "HEAD"]);
+  const marks = cherry === null ? null : cherry.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  if (marks !== null && marks.every((line) => line.startsWith("-"))) return { merged: true, unmergedCommits: 0 };
+  // A rename or rewrite can read as `+` to cherry while the merge is empty, so the tree still gets its say.
+  const tree = await removalGit(repo, ["merge-tree", "--write-tree", defRef, "HEAD"]);
+  const base = tree === null ? null : await removalGit(repo, ["rev-parse", `${defRef}^{tree}`]);
+  if (tree !== null && base !== null && tree === base) return { merged: true, unmergedCommits: 0 };
+  return { merged: false, unmergedCommits: marks === null ? null : marks.filter((line) => line.startsWith("+")).length };
+}
+
+/**
+ * Clear a settled task's worktree checkout. Only a Moxen-managed checkout
+ * belonging to that task's own thread (`thread.env.mode === "worktree"`,
+ * under the store's `worktrees` dir — the helper `removeThreadWorktree`
+ * enforces this too); never a shared checkout, never the parent's own
+ * directory, and never outside what that helper manages. Refuses, with the
+ * reason, when the checkout has uncommitted or untracked work (ignored files
+ * don't count) or its commits are not merged — the branch stays either way.
+ * A removal that still fails (a locked directory on Windows refuses) is a
+ * `false` with a reason, never a thrown error: the task already settled.
+ */
+async function removeSettledTaskWorktree(
+  ctx: OperationContext,
+  parent: StoredThread,
+  child: StoredThread,
+): Promise<{ readonly removed: boolean; readonly reason?: string }> {
+  if (child.env.mode !== "worktree" || !child.env.path.trim()) {
+    return { removed: false, reason: "the task has no worktree checkout of its own to remove (it shares a checkout)" };
+  }
+  const dir = path.resolve(child.env.path);
+  if (path.dirname(dir) !== path.join(path.resolve(ctx.storeRoot), "worktrees")) {
+    return { removed: false, reason: "the task's checkout is not a Moxen-managed worktree" };
+  }
+  if (parent.env.path.trim() !== "" && dir === path.resolve(parent.env.path)) {
+    return { removed: false, reason: "the task's checkout is the parent's own directory" };
+  }
+  if (!existsSync(dir)) return { removed: false, reason: "the task's worktree checkout is already gone" };
+  const dirty = await removalGit(dir, ["status", "--porcelain"]);
+  if (dirty === null) return { removed: false, reason: "the checkout could not be inspected for uncommitted work" };
+  if (dirty !== "") {
+    return { removed: false, reason: "the checkout has uncommitted or untracked changes (ignored files don't count): commit, stash or discard them first" };
+  }
+  const target = await removalDefaultRef(dir);
+  if (target === null) return { removed: false, reason: "no default branch could be named to judge the task's commits against" };
+  const state = await removalMergedState(dir, target.ref);
+  if (!state.merged) {
+    const count = state.unmergedCommits === null ? "unresolved" : `${state.unmergedCommits}`;
+    return { removed: false, reason: `the task's branch holds ${count === "1" ? "1 commit" : `${count} commits`} not in ${target.name}: merge it there first` };
+  }
+  // An idle provider session survives settle with the checkout as its working
+  // directory; close it before the directory goes, best effort like elsewhere.
+  try {
+    const driver = ctx.driverFor(child.modelSelection.instanceId);
+    if (driver.stopSession) await Effect.runPromise(driver.stopSession(child.id)).catch(() => undefined);
+  } catch {
+    // Best effort: the removal below refuses on its own when the checkout is held.
+  }
+  if (!(await removeThreadWorktree(ctx.storeRoot, child))) {
+    return { removed: false, reason: "git could not remove the checkout — often a file another process still holds open, which locks the directory on Windows; the branch is kept" };
+  }
+  return { removed: true };
+}
+
 /** A task a caller may act on with `task_send` or `task_ask`: its delegation row and the task thread. */
 export interface ControlledTask {
   readonly row: StoredDelegation;
@@ -3409,6 +3581,13 @@ export async function sendTaskMessage(
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
   const { row, target } = await requireTaskControl(ctx, parentThreadId, rawTaskId, "task_send");
+  if (target.env.mode === "worktree" && target.env.path.trim() !== "" && !existsSync(target.env.path)) {
+    throw new CliError(
+      "TASK_WORKTREE_REMOVED",
+      `Task ${row.childThreadId} cannot take the message: its worktree checkout was removed after it settled, and its branch ${target.env.branch ?? "(unknown)"} is kept. Re-delegate the follow-up as a new task.`,
+      { exitCode: 4, details: { taskId: row.childThreadId, branch: target.env.branch } },
+    );
+  }
 
   const before = await describeTask(ctx, parentThreadId, row.childThreadId);
   const turns = await ctx.store.readTurns(target.id);
