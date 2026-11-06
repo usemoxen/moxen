@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 
 import type { CliConfig } from "../../types.js";
 import { resetUsageLimitsForTests, recordUsageWindows } from "../../usage/limits.js";
@@ -10,7 +12,9 @@ import { MAX_USAGE_CONTINUES, autoContinuesAt, scheduleUsageContinue, type Opera
 import { toThreadEnvelope } from "../project.js";
 import { armScheduledTurn, armedScheduleCount, onScheduledTurnDue } from "../schedule.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, holdPromotedTurn, interruptTurn, isHeldTurn, promoteDueScheduledTurn, sendTurn, turnPrompt, updateThreadMeta } from "../threads.js";
+import { completeTurn, createThread, holdPromotedTurn, interruptTurn, isHeldTurn, promoteDueScheduledTurn, reconcileOrphanedTurn, sendTurn, snoozeThread, turnPrompt, unsnoozeThread, updateThreadMeta } from "../threads.js";
+import { executeTurn, type TurnDriver } from "../execute.js";
+import { settleRuns } from "../../testing/turns.js";
 import { queueAdmission } from "../queue.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
@@ -319,5 +323,76 @@ describe("holding a queued message for the reset", () => {
     const retry = await sendTurn(store, thread.id, { prompt: "meanwhile" });
     await completeTurn(store, thread.id, retry.turn.id, { text: "done" });
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "running" });
+  });
+});
+
+/**
+ * Settling a turn promotes the next queued message and its runner starts it
+ * at once — even when the thread is snoozed, which `queueAdmission` (and the
+ * Work queue display built on it) reports as "Thread is not active". A
+ * snoozed thread's plain queued turn must wait for the thread to be active
+ * again instead of starting at settle, on every settle path.
+ */
+describe("a snoozed thread holds its queued turn at settle", () => {
+  function recordingDriver(threadId: string, sent: string[]): TurnDriver {
+    return {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => {
+        sent.push(input.prompt);
+        return Effect.succeed({ threadId, turnId: "native" });
+      },
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.never,
+      awaitTurn: async () => ({ status: "completed" as const, text: "done", usage: null, error: null }),
+    };
+  }
+
+  it("snoozed thread holds queued turn at settle", async () => {
+    const now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread } = await setup(() => now);
+    const first = await sendTurn(store, thread.id, { prompt: "the turn that settles" });
+    const queued = await sendTurn(store, thread.id, { prompt: "sent while it ran", delivery: "queue" });
+    await snoozeThread(store, thread.id, new Date(now + 3600_000).toISOString());
+    const sent: string[] = [];
+    const driver = recordingDriver(thread.id, sent);
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "the turn that settles" });
+    // The promoted run starts unawaited, so flush before asserting.
+    await settleRuns();
+    // Held, not started: the provider never saw the queued message, and the
+    // queue shows it blocked because the thread is not active.
+    expect(sent).toEqual(["the turn that settles"]);
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued" });
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.promoted")).toBe(false);
+    const row = { thread: (await store.readThreadRecord(thread.id))!, turns: await store.readTurns(thread.id) };
+    const waiting = row.turns.find((turn) => turn.id === queued.turn.id)!;
+    expect(queueAdmission(row, waiting, [row], {} as CliConfig, now).blocked).toContain("Thread is not active");
+    // Once the thread is active again the next settle promotes it, so the
+    // held turn is not stranded: it runs with the following turn.
+    await unsnoozeThread(store, thread.id);
+    const retry = await sendTurn(store, thread.id, { prompt: "meanwhile" });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: retry.turn.id, prompt: "meanwhile" });
+    await settleRuns();
+    expect(sent).toEqual(["the turn that settles", "meanwhile", "sent while it ran"]);
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("holds queued turns on interrupt and orphan recovery while snoozed", async () => {
+    const now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread } = await setup(() => now);
+    const until = new Date(now + 3600_000).toISOString();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(store, thread.id, { prompt: "queued behind it", delivery: "queue" });
+    await snoozeThread(store, thread.id, until);
+    await interruptTurn(store, thread.id, running.turn.id);
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued" });
+    // Orphan recovery: the replacement turn's owner is gone, but the thread
+    // is still snoozed, so recovery interrupts without promoting.
+    const retry = await sendTurn(store, thread.id, { prompt: "work again" });
+    await store.updateTurn(thread.id, retry.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    const recovered = await reconcileOrphanedTurn(store, thread.id);
+    expect(recovered?.promoted).toBeNull();
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === retry.turn.id)).toMatchObject({ status: "interrupted" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued" });
   });
 });
