@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -513,8 +513,11 @@ export async function loadConfig(explicitPath?: string): Promise<{ config: CliCo
 }
 
 export async function saveConfig(configPath: string, config: CliConfig): Promise<void> {
-  await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  // Loaded here rather than at the top: `core/config` is imported during
+  // test setup, before any file mock registers, and a static edge would pin
+  // the atomic write to the real filesystem for the whole test run.
+  const { writeAtomic } = await import("./infra/atomic.js");
+  await writeAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 /**

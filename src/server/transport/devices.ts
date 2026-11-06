@@ -15,11 +15,12 @@
  * keychain entry lingers.
  */
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { appHomeDir } from "../../core/config.js";
 import { CliError } from "../../core/errors.js";
+import { renameReplacing } from "../../core/infra/atomic.js";
 import { readSecretStrict, writeSecret } from "../../core/secrets.js";
 
 export const PAIRING_TTL_MS = 5 * 60_000;
@@ -170,7 +171,7 @@ export class DeviceRegistry {
       await mkdir(path.dirname(this.file), { recursive: true });
       const temporary = `${this.file}.${process.pid}.tmp`;
       await writeFile(temporary, `${JSON.stringify({ devices: next }, null, 2)}\n`, "utf8");
-      await rename(temporary, this.file);
+      await renameReplacing(temporary, this.file);
     });
     this.writes = run.catch(() => undefined);
     return run;

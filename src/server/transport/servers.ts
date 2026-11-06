@@ -11,13 +11,15 @@
  * pairing code the server showed vouches for it, and the pin it presents
  * is then remembered. Every later connection must present the same key.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 import { appHomeDir } from "../../core/config.js";
 import { DEFAULT_REMOTE_PORT } from "../../core/configschema.js";
 import { CliError } from "../../core/errors.js";
+import { renameReplacing } from "../../core/infra/atomic.js";
 import { readSecretStrict, writeSecret } from "../../core/secrets.js";
 import { RemoteConnection, type RemoteConnectionOptions } from "./remote.js";
 import type { TokenStore } from "./devices.js";
@@ -50,6 +52,8 @@ export const serverTokenName = (deviceId: string): string => `remote-server-${de
 export class PairedServers {
   private readonly file: string;
   private readonly tokens: TokenStore;
+  /** List writes run one at a time: `pair` and `forget` read-modify-write. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(options: PairedServersOptions = {}) {
     this.file = options.file ?? path.join(appHomeDir(), "remote", "servers.json");
@@ -95,10 +99,12 @@ export class PairedServers {
     const name = (options.name?.trim() || hello.serverName || host).slice(0, 64);
     const server: PairedServer = { name, host, port, fingerprint, deviceId: hello.deviceId, pairedAt: new Date().toISOString() };
     await this.tokens.write(serverTokenName(server.deviceId), hello.token);
-    const existing = await this.list();
-    const replaced = new Set(existing.filter((entry) => entry.name.toLowerCase() === name.toLowerCase() || (entry.host === host && entry.port === port)).map((entry) => entry.deviceId));
+    let replaced = new Set<string>();
+    await this.update((existing) => {
+      replaced = new Set(existing.filter((entry) => entry.name.toLowerCase() === name.toLowerCase() || (entry.host === host && entry.port === port)).map((entry) => entry.deviceId));
+      return [...existing.filter((entry) => !replaced.has(entry.deviceId)), server];
+    });
     for (const deviceId of replaced) await this.tokens.write(serverTokenName(deviceId), "").catch(() => undefined);
-    await this.save([...existing.filter((entry) => !replaced.has(entry.deviceId)), server]);
     return server;
   }
 
@@ -106,7 +112,7 @@ export class PairedServers {
   async forget(nameOrAddress: string): Promise<PairedServer> {
     const server = await this.find(nameOrAddress);
     if (!server) throw notPaired(nameOrAddress);
-    await this.save((await this.list()).filter((entry) => entry.deviceId !== server.deviceId));
+    await this.update((servers) => servers.filter((entry) => entry.deviceId !== server.deviceId));
     await this.tokens.write(serverTokenName(server.deviceId), "").catch(() => undefined);
     return server;
   }
@@ -129,11 +135,19 @@ export class PairedServers {
     };
   }
 
+  private update(change: (servers: PairedServer[]) => PairedServer[]): Promise<void> {
+    const run = this.writes.then(async () => {
+      await this.save(change(await this.list()));
+    });
+    this.writes = run.catch(() => undefined);
+    return run;
+  }
+
   private async save(servers: PairedServer[]): Promise<void> {
     await mkdir(path.dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${process.pid}.tmp`;
+    const temporary = `${this.file}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify({ servers }, null, 2)}\n`, "utf8");
-    await rename(temporary, this.file);
+    await renameReplacing(temporary, this.file);
   }
 }
 
