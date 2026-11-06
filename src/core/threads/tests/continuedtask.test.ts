@@ -143,6 +143,73 @@ describe("an orchestrator continued in a new thread", () => {
   });
 });
 
+describe("a limited thread continued in a new one", () => {
+  async function limitedSource(w: Awaited<ReturnType<typeof world>>) {
+    const source = await w.make("limited work");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.appendLedger(source.id, "activity", { id: "limit", threadId: source.id, turnId: turn.id, kind: "usage.limit", summary: "Usage limit reached", payload: { provider: "codex", rateLimitType: null, label: "Session", resetsAt }, createdAt: w.store.nowIso() });
+    await completeTurn(w.store, source.id, turn.id, { text: "Stopped at the limit." });
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt, order: 1, phase: "waiting", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    return { source, resetsAt };
+  }
+
+  it("inherits the hold for the reset: waiting, with the first turn as its recovery and the limit marker", async () => {
+    const w = await world();
+    const { source, resetsAt } = await limitedSource(w);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    const first = (await w.store.readTurns(continued.threadId))[0]!;
+    // Held for the reset, not released: the first turn is the recovery entry.
+    expect(first).toMatchObject({ status: "queued", scheduledFor: at });
+    expect(destination.usagePause).toMatchObject({ provider: "codex", resetsAt, phase: "waiting", recoveryTurnId: first.id });
+    // The limit marker travels along, so the new thread shows the block from the start.
+    expect((await w.store.readActivities(continued.threadId)).find((activity) => activity.kind === "usage.limit")).toMatchObject({
+      summary: "Usage limit reached",
+      payload: { provider: "codex", label: "Session", resetsAt },
+    });
+  });
+
+  it("holds a task notification on the continued thread without spending a turn", async () => {
+    const w = await world();
+    const { source } = await limitedSource(w);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: continued.threadId, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const finished = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, finished.id, { text: "Done." });
+    await queueTaskNotification(w.ctx, continued.threadId, child.id);
+    await flushTurnRunners();
+    // Queued behind the hold, not run into the wall: nothing is running.
+    expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
+    const turns = await w.store.readTurns(continued.threadId);
+    expect(turns).toHaveLength(2);
+    expect(turns.every((turn) => turn.status === "queued")).toBe(true);
+    expect((await w.store.readMessages(continued.threadId)).some((message) => message.origin === "task-notification")).toBe(true);
+  });
+
+  it("an immediate continue of an unpaused thread still starts its first turn at once, with no hold", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    await flushTurnRunners();
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    expect(destination.usagePause).toBeUndefined();
+    expect((await w.store.readActivities(continued.threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+    expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
+  });
+});
+
 describe("concurrent continuations of one thread", () => {
   it("two overlapping calls share one destination instead of creating two", async () => {
     const w = await world();

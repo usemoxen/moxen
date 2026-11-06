@@ -76,6 +76,7 @@ import {
   deleteThread,
   delegationForChild,
   failTurn,
+  isStaleContinueTurn,
   reconcileOrphanedTurn,
   holdStrandedPromotions,
   inspectThread,
@@ -88,6 +89,7 @@ import {
   threadFamily,
   turnPrompt,
   updateThreadMeta,
+  wakeUpHasRiders,
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
@@ -545,12 +547,25 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     else rows.push({ thread, turns });
   }
   const idle = !openTurn([...row.turns]);
+  let messages: readonly StoredMessage[] | null = null;
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued") continue;
     // A plain turn still waits for the running turn's settle unless settle
     // held it for admission (a snoozed or settled thread, or an exhausted
     // provider) and the thread is idle now.
     if (!candidate.queue && !candidate.scheduledFor && (!candidate.heldAtSettle || !idle)) continue;
+    // A stale automatic continue never fires as a pointless turn: the
+    // thread's work already resumed, so it is taken back before it runs and
+    // the loop moves on to whatever waits behind it.
+    if (isStaleContinueTurn(row.turns, candidate, now)) {
+      if (candidate.queue?.wakeUp === true) {
+        messages ??= await ctx.store.readMessages(threadId).catch(() => []);
+        if (wakeUpHasRiders(messages, candidate)) continue;
+      }
+      await interruptTurn(ctx.store, threadId, candidate.id).catch(() => undefined);
+      rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
+      continue;
+    }
     const pause = row.thread.usagePause;
     if (pause?.forced) continue;
     if (candidate.queue?.continuation && candidate.queue.continuation !== "same-thread") continue;
@@ -1182,6 +1197,75 @@ export function firstMessageNote(firstMessage: string | undefined): string {
   return `\n\n## What to do first\n\n${text}`;
 }
 
+/**
+ * Finish inheriting a usage-limit hold on a continuation held for the reset:
+ * the destination's oldest queued scheduled turn becomes its recovery entry,
+ * so the admission path runs it once nothing blocks it; and the source's
+ * limit marker travels along, so the new thread shows the block from the
+ * start and holds notifications without spending a turn. A retry rejoining
+ * the destination links the same turn rather than duplicating anything.
+ */
+async function linkScheduledContinuation(ctx: OperationContext, sourceId: string, destinationId: string): Promise<void> {
+  const { store } = ctx;
+  await store.withThreadLock(destinationId, async () => {
+    const destination = await store.readThreadRecord(destinationId);
+    const pause = destination?.usagePause;
+    if (destination && pause && pause.phase === "waiting" && !pause.recoveryTurnId) {
+      const first = (await store.readTurns(destinationId)).find((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string");
+      if (first) await store.writeThreadRecord({ ...destination, usagePause: { ...pause, recoveryTurnId: first.id } });
+    }
+    const activities = await store.readActivities(destinationId);
+    if (activities.some((activity) => activity.kind === "usage.limit" || activity.kind === "usage.wrap-up")) return;
+    const marker = await scheduledContinuationMarker(store, sourceId);
+    if (!marker) return;
+    await store.appendLedger(destinationId, "activity", {
+      id: store.newId(),
+      threadId: destinationId,
+      turnId: null,
+      kind: marker.kind,
+      summary: marker.summary,
+      payload: marker.payload,
+      createdAt: store.nowIso(),
+    });
+  });
+}
+
+/**
+ * The limit marker a continuation held for the reset shows from the start:
+ * the source's latest hit, or the hold's own reset when the hit predates the
+ * marker rows. Null when the source names no limit at all.
+ */
+async function scheduledContinuationMarker(
+  store: ThreadStore,
+  sourceId: string,
+): Promise<{ kind: "usage.limit" | "usage.wrap-up"; summary: string; payload: Record<string, unknown> } | null> {
+  const source = await store.readThreadRecord(sourceId).catch(() => null);
+  const hit = (await store.readActivities(sourceId).catch(() => [] as StoredActivity[])).findLast(
+    (activity) => activity.kind === "usage.limit" || activity.kind === "usage.wrap-up",
+  );
+  if (hit) {
+    const payload = (hit.payload ?? {}) as Record<string, unknown>;
+    return {
+      kind: hit.kind as "usage.limit" | "usage.wrap-up",
+      summary: hit.kind === "usage.wrap-up" ? "Usage limit reached, wrapping up" : "Usage limit reached",
+      payload: {
+        provider: payload.provider ?? source?.usagePause?.provider ?? null,
+        rateLimitType: payload.rateLimitType ?? null,
+        label: payload.label ?? null,
+        resetsAt: payload.resetsAt ?? source?.usagePause?.resetsAt ?? null,
+      },
+    };
+  }
+  const pause = source?.usagePause;
+  if (!pause) return null;
+  const latestWindow = [...(pause.windows ?? [])].sort((a, b) => String(a.resetsAt ?? "").localeCompare(String(b.resetsAt ?? ""))).at(-1);
+  return {
+    kind: "usage.limit",
+    summary: "Usage limit reached",
+    payload: { provider: pause.provider, rateLimitType: null, label: latestWindow?.label ?? null, resetsAt: pause.resetsAt },
+  };
+}
+
 async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
@@ -1213,6 +1297,8 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     });
   }
   const live = await store.readThreadRecord(source.id);
+  // A continuation held for the reset inherits the hold; one starting now does not.
+  const scheduledHold = request.scheduledFor !== undefined && !request.destinationThreadId;
   if (live?.usagePause && !request.destinationThreadId) {
     if (live.usagePause.continuedThreadId !== created.id) {
       await store.withThreadLock(source.id, async () => {
@@ -1222,12 +1308,25 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
         }
       });
     }
-    await store.withThreadLock(created.id, async () => {
-      const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
-      if (destination && !destination.usagePause && pause?.usagePause) {
-        await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "resuming", handoff: false } });
-      }
-    });
+    if (scheduledHold) {
+      // Waiting, not resuming: until the reset nothing starts on the new
+      // thread — notifications and sends queue behind the hold — and its
+      // first turn becomes the recovery entry below. Written before that
+      // turn starts so a notification racing it still waits.
+      await store.withThreadLock(created.id, async () => {
+        const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
+        if (destination && !destination.usagePause && pause?.usagePause) {
+          await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "waiting", handoff: false } });
+        }
+      });
+    } else {
+      await store.withThreadLock(created.id, async () => {
+        const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
+        if (destination && !destination.usagePause && pause?.usagePause) {
+          await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "resuming", handoff: false } });
+        }
+      });
+    }
   }
   // An unclaimed run-size question moves with the thread: the continuation
   // has not been offered one either, so its first real prompt still asks.
@@ -1264,6 +1363,7 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     const parent = notifyParent ?? (await continuationNotifier(store, created.id));
     if (parent) await watchContinuation(ctx, parent, created.id);
   }
+  if (scheduledHold) await linkScheduledContinuation(ctx, source.id, created.id);
   if (!(await store.readActivities(source.id)).some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === created.id)) {
     await store.appendLedger(source.id, "activity", {
       id: store.newId(),

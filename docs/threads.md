@@ -60,6 +60,19 @@ snoozed thread, a provider with no room — still holds its place, so the new
 message waits behind it rather than running first; unsnoozing, or the limit
 lapsing, releases both in order. Sending an immediate user message to end
 usage protection is the exception: it releases that hold and runs first.
+"Older held turn" includes a due one: a continue set for a usage-limit
+reset, or a message held behind one, whose time has come. The rule is oldest
+first — the new message rides along in the older turn when model and mode
+match, or runs next once it settles.
+
+A due held turn starts after the running turn settles, oldest first, with
+later held messages batched into it as one turn. It never starts while the
+limit still stands, while usage protection holds the thread, or while the
+thread is snoozed or settled: those wait for the reset, the release, or the
+thread becoming active again. An automatic continue whose time came while
+the thread already resumed — a turn ran to completion after it came due —
+is taken back before it runs instead of firing as a pointless turn; a turn
+that failed or was interrupted does not count as resumed.
 
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
@@ -469,6 +482,11 @@ their own provider and model either way, so the handoff works across
 providers and grants no extra access. No extra guard applies when the new
 thread runs a more restricted runtime mode: the mode governs only that
 thread's own turns, and steering a task is a message, not execution.
+A continuation held for the reset inherits the source's usage-limit hold:
+the new thread waits, shows the limit block from the start, and holds task
+notifications without spending a turn, and its first turn is the recovery
+entry that runs once the reset comes. An immediate message still releases
+the hold and runs first, as on any held thread.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
