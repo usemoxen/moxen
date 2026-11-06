@@ -808,6 +808,11 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
+  // Plain turns never pass through the admission path, so while the thread
+  // itself is snoozed or settled — states `queueAdmission` reports as
+  // "Thread is not active" — they wait for it to be active again instead of
+  // starting at settle. Admitted turns keep their own admission checks.
+  if (admittedId === undefined && threadStatus(thread, instant) !== "active") return;
   const next = turns.find((turn) => {
     if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
     if (admittedId) return turn.id === admittedId;
