@@ -526,9 +526,9 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       // requeue, so the tick cannot start it in between; a concurrent
       // interrupt that already took it back wins, so only a still-`running`
       // turn is requeued.
-      claimed = null;
       await store.withThreadLock(threadId, async () => {
         store.untrackRunning(next.id);
+        claimed = null;
         const fresh = (await store.readTurns(threadId)).find((turn) => turn.id === next.id);
         if (!fresh || fresh.status !== "running") return;
         const now = store.nowIso();
