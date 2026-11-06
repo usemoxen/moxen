@@ -580,18 +580,38 @@ function sessionOf(params: Record<string, unknown>): string | null {
 }
 
 /**
- * Who a request runs for on the directory's shared `moxen` entry. A call
+ * Who a request runs for on the directory's shared `moxen` entry. A request
  * carrying a known session id runs with that session's thread and gating; a
- * call without one runs as the entry's own thread; a call carrying an
- * unknown session id fails rather than landing on another thread.
+ * request carrying an unknown session id fails rather than landing on
+ * another thread. A request without one falls back to the entry's own
+ * thread — except a `tools/call`, which would otherwise silently execute as
+ * the owner (a `delegate` creating the owner's task, a `memory_save` in the
+ * owner's scope): with more than one live session the call is ambiguous, so
+ * it fails naming the missing key, and with one at most the fallback cannot
+ * land on another thread.
  */
 export async function routeMcpSession(
   api: ClientApi,
   fallback: { readonly threadId: string; readonly options: MoxenToolOptions },
   params: Record<string, unknown>,
+  requireSession: boolean,
 ): Promise<{ readonly threadId: string; readonly options: MoxenToolOptions } | { readonly error: string }> {
   const nativeSessionId = sessionOf(params);
-  if (nativeSessionId === null) return fallback;
+  if (nativeSessionId === null) {
+    if (!requireSession) return fallback;
+    let sessions = 0;
+    try {
+      sessions = (await api.query({ type: "opencode.session-count" })).count;
+    } catch (cause) {
+      return { error: `Could not count this server's live sessions: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
+    if (sessions <= 1) return fallback;
+    return {
+      error:
+        `Missing "${OPENCODE_SESSION_META_KEY}" in this tools/call: the shared moxen entry serves ${sessions} live sessions, ` +
+        `so the call cannot be attributed to one thread and is refused instead of running as another thread.`,
+    };
+  }
   let routing;
   try {
     routing = await api.query({ type: "opencode.session-thread", nativeSessionId });

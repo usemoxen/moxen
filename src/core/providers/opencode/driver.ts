@@ -540,6 +540,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     return null;
   };
 
+  /** Live native sessions on this driver's servers: more than one makes a call without session identity ambiguous. */
+  readonly liveSessionCount = (): number => {
+    let count = 0;
+    for (const session of this.sessions.values()) if (!session.closed) count += 1;
+    return count;
+  };
+
   /**
    * The tools to leave off, for a session already running: what the setting says now. The server was started with
    * the set of its day, so a difference waits for it to be quiet and then restarts it. Not for an external server,
@@ -752,6 +759,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * config here would flip the entry mid-call, killing the in-flight call
    * with `Connection closed` and landing later calls on the wrong thread's
    * tools; those calls are routed per call instead.
+   *
+   * Residual shared fate: the owner's own re-registration still restarts the
+   * server with `mcp.add`, which kills whatever else is in flight on it —
+   * the price of the owner's entry genuinely changing. Nothing else on the
+   * server re-registers, so nothing else pays it.
    */
   private async registerMoxenServer(
     connection: OpencodeServerConnection,
@@ -1443,7 +1455,28 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         // Best effort: the server may already be gone.
       }
       this.sessions.delete(threadId);
+      this.transferMoxenEntry(session);
     });
+
+  /**
+   * Ownership of the directory's `moxen` entry follows liveness, without
+   * touching the entry itself (re-registering would restart the server and
+   * kill in-flight calls): when the owning thread's session closes, the
+   * earliest surviving session on the server may re-register it when its own
+   * spec changes. With no live session left the next start registers fresh.
+   * The entry's own config — and so the fallback for a call without session
+   * identity — stays the first owner's until anything re-registers.
+   */
+  private transferMoxenEntry(session: OpenCodeSession): void {
+    const connection = this.liveConnections.get(session.workingDirectory);
+    const entry = connection ? this.moxenEntry.get(connection) : undefined;
+    if (!connection || !entry || entry.owner !== session.threadId) return;
+    const heir = [...this.sessions.values()].find(
+      (candidate) => !candidate.closed && candidate.workingDirectory === session.workingDirectory,
+    );
+    if (heir) this.moxenEntry.set(connection, { owner: heir.threadId, key: entry.key });
+    else this.moxenEntry.delete(connection);
+  }
 
   readonly listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
     Effect.succeed([...this.sessions.values()].filter((session) => !session.closed).map((session) => this.describeSession(session)));

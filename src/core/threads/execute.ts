@@ -121,6 +121,13 @@ export interface TurnDriver extends ProviderSessionTitles {
    */
   threadForNativeSession?(nativeSessionId: string): string | null;
   /**
+   * How many live native sessions this driver holds, for deciding whether a
+   * tool call without session identity is unambiguous: with one live session
+   * at most, the entry owner's fallback cannot land on another thread.
+   * Absent where the provider sends no session id with its tool calls.
+   */
+  liveSessionCount?(): number;
+  /**
    * The provider tools to leave off, as the setting says now, for a session already running. OpenCode's are part of
    * its server's config, so it restarts the server once nothing runs on it. Absent where a live session cannot
    * change them (Claude Code reads them when the session starts).

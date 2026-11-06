@@ -1836,6 +1836,14 @@ export class DirectConnection implements ClientApi {
         }
         return null;
       }
+      case "opencode.session-count": {
+        // Live native sessions across this server's drivers: more than one
+        // makes a tool call without session identity ambiguous, so it fails
+        // instead of running as the entry owner's thread.
+        let count = 0;
+        for (const driver of this.ownedDrivers) count += driver.liveSessionCount?.() ?? 0;
+        return { count };
+      }
       case "research.proposals":
         this.expireResearchProposals();
         return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);

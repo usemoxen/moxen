@@ -15,12 +15,18 @@ interface Routing {
 }
 
 /** A stub server: resolves one known OpenCode session, echoes which thread each tool ran for. */
-function stubApi(resolved: Routing | null, seen: { toolQueries: string[] }): ClientApi {
+function stubApi(
+  resolved: Routing | null,
+  seen: { toolQueries: string[] },
+  liveSessions = 1,
+): ClientApi {
   return {
     query: async (query: { readonly type: string } & Record<string, unknown>) => {
       switch (query.type) {
         case "opencode.session-thread":
           return resolved;
+        case "opencode.session-count":
+          return { count: liveSessions };
         case "research.run":
           return null;
         case "image-generation.availability":
@@ -39,8 +45,8 @@ function stubApi(resolved: Routing | null, seen: { toolQueries: string[] }): Cli
   } as unknown as ClientApi;
 }
 
-function session(parentThreadId: string, resolved: Routing | null, seen: { toolQueries: string[] }): McpSessionOptions {
-  return { api: stubApi(resolved, seen), parentThreadId };
+function session(parentThreadId: string, resolved: Routing | null, seen: { toolQueries: string[] }, liveSessions = 1): McpSessionOptions {
+  return { api: stubApi(resolved, seen, liveSessions), parentThreadId };
 }
 
 const childRouting: Routing = { threadId: "thread-child", delegated: true, webFetch: true, memory: "read", checklist: false };
@@ -71,9 +77,9 @@ describe("routed moxen calls (one stable entry per OpenCode server)", () => {
     expect(toolQuery).not.toHaveBeenCalled();
   });
 
-  it("serves a call without _meta as the entry's own thread", async () => {
+  it("serves a call without _meta as the entry's own thread when no other session could have placed it", async () => {
     const seen = { toolQueries: [] as string[] };
-    const answer = await answerMcp(session(PARENT_THREAD, childRouting, seen), {
+    const answer = await answerMcp(session(PARENT_THREAD, childRouting, seen, 1), {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/call",
@@ -82,6 +88,21 @@ describe("routed moxen calls (one stable entry per OpenCode server)", () => {
     const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
     expect(result.isError).toBe(false);
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({ reading: { takenAt: `reading-for:${PARENT_THREAD}` } });
+  });
+
+  it("fails a call without _meta closed when sessions share the server instead of running it as the owner", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const toolQuery = vi.spyOn(seen.toolQueries, "push");
+    const answer = await answerMcp(session(PARENT_THREAD, childRouting, seen, 3), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "context_usage", arguments: {} },
+    });
+    expect(answer?.error).toMatchObject({ code: -32602 });
+    expect(String((answer?.error as { message: string }).message)).toContain("ai.opencode/sessionID");
+    // Fail safe: the tool never ran for anyone.
+    expect(toolQuery).not.toHaveBeenCalled();
   });
 
   it("enforces the routed thread's own gating on every call", async () => {
@@ -118,5 +139,29 @@ describe("routed moxen calls (one stable entry per OpenCode server)", () => {
     });
     const names = ((answer?.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name);
     expect(names).toContain("delegate");
+  });
+
+  it("answers initialize with the routed session's instructions when _meta names a known session", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const answer = await answerMcp(session(PARENT_THREAD, childRouting, seen), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", _meta: { "ai.opencode/sessionID": CHILD_SESSION } },
+    });
+    const instructions = (answer?.result as { instructions: string }).instructions;
+    expect(instructions).toContain("context_usage");
+    expect(instructions).not.toContain("use delegate");
+  });
+
+  it("answers initialize with the entry owner's instructions when _meta is missing", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const answer = await answerMcp(session(PARENT_THREAD, childRouting, seen), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    expect((answer?.result as { instructions: string }).instructions).toContain("use delegate");
   });
 });

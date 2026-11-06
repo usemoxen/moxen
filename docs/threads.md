@@ -799,6 +799,18 @@ project that is not a git repository at all — there is no worktree to give,
 so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
 `isolation: "shared"`. It never quietly shares your checkout.
 
+OpenCode keys MCP servers by name per directory, so every thread in one
+checkout shares a single `moxen` entry. The first thread to start keeps it:
+a later session on the same server never replaces it (replacing it would
+restart the server mid-call), and when the owning thread's session closes,
+ownership passes to the earliest session still running. Each tool call is
+routed to the session that made it, so a shared task still gets only its
+own tools — a delegated task's `delegate` call is refused even though the
+shared listing shows the owner's catalog. A call naming a session that is
+not live fails instead of landing on another thread; a call with no session
+at all fails too while sessions share the server, and otherwise runs as the
+entry owner's thread.
+
 ### Starting several tasks in one call (`delegate`)
 
 One `delegate` call takes shared settings (`provider`, `model`, `effort`,
