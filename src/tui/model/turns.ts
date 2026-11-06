@@ -395,6 +395,16 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
       case "task":
         bump("task");
         break;
+      case "agent":
+        // moxen's task tools count in their own words (`delegated 1 task`,
+        // not `used 1 tool`); anything else agent-shaped — a native
+        // subagent, the `models` lookup — stays out of the heading, as
+        // before. `task` above keeps covering background task rows.
+        if (view.source === "moxen" && view.tool !== null) {
+          const key = AGENT_SUMMARY_KEY[view.tool];
+          if (key !== undefined) bump(key);
+        }
+        break;
       case "skill":
         bump("skill");
         break;
@@ -425,6 +435,20 @@ export function summarizeWork(entries: readonly TimelineEntry[]): string | null 
   return [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(", ");
 }
 
+/**
+ * A moxen task tool call counts in its own words in a folded segment's
+ * heading, keyed by the tool `AgentView.tool` carries — never as a generic
+ * "used N tools".
+ */
+const AGENT_SUMMARY_KEY: Readonly<Record<string, string>> = {
+  delegate: "delegate",
+  task_send: "task_send",
+  task_status: "task_status",
+  task_cancel: "task_cancel",
+  task_ask: "task_ask",
+  message_queue: "message_queue",
+};
+
 function summarizePart(key: string, count: number): string {
     switch (key) {
     case "command":
@@ -449,6 +473,18 @@ function summarizePart(key: string, count: number): string {
       return t("summary.question", { count });
     case "task":
       return t("summary.task", { count });
+    case "delegate":
+      return t("summary.delegate", { count });
+    case "task_send":
+      return t("summary.task_send", { count });
+    case "task_status":
+      return t("summary.task_status", { count });
+    case "task_cancel":
+      return t("summary.task_cancel", { count });
+    case "task_ask":
+      return t("summary.task_ask", { count });
+    case "message_queue":
+      return t("summary.message_queue", { count });
     case "skill":
       return t("summary.skill", { count });
     case "thread-search":

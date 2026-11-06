@@ -133,6 +133,93 @@ describe("summarizeWork", () => {
     expect(summarizeWork(entries)).toBe("Read 2 threads, searched threads 1 time");
   });
 
+  it("names delegated and messaged tasks instead of folding them into used tools", () => {
+    const linear = (id: string, tool: string): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: "",
+        data: { toolName: `mcp__claude_ai_Linear__${tool}`, input: {} },
+      });
+    const moxen = (id: string, tool: string, input: Record<string, unknown>, output: string): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: output,
+        data: { toolName: tool, state: { status: "completed", input, output } },
+      });
+    const entries = [
+      linear("l1", "list_issues"),
+      linear("l2", "get_issue"),
+      linear("l3", "list_issues"),
+      toolEntry("c1", "tool.completed", commandPayload("bun run check")),
+      moxen("d1", "mcp__moxen__delegate", { title: "Stop button race on new threads", task: "Investigate." }, JSON.stringify({ taskId: "t1", title: "Stop button race on new threads", status: "running" })),
+      moxen("s1", "mcp__moxen__task_send", { taskId: "t1", message: "go" }, JSON.stringify({ taskId: "t1", outcome: "queued", status: "running" })),
+    ];
+    expect(summarizeWork(entries)).toBe("Used 3 tools, ran 1 command, delegated 1 task, messaged 1 task");
+  });
+
+  it.each([
+    ["en", "Delegated 1 task, messaged 1 task, checked 1 task, cancelled 1 task, asked 1 task, queued 1 message"],
+    ["es-ES", "Ha delegado 1 tarea, ha enviado un mensaje a 1 tarea, ha comprobado 1 tarea, ha cancelado 1 tarea, ha preguntado a 1 tarea, ha puesto en cola 1 mensaje"],
+  ])("counts every moxen task tool in its own words on OpenCode namespacing (%s)", (language, heading) => {
+    const moxen = (id: string, tool: string, input: Record<string, unknown>, output: string): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: output,
+        data: { tool: `moxen.${tool}`, state: { status: "completed", input, output } },
+      });
+    applyLanguage(language);
+    try {
+      const entries = [
+        moxen("d1", "delegate", { title: "Stop button race on new threads", task: "Investigate." }, JSON.stringify({ taskId: "t1", title: "Stop button race on new threads", status: "running" })),
+        moxen("s1", "task_send", { taskId: "t1", message: "go" }, JSON.stringify({ taskId: "t1", outcome: "queued", status: "running" })),
+        moxen("t1", "task_status", { taskId: "t1" }, JSON.stringify({ taskId: "t1", status: "completed" })),
+        moxen("c1", "task_cancel", { taskId: "t1" }, JSON.stringify({ taskId: "t1", status: "interrupted" })),
+        moxen("a1", "task_ask", { taskId: "t1", question: "go on?" }, JSON.stringify({ taskId: "t1", status: "completed" })),
+        moxen("q1", "message_queue", { message: "later" }, JSON.stringify({ status: "queued" })),
+      ];
+      expect(summarizeWork(entries)).toBe(heading);
+    } finally {
+      applyLanguage("en");
+    }
+  });
+
+  it("recognises moxen's tools under every namespacing, and leaves native subagents and models out", () => {
+    const moxen = (id: string, tool: string): TimelineEntry =>
+      toolEntry(id, "tool.completed", {
+        itemType: "dynamic_tool_call",
+        toolCallId: id,
+        status: "completed",
+        title: "Tool call",
+        detail: "",
+        data: { toolName: tool, state: { status: "completed", input: { taskId: "t1" } } },
+      });
+    expect(summarizeWork([
+      moxen("a", "mcp__moxen__delegate"),
+      moxen("b", "moxen.delegate"),
+      moxen("c", "moxen/task_send"),
+      moxen("d", "moxen_task_status"),
+    ])).toBe("Delegated 2 tasks, messaged 1 task, checked 1 task");
+    const native = toolEntry("n1", "tool.completed", {
+      itemType: "dynamic_tool_call",
+      toolCallId: "n1",
+      status: "completed",
+      title: "Tool call",
+      detail: "",
+      data: { toolName: "Agent", input: { subagent_type: "Explore", description: "List CLI commands" } },
+    });
+    const models = moxen("m1", "mcp__moxen__models");
+    expect(summarizeWork([native, models])).toBeNull();
+  });
+
   it.each([
     ["en", "Searched the knowledge base 1 time", "Read from the knowledge base 1 time", "Searched the knowledge base 2 times, read from the knowledge base 1 time, used 1 tool"],
     ["es-ES", "Ha buscado en la base de conocimiento 1 vez", "Ha leído la base de conocimiento 1 vez", "Ha buscado en la base de conocimiento 2 veces, ha leído la base de conocimiento 1 vez, ha usado 1 herramienta"],
