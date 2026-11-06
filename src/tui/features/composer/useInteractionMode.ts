@@ -25,6 +25,9 @@ export function useInteractionMode(params: {
   const { client, selected, creating, setError, isRunning } = params;
   const [creatingMode, setCreatingMode] = useState<InteractionMode>("default");
   const [requested, setRequested] = useState<{ readonly threadId: string; readonly mode: InteractionMode } | null>(null);
+  // The `thread.interaction-mode.set` still reaching the server, if any: a
+  // send started now waits for it instead of racing it.
+  const pendingMode = useRef<Promise<boolean> | null>(null);
   const stored = storedInteractionMode(selected?.interactionMode);
   const threadMode = selected !== null && requested !== null && requested.threadId === selected.id ? requested.mode : stored;
   /** The mode a new prompt starts in and `Shift+Tab` cycles: the thread's own. */
@@ -83,13 +86,21 @@ export function useInteractionMode(params: {
     if (selected === null) return false;
     const threadId = selected.id;
     setRequested({ threadId, mode: next });
+    const attempt = (async (): Promise<boolean> => {
+      try {
+        await client.dispatch({ type: "thread.interaction-mode.set", threadId, interactionMode: next });
+        return true;
+      } catch (cause) {
+        setRequested(null);
+        setError(String(cause).slice(0, 120));
+        return false;
+      }
+    })();
+    pendingMode.current = attempt;
     try {
-      await client.dispatch({ type: "thread.interaction-mode.set", threadId, interactionMode: next });
-      return true;
-    } catch (cause) {
-      setRequested(null);
-      setError(String(cause).slice(0, 120));
-      return false;
+      return await attempt;
+    } finally {
+      if (pendingMode.current === attempt) pendingMode.current = null;
     }
   };
 
@@ -106,14 +117,35 @@ export function useInteractionMode(params: {
     return command.rest;
   };
 
+  /**
+   * A send through this gate runs once the mode switch still reaching the
+   * server has landed, so the prompt runs in the mode the composer shows.
+   * See `sendAfterModeSwitch`.
+   */
+  const gateSend = (send: () => void): Promise<boolean> => sendAfterModeSwitch(pendingMode.current, send);
+
   return {
     mode,
     stickyMode,
     setMode,
-    cycleMode: () => void setMode(nextInteractionMode(stickyMode)),
+    cycleMode: () => setMode(nextInteractionMode(stickyMode)),
     takeCommand,
     takeOneOff,
     refuseWhileRunning,
+    gateSend,
     isModeCommand: (draft: string) => parseModeCommand(draft) !== null,
   };
+}
+
+/**
+ * Runs a send once the mode switch still reaching the server has landed, so
+ * the prompt runs in the mode the composer shows. With no switch in flight
+ * the send runs at once. When the switch failed the send never runs — the
+ * switch already said why — so nothing goes out silently in the old mode.
+ * Returns whether the send ran.
+ */
+export async function sendAfterModeSwitch(pending: Promise<boolean> | null, send: () => void): Promise<boolean> {
+  if (pending !== null && !(await pending)) return false;
+  send();
+  return true;
 }

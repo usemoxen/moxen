@@ -141,10 +141,12 @@ subscription does not count. Opt in before requesting research.
 `/research` (`interactionMode: "research"` on `thread.turn.start`) uses this
 same surface. After approval, the user's own thread is the lead; no delegated
 lead is created. With a single-researcher answer or no answering client, it
-researches directly without role tools. The picker shows only for `/research`
-and for the first prompt after the user switches the thread into Research mode
-(the thread keeps a `researchPicker` mark until then), not on every message of a
-thread that stays in Research mode. Clients that have not opted in keep the
+researches directly without role tools. The picker shows for `/research`,
+for the first prompt after the user switches the thread into Research mode,
+and for the first prompt of a thread created in Research mode (a new-thread
+draft sent while Research is picked): the thread keeps a `researchPicker` mark
+until that first prompt, not on every message of a thread that stays in
+Research mode. Clients that have not opted in keep the
 single-researcher behavior.
 
 A full-run lead's `thread.json` stores a
@@ -591,7 +593,8 @@ model that fits it, checking budget, memory and isolation before delegating.
   (a handoff document, say) ahead of it, up to the last turn the provider
   answered, along with the mode block.
 - A new thread starts in Build unless a mode is picked while drafting it,
-  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate.
+  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate. A thread
+  drafted in Research mode asks for the run size on its first prompt.
 - The TUI shows the mode as the composer's left-edge colour (Build sky,
   Research violet, Orchestrate fuchsia), its running pulse, and in the
   footer.

@@ -899,28 +899,35 @@ export function App({
       resetDraft(sourceId);
       filePaths.clear(sourceId);
     };
-    if (parsed.paths.length === 0 && pending.length === 0) {
-      finish();
-      dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue);
-      return;
-    }
-    void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
-      shrinkForAttach(name, mimeType, bytes, pending.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
-    ).then((built) => {
-      if (built.error !== null) {
-        setError(built.error.slice(0, 120));
+    // A send started while the Shift+Tab switch is still reaching the server
+    // waits for it, so the prompt runs in the mode the composer shows. When
+    // the switch failed the send stays unsent (the switch already said why)
+    // instead of going out silently in the old mode; the draft is kept until
+    // the prompt really goes.
+    void interaction.gateSend(() => {
+      if (parsed.paths.length === 0 && pending.length === 0) {
+        finish();
+        dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue);
         return;
       }
-      // Pasted and @-mentioned together: the server refuses the same, but
-      // here the draft is kept and nothing is sent.
-      const imageError = imageSetError([...pending, ...built.attachments]);
-      if (imageError !== null) {
-        setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
-        return;
-      }
-      finish();
-      writePending(sourceId, []);
+      void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
+        shrinkForAttach(name, mimeType, bytes, pending.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
+      ).then((built) => {
+        if (built.error !== null) {
+          setError(built.error.slice(0, 120));
+          return;
+        }
+        // Pasted and @-mentioned together: the server refuses the same, but
+        // here the draft is kept and nothing is sent.
+        const imageError = imageSetError([...pending, ...built.attachments]);
+        if (imageError !== null) {
+          setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
+          return;
+        }
+        finish();
+        writePending(sourceId, []);
         dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor, queue);
+      });
     });
   };
 

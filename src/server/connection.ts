@@ -1492,6 +1492,19 @@ export class DirectConnection implements ClientApi {
         branch: scratch ? null : (command.branch ?? null),
       },
     });
+    // A thread born in Research mode has not been offered a run size yet, so
+    // its first prompt asks — the same mark a switch into Research mode
+    // leaves, claimed by the same first prompt. Only `thread.create` marks:
+    // delegated children, research role threads and handoffs never come
+    // through here, so they stay unmarked and never ask.
+    if (created.interactionMode === "research") {
+      await store.withThreadLock(created.id, async () => {
+        const current = await store.readThreadRecord(created.id);
+        if (current && current.researchPicker !== true) {
+          await store.writeThreadRecord({ ...current, researchPicker: true });
+        }
+      });
+    }
     return { threadId: created.id, accepted: true };
   }
 
