@@ -18,6 +18,7 @@ import { drawCentered, drawText } from "../src/core/usage/pixelfont.js";
 import { Canvas, encodePng, rgb } from "../src/core/usage/png.js";
 import type { StatsRange } from "../src/core/usage/stats.js";
 import { readUsageStats } from "../src/core/usage/statsstore.js";
+import { loadConfig } from "../src/core/config.js";
 import { openThreadStore, resolveStoreRoot } from "../src/core/threads/store.js";
 import { cardPalette } from "../src/tui/model/cardtheme.js";
 import { applyTheme } from "../src/tui/theme.js";
@@ -49,8 +50,10 @@ const SHEET_DIM = rgb("#8a8a98");
 
 const store = await openThreadStore(resolveStoreRoot());
 const now = new Date();
+// The sheet prices what the stats screen prices: the machine's own config, so unreported turns estimate the same.
+const { config } = await loadConfig().catch(() => ({ config: undefined }));
 const stats = new Map<StatsRange, Awaited<ReturnType<typeof readUsageStats>>>();
-for (const range of RANGES) stats.set(range, await readUsageStats(store, range, now));
+for (const range of RANGES) stats.set(range, await readUsageStats(store, range, now, config));
 const all = stats.get("all")!;
 console.log(`${all.sessions} sessions, ${all.totalTokens} tokens, ${all.activeDays} active days`);
 
