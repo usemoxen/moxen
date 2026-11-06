@@ -4,6 +4,7 @@ import { testRender } from "../testrender.js";
 
 import type { ClientApi } from "../../../server/api.js";
 import { App, client } from "../fixtures.js";
+import { USAGE_CONTINUE_GRACE_MS } from "../../../core/threads/views.js";
 import { applyLanguage } from "../../i18n/index.js";
 import { fail } from "../helpers.js";
 
@@ -263,5 +264,233 @@ export async function runContinueModalSpanish(): Promise<void> {
   } finally {
     setup.renderer.destroy();
     applyLanguage("en");
+  }
+}
+
+/** Like `catalog`, plus an effort-less model the modal can land on. */
+function limitedCatalog() {
+  const base = catalog();
+  const claude = base.providers.find((provider) => provider.instanceId === "claudeAgent");
+  if (claude !== undefined) {
+    // No knobs at all: an empty descriptor list reads as no sliders.
+    claude.models.push({ slug: "claude-plain", name: "Claude Plain", isCustom: false, isDefault: false, capabilities: { optionDescriptors: [] } });
+  }
+  return base;
+}
+
+/** A `usage.limit` hit on the open thread's latest turn, as the runner records one. */
+function limitFrame(resetsAt: string): unknown {
+  return {
+    kind: "event",
+    event: {
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          id: "limit-continue",
+          kind: "usage.limit",
+          tone: "info",
+          summary: "Usage limit reached",
+          turnId: "turn-2",
+          createdAt: new Date().toISOString(),
+          payload: { provider: "claude", rateLimitType: "five_hour", label: "Session", resetsAt },
+        },
+      },
+    },
+  };
+}
+
+/**
+ * The base thread subscription, replaying a standing usage limit after
+ * every snapshot — resubscribes (a thread switch, a resync) keep the
+ * banner, so later passes don't depend on a still-open subscription.
+ */
+function limitedThreads(resetsAt: string): ClientApi["subscribeThread"] {
+  return ((threadId: string, options: object, onItem: (item: unknown) => void, onError?: (cause: unknown) => void) => {
+    const stop = client.subscribeThread(
+      threadId,
+      options as never,
+      (item) => {
+        (onItem as (frame: unknown) => void)(item);
+        if ((item as { kind?: unknown }).kind === "synchronized") (onItem as (frame: unknown) => void)(limitFrame(resetsAt));
+      },
+      onError as never,
+    );
+    return stop;
+  }) as unknown as ClientApi["subscribeThread"];
+}
+
+async function openContinueFromBanner(setup: TestRendererSetup): Promise<void> {
+  await waitFor(setup, "the usage banner did not offer a new thread", (frame) => frame.includes("In a new thread"));
+  const bannered = setup.captureCharFrame().split("\n");
+  const action = bannered.findIndex((line) => line.includes("In a new thread"));
+  if (action === -1) fail(`the usage banner lacks a new-thread action:\n${setup.captureCharFrame()}`);
+  await act(async () => setup.mockMouse.click(bannered[action]!.indexOf("In a new thread") + 2, action));
+  await waitFor(setup, "the continue modal did not open from the banner", (frame) => frame.includes("enter continues"));
+  await settle(setup);
+}
+
+/**
+ * A limited thread's banner opens the same modal: with the reset ahead it
+ * waits, and switching provider flips the footer to starting at once. A
+ * model with no effort knobs offers no sliders. Enter sends the hold along
+ * with the model when both apply.
+ */
+export async function runContinueModalLimited(): Promise<void> {
+  type Dispatch = Parameters<ClientApi["dispatch"]>[0];
+  const commands: Dispatch[] = [];
+  const resetsAt = new Date(Date.now() + 72.5 * 60_000).toISOString();
+  const isolated: ClientApi = {
+    ...client,
+    dispatch: ((command: Dispatch) => {
+      commands.push(command);
+      if (command.type === "thread.continue") {
+        // Stay on the open thread: the mock server mints no threads, and
+        // the standing limit must survive for the later passes.
+        return Promise.resolve({ threadId: "t-now", title: "continued", scheduledFor: null, accepted: true });
+      }
+      return client.dispatch(command);
+    }) as unknown as ClientApi["dispatch"],
+    getConfig: (() => Promise.resolve(limitedCatalog())) as unknown as ClientApi["getConfig"],
+    subscribeThread: limitedThreads(resetsAt),
+  };
+  const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
+    width: 120,
+    height: 30,
+    exitOnCtrlC: false,
+  });
+  try {
+    await waitFor(setup, "the thread view did not settle", (frame) => frame.includes("Claude Opus 5"));
+    await openContinueFromBanner(setup);
+    const held = setup.captureCharFrame();
+    console.log("--- continue modal (waiting for the reset) ---");
+    console.log(held);
+    if (!held.includes("Waits for the reset")) fail("the limited modal does not say it waits for the reset");
+    // Enter at once on the same provider: the hold rides along, like
+    // today's continue — no modelSelection, scheduled for after the reset.
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    const heldContinue = commands.find((command) => command.type === "thread.continue");
+    if (
+      heldContinue?.type !== "thread.continue" || "modelSelection" in heldContinue ||
+      heldContinue.scheduledFor !== new Date(Date.parse(resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString()
+    ) {
+      fail(`the held continue sent ${JSON.stringify(heldContinue)}`);
+    }
+    await waitFor(setup, "the continue modal did not close", (frame) => !frame.includes("enter continues"));
+    // The limit still stands on the same thread: switching provider flips
+    // the footer to starting at once instead of waiting on the old reset.
+    await openContinueFromBanner(setup);
+    const providerRow = rowWith(setup, "Provider");
+    const providerLine = setup.captureCharFrame().split("\n")[providerRow.y]!;
+    await act(async () => setup.mockMouse.click(providerLine.indexOf("Claude", providerRow.x), providerRow.y));
+    await setup.flush();
+    const flipped = setup.captureCharFrame();
+    console.log("--- continue modal (flipped to starts right away) ---");
+    console.log(flipped);
+    if (!flipped.includes("Starts right away") || flipped.includes("Waits for the reset")) {
+      fail("switching provider did not flip the wait hint");
+    }
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    const prompt = commands.filter((command) => command.type === "thread.continue").at(-1);
+    if (
+      prompt?.type !== "thread.continue" || "scheduledFor" in prompt ||
+      JSON.stringify(prompt.modelSelection) !== JSON.stringify({ instanceId: "opencode", model: "oc-model", options: [{ id: "reasoningEffort", value: "low" }] })
+    ) {
+      fail(`the cross-provider continue sent ${JSON.stringify(prompt)}`);
+    }
+    // The palette row says what the modal will do while the limit stands.
+    await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+    await setup.flush();
+    for (const char of "continu") {
+      await act(async () => setup.mockInput.pressKey(char));
+      await setup.flush();
+    }
+    await waitFor(setup, "the palette did not narrow", (frame) => frame.includes("Continue in a new thread") && frame.includes("after the reset"));
+    const narrowed = setup.captureCharFrame().split("\n");
+    const row = narrowed.findIndex((line) => line.includes("Continue in a new thread"));
+    await act(async () => setup.mockMouse.click(narrowed[row]!.indexOf("Continue in a new thread") + 2, row));
+    await waitFor(setup, "the continue modal did not open from the palette", (frame) => frame.includes("enter continues"));
+    await settle(setup);
+    // The plain model has no effort knobs: no sliders, and the handoff
+    // carries no options — held for the reset on this provider.
+    const model = rowWith(setup, "Model");
+    await act(async () => setup.mockMouse.click(model.x, model.y));
+    await setup.flush();
+    const plain = setup.captureCharFrame();
+    console.log("--- continue modal (model without effort) ---");
+    console.log(plain);
+    if (plain.includes("Effort") || plain.includes("Faster")) fail("the plain model still offers an effort slider");
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    const plainContinue = commands.filter((command) => command.type === "thread.continue").at(-1);
+    if (
+      plainContinue?.type !== "thread.continue" ||
+      JSON.stringify(plainContinue.modelSelection) !== JSON.stringify({ instanceId: "claudeAgent", model: "claude-plain" }) ||
+      plainContinue.scheduledFor === undefined
+    ) {
+      fail(`the plain-model continue sent ${JSON.stringify(plainContinue)}`);
+    }
+  } finally {
+    setup.renderer.destroy();
+  }
+}
+
+/**
+ * A rejected continue keeps the modal open: the draft stays intact for
+ * retry instead of dropping the user into the model picker.
+ */
+export async function runContinueModalRetry(): Promise<void> {
+  type Dispatch = Parameters<ClientApi["dispatch"]>[0];
+  const commands: Dispatch[] = [];
+  let attempts = 0;
+  const isolated: ClientApi = {
+    ...client,
+    dispatch: ((command: Dispatch) => {
+      commands.push(command);
+      if (command.type === "thread.continue") {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(new Error("the server refused the handoff"));
+        return Promise.resolve({ threadId: "t-now", title: "continued", scheduledFor: null, accepted: true });
+      }
+      return client.dispatch(command);
+    }) as unknown as ClientApi["dispatch"],
+    getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+  };
+  const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
+    width: 120,
+    height: 30,
+    exitOnCtrlC: false,
+  });
+  try {
+    await waitFor(setup, "the thread view did not settle", (frame) => frame.includes("Claude Opus 5"));
+    await openContinueFromPalette(setup);
+    // Dirty the draft first: the retry must keep this choice, not a blank one.
+    const high = rowWith(setup, "Low", "Medium", "High");
+    await act(async () => setup.mockMouse.click(setup.captureCharFrame().split("\n")[high.y]!.indexOf("High"), high.y));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    if (commands.length !== 1) fail(`the rejected continue dispatched ${commands.length} commands`);
+    // Still the modal, not the model picker: the wait hint reads, and the
+    // High stop the draft picked is still the one in force.
+    const stayed = setup.captureCharFrame();
+    console.log("--- continue modal (rejected, kept open) ---");
+    console.log(stayed);
+    if (!stayed.includes("enter continues")) fail("the rejected continue did not keep the modal open");
+    if (!stayed.includes("Deeper reasoning for harder tasks")) fail("the rejected continue lost the drafted effort");
+    // Retry: the kept draft goes out unchanged and the modal closes.
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    const retried = commands.filter((command) => command.type === "thread.continue").at(-1);
+    if (
+      retried?.type !== "thread.continue" ||
+      JSON.stringify(retried.modelSelection) !== JSON.stringify({ instanceId: "claudeAgent", model: "claude-opus-5", options: [{ id: "effort", value: "high" }] })
+    ) {
+      fail(`the retry sent ${JSON.stringify(retried)}`);
+    }
+    await waitFor(setup, "the continue modal did not close after retry", (frame) => !frame.includes("enter continues"));
+  } finally {
+    setup.renderer.destroy();
   }
 }

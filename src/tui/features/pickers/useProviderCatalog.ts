@@ -281,7 +281,6 @@ export function useProviderCatalog(params: {
     permissionChoices,
     modelColor,
     labelFor,
-    buildModelSelection,
     openModelPicker,
     openEffortPicker,
     openPermissionPicker,

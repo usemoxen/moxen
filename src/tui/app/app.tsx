@@ -1745,7 +1745,8 @@ export function App({
               // Read together: continue [at reset | in a new thread].
               ...(banner.resetsAt === null ? [] : [{ label: t("app.continue_at_reset_681f"), fg: COLOR.accent, onClick: usageBanner.scheduleContinue }]),
               // A fresh context instead of resuming a long one: the handoff
-              // carries the work, and waits for the reset if it has not come.
+              // carries the work. The modal holds it for the reset on this
+              // provider, or starts it at once on another.
               // Only once the assistant has said something to hand over.
               ...(lastAssistantMessage === null ? [] : [{ label: t("app.in_a_new_thread_b710"), fg: COLOR.accent, onClick: () => openContinueModal() }]),
               { label: t("action.dismiss"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.dismiss },
@@ -1827,13 +1828,20 @@ export function App({
    * The modal's choice, confirmed: an untouched draft dispatches exactly
    * like today's continue (no `modelSelection`), so the same-provider hold
    * for a usage-limit reset still applies. On another provider it starts at
-   * once — the old provider's allowance is not its own.
+   * once — the old provider's allowance is not its own. The draft stays
+   * until the server accepts, so a rejection keeps the modal open with the
+   * choice intact for retry instead of stranding the user in the picker.
    */
   const confirmContinueThread = (choice: ModelSelection) => {
     const draft = continueDraft;
     if (draft === null) return;
-    setContinueDraft(null);
     const current = selected?.modelSelection;
+    // Same provider by instance id. A cross-instance continue on the same
+    // usage account (two Harness profiles, say) still reads as another
+    // provider and starts at once: comparing by usage account would need
+    // `usageKeyForInstance` from `core/usage/limits`, which is a domain
+    // operation outside the client-shared kernel, so the layering test
+    // forbids the import and the server owns that accounting instead.
     const sameProvider = current !== undefined && current.instanceId === choice.instanceId;
     const scheduledFor = continueScheduledFor({
       resetsAt: usageBanner.banner?.resetsAt ?? null,
@@ -3672,10 +3680,7 @@ export function App({
         <ContinueModal
           providers={providers}
           initial={continueDraft.selection}
-          waiting={
-            selected?.modelSelection?.instanceId === continueDraft.selection.instanceId &&
-            (usageBanner.banner?.resetsAt?.getTime() ?? 0) > Date.now()
-          }
+          resetsAt={usageBanner.banner?.resetsAt ?? null}
           screenWidth={width}
           screenHeight={height}
           onConfirm={confirmContinueThread}

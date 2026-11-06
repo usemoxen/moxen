@@ -29,7 +29,7 @@ const LABEL_WIDTH = 10;
 export function ContinueModal({
   providers,
   initial,
-  waiting,
+  resetsAt,
   screenWidth,
   screenHeight,
   onConfirm,
@@ -38,8 +38,8 @@ export function ContinueModal({
   providers: ProviderSummary[] | null;
   /** The thread's own selection: the draft starts as it, untouched. */
   initial: ModelSelection;
-  /** The new thread waits for a usage-limit reset before starting. */
-  waiting: boolean;
+  /** The usage-limit reset the thread is held for, if any stands. */
+  resetsAt: Date | null;
   screenWidth: number;
   screenHeight: number;
   onConfirm: (selection: ModelSelection) => void;
@@ -47,6 +47,12 @@ export function ContinueModal({
 }) {
   const [selection, setSelection] = useState<ModelSelection>(initial);
   const [row, setRow] = useState(0);
+  /**
+   * Whether the continuation waits for the reset: only on the thread's own
+   * provider while the reset has not come. Another provider starts at once,
+   * so switching provider flips this from under the confirm button.
+   */
+  const waiting = resetsAt !== null && resetsAt.getTime() > Date.now() && selection.instanceId === initial.instanceId;
 
   // Every *enabled* provider (a handoff can cross providers), plus the
   // draft's own when it is not offered — the same rule the model picker

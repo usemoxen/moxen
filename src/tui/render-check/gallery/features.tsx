@@ -656,7 +656,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     settleMs: 250,
     element: () => (
       <Stage width={100} height={28}>
-        <ContinueModal providers={CONTINUE_PROVIDERS} initial={{ instanceId: "claude", model: "opus" }} waiting={false} screenWidth={100} screenHeight={28} onConfirm={noop} onClose={noop} />
+        <ContinueModal providers={CONTINUE_PROVIDERS} initial={{ instanceId: "claude", model: "opus" }} resetsAt={null} screenWidth={100} screenHeight={28} onConfirm={noop} onClose={noop} />
       </Stage>
     ),
   },
