@@ -35,8 +35,10 @@ exceptions.
   table both clients render from). Each area keeps its own `tests/`.
 - `src/core/syntax/` — the vendored tree-sitter grammars plus their
   loader, shared by every presentation client (the TUI today, the desktop
-  next). The one `core/` area clients may import directly; the layering
-  test pins the exception.
+  next). It is one of several `core/` areas clients may import directly:
+  the layering test's `KERNEL_PREFIXES` allowlists the whole shared kernel
+  (vocabulary and primitives), and pins that domain operations stay behind
+  `server/`.
 - `src/server/` — the boundary: `api.ts` is `ClientApi`, the typed
   contract every frontend talks through (`dispatch` for commands, `query`
   for reads, `subscribeShell`, `subscribeThread`, `turnDiff`,
@@ -52,12 +54,21 @@ exceptions.
   server and tests use (`src/cli/tests/setup.ts` sets that up for every test
   file, and points them away from any real server); `workspace.ts` backs the
   live-diff and attachment reads a client makes; `main.ts` is the
-  server process; `mcp/` is the `moxen` MCP server every top-level provider
-  session gets (`delegate` / `task_status` / `task_cancel` / `task_send` / `task_ask` / `message_queue`, over `ClientApi`).
+  server process; `mcp/` is the `moxen` MCP server provider sessions get,
+  over `ClientApi`: the delegation tools (`delegate`, `task_status`, `models`,
+  `task_cancel`, `task_settle`, `task_send`, `task_ask`, `message_queue`,
+  `thread_search`, `thread_read`, `image_gen`, `thread_continue`) plus thread,
+  memory and utility tools — not every session gets all of them (a delegated
+  task gets none of the delegation tools; research, web-fetch, memory,
+  image-generation, hand-off and checklist tools are offered per session;
+  `moxenToolsFor` in `server/mcp/tools.ts` decides).
   **New frontend surface goes here, not into a client.**
 - `src/cli/` — a client: `index.ts` (command definitions; thin dispatch
-  over the modules below), `output.ts`, `doctor.ts`, and `catalog/`,
-  `handover/`, `infra/` (`client.ts` — the CLI's `ClientApi`), `projects/`,
+  over the modules below), `output.ts`, `doctor.ts`, `server.ts`
+  (`server start|status|stop`), `selfupdate.ts`, `update.ts` (provider
+  updaters), `remote.ts` (paired servers and remote access), and `catalog/`,
+  `handover/`, `harness/` (Harness profiles), `infra/` (`client.ts` — the
+  CLI's `ClientApi`), `memory/`, `projects/`,
   `threads/`, `git/` (the `git` and `pr` command groups) — flags, prompts
   and `--json` envelopes over `ClientApi`;
   `tests/envelopes/` pins every envelope byte-for-byte.
@@ -70,7 +81,7 @@ exceptions.
   - `model/` — pure projection logic (`thread.ts`, `turns.ts`, `activity.ts`, …), genuinely cross-cutting across features.
   - `hooks/` — shared runtime hooks used across features (`useToasts`, `useClipboard`, `useHover`, `useAnimTick`).
   - `render-check/` — snapshot harness: `fixtures.ts` (mock client/builders), `helpers.ts`, `scenarios/*.ts` (one file per feature area); `render-check.tsx` at the top level is the slim orchestrator that runs them in sequence against a mock client with scripted input and captures char frames. No live terminal needed. For colour, `bun run check:tui:frames` paints every frame the walkthrough captures (named by each scenario's `--- label ---`, identical frames once; `--theme a,b|all`, `--filter text`), through the `testRender` shim in `render-check/testrender.ts` that every scenario imports instead of opentui's own. `bun run check:tui:gallery` draws each component of `render-check/gallery/` alone in every theme and builds a sheet per component comparing them (`shots/gallery/sheets/`); the settings page is in it too, one entry per screen of it — each sidebar page, each profile's and MCP server's pages, a model's page and the add-a-profile and add-a-server wizards — and per kind of setting editor (`gallery/settings.tsx`, drawn from `core/configschema.ts`, with an empty config and a configured one), and `check:tui` fails when a non-hidden setting is never drawn on some page; a component needs an entry there or a name on the `NOT_YET` list in `gallery/tests/coverage.test.ts`. `bun run check:tui:shots` renders a few screens (188×53, JetBrains Mono with ligatures when Raqm is available) in every theme and paints them as PNGs under the untracked `shots/<theme>/` (`render-check/shots.tsx` dumps each cell's glyph and colours, `scripts/render-shots.py` paints them with Pillow); open them to judge a palette. `bun run stats:sheet` draws the stats card in every theme for all time, 30 days and 7 days from this machine's real usage and lays them out as one contact sheet (`shots/stats/stats-themes.png`, the cards full size under `shots/stats/cards/`; `--out dir`, `--theme a,b`). The contrast test in `tui/model/tests/theme.test.ts` is the automatic bar for a theme's text colours.
-- `mods/` — Claude Code mods shipped in the package and loaded into Claude sessions as local plugins: `agent-skills` (serves the user's own `.agents/skills`, which Claude Code does not read itself). Check one with `claude plugin validate mods/<name>` and `claude plugin test mods/<name>`.
+- `mods/` — mods shipped in the package: `agent-skills`, loaded into Claude sessions as a local plugin (serves the user's own `.agents/skills`, which Claude Code does not read itself), and `opencode-compaction`, loaded into OpenCode servers Moxen starts (it runs OpenCode's compaction with Moxen's summary prompt, and restores the recent exchange tail afterwards). Check a Claude mod with `claude plugin validate mods/<name>` and `claude plugin test mods/<name>`.
 - `parsers-config.json` / `parsers-build.json` — the tree-sitter grammars under `src/core/syntax/`: the first lists grammars with a published wasm, the second those built from a pinned source (`bun scripts/build-tree-sitter-grammars.ts`, needs the `tree-sitter` CLI). `bun run update:tree-sitter-assets` also rewrites every `LICENSE` there and `THIRD_PARTY_LICENSES.md`.
 - `docs/` — Moxen docs plus `external/`, mirrors of the Claude Code and OpenCode v2 docs we check behavior against. `bun run update:docs` refreshes the mirrors (`claude`, `opencode`, `--dry-run`, `--prune`); `git diff docs` after a run is the changelog.
 - `reference/` — read-only clones of the reference implementations we check behavior against (OpenCode's plugin/loader contracts, compaction rules). Gitignored. Verify there before copying upstream behavior — never guess it.
