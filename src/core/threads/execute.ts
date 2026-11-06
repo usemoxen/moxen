@@ -499,7 +499,7 @@ export async function imagesOf(attachments: readonly StoredAttachment[]): Promis
  * guaranteed to be alive at the moment of promotion, so it takes the next
  * turn — on the same driver, which is the one holding the session.
  */
-async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
+export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
   const { store, threadId, driver } = args;
   // Held until the turn is handed to `executeTurn`; any earlier way out frees it.
   let claimed: string | null = null;
@@ -1245,6 +1245,21 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   };
   controller.signal.addEventListener("abort", onAbort, { once: true });
   try {
+    // A stop that landed before the run started leaves no abort to fire:
+    // the ledger is the signal. Never send a prompt for a turn that already
+    // settled — the provider run would have no store turn and keep going.
+    const live = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+    if (!live || live.status !== "running" || controller.signal.aborted) {
+      // Stopped, not unanswered: the user ended it, so a fresh conversation
+      // must not re-send its text with the next prompt.
+      interrupted = live?.status === "interrupted" || controller.signal.aborted;
+      if (args.driverTurnId) {
+        // The provider started this turn itself, so a run provably exists:
+        // stop it rather than orphaning it.
+        await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
+      }
+      return;
+    }
     const sent = args.driverTurnId
       ? { turnId: args.driverTurnId }
       : await Effect.runPromise(
@@ -1256,6 +1271,15 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
             ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
           }),
         );
+    if (!args.driverTurnId && controller.signal.aborted) {
+      // The stop landed while the prompt was going out: `onAbort`'s
+      // interrupt found no open turn yet. Stop the run that just started —
+      // unless a newer turn has since taken the thread: its run is not ours.
+      const turns = await store.readTurns(threadId);
+      if (!turns.some((turn) => turn.id !== storeTurnId && turn.status === "running")) {
+        await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
+      }
+    }
     // Persisted as soon as the turn is under way, not only at settle: a
     // process that dies mid-turn is exactly the one whose successor needs it.
     await persistResumeCursor(store, driver, threadId);

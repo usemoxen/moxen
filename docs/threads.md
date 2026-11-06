@@ -44,6 +44,14 @@ ever settle it, so the next operation that touches the thread interrupts
 the orphaned turn and runs the one queued behind it. A turn owned on
 another host is never judged.
 
+A queued message outlives the settle it was waiting for when the thread
+cannot take it: a snoozed thread, or a provider whose allowance is
+exhausted, holds it instead of starting it (the Work queue says the
+thread is not active). The server starts it on its own once the thread is
+active again and the provider has room — an unsnooze, or the snooze or
+the limit lapsing, is enough; no message needs to be sent. A message left
+queued any other way still waits for the next message or settle.
+
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.
