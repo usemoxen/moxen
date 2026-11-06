@@ -198,12 +198,12 @@ export type CommandBody =
       readonly scheduleReason?: "user" | "usage-reset";
     }
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
-  | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
+  | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string; readonly notifyParent?: boolean }
   | { readonly type: "usage.wrap"; readonly provider: string }
   | { readonly type: "thread.protect"; readonly threadId: string }
-  | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy }
+  | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy; readonly notifyParent?: boolean }
   | { readonly type: "handoff.submit"; readonly threadId: string; readonly requestId: string; readonly summary: string }
-  | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel" }
+  | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel"; readonly notifyParent?: boolean }
   /** `stop`: end the family's running work first instead of refusing to settle past it. */
   | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string; readonly stop?: boolean }
   | { readonly type: "thread.unsettle"; readonly threadId: string; readonly reason?: string }
@@ -270,7 +270,7 @@ export type CommandBody =
   | ({ readonly type: "skills.enabled.set"; readonly projectId?: string; readonly enabled: boolean } & SkillAddress)
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
-  | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
+  | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string; readonly notifyParent?: boolean }
   /**
    * Settle a task the caller delegated (moxen's `task_settle`), through the
    * same path as `threads settle`. `stop` ends running work first; a running
@@ -551,6 +551,13 @@ export type Query =
       readonly lastTurn?: boolean;
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * The live delegation that made this thread a task, if any: which thread
+   * it reports to and whether it notifies. Lets a client cancelling an
+   * automatic continue ask before telling the parent. Null for threads that
+   * are nobody's task.
+   */
+  | { readonly type: "thread.delegation"; readonly threadId: string }
   | { readonly type: "research.run"; readonly threadId: string }
   /**
    * The thread behind a live OpenCode session: which thread's tools and
@@ -742,6 +749,7 @@ export interface QueryResults {
   "thread.inspect": { readonly project: StoredProject | null; readonly thread: ThreadInspection };
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
+  "thread.delegation": { readonly parentThreadId: string; readonly notify: boolean } | null;
   "research.run": ResearchRunView | null;
   "opencode.session-thread": {
     readonly threadId: string;
@@ -1113,17 +1121,18 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         ...(asString(record.turnId) ? { turnId: asString(record.turnId) as string } : {}),
+        ...optionalBoolean(record, "notifyParent"),
       };
     case "usage.wrap":
       return { ...meta, type, provider: requireField(record.provider, type, "provider") };
     case "thread.protect":
       return { ...meta, type, threadId: threadId() };
     case "queue.edit":
-      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}) };
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent") };
     case "handoff.submit":
       return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
-      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const) };
+      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const), ...optionalBoolean(record, "notifyParent") };
     case "thread.settle":
       return {
         ...meta,
@@ -1297,6 +1306,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
+        ...optionalBoolean(record, "notifyParent"),
       };
     case "thread.task.settle":
       return {
@@ -1701,6 +1711,8 @@ export function decodeQuery(value: unknown): Query {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
       };
+    case "thread.delegation":
+      return { type, threadId: requireThreadId(record.threadId) };
     case "thread.turn.await":
       return {
         type,
