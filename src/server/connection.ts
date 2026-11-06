@@ -115,6 +115,7 @@ import {
   type TurnDriverFactories,
 } from "../core/threads/execute.js";
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
+import { onThreadFailure } from "../core/threads/failures.js";
 import {
   armPendingScheduledTurns,
   recoverTaskNotifications,
@@ -291,6 +292,10 @@ export class DirectConnection implements ClientApi {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
   private readonly usageFailures = new Set<string>();
+  /** Detached core failures already written to the server log, by line: a subscriber that throws on every event must not fill the disk. */
+  private readonly threadFailures = new Set<string>();
+  /** Removes this connection's detached-failure sink; set in the constructor, run in `close`. */
+  private readonly stopThreadFailureSink: () => void;
   private readonly usageSubscriptions: Array<() => void> = [];
   private readonly storeRoot: string;
   private readonly embeddingRuntime: EmbeddingRuntime;
@@ -377,6 +382,24 @@ export class DirectConnection implements ClientApi {
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
+    // Detached core failures (a throwing event subscriber, an abort-time
+    // interrupt, a failed idle probe) have no caller to return them to:
+    // they land in the server log, where the usage tick's own failures go.
+    this.stopThreadFailureSink = onThreadFailure((area, message) => {
+      void this.logThreadFailure(area, message);
+    });
+  }
+
+  /**
+   * One detached core failure in the server log. Each distinct line once,
+   * like the usage tick's failures: a subscriber that throws on every
+   * event is one bug, not one line per event.
+   */
+  private async logThreadFailure(area: string, message: string): Promise<void> {
+    const key = `${area}: ${message}`;
+    if (this.threadFailures.has(key)) return;
+    this.threadFailures.add(key);
+    await appendFile(path.join(this.storeRoot, "server.log"), `${new Date().toISOString()} ${key}\n`, "utf8").catch(() => undefined);
   }
 
   /** Where a memory request points: the thread's project, the project named, or neither (global alone). */
@@ -2301,6 +2324,7 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.stopThreadFailureSink();
     for (const entry of this.researchProposals.values()) entry.answer(null);
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
     this.usageProtection.close();
