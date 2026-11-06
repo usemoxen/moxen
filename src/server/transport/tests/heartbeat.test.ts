@@ -45,6 +45,7 @@ async function fakeServer(): Promise<{ endpoint: string; muted: boolean; connect
         const message = JSON.parse(line) as { id: number; method: string };
         if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
         else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+        else if (message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
         else if (message.method === "subscribeShell") {
           socket.write(encode({ id: message.id, result: { subscription: message.id } }));
           socket.write(encode({ subscription: message.id, item: { kind: "snapshot" } }));
@@ -117,6 +118,8 @@ describe("heartbeat", () => {
     // A `send --wait` has no subscription: only its in-flight await is
     // around when the server goes quiet. It must still see the link drop
     // and come back, rather than fail once while the link claims connected.
+    // Recovery takes a new request: with nobody waiting the client stops
+    // dialling, and the next send kicks it off again.
     const endpoint = testEndpoint();
     let muted = false;
     const sockets = new Set<net.Socket>();
@@ -159,6 +162,46 @@ describe("heartbeat", () => {
     expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
 
     muted = false;
+    // The demand kicks the reconnect: the wait below fails while the link
+    // still says connected.
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects in-flight requests on close, even when the server says nothing", async () => {
+    // The socket's own close may never come back from a silent server, so
+    // `close()` settles what is parked itself instead of hanging on it.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await client.close();
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+  });
+
+  it("stops redialling once nobody waits, and redials on the next send", async () => {
+    // With no subscription and nothing in flight, the reconnect gives up
+    // instead of dialling forever — and says it stopped trying. The next
+    // request kicks it off again.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    await waitFor("given up", () => client.linkState.status === "failed");
+    expect(client.linkState).toMatchObject({ status: "failed", code: "SERVER_DISCONNECTED" });
+
+    server.muted = false;
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
     await waitFor("connected again", () => client.linkState.status === "connected");
     await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
   });

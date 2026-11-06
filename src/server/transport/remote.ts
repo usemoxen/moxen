@@ -173,10 +173,13 @@ export class RemoteConnection implements ClientApi {
     socket.once("close", () => this.onClose(socket));
     this.socket = socket;
     // A frozen server still accepts the connection; only the hello shows it is not answering.
+    // Unref'd, so a client closed mid-hello does not hold the event loop up
+    // to the deadline: `close()` already rejected what the hello parked.
     const helloDeadline = setTimeout(() => {
       this.dropReason = `it accepted the connection but did not answer within ${seconds(this.connectTimeoutMs)}`;
       socket.destroy();
     }, this.connectTimeoutMs);
+    helloDeadline.unref?.();
     try {
       this.helloResult = (await this.request("hello", { ...this.options.hello, protocol: PROTOCOL_VERSION })) as HelloResult;
     } catch (cause) {
@@ -332,9 +335,11 @@ export class RemoteConnection implements ClientApi {
     if (this.closed || socket === null || socket.destroyed) {
       // The server went away between requests: come back in the background
       // while the caller decides whether to ask again (a `send --wait`
-      // retry does). Never from a refusal no retry can fix.
-      if (!this.closed && this.socket === null && this.options.reconnect !== false && this.link.status !== "failed") {
-        if (this.link.status === "connected") {
+      // retry does). Never from a refusal no retry can fix — but an
+      // abandoned link (`failed` without a fatal code) kicks anew.
+      const refused = this.link.status === "failed" && FATAL_HELLO_CODES.has(this.link.code);
+      if (!this.closed && this.socket === null && this.options.reconnect !== false && !refused) {
+        if (this.link.status !== "reconnecting") {
           this.setLink({ status: "reconnecting", since: Date.now(), attempts: 0, reason: "the connection closed" });
         }
         void this.reconnect();
@@ -419,6 +424,14 @@ export class RemoteConnection implements ClientApi {
           const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
           this.setLink({ status: "reconnecting", since, attempts, reason: cause instanceof Error ? cause.message : String(cause) });
           delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+        }
+        // Nobody waits on this link: stop dialling. A later `send()` kicks a
+        // fresh reconnect while the link says it stopped trying.
+        if (this.subscriptions.size === 0 && this.pending.size === 0) {
+          if (this.link.status === "reconnecting") {
+            this.setLink({ status: "failed", reason: this.link.reason, code: "SERVER_DISCONNECTED" });
+          }
+          return;
         }
       }
     })().finally(() => {
@@ -510,6 +523,18 @@ export class RemoteConnection implements ClientApi {
     this.closed = true;
     this.stopHeartbeat();
     this.linkListeners.clear();
+    // Everything parked rejects, as on a drop: against a silent server the
+    // socket's own close may never settle them (and `onClose` will not see
+    // them — the socket is nulled below). `SERVER_DISCONNECTED` is what a
+    // drop already reports, so callers see nothing new.
+    for (const pending of [...this.pending.values()]) {
+      pending.reject(
+        new CliError("SERVER_DISCONNECTED", "The connection to the moxen server is closed.", {
+          details: { endpoint: this.endpoint },
+        }),
+      );
+    }
+    this.pending.clear();
     this.subscriptions.clear();
     this.socket?.end();
     this.socket = null;
