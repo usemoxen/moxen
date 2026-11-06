@@ -1268,6 +1268,9 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
   const turnThread: StoredThread = { ...sent.thread, modelSelection: turnModel, interactionMode: sent.turn.interactionMode };
+  // Whether this send opened the session: a turn stopped while it started
+  // leaves a session nobody will use, so it is closed again below.
+  const hadSession = await Effect.runPromise(driver.hasSession(thread.id)).catch(() => false);
   let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
   let startFailure: unknown = null;
   try {
@@ -1281,6 +1284,13 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    return { ...sent, run: Promise.resolve() };
+  }
+  // A stop that landed while the session was starting already settled the
+  // turn: sending now would orphan a provider run with no store turn.
+  const current = (await store.readTurns(thread.id)).find((turn) => turn.id === sent.turn.id);
+  if (!current || current.status !== "running") {
+    if (!hadSession && driver.stopSession) await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   const images = providerImages(uploads);
