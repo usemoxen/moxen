@@ -760,9 +760,12 @@ A turn-end notification always fires on time and nothing can hold it. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must
-not treat the task's report as complete. When that work ends, the task wakes to
-pick up the result where its provider allows it, and the parent gets a second
-notification when the task next has nothing left to run. Work that never ends
+not treat the task's report as complete. The named list is a snapshot taken
+when the notification is assembled; work may have ended or started since.
+When that work ends, the task wakes to pick up the result where its provider
+allows it, and the parent gets a second notification if the task wakes and
+next has nothing left to run. Work its provider never wakes stays visible in
+task_status instead of arriving as a notification, and work that never ends
 (a dev-server watcher) sends nothing further and blocks nothing. `task_status`
 lists what is still running and for how long; past `backgroundForgottenAfter`
 (30m unless set) it is flagged as probably forgotten, and Moxen never stops it

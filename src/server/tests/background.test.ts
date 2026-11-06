@@ -122,8 +122,11 @@ describe("background work through ClientApi", () => {
       expect(assistant[0]!.id).toBe(noteMessageId(firstTurn, "m1"));
 
       // Background work: listed live, stoppable, and in the ledger.
+      // The thread runs on the opencode instance id, whose background list is
+      // partial by provider (only what its server started), even for this fake driver.
       expect(await connection.query({ type: "thread.background.list", threadId })).toEqual({
         live: true,
+        partial: true,
         tasks: [{ taskId: "bg1", taskType: "local_bash", description: "watch the log" }],
       });
       await connection.dispatch({ type: "thread.background.stop", threadId, taskId: "bg1" });

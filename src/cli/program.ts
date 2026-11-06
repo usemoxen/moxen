@@ -1349,7 +1349,9 @@ threads
           ? `No live session for thread ${result.threadId} here.`
           : lines.length > 0
             ? lines.join("\n")
-            : "No background tasks running.",
+            : result.partial
+              ? "No background tasks visible to Moxen."
+              : "No background tasks running.",
       );
     }),
   );

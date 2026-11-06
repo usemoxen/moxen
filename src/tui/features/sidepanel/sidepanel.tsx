@@ -656,12 +656,15 @@ const KIND_LABEL = (): Record<string, string> => ({ shell: t("side.shell_ea89"),
 
 export function BackgroundTab({
   tasks,
+  partial,
   width,
   now,
   onOpen,
   onStop,
 }: {
   tasks: readonly BackgroundTaskRow[];
+  /** The provider cannot report all of its background work, so an empty list proves nothing. */
+  partial?: boolean;
   width: number;
   now: number;
   /** Opens the background browser on this task's details. */
@@ -672,6 +675,7 @@ export function BackgroundTab({
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
       <Heading text={t("side.running_in_the_background_e706")} meta={tasks.length === 0 ? t("side.noneYet") : `${tasks.length}`} />
+      {partial === true ? <text fg={COLOR.faint}>{t("side.background_list_partial_9c2d")}</text> : null}
       {tasks.length === 0 ? (
         <Empty glyph="○" text={t("side.background_commands_monitor_watches_487b")} />
       ) : (

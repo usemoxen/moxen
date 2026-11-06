@@ -948,6 +948,7 @@ export const es: Catalog = {
   "side.agent_7446": "Agente",
   "side.running_in_the_background_e706": "Funcionando en segundo plano",
   "side.background_commands_monitor_watches_487b": "Los comandos, los Monitor y los subagentes en segundo plano salen aquí mientras se ejecutan.",
+  "side.background_list_partial_9c2d": "Es posible que Moxen no vea todas las tareas en segundo plano.",
   "git.no_remote_b921": "sin remoto",
   "git.detached_1594": "(HEAD suelto)",
   "git.in_sync_1199": "sincronizado",

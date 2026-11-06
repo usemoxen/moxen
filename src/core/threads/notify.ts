@@ -92,19 +92,25 @@ export function taskNotificationText(tasks: readonly TaskNotification[], nowMs: 
       .filter((line): line is string => line !== null)
       .join("\n");
   });
-  const unfinished = tasks.some((task) => task.background.length > 0 || task.backgroundUnknown);
+  const running = tasks.some((task) => task.background.length > 0);
+  const unknown = tasks.some((task) => task.backgroundUnknown);
   const head =
-    tasks.length === 1 && !unfinished
-      ? "A task you delegated has settled."
-      : tasks.length === 1
-        ? "A task you delegated ended its turn with background work still running. It is not finished: do not treat its report as complete."
-        : unfinished
-          ? "Tasks you delegated ended their turns with background work still running. They are not finished: do not treat their reports as complete."
-          : `${tasks.length} tasks you delegated have settled.`;
+    tasks.length === 1 && running
+      ? "A task you delegated ended its turn with background work still running. It is not finished: do not treat its report as complete."
+      : tasks.length === 1 && unknown
+        ? "Moxen could not verify whether background work is still running on a task you delegated. Check task_status."
+        : tasks.length === 1
+          ? "A task you delegated has settled."
+          : running
+            ? "Tasks you delegated ended their turns with background work still running. They are not finished: do not treat their reports as complete."
+            : unknown
+              ? "Moxen could not verify whether background work is still running on some tasks you delegated. Check task_status."
+              : `${tasks.length} tasks you delegated have settled.`;
   return [
     "<task-notification>",
     head,
     ...lines,
+    ...(running ? ["A follow-up notification arrives if a task wakes and settles again; work its provider never wakes stays visible in task_status instead."] : []),
     "Call task_status with a taskId for the full report.",
     "</task-notification>",
   ].join("\n");
@@ -124,8 +130,13 @@ function backgroundLines(task: TaskNotification, nowMs: number): readonly (strin
     task.background.length === 0
       ? null
       : `  Background work still running: ${task.background.map((note) => backgroundWorkLabel(note, nowMs)).join("; ")}.`;
-  const unknown = !task.backgroundUnknown
-    ? null
-    : "  Moxen could not check for more background work, so more may still be running beyond what is named above.";
-  return [running, unknown];
+  const unknown =
+    !task.backgroundUnknown || task.background.length > 0
+      ? null
+      : "  Moxen could not check whether background work is still running. Check task_status.";
+  const unknownBeyond =
+    !task.backgroundUnknown || task.background.length === 0
+      ? null
+      : "  Moxen could not check for more background work, so more may still be running beyond what is named above.";
+  return [running, unknown, unknownBeyond];
 }

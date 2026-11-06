@@ -192,4 +192,24 @@ describe("HarnessDriver background commands", () => {
     await expect(Effect.runPromise(driver.stopBackgroundTask("t1", task!.taskId))).rejects.toThrow(/No background task/);
     await Effect.runPromise(driver.stopAll());
   });
+
+  it("still wakes for completions past the wake cap once nothing is still running", async () => {
+    // Seven slow commands, each ending a second after the last so every end
+    // gets its own wake turn (real subprocesses, so this takes ~8s). Past
+    // six wakes in a row the cap holds further wakes — but once the set is
+    // empty the streak resets and the piled-up completions are delivered.
+    const starts = [1, 2, 3, 4, 5, 6, 7].map((n) =>
+      call(`c${n}`, "bash", { command: `sleep ${n}`, description: `sleeper ${n}`, run_in_background: true }),
+    );
+    const { driver, events } = driverWith([...starts, say("Started."), ...Array.from({ length: 7 }, () => say("Noted."))]);
+    await Effect.runPromise(driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: { instanceId: "harness/colab", model: "m" } }));
+    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "t1", prompt: "go" }));
+    await driver.awaitTurn("t1", turnId);
+    await until(
+      () => events.filter((event) => event.type === "turn.started" && event.origin === "background").length === 7,
+      30_000,
+    );
+    expect(driver.backgroundTasks("t1")).toEqual([]);
+    await Effect.runPromise(driver.stopAll());
+  }, 60_000);
 });

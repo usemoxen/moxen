@@ -2205,6 +2205,12 @@ async function taskHasSettledForGood(ctx: OperationContext, childThreadId: strin
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
 }
 
+/** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
+async function settledTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
+  const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
+  return turns.filter((turn) => turn.completedAt !== null).length;
+}
+
 /** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
 const BACKGROUND_FORGOTTEN_AFTER_DEFAULT_MS = 30 * 60_000;
 
@@ -2355,9 +2361,15 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     (id): id is string => id !== null,
   );
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
+  // The settle generation each snapshot was taken at: a turn settling between
+  // the snapshot and the arming below must still report at once (finding: the
+  // gap), rather than arming a watcher that only hears future settles.
+  const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
+    const since = await settledTurnCount(ctx, id);
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
+    if (task) generations.set(task.taskId, since);
     return task && from ? { ...task, continuedFrom: from } : task;
   }))).filter(
     (task): task is TaskNotification => task !== null,
@@ -2378,7 +2390,9 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     if (!row) continue;
     const child = await ctx.store.readThreadRecord(task.taskId);
     if (!child || threadStatus(child) === "settled") continue;
-    if (task.background.length > 0 || task.backgroundUnknown) notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true);
+    if (task.background.length > 0 || task.backgroundUnknown) {
+      notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true, generations.get(task.taskId) ?? null);
+    }
   }
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return;
@@ -3312,8 +3326,18 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * `onlyFutureSettles` skips the check of the task as it stands: the caller
  * just reported this settle, so only a later turn settling may report again.
  * Without it, arming on an already-settled task would notify at once.
+ * `sinceGeneration` is the settle generation the caller's snapshot was taken
+ * at: when set, a settle that landed between the snapshot and this arming
+ * reports at once instead of being lost. A task that has not settled since
+ * keeps waiting for a future one.
  */
-function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, childThreadId: string, onlyFutureSettles = false): void {
+function notifyWhenTaskSettles(
+  ctx: OperationContext,
+  parentThreadId: string,
+  childThreadId: string,
+  onlyFutureSettles = false,
+  sinceGeneration: number | null = null,
+): void {
   let done = false;
   let checking = false;
   let again = false;
@@ -3330,6 +3354,11 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
       do {
         again = false;
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
+        if (sinceGeneration !== null && (await settledTurnCount(ctx, childThreadId)) <= sinceGeneration) {
+          // No settle since the caller's snapshot: a turn settling in the gap
+          // would have moved the generation. Keep waiting for a future one.
+          continue;
+        }
         done = true;
         stop();
         await queueTaskNotification(ctx, parentThreadId, childThreadId);
@@ -3339,6 +3368,7 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
     }
   };
   if (!onlyFutureSettles) void check();
+  else if (sinceGeneration !== null) void check();
 }
 
 /** One checklist item, as the tasks panel reads it (`turn.plan.updated`'s `plan`). */

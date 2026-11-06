@@ -98,7 +98,7 @@ describe("a task notification with background work still running", () => {
     expect(text).not.toContain("has settled");
   });
 
-  it("says plainly when the provider cannot report background work", () => {
+  it("says it cannot verify rather than crying not finished when nothing is named", () => {
     const text = taskNotificationText([
       {
         taskId: "child",
@@ -115,8 +115,34 @@ describe("a task notification with background work still running", () => {
         backgroundUnknown: true,
       },
     ]);
+    expect(text).toContain("could not verify");
+    expect(text).toContain("Check task_status");
+    expect(text).not.toContain("not finished");
+    expect(text).not.toContain("has settled.");
+  });
+
+  it("still reads not finished when work is named, even where the provider cannot report it all", () => {
+    const text = taskNotificationText([
+      {
+        taskId: "child",
+        title: "Build it",
+        status: "completed",
+        durationMs: 60_000,
+        model: "opencode/gpt-5.4",
+        branch: null,
+        headline: "Partial report.",
+        filesChanged: null,
+        additions: null,
+        deletions: null,
+        background: [
+          { taskId: "bg1", description: "bun run check", command: "bun run check", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() },
+        ],
+        backgroundUnknown: true,
+      },
+    ]);
     expect(text).toContain("not finished");
-    expect(text).toContain("could not check");
+    expect(text).toContain("bun run check");
+    expect(text).toContain("beyond what is named above");
   });
 
   it("reads exactly as before when nothing runs and the provider reports fully", () => {

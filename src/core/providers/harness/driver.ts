@@ -528,7 +528,12 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   private wake(session: HarnessSession): void {
     // A running turn takes the notes itself, before its next request; a settled one calls this again.
-    if (session.closed || this.openTurn(session) || session.wakeStreak >= MAX_WAKES_IN_A_ROW) return;
+    if (session.closed || this.openTurn(session)) return;
+    // A new episode: nothing is still running, so earlier wakes no longer
+    // count against this one. Without this, completions past the cap while a
+    // last task still ran would pile notes up forever with no turn to deliver them.
+    if (session.background.running().length === 0) session.wakeStreak = 0;
+    if (session.wakeStreak >= MAX_WAKES_IN_A_ROW) return;
     const target = this.tryTarget(session);
     if (!target) return;
     const notes = session.modelNotes.splice(0).filter((note) => !session.background.endSeen(note.taskId));

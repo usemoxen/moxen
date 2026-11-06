@@ -708,7 +708,7 @@ export interface QueryResults {
   "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
   "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
   "skills.manage.read": { readonly text: string };
-  "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
+  "thread.background.list": { readonly live: boolean; readonly partial: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
   "thread.agent-read": { readonly text: string };
   "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
   "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };

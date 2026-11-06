@@ -954,6 +954,7 @@ export const en = {
   "side.agent_7446": "Agent",
   "side.running_in_the_background_e706": "Running in the background",
   "side.background_commands_monitor_watches_487b": "Background commands, Monitor watches and background subagents appear here while they run.",
+  "side.background_list_partial_9c2d": "Moxen may not see every background task here.",
   "git.no_remote_b921": "no remote",
   "git.detached_1594": "(detached)",
   "git.in_sync_1199": "in sync",
