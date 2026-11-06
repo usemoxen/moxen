@@ -434,6 +434,15 @@ export async function sendTurn(
     // goes out once the continue has run.
     const waitingOut = scheduledFor === null && !running && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const holdUntil = waitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
+    // Order behind an older held turn: a plain send on an idle thread whose
+    // older turn settle held for admission (snooze, settle, exhaustion) does
+    // not run ahead of it. It queues behind, held for admission in turn, and
+    // the admission path runs the older first. When the older cannot run yet
+    // the new message waits behind it — visibly queued, never swallowed. A
+    // message ending usage protection is the exception: it releases the hold
+    // and runs first, as protection promises.
+    const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
+      && turns.some((turn) => turn.status === "queued" && turn.heldAtSettle === true && !turn.queue);
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
     let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
@@ -441,15 +450,16 @@ export async function sendTurn(
     } : input.queue;
     if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
-    const status = heldQueue || usageHeld || holdUntil !== null || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = heldQueue || usageHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
+      ...(heldBehind ? { heldAtSettle: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
-        delivery === "queue" || waitingOut !== null ? (status === "queued" ? "queued" : "started")
+        delivery === "queue" || waitingOut !== null || heldBehind ? (status === "queued" ? "queued" : "started")
         : delivery === "restart" ? "restarted"
         : "started",
       messageId: store.newId(),

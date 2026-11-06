@@ -1278,7 +1278,15 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
   }
   const fresh = (sent.delivery === "started" || sent.delivery === "restarted") && sent.turn.status === "running";
-  if (!fresh) return { ...sent, run: null };
+  if (!fresh) {
+    // A send that queued behind an older held turn: start the older now when
+    // it is admissible, so it goes first without waiting for the next tick.
+    // Anything still blocked simply stays queued.
+    if (sent.turn.status === "queued" && sent.turn.heldAtSettle === true && sent.delivery === "queued" && !input.queue && input.scheduledFor === undefined) {
+      await runDueScheduledTurn(ctx, thread.id).catch(() => undefined);
+    }
+    return { ...sent, run: null };
+  }
   // The turn is live in this process from here until `executeTurn` takes it:
   // a stop landing while the session starts still promotes the turn queued
   // behind it, and this claim is what tells that stop a runner is coming.

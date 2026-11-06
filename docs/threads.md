@@ -52,6 +52,15 @@ active again and the provider has room — an unsnooze, or the snooze or
 the limit lapsing, is enough; no message needs to be sent. A message left
 queued any other way still waits for the next message or settle.
 
+A send on an idle thread never jumps ahead of an older held turn: the new
+message queues behind it, held for admission in turn, and the send reports
+it queued (it waits in the Work queue, it is not lost). The older turn goes
+first once nothing blocks it. A held turn that genuinely cannot run yet — a
+snoozed thread, a provider with no room — still holds its place, so the new
+message waits behind it rather than running first; unsnoozing, or the limit
+lapsing, releases both in order. Sending an immediate user message to end
+usage protection is the exception: it releases that hold and runs first.
+
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.

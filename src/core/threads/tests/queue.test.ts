@@ -420,4 +420,42 @@ describe("admission of held plain queued turns", () => {
     expect(w.sent.map((turn) => turn.prompt)).toContain("queued past the limit");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
   });
+
+  it("queues a fresh send behind an older held turn and runs the older first", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued past the limit", delivery: "queue" });
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The limit lapses, but the fresh send still queues behind the older held
+    // turn instead of running ahead of it — and the send says so.
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
+    const fresh = await startTurn(w.ctx, { threadId: thread.id, prompt: "newer message" });
+    expect(fresh.delivery).toBe("queued");
+    expect(fresh.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The older held turn goes first: the admission run takes it, and the
+    // newer message follows in the same run — older text first — rather than
+    // jumping ahead of it.
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
+    expect(w.sent.map((turn) => turn.prompt)).toEqual(["queued past the limit\n\nnewer message"]);
+  });
+
+  it("holds a queued send behind a held turn that cannot run yet, reporting it queued", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued while snoozed", delivery: "queue" });
+    await snoozeThread(w.store, thread.id, new Date(now + 3600_000).toISOString());
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    // The snooze still holds the older turn, so the new message waits behind
+    // it — queued with its place kept, not swallowed and not jumped ahead.
+    const fresh = await startTurn(w.ctx, { threadId: thread.id, prompt: "newer message", delivery: "queue" });
+    expect(fresh.delivery).toBe("queued");
+    expect(fresh.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "queued", "queued"]);
+  });
 });
