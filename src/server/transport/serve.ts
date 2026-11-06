@@ -144,7 +144,8 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   socket.once("close", () => waiting.abort());
   // Set when a local hello came from another build: greeted (so `shutdown`
   // keeps working, which stopping the old server needs) but good for
-  // nothing else.
+  // nothing else. Sticky by design: real clients hello once per socket, and
+  // limited is strictly less capable, so a second hello has nothing to gain.
   let limited: CliError | null = null;
   /** Armed by the first ping: from then on this client has said it will keep being heard from. */
   const watch = (): void => {

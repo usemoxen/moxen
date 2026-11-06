@@ -9,8 +9,10 @@
  */
 import { defaultConfigPath, migrateLegacyConfig } from "../core/config.js";
 import { buildIdentity } from "../core/build.js";
+import { CliError } from "../core/errors.js";
+import { resolveStoreRoot } from "../core/threads/store.js";
 import type { CliConfig } from "../core/types.js";
-import { DirectConnection } from "./connection.js";
+import { DirectConnection, storeLockGone } from "./connection.js";
 import { defaultEndpoint } from "./transport/endpoint.js";
 import { RemoteAccess } from "./transport/remoteaccess.js";
 import { serve, type ServerHandle } from "./transport/serve.js";
@@ -20,6 +22,15 @@ export interface RunServerOptions {
   /** Config source; defaults to re-reading the user's config per operation. */
   readonly config?: () => Promise<CliConfig>;
 }
+
+/**
+ * How long a starting server waits for a stopping one's store lock to
+ * clear before refusing: `shutdown` is acknowledged before the drivers
+ * drain and the lock is released, so an immediate restart would otherwise
+ * meet a live lock and need a manual retry.
+ */
+const STORE_RETRY_WAIT_MS = 10_000;
+const STORE_RETRY_POLL_MS = 100;
 
 export async function runServer(options: RunServerOptions = {}): Promise<ServerHandle> {
   // The server owns the config file, so it is the one to bring an old one over.
@@ -39,8 +50,21 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
   try {
     // The store has one owner: a second server on it is refused before it
     // listens, not on the first client request. A lock from a crashed
-    // server is taken over.
-    await connection.claimStore();
+    // server is taken over. A stopping server still holds a live lock just
+    // after it acknowledged shutdown, so on STORE_OWNED wait for it to
+    // clear and try once more before surfacing the error.
+    try {
+      await connection.claimStore();
+    } catch (cause) {
+      if (!(cause instanceof CliError) || cause.code !== "STORE_OWNED") throw cause;
+      const root = resolveStoreRoot();
+      const deadline = Date.now() + STORE_RETRY_WAIT_MS;
+      while (!(await storeLockGone(root))) {
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, STORE_RETRY_POLL_MS));
+      }
+      await connection.claimStore();
+    }
     handle = await serve({
       endpoint: options.endpoint ?? defaultEndpoint(),
       api: connection,

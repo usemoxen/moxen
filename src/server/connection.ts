@@ -297,6 +297,30 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** The store's lock as it stands: null when no claim is recorded, or it cannot be read. */
+export async function readStoreLock(storeRoot: string): Promise<StoreLock | null> {
+  const raw = await readFile(path.join(storeRoot, STORE_LOCK_FILE), "utf8").catch(() => null);
+  if (raw === null) return null;
+  try {
+    const lock = JSON.parse(raw) as Partial<StoreLock>;
+    if (typeof lock.pid !== "number" || typeof lock.build !== "string") return null;
+    return {
+      build: lock.build,
+      display: typeof lock.display === "string" ? lock.display : lock.build,
+      pid: lock.pid,
+      startedAt: typeof lock.startedAt === "string" ? lock.startedAt : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a starting server may take the store: no lock, or its holder is gone (or this process). */
+export async function storeLockGone(storeRoot: string): Promise<boolean> {
+  const lock = await readStoreLock(storeRoot);
+  return lock === null || lock.pid === process.pid || !processAlive(lock.pid);
+}
+
 export type { TurnDriverFactories } from "../core/threads/execute.js";
 
 export interface DirectConnectionOptions {
@@ -843,16 +867,13 @@ export class DirectConnection implements ClientApi {
 
   /** Release the store claim, so the next server starts without meeting a stale lock. */
   private async releaseStore(): Promise<void> {
-    if (claimedStores.get(this.storeRoot)?.token === this.claimToken) claimedStores.delete(this.storeRoot);
-    const file = path.join(this.storeRoot, STORE_LOCK_FILE);
-    try {
-      const raw = await readFile(file, "utf8").catch(() => null);
-      if (raw === null) return;
-      const lock = JSON.parse(raw) as Partial<StoreLock>;
-      if (lock.pid === process.pid) await rm(file, { force: true });
-    } catch {
-      // A corrupt lock is the next claim's to take over, not this close's to fix.
-    }
+    // Only the owner releases: a refused second claimant shares this
+    // process's pid, so pid alone cannot tell its close from the owner's —
+    // without this, its close deletes the live owner's lock file.
+    const owned = claimedStores.get(this.storeRoot)?.token === this.claimToken;
+    if (!owned) return;
+    claimedStores.delete(this.storeRoot);
+    await rm(path.join(this.storeRoot, STORE_LOCK_FILE), { force: true }).catch(() => undefined);
   }
 
   private schedulingStarted = false;
