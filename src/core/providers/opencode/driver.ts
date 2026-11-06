@@ -25,6 +25,8 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import type { Done } from "effect/Cause";
 
+import { TIMED_OUT, withinMs } from "../timeout.js";
+
 import { CliError } from "../../errors.js";
 import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolation.js";
 import { modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../../threads/modes.js";
@@ -110,7 +112,9 @@ export interface OpenCodeDriverOptions {
   readonly interruptAckTimeoutMs?: number;
   /** How long a server stays quiet before a pending tool-settings restart (default 1.5 s; see `reconcileServers`). */
   readonly reconcileDelayMs?: number;
-  /** How long a stop waits for an in-flight start before abandoning it (default 2 s, well under the server's per-driver stop budget). */
+  /** How long an interrupt or stop waits for an abort connection and the abort itself (default 1 s); a timeout skips the abort. */
+  readonly abortWaitMs?: number;
+  /** How long a stop waits for an in-flight start before abandoning it (default 1 s, well under the server's per-driver stop budget). */
   readonly stopWaitMs?: number;
 }
 
@@ -295,8 +299,11 @@ function subagentHistoryItems(messages: ReadonlyArray<OpencodeMessage>): Subagen
 /** How long a server stays up after it goes quiet before a pending tool-settings restart (see `reconcileServers`). */
 const RECONCILE_DELAY_MS = 1_500;
 
+/** How long an interrupt or stop waits for an abort connection and the abort itself (see `abortWaitMs`). */
+const ABORT_WAIT_MS = 1_000;
+
 /** How long a stop waits for an in-flight start before abandoning it (see `stopWaitMs`). */
-const STOP_WAIT_MS = 2_000;
+const STOP_WAIT_MS = 1_000;
 
 /** An `openSession` still running: a stop waits for it, bounded, then abandons it (see `abandonStart`). */
 interface PendingStart {
@@ -634,12 +641,20 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly interruptTailMs = 3_000;
   private readonly interruptAckTimeoutMs: number;
   private readonly reconcileDelayMs: number;
+  private readonly abortWaitMs: number;
   private readonly stopWaitMs: number;
   private readonly stallTimers = new Map<TurnId, ReturnType<typeof setTimeout>>();
   private readonly sessions = new Map<ThreadId, OpenCodeSession>();
   /** Starts in flight, by thread: a stop waits for the start bounded, then abandons it (see `abandonStart`). */
   private readonly starting = new Map<ThreadId, PendingStart>();
   private readonly connections = new Map<string, Promise<OpencodeServerConnection>>();
+  /**
+   * Establishes a stop discarded while in flight: their late frames dispose
+   * the connection instead of registering it (see `connectionForSession`),
+   * then delete the entry here. Only `stopAll` adds to it; frames delete on
+   * observe, so it cannot grow.
+   */
+  private readonly discarded = new Set<Promise<OpencodeServerConnection>>();
   /**
    * The tools OpenCode's own server is told to leave off, and whether Moxen's prompt replaces its own, are part of
    * its config, fixed when it starts. `wanted` is what the settings say now (per server, which is per directory);
@@ -680,6 +695,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.toolStallTimeoutMs = options.toolStallTimeoutMs ?? this.stallTimeoutMs * 6;
     this.interruptAckTimeoutMs = options.interruptAckTimeoutMs ?? 3000;
     this.reconcileDelayMs = options.reconcileDelayMs ?? RECONCILE_DELAY_MS;
+    this.abortWaitMs = options.abortWaitMs ?? ABORT_WAIT_MS;
     this.stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS;
   }
 
@@ -720,6 +736,15 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const existing = this.connections.get(key);
     if (existing) {
       const connection = await existing;
+      if (this.discarded.has(existing)) {
+        // A stop discarded this establish while it was in flight: never
+        // register it, dispose it instead.
+        this.discarded.delete(existing);
+        void connection.dispose().catch(() => undefined);
+        throw new CliError("OPENCODE_START_ABANDONED", `Its server was discarded by a stop.`, {
+          details: { workingDirectory },
+        });
+      }
       // A pump that died (dropped stream) is restarted before anything is sent:
       // v2 replays nothing, so an event stream that is not live loses answers.
       await this.ensurePump(key, connection);
@@ -737,6 +762,15 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.connections.set(key, pending);
     try {
       const connection = await pending;
+      if (this.discarded.has(pending)) {
+        // A stop discarded this establish while it was in flight: never
+        // register it, dispose it instead.
+        this.discarded.delete(pending);
+        void connection.dispose().catch(() => undefined);
+        throw new CliError("OPENCODE_START_ABANDONED", `Its server was discarded by a stop.`, {
+          details: { workingDirectory },
+        });
+      }
       this.liveConnections.set(key, connection);
       // A spawned server that exits is forgotten, so the next call respawns it.
       void connection.closed.then(() => this.dropConnection(key, connection, "the server exited"));
@@ -840,41 +874,30 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   /**
    * Wait for in-flight starts, at most `stopWaitMs`: a wedged transport must
-   * not hang a stop. The timer is unref'd and cleared; unsettled entries stay
-   * registered, so the caller can abandon exactly those.
+   * not hang a stop. Unsettled entries stay registered, so the caller can
+   * abandon exactly those.
    */
   private async awaitStarts(starts: ReadonlyArray<PendingStart>): Promise<void> {
     if (starts.length === 0) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        Promise.allSettled(starts.map((start) => start.promise)),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, this.stopWaitMs);
-          (timer as { unref?: () => void }).unref?.();
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    await withinMs(Promise.allSettled(starts.map((start) => start.promise)), this.stopWaitMs);
   }
 
   /**
-   * Give up on a wedged start: its late resolution tears itself down instead
-   * of registering (see `openSession`), and whatever it already holds is
-   * dropped now so the wedge is killed.
+   * Give up on a wedged start: its late resolution tears down only its own
+   * native session instead of registering (see `openSession`). The shared
+   * connection is never dropped here: sibling sessions may be using it, and
+   * a stop must not fail their turns.
    */
   private abandonStart(entry: PendingStart): void {
     entry.abandoned = true;
-    const live = this.liveConnections.get(entry.workingDirectory);
-    if (live) this.dropConnection(entry.workingDirectory, live, "a stop timed out waiting for its start");
   }
 
   /**
    * The connection an abort may use: a live one, one already being
    * established, or a reattach to an external server (whose address is
    * configured, so no process is spawned). Null when reaching the server
-   * would spawn a process: never start a server just to deliver an abort.
+   * would spawn a process, or when reaching it takes longer than
+   * `abortWaitMs`: never start a server, nor hang, just to deliver an abort.
    */
   private async connectionForAbort(session: OpenCodeSession): Promise<OpencodeServerConnection | null> {
     const key = session.workingDirectory;
@@ -883,14 +906,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const inFlight = this.connections.get(key);
     if (inFlight) {
       try {
-        return await inFlight;
+        const raced = await withinMs(inFlight, this.abortWaitMs);
+        return raced === TIMED_OUT ? null : raced;
       } catch {
         return null;
       }
     }
     if (this.settings.serverUrl.trim().length === 0) return null;
     try {
-      return await this.connectionFor(session);
+      const raced = await withinMs(this.connectionFor(session), this.abortWaitMs);
+      return raced === TIMED_OUT ? null : raced;
     } catch {
       return null;
     }
@@ -1139,10 +1164,17 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
             if (this.starting.get(input.threadId) === entry) this.starting.delete(input.threadId);
           }
         }
-        // Join the in-flight start, failure included. A stop may have
-        // overlapped it (`stopping`): whatever it registered is being closed,
-        // so loop and start fresh instead of handing back a dead session.
-        await pending.promise;
+        // Join the in-flight start. A stop may have overlapped it
+        // (`stopping`): whatever it registered is being closed, so loop and
+        // start fresh instead of handing back a dead session — including when
+        // the stop abandoned it and the join fails with that.
+        try {
+          await pending.promise;
+        } catch (cause) {
+          if (!pending.stopping) throw cause;
+          fresh = true;
+          continue;
+        }
         if (pending.stopping) {
           fresh = true;
           continue;
@@ -1210,7 +1242,10 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // synchronous with the `set`, so no stop can slip between them.
       const entry = this.starting.get(input.threadId);
       if (entry?.abandoned === true) {
-        this.dropConnection(input.workingDirectory, connection, "its start was abandoned by a stop");
+        // Tear down only this start's own native session: the connection is
+        // shared with sibling sessions and must not be dropped. Bounded, like
+        // every other wait on the stop path.
+        await withinMs(connection.abortSession(nativeSessionId).catch(() => undefined), this.abortWaitMs);
         throw new CliError("OPENCODE_START_ABANDONED", `Start for thread ${input.threadId} was abandoned by a stop.`, {
           details: { threadId: input.threadId },
         });
@@ -1420,12 +1455,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       await this.rejectParked(session, connection, "Interrupted.");
       if (connection) {
         try {
-          if (turn) await this.cancelQueuedInput(session, connection, turn);
-          await connection.abortSession(session.nativeSessionId);
+          // Every wait here is bounded: a wedged server must not hang the interrupt.
+          if (turn) await withinMs(this.cancelQueuedInput(session, connection, turn), this.abortWaitMs);
+          await withinMs(connection.abortSession(session.nativeSessionId), this.abortWaitMs);
           // The parent's turn is waiting on its subagents (a foreground call
           // returns only when its child does), and aborting the parent does not
           // reach them: they would run on, unseen. Stop them with it.
-          await this.stopChildren(session, connection);
+          await withinMs(this.stopChildren(session, connection), this.abortWaitMs);
         } catch (cause) {
           if (!session.closed) throw cause;
         }
@@ -1434,7 +1470,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // after this call returns. Settling before it would let a prompt sent
       // right away be completed by the old run's confirmation.
       // (It may already have: the event can beat the HTTP reply.)
-      // Without a connection no server can confirm: settle at once.
+      // Without a connection no server can confirm: settle at once. An abort
+      // that timed out still waits below: its late confirmation must not
+      // complete the next turn.
       if (connection && turn && turn.status === "running" && !turn.interruptAcked) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, this.interruptAckTimeoutMs);
@@ -1649,16 +1687,14 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       if (entry?.session && session !== entry.session) return;
       session.closed = true;
       this.settleOpenTurn(session, "interrupted", "Session stopped.");
-      // Best effort, and never a reason to spawn a server: the server may already be gone.
+      // Best effort and bounded, and never a reason to spawn a server: the server may already be gone.
       const connection = await this.connectionForAbort(session);
       if (connection) {
-        try {
-          await connection.abortSession(session.nativeSessionId);
-        } catch {
-          // Best effort: the server may already be gone.
-        }
+        await withinMs(connection.abortSession(session.nativeSessionId), this.abortWaitMs);
       }
-      this.sessions.delete(threadId);
+      // A successor may have registered while the abort was awaited: delete
+      // only the session this stop closed.
+      if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
       this.transferMoxenEntry(session);
     });
 
@@ -1766,12 +1802,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         this.sessions.clear();
         for (const pump of this.pumps.values()) pump.controller.abort();
         this.pumps.clear();
-        const connections = [...this.connections.values()];
+        // Disposing is parallel and never awaited one by one: a wedged
+        // establish must not hang the stop. Settled servers are disposed now;
+        // a late success finds its pending discarded and disposes itself
+        // (see `connectionForSession`) instead of registering.
+        const pendings = [...this.connections.entries()];
+        const live = [...this.liveConnections.values()];
         this.connections.clear();
         this.liveConnections.clear();
-        for (const pending of connections) {
-          await pending.then((connection) => connection.dispose()).catch(() => undefined);
-        }
+        for (const [, pending] of pendings) this.discarded.add(pending);
+        await Promise.allSettled(live.map((connection) => connection.dispose()));
         // Signal completion on the event stream: buffered events are still
         // delivered, the stream then ends so the pump in `threads/execute.ts`
         // releases its fiber instead of waiting on a driver that is gone.
