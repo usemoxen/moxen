@@ -569,8 +569,16 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
     // of the prompt, like a fresh send. Without a baseline this captures one
-    // and stays quiet. (Native tools need the session setup, which only the
-    // admission path holds; this runner does not re-register them.)
+    // and stays quiet.
+    //
+    // No MCP/native-tool refresh here, unlike a fresh send (`startTurn`) or
+    // an admission resume (`runRecoveredTurn`): those recompute the session
+    // setup from config, and this runner cannot — it runs without an
+    // operation context, on whatever the settling runner handed it. The
+    // promotion runs seconds after a turn whose own send applied that
+    // moment's registrations, and the next send or admission refreshes again,
+    // so only an edit landing mid-turn waits one extra turn. Rule files need
+    // no setup, so they do refresh above.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     claimed = null;
     void executeTurn({

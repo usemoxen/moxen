@@ -74,6 +74,10 @@ export class UsageProtection {
         const thread = await ctx.store.readThreadRecord(threadId);
         if (!thread || thread.deletedAt) throw new CliError("THREAD_NOT_FOUND", "The thread does not exist.");
         if (thread.archivedAt) throw new CliError("THREAD_ARCHIVED", "An archived thread cannot be protected.");
+        // A forced hold ends on a message, but settled threads refuse messages
+        // and the queue cannot cancel a forced hold: accepting this would
+        // leave a hold that sticks forever (released again on the next tick).
+        if (thread.settledAt) throw new CliError("THREAD_SETTLED", "A settled thread cannot be protected. Unsettle it first.");
         if (thread.usagePause?.forced) return;
         const running = openTurn(await ctx.store.readTurns(threadId));
         const provider = usageKeyForInstance((running?.modelSelection ?? thread.modelSelection).instanceId);
