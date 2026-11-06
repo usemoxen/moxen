@@ -40,14 +40,14 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   };
   // Back to the top of the timeline, then click the user prompt: mouse-up on
   // a PromptBlock (not a selection drag) opens message actions. Found by its
-  // label with room to spare on the left: a fixed cell misses whenever the
-  // rows above it shift, and clicking text selects it (which the actions
-  // entry reads as a drag and swallows), so click the padding instead.
+  // label, since the rows above it shift — and clicked on its text, since
+  // the card's padding cells do not hit-test in this renderer. A same-cell
+  // down+up selects nothing, so no drag is ever read.
   const clickPrompt = async (): Promise<void> => {
     const rows = frame().split("\n");
     const y = rows.findIndex((line) => line.includes("Render markdown"));
     if (y === -1) fail("timeline shows no user prompt to open");
-    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") - 2, y));
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") + 2, y));
     await setup.flush();
   };
   await act(async () => setup.mockInput.pressKey("HOME"));

@@ -31,8 +31,6 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   // Revert, resolved through its turn).
   await act(async () => {
     const header = replyHeader(setup);
-    // eslint-disable-next-line no-console
-    console.log(`--- reply click target: x=${header.x} y=${header.y} row=${JSON.stringify(setup.captureCharFrame().split("\n")[header.y])} ---`);
     await setup.mockMouse.click(header.x, header.y);
   });
   await setup.flush();
