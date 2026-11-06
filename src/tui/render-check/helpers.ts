@@ -20,17 +20,24 @@ export function permissionFooterTarget(setup: TestRendererSetup): { x: number; y
 }
 
 /** The closing assistant reply's header. Located fresh every time — flat
-    tool rows above it reflow the pane, so stale coordinates would miss. */
+    tool rows above it reflow the pane, so stale coordinates would miss.
+    Intermediate assistant messages share the header text but are
+    display-only: the closing reply is the last match. */
 export function replyHeader(setup: TestRendererSetup): { x: number; y: number } {
   const rows = setup.captureCharFrame().split("\n");
-  const y = rows.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
+  let y = -1;
+  rows.forEach((line, index) => {
+    if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line)) y = index;
+  });
   if (y === -1) fail("closing reply header not visible");
   const x = rows[y]?.indexOf("Claude Opus 5") ?? -1;
-  // Click the header row well right of the text, still inside the card: a
-  // click on a text cell leaves a live selection behind, and any later
-  // message-action click reads that stale selection as "that was a drag"
-  // and swallows itself. Empty card chrome selects only spaces.
-  return { x: x === -1 ? 100 : Math.min(x + 60, 125), y };
+  if (x === -1) fail("closing reply header has no clickable label");
+  // Click the header row's own rail: the box's border cell hit-tests, unlike
+  // the padding beside it, and it never leaves the card — a well-right-of-the
+  // text cell lands in the side panel whenever the pane narrows, while a text
+  // cell leaves a live selection that a later message-action click reads as
+  // a drag and swallows. Empty card chrome selects only spaces.
+  return { x: x - 3, y };
 }
 
 /** The Worked fold, located by text from the top — flat tool rows reflow

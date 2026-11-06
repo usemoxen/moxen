@@ -120,3 +120,24 @@ it("decodes conditional queue entries without trusting internal latches or admis
   expect(command.queue).not.toHaveProperty("requestId");
   expect(() => decodeCommand({ type: "queue.edit", threadId: "thread", turnId: "turn", action: "edit", policy: { conditions: [{ type: "usage", provider: "codex", window: "weekly", minimum: -1 }] } })).toThrow();
 });
+
+it("reads the work queue from candidate threads without rereading idle history", async () => {
+  const w = await testHarness();
+  for (let index = 0; index < 20; index++) {
+    const thread = await createThread(w.store, { projectId: "p", title: `idle ${index}`, modelSelection: { instanceId: "codex", model: "test" }, env: { mode: "local", path: w.work, branch: null } });
+    const finished = await sendTurn(w.store, thread.id, { prompt: "done work" });
+    await completeTurn(w.store, thread.id, finished.turn.id, { text: "done" });
+  }
+  const busy = await createThread(w.store, { projectId: "p", title: "waiting work", modelSelection: { instanceId: "codex", model: "test" }, env: { mode: "local", path: w.work, branch: null } });
+  const queued = await sendTurn(w.store, busy.id, { prompt: "waiting work", queue: parseQueuePolicy({ conditions: [] }) });
+  const api = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });
+  try {
+    expect((await api.query({ type: "queue.read" })).entries.some((entry) => entry.turnId === queued.turn.id)).toBe(true);
+    const store = await (api as unknown as { store: () => Promise<typeof w.store> }).store();
+    const turns = vi.spyOn(store, "readTurns");
+    const lists = vi.spyOn(store, "listThreadIds");
+    expect((await api.query({ type: "queue.read" })).entries.some((entry) => entry.turnId === queued.turn.id)).toBe(true);
+    expect(lists).not.toHaveBeenCalled();
+    expect(turns.mock.calls.every(([id]) => id === busy.id)).toBe(true);
+  } finally { await api.close(); }
+});

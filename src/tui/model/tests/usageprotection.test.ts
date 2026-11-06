@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResults } from "../../../server/protocol.js";
-import { usageProtectionNotices } from "../usageprotection.js";
+import { CliError } from "../../../core/errors.js";
+import { protectionActionError, usageProtectionNotices } from "../usageprotection.js";
 import { queueConditionText, queueEntryState } from "../workqueue.js";
 
 type Queue = QueryResults["usage.protection"]["queue"][number];
@@ -37,6 +38,18 @@ describe("usage recovery status", () => {
     const forced = notice({ forced: true, phase: "waiting" });
     expect(detailText({ forced: true, phase: "waiting" })).toBe("Manually protected. Send a message to end it.");
     expect(forced.actions.map((action) => action.label)).toEqual(["Move first", "Move last"]);
+  });
+
+  it("says a rejected queue action failed through the catalog, never as a raw CliError string", () => {
+    const message = protectionActionError(new CliError("USAGE_QUEUE_MISSING", "The thread is not waiting for usage."));
+    expect(message).toBe("Could not update the recovery queue: The thread is not waiting for usage.");
+    expect(message).not.toContain("CliError");
+  });
+
+  it("strips the Error prefix from a plain failure inside the catalog sentence", () => {
+    const message = protectionActionError(new Error("boom"));
+    expect(message).toContain("boom");
+    expect(message).not.toContain("Error:");
   });
 
   it("names a running recovery in the work queue as the banner does", () => {

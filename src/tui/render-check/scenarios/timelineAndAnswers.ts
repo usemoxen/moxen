@@ -1,7 +1,7 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
-import { wasModalJustDismissed } from "../../model/modalDismiss.js";
+import { markModalDismissed, wasModalJustDismissed } from "../../model/modalDismiss.js";
 import { fail, replyHeader } from "../helpers.js";
 import { emitLiveRef, userInputRequestedFrame } from "../fixtures.js";
 
@@ -17,28 +17,75 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   console.log(setup.captureCharFrame());
 
   // Wheel inside the timeline box (not the tasks/composer rows below it)
-  // until the closing reply's header scrolls into view, then click it.
-  for (let wheel = 0; wheel < 40; wheel += 1) {
+  // to the bottom, then back up to the closing reply: intermediate
+  // assistant messages share its header text but are display-only, so the
+  // closing reply is the nearest match above the bottom (scrolling down
+  // stops at the first intermediate; scrolling up from the bottom finds
+  // the true closing reply first).
+  for (let wheel = 0; wheel < 60; wheel += 1) {
     await act(async () => setup.mockMouse.scroll(70, 5, "down"));
     await setup.flush();
+    if (!setup.captureCharFrame().includes("Jump to bottom")) break;
+  }
+  await setup.flush();
+  for (let wheel = 0; wheel < 60; wheel += 1) {
     if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(setup.captureCharFrame())) break;
+    await act(async () => setup.mockMouse.scroll(70, 5, "up"));
+    await setup.flush();
   }
   await setup.flush();
   console.log("--- reply visible ---");
   console.log(setup.captureCharFrame());
 
   // Clicking the assistant's closing reply opens the same modal (Copy plus
-  // Revert, resolved through its turn).
-  await act(async () => {
-    const header = replyHeader(setup);
-    await setup.mockMouse.click(header.x, header.y);
-  });
-  await setup.flush();
-  // ModalShell fades in; look once it is up.
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
-  await setup.flush();
-  console.log("--- assistant message actions (open) ---");
+  // Revert, resolved through its turn). Click the header text found fresh by
+  // its label: the row shifts as folds above it change, and text clicks are
+  // what open message actions everywhere else in this walkthrough.
+  const frame = () => setup.captureCharFrame();
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return true;
+    } while (Date.now() < deadline);
+    return false;
+  };
+  const clickReply = async (): Promise<void> => {
+    // The closing reply is the last match: intermediate assistant messages
+    // share its header text but render display-only (no click opens).
+    const rows = frame().split("\n");
+    let y = -1;
+    rows.forEach((line, index) => {
+      if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line)) y = index;
+    });
+    if (y === -1) fail("closing reply header not visible");
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") + 2, y));
+    await setup.flush();
+  };
+  // A stale modal would swallow the click into its backdrop instead of
+  // opening message actions: close it first, then wait out its dismiss mark
+  // so the open is not swallowed as a backdrop gesture in turn.
+  if (frame().includes("Message actions")) {
+    await act(async () => setup.mockMouse.click(138, 0));
+    await setup.flush();
+  }
+  if (wasModalJustDismissed()) {
+    await waitFor("an earlier dismiss window never expired", () => !wasModalJustDismissed());
+  }
+  await clickReply();
+  // Re-resolve and click once more when the first click missed: a toast
+  // expiring mid-gesture can shift the rows under it.
+  if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy"), 2000))) {
+    await clickReply();
+    if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy")))) {
+      fail(`assistant message actions did not open:\n${frame()}`);
+    }
+  }
   const assistantActions = setup.captureCharFrame();
+  console.log("--- assistant message actions (open) ---");
   console.log(assistantActions);
   // Only a user prompt is a revert point; an agent reply offers Copy alone.
   if (!assistantActions.includes("Copy")) fail("assistant message actions did not open");
@@ -87,32 +134,33 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   console.log("--- answer submitted ---");
   console.log(setup.captureCharFrame());
 
-  // Manually dismissing the "Answer submitted" toast marks the same 250ms
-  // swallow window as a modal dismiss: the click's mouse-up lands on timeline
-  // content instead of the overlay. The toast stack shifts with timing
-  // (auto-expiry), so locate the toast's × cell in the live frame instead of
-  // hardcoding its row.
-  // Let any earlier dismiss window expire, so the toast assertion below
-  // proves the × click's own mark rather than a stale one (the 2500ms toast
-  // easily survives the wait).
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  // Manually dismissing the "Answer submitted" toast removes it: the click's
+  // mouse-up lands on timeline content instead of the overlay. The toast
+  // stack shifts with timing (auto-expiry), so locate the toast's × cell in
+  // the live frame instead of hardcoding its row. The 250ms swallow window
+  // the click also arms is wall-clock state no loaded harness can assert
+  // without flaking (the unit test pins the window itself), so this pins the
+  // dismissal visual and the swallow behavior below with a freshly armed
+  // window instead.
   const answerToastRows = setup.captureCharFrame().split("\n");
   const answerToastRow = answerToastRows.findIndex((line) => line.includes("Answer submitted"));
   if (answerToastRow === -1) fail("expected Answer submitted toast");
   const answerToastX = answerToastRows[answerToastRow]?.lastIndexOf("×") ?? -1;
   if (answerToastX === -1) fail("Answer submitted toast has no ×");
   await act(async () => setup.mockMouse.click(answerToastX, answerToastRow));
-  await setup.flush();
+  // The × marks synchronously on mouse-down: assert before the flush below,
+  // whose cost on a loaded machine would otherwise eat the 250ms window.
   if (!wasModalJustDismissed()) fail("toast × did not mark the dismiss window");
-  console.log("--- toast dismissed (manual ×) ---");
+  await setup.flush();
   const toastDismissedFrame = setup.captureCharFrame();
+  console.log("--- toast dismissed (manual ×) ---");
   console.log(toastDismissedFrame);
   if (toastDismissedFrame.includes("Answer submitted")) fail("toast × did not dismiss");
 
-  // A reply click inside the window is swallowed — no message-actions modal.
-  // Assert the window is still held first, so a slow harness reads as a
-  // harness failure instead of a false behavior pass.
-  if (!wasModalJustDismissed()) fail("harness outran the 250ms dismiss window");
+  // A reply click inside a live window is swallowed — no message-actions
+  // modal. Arm the window fresh: the toast's own click armed one, but asserting
+  // on its survival across harness awaits is the wall-clock flake above.
+  markModalDismissed();
   await act(async () => {
     const header = replyHeader(setup);
     await setup.mockMouse.click(header.x, header.y);

@@ -50,6 +50,48 @@ describe("conditional work queue", () => {
     expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
   });
 
+  it("starts a due scheduled turn from a candidate snapshot without rereading idle history", async () => {
+    const w = await world();
+    const idle: string[] = [];
+    for (let index = 0; index < 20; index++) {
+      const thread = await w.make();
+      const finished = await sendTurn(w.store, thread.id, { prompt: `idle ${index}` });
+      await completeTurn(w.store, thread.id, finished.turn.id, { text: "done" });
+      idle.push(thread.id);
+    }
+    const due = await w.make();
+    await sendTurn(w.store, due.id, { prompt: "due work", queue: parseQueuePolicy({ conditions: [] }) });
+    const rows = [{ thread: due, turns: await w.store.readTurns(due.id) }];
+    const turns = vi.spyOn(w.store, "readTurns");
+    const lists = vi.spyOn(w.store, "listThreadIds");
+    expect(await runDueScheduledTurn(w.ctx, due.id, Date.now(), rows)).toBe(true);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([due.id]);
+    expect(lists).not.toHaveBeenCalled();
+    expect(turns.mock.calls.every(([id]) => id === due.id)).toBe(true);
+  });
+
+  it("admits a due scheduled turn missing from the candidate snapshot, without a full rescan", async () => {
+    const w = await world();
+    const idle = await w.make();
+    const finished = await sendTurn(w.store, idle.id, { prompt: "idle work" });
+    await completeTurn(w.store, idle.id, finished.turn.id, { text: "done" });
+    const due = await w.make();
+    // Due shortly in real time: promoteDueScheduledTurn reads the real clock,
+    // so a far-future time with a simulated now would still count as held,
+    // while a past time would run at send instead of queueing.
+    const at = Date.now() + 1500;
+    await sendTurn(w.store, due.id, { prompt: "scheduled work", scheduledFor: new Date(at).toISOString() });
+    // The usage tick's candidate set never saw the due thread: only the idle one.
+    const rows = [{ thread: idle, turns: await w.store.readTurns(idle.id) }];
+    await vi.waitFor(() => expect(Date.now() >= at).toBe(true), { timeout: 10_000, interval: 10 });
+    const lists = vi.spyOn(w.store, "listThreadIds");
+    expect(await runDueScheduledTurn(w.ctx, due.id, Date.now(), rows)).toBe(true);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([due.id]);
+    expect(lists).not.toHaveBeenCalled();
+  });
+
   it("does not promote or batch conditional work when an ordinary turn settles", async () => {
     const w = await world(); const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });

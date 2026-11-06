@@ -164,7 +164,7 @@ import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/thr
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
-import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
+import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
 import { driverKindOfInstance } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
@@ -799,7 +799,8 @@ export class DirectConnection implements ClientApi {
     if (this.closed || this.dueRunning.has(threadId)) return;
     this.dueRunning.add(threadId);
     try {
-      await runDueScheduledTurn(await this.context(), threadId);
+      const ctx = await this.context();
+      await runDueScheduledTurn(ctx, threadId, Date.now(), await this.usageProtection.snapshotRows(ctx));
     } catch {
       // The turn stays queued; the next poll or timer tries again.
     } finally {
@@ -868,6 +869,12 @@ export class DirectConnection implements ClientApi {
     // skip the read of every thread's turns (and the stringify of them all).
     let lastFingerprint: string | null = null;
     let nextDueAt = Number.POSITIVE_INFINITY;
+    // Turns ledgers are megabytes on long threads: reread one only when its
+    // version moved, reusing the last read for idle history otherwise, so the
+    // cost of a poll no longer grows with idle threads. Records stay fresh
+    // from `listThreads` every poll (small files), and envelopes are rebuilt
+    // from them, so renames, delegation and research runs still update.
+    const turnCache = new Map<string, { version: string; turns: StoredTurn[] }>();
     let stopped = false;
     let polling = false;
     this.startScheduling();
@@ -889,10 +896,17 @@ export class DirectConnection implements ClientApi {
         nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
         const parents = new Map((await store.readDelegations().catch(() => [])).map((row) => [row.childThreadId, row.parentThreadId] as const));
+        const seen = new Set<string>();
         const rows = await Promise.all(
           threads.map(async (entry) => {
-            const turns = await store.readTurns(entry.id);
-            // This poll already reads every thread's turns: a scheduled turn
+            seen.add(entry.id);
+            // Only the changed ledgers are reread: `threadVersion` stats five
+            // small files, while `readTurns` parses megabytes of history.
+            const version = await store.threadVersion(entry.id);
+            const cached = turnCache.get(entry.id);
+            const turns = cached && cached.version === version ? cached.turns : await store.readTurns(entry.id);
+            if (!cached || cached.version !== version) turnCache.set(entry.id, { version, turns });
+            // This poll already reads every changed thread's turns: a scheduled turn
             // that came due — even one another process scheduled — starts here.
             if (turns.some((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) <= now)) {
               void this.runDue(entry.id);
@@ -910,6 +924,7 @@ export class DirectConnection implements ClientApi {
             return toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
           }),
         );
+        for (const id of [...turnCache.keys()]) if (!seen.has(id)) turnCache.delete(id);
         const visible = rows.filter(isVisibleThread);
         const researchRuns = threads.flatMap((thread) => [...(thread.pastResearchRuns ?? []), ...(thread.researchRun ? [thread.researchRun] : [])]);
         const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
@@ -1340,8 +1355,10 @@ export class DirectConnection implements ClientApi {
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
       case "thread.task.ask":
         return await this.taskAsk(command);
-      case "thread.message.queue":
-        return await queueAgentMessage(await this.context(), command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) });
+      case "thread.message.queue": {
+        const ctx = await this.context();
+        return await queueAgentMessage(ctx, command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) }, await this.usageProtection.snapshotRows(ctx));
+      }
       case "thread.plan.set":
         return await recordChecklist(await this.context(), command.threadId, command.plan);
       case "thread.background.stop": {
@@ -2129,8 +2146,10 @@ export class DirectConnection implements ClientApi {
         return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
         return this.usageProtection.read();
-      case "queue.read":
-        return { entries: await readWorkQueue(await this.context()) };
+      case "queue.read": {
+        const ctx = await this.context();
+        return { entries: await readWorkQueue(ctx, await this.usageProtection.snapshotRows(ctx)) };
+      }
       case "handoff.pending":
         return { requestId: await pendingHandoff(await this.context(), query.threadId) };
       case "usage.stats":

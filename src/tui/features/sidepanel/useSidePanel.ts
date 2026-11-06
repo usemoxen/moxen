@@ -3,11 +3,11 @@ import type { MutableRefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
-import { dispatchErrorMessage } from "../../../core/errors.js";
 import type { ContextBreakdown } from "../../model/sidepanel.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { QueryResults } from "../../../server/protocol.js";
 import type { SideTab } from "../../model/sidepanel.js";
+import { protectionActionError } from "../../model/usageprotection.js";
 import { startPolling } from "../../hooks/poll.js";
 import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 
@@ -96,7 +96,7 @@ export function useUsageProtection(client: ClientApi) {
     void client.dispatch(command)
       .then(() => client.query({ type: "usage.protection" }))
       .then(setState)
-      .catch((cause: unknown) => setError(dispatchErrorMessage(cause)));
+      .catch((cause: unknown) => setError(protectionActionError(cause)));
   }, [client]);
   return { state, error, act };
 }

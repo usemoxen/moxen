@@ -31,6 +31,16 @@ export interface PickerRow {
   onPick: () => void;
 }
 
+/**
+ * Call a picker row the way both mouse and keyboard do: with no arguments.
+ * A row like Compact takes an optional callback, which a passed-through
+ * mouse event would impersonate (erroring instead of closing), so neither
+ * path may hand the handler its event.
+ */
+export function pickRow(row: PickerRow): void {
+  row.onPick();
+}
+
 export interface PickerSection {
   header?: string;
   headerColor?: string;
@@ -187,7 +197,7 @@ export function PickerModal({
     if (visible.length > 0) {
       if (key.name === "return" || key.name === "kpenter") {
         const row = visible[safe];
-        if (row !== undefined && row.disabled !== true) row.onPick();
+        if (row !== undefined && row.disabled !== true) pickRow(row);
         return;
       }
       if (key.name === "up") {
@@ -290,7 +300,12 @@ export function PickerModal({
                     key={row.key}
                     style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}
                     backgroundColor={rowBg}
-                    {...(disabled ? {} : { onMouseDown: row.onPick })}
+                    // Never hand the handler the mouse event itself: the contract
+                    // is zero-arg (the keyboard path calls it bare), and a
+                    // row like Compact takes an optional callback that the
+                    // event object would impersonate, erroring instead of
+                    // closing.
+                    {...(disabled ? {} : { onMouseDown: () => pickRow(row) })}
                     onMouseOver={() => setIndex(visible.findIndex((entry) => entry.key === row.key))}
                   >
                     <OverflowText fg={labelFg} bg={rowBg} selectable={false} width={columns.label} prefix={row.selected === true ? "● " : "  "} active={active}>{row.label}</OverflowText>

@@ -6,6 +6,43 @@ import { fail } from "../helpers.js";
 /** The command palette's copy row, export row, filter-to-delete two-step
     confirm, rename, regenerate title, compact, settle, and archive. */
 export async function runCommandPalette(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // The palette's rows shift while async entries (provider updates, queue
+  // entries) load, so every row below is found by its label — never a fixed
+  // cell, which picked whatever row had slid into place (once opening a new
+  // thread and the search picker, poisoning the scenarios after this one).
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
+  const pickRow = async (filter: string, label: string, waiting: string): Promise<void> => {
+    // Start from a closed picker: a focused filter input swallows esc and
+    // ctrl+p alike, so reopening over a stale filter would only append to it
+    // (once yielding "compactsettle" and no match). A backdrop click always
+    // lands outside any centred modal, so it reliably closes one.
+    if (frame().includes("Command palette")) {
+      await act(async () => setup.mockMouse.click(138, 0));
+      await waitFor("stale command palette did not close", () => !frame().includes("Command palette"));
+    }
+    await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+    await setup.flush();
+    for (const char of filter) {
+      await act(async () => setup.mockInput.pressKey(char));
+      await setup.flush();
+    }
+    const rows = (await waitFor(waiting, () => frame().includes(label))).split("\n");
+    const y = rows.findIndex((line) => line.includes(label));
+    if (y === -1) fail(`palette row "${label}" not visible`);
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf(label) + 2, y));
+    await setup.flush();
+  };
   // The command palette opens on ctrl+p from any pane.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
@@ -28,8 +65,14 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   }
 
   // A copy row works inline (toast where the clipboard resolves) and leaves
-  // the palette open for the next action.
-  await act(async () => setup.mockMouse.click(55, 10));
+  // the palette open for the next action. Found by label: async rows above
+  // it move fixed cells.
+  {
+    const rows = setup.captureCharFrame().split("\n");
+    const y = rows.findIndex((line) => line.includes("Copy branch"));
+    if (y === -1) fail('palette row "Copy branch" not visible');
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Copy branch") + 2, y));
+  }
   await setup.flush();
   console.log("--- palette copy branch ---");
   console.log(setup.captureCharFrame());
@@ -96,10 +139,9 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log(setup.captureCharFrame());
 
   // Rename opens its own prompt, prefilled with the current title …
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 18));
-  await setup.flush();
+  // (pickRow opens the palette itself, from a closed picker, so the filter
+  // always starts empty even after a pick that left it open.)
+  await pickRow("rename", "Rename thread", "rename row did not narrow to Rename thread");
   console.log("--- rename modal (open) ---");
   console.log(setup.captureCharFrame());
 
@@ -113,34 +155,24 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
   console.log(setup.captureCharFrame());
 
   // Regenerate fires a toast and closes back to where the palette opened.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 17));
-  await setup.flush();
+  await pickRow("regener", "Regenerate title", "regenerate row did not narrow to Regenerate title");
   console.log("--- title regenerate fired ---");
   console.log(setup.captureCharFrame());
 
   // Compact dispatches a /compact turn and closes.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 20));
+  await pickRow("compact", "Compact session", "compact row did not narrow to Compact session");
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   console.log("--- compact dispatched ---");
   console.log(setup.captureCharFrame());
 
   // Settle toasts and closes, keeping the thread selected.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 16));
-  await setup.flush();
+  await pickRow("settle", "Settle thread", "settle row did not narrow to Settle thread");
   console.log("--- thread settled ---");
   console.log(setup.captureCharFrame());
 
   // Archive last: success toasts and falls back to the next thread.
-  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
-  await setup.flush();
-  await act(async () => setup.mockMouse.click(55, 19));
+  await pickRow("archiv", "Archive thread", "archive row did not narrow to Archive thread");
   await new Promise((resolve) => setTimeout(resolve, 400));
   await setup.flush();
   console.log("--- thread archived (fallback selected) ---");

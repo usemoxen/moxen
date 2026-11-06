@@ -89,6 +89,24 @@ async function focusComposer(setup: TestRendererSetup) {
   await press(setup, "i");
 }
 
+/** A fresh renderer with its thread list loaded and the launch thread open:
+    Shift+Tab needs a selected thread to dispatch its mode switch, and a
+    single flush does not guarantee the shell snapshot (and the auto-open
+    effect after it) has landed on a loaded machine. */
+async function readyComposer(setup: TestRendererSetup) {
+  await setup.flush();
+  await visible(setup, "Message delay and scheduling");
+  await setup.flush();
+  await focusComposer(setup);
+}
+
+/** The next mode switch has dispatched (its server round trip is held by the
+    fixture): Shift+Tab is swallowed without a selected thread, so never
+    assume a single flush delivered it on a loaded machine. */
+async function switched(setup: TestRendererSetup, fixture: GateFixture, count: number) {
+  await until(setup, () => fixture.modeSets.length >= count, "the mode switch never dispatched");
+}
+
 function turnTexts(fixture: GateFixture): string[] {
   return fixture.turnStarts.map((entry) => (entry.command as TurnStart).message.text);
 }
@@ -105,10 +123,10 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await typeText(setup, "hello");
       await press(setup, "enter");
       await press(setup, "enter");
@@ -130,10 +148,10 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await typeText(setup, "/research hello");
       await press(setup, "enter");
       await act(async () => fixture.modeSets[0]!.reject(new Error("mode switch refused by test")));
@@ -162,14 +180,15 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await typeText(setup, "hello");
       await press(setup, "enter");
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 2);
       await act(async () => fixture.modeSets[0]!.resolve(true));
       await setup.flush();
       if (fixture.turnStarts.length !== 0) fail("the send ran while the second switch was still in flight");
@@ -186,12 +205,13 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 2);
       await act(async () => fixture.modeSets[0]!.reject(new Error("first switch refused by test")));
       await setup.flush();
       await visible(setup, "Orchestrate");
@@ -205,10 +225,10 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await typeText(setup, "hello");
       await press(setup, "enter");
       await typeText(setup, " world");
@@ -228,8 +248,7 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture({ rejectTurnStarts: new Error("turn start refused by test") });
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await typeText(setup, "hello");
       await press(setup, "enter");
       await until(setup, () => fixture.turnStarts.length === 1, "the send never dispatched its turn");
@@ -251,11 +270,11 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await typeText(setup, "hello");
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
       await setup.flush();
       await visible(setup, "Schedule work");
@@ -282,10 +301,10 @@ export async function runSendGate(): Promise<void> {
     const fixture = gateFixture();
     const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
     try {
-      await setup.flush();
-      await focusComposer(setup);
+      await readyComposer(setup);
       await act(async () => setup.mockInput.pressTab({ shift: true }));
       await setup.flush();
+      await switched(setup, fixture, 1);
       await click(setup, "VibeCheck");
       await press(setup, "i");
       await typeText(setup, "other hello");

@@ -1,17 +1,33 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
+import { SIDEBAR_WIDTH } from "../../app/constants.js";
 import { fail } from "../helpers.js";
 
 /** Prompt-click message actions: copy, and the revert two-step confirm
     (blocked while running, then succeeding on an idle thread). */
 export async function runMessageActions(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // Modals fade in and thread switches resync on their own time, not a
+  // fixed delay a loaded renderer overruns (mid-fade the panel composites
+  // transcript borders into its rows, garbling label matches).
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
   // Rows are found by their label, not a fixed row: the modal is centred, so
   // its rows move whenever it gains or loses one.
   // `required` rows fail the walkthrough when missing; the first pass runs
   // wherever the palette scenario left the app, so its rows are best-effort.
   const clickRow = async (label: string, required = false): Promise<void> => {
-    const rows = setup.captureCharFrame().split("\n");
+    const rows = frame().split("\n");
     const y = rows.findIndex((line) => line.includes(label));
     if (y === -1) {
       if (required) {
@@ -23,11 +39,47 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
     await act(async () => setup.mockMouse.click(rows[y]!.indexOf(label) + 2, y));
   };
   // Back to the top of the timeline, then click the user prompt: mouse-up on
-  // a PromptBlock (not a selection drag) opens message actions.
+  // a PromptBlock (not a selection drag) opens message actions. Found by its
+  // label, since the rows above it shift — and clicked on its text, since
+  // the card's padding cells do not hit-test in this renderer. A same-cell
+  // down+up selects nothing, so no drag is ever read.
+  const clickPrompt = async (): Promise<void> => {
+    // After a thread switch the transcript resyncs under the click: settle
+    // first (two identical frames), or the resolved row is replaced right
+    // after the click lands and the modal never opens.
+    let settled = frame();
+    for (let i = 0; i < 20; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      const next = frame();
+      if (next === settled) break;
+      settled = next;
+    }
+    const clickOnce = async (): Promise<void> => {
+      const rows = frame().split("\n");
+      const y = rows.findIndex((line) => line.includes("Render markdown"));
+      if (y === -1) fail("timeline shows no user prompt to open");
+      await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") + 2, y));
+      await setup.flush();
+    };
+    await clickOnce();
+    // A toast expiring mid-gesture can still shift the rows under the
+    // click: probe briefly for the modal, then re-resolve once on a live
+    // frame rather than failing outright.
+    const start = Date.now();
+    while (!frame().includes("Revert to before this turn") && Date.now() - start < 1500) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+    }
+    if (!frame().includes("Revert to before this turn")) await clickOnce();
+  };
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(60, 5));
-  await setup.flush();
+  await clickPrompt();
   console.log("--- message actions (open) ---");
   console.log(setup.captureCharFrame());
 
@@ -40,8 +92,7 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // … reopen (past the 250ms dismiss-guard window, which swallows the
   // mouse-up half of a backdrop-dismiss gesture), arm the revert …
   await new Promise((resolve) => setTimeout(resolve, 350));
-  await act(async () => setup.mockMouse.click(60, 5));
-  await setup.flush();
+  await clickPrompt();
   await clickRow("Revert to before this turn");
   await setup.flush();
   console.log("--- revert armed ---");
@@ -61,19 +112,40 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // click the prompt again.
   await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
-  // Found by its title: the sidebar's rows move whenever a row above them changes.
+  // If the backdrop click missed, the modal is still up and would swallow
+  // the sidebar click into its own backdrop instead of switching threads:
+  // close it first rather than failing fifteen seconds later at the header.
+  if (setup.captureCharFrame().includes("Message actions")) {
+    await act(async () => setup.mockMouse.click(138, 0));
+    await waitFor("stale message modal did not close", () => !setup.captureCharFrame().includes("Message actions"));
+  }
+  // Open t-xash from the sidebar: found by the thread's own title, in the
+  // sidebar's columns. The project shares its name with nothing here, but a
+  // whole-frame search for it matches the thread's first card line, and the
+  // thread header only ever shows thread titles — never the project name the
+  // old whole-frame search waited for, which could never appear.
+  // (The card's first line carries the project title and badge; the second
+  // carries the thread title that opens it. Either line's box opens it.)
   const sidebarRows = setup.captureCharFrame().split("\n");
-  const xash = sidebarRows.findIndex((line) => line.includes("Xash3D RT Streamline"));
+  const xash = sidebarRows.findIndex((line) => line.includes("Neural Radiance") && line.indexOf("Neural Radiance") < SIDEBAR_WIDTH);
   if (xash === -1) fail("the sidebar does not list t-xash");
   await act(async () => setup.mockMouse.click(10, xash));
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await setup.flush();
+  // The thread switch resyncs the transcript; wait for the new thread's
+  // header rather than a fixed delay. The header shows the thread title
+  // (matched loosely: it scrolls longer titles), never the project name.
+  // Bound generously: the resync waits on the thread poll tick, which a
+  // loaded machine can stall badly.
+  const threadHeader = () => {
+    const top = frame().split("\n")[0] ?? "";
+    return top.split("╮")[1] ?? "";
+  };
+  await waitFor("sidebar did not open t-xash", () => /Neural|Radiance|viability/.test(threadHeader()), 15000);
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(60, 5));
-  // ModalShell fades in; look for its rows once it is up.
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
-  await setup.flush();
+  await clickPrompt();
+  // ModalShell fades in; wait for its rows to read cleanly instead of
+  // capturing mid-fade, when the composite garbles label matches.
+  await waitFor("message actions did not open on t-xash", () => frame().includes("Revert to before this turn"));
   await clickRow("Revert to before this turn", true);
   await setup.flush();
   await clickRow("Confirm revert", true);

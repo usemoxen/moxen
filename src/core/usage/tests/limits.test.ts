@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { captureUsageProtectionOverride, usageProtectionOverrideActive, persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
 
@@ -68,15 +68,25 @@ describe("usage limits registry", () => {
     expect(later).toMatchObject({ usedPercent: 0, resetsAt: null });
   });
 
-  it("persists next to the store and loads it in a fresh registry", () => {
+  it("persists next to the store and loads it in a fresh registry", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "moxen-usage-"));
-    persistUsageLimits(root);
-    recordUsageWindows("claude", [{ id: "weekly", label: "Weekly – Opus", resetsAt: IN_2H, exhausted: false, usedPercent: 71 }], NOW);
-    return new Promise<void>((resolve) => setTimeout(resolve, 50)).then(() => {
+    try {
+      persistUsageLimits(root);
+      recordUsageWindows("claude", [{ id: "weekly", label: "Weekly – Opus", resetsAt: IN_2H, exhausted: false, usedPercent: 71 }], NOW);
+      // The registry persists on a chained promise: wait for the file to say
+      // what was recorded, never for a fixed delay a loaded runner overruns.
+      const file = path.join(root, "usage-limits.json");
+      await vi.waitFor(() => {
+        expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({
+          claude: { windows: [{ label: "Weekly – Opus", usedPercent: 71 }] },
+        });
+      }, { timeout: 10_000, interval: 10 });
       resetUsageLimitsForTests();
       persistUsageLimits(root);
       expect(usageLimitsSnapshot(NOW).claude!.windows[0]).toMatchObject({ label: "Weekly – Opus", kind: "weekly", usedPercent: 71 });
+    } finally {
+      resetUsageLimitsForTests();
       fs.rmSync(root, { recursive: true, force: true });
-    });
+    }
   });
 });

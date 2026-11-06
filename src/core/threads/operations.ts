@@ -495,16 +495,31 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
  * Run the thread's scheduled turn once it is due and the thread is free.
  * Called by the schedule timer and by the shell poll; safe to call any time
  * — nothing happens when nothing is due or a turn is already running.
+ * A candidate snapshot (threads with work, as the usage tick keeps) avoids
+ * rereading idle history; idle dependencies of queued conditions are loaded
+ * on top, as for the work queue.
  */
-export async function runDueScheduledTurn(ctx: OperationContext, threadId: string, now = Date.now()): Promise<boolean> {
-  return ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => admitQueuedTurn(ctx, threadId, await queueRows(ctx), now));
+export async function runDueScheduledTurn(ctx: OperationContext, threadId: string, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<boolean> {
+  return ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
+    const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+    if (snapshot) await queueDependencies(ctx, rows);
+    return admitQueuedTurn(ctx, threadId, rows, now);
+  });
 }
 
 async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
   await recoverOrphanedTurn(ctx, threadId);
   const thread = await ctx.store.readThreadRecord(threadId);
-  const index = rows.findIndex((r) => r.thread.id === threadId);
-  if (thread && index >= 0) rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+  let index = rows.findIndex((r) => r.thread.id === threadId);
+  if (thread && index < 0) {
+    // A snapshot that never contained this thread must not delay its
+    // admission to the next rescan (cross-process scheduled work would wait
+    // up to 60s): include it directly, the same fallback queueAgentMessage uses.
+    rows.push({ thread, turns: await ctx.store.readTurns(threadId) });
+    index = rows.length - 1;
+  } else if (thread && index >= 0) {
+    rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+  }
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
   // An entry or thread condition can name a thread whose owner died
@@ -1767,6 +1782,11 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // A send that queued behind an older held turn: start the older now when
     // it is admissible, so it goes first without waiting for the next tick.
     // Anything still blocked simply stays queued.
+    // This keeps a full scan on purpose: the held turn's provider and usage
+    // conditions read global state (other threads' holds and windows), which
+    // a single-thread snapshot cannot see and would misreport as blocking.
+    // The repeating poll paths (shell poll, schedule timer, agent message,
+    // queue read) share the usage tick's maintained snapshot instead.
     if (sent.turn.status === "queued" && sent.turn.heldAtSettle === true && sent.delivery === "queued" && !input.queue && input.scheduledFor === undefined) {
       await runDueScheduledTurn(ctx, thread.id).catch(() => undefined);
     }
@@ -4176,7 +4196,7 @@ export interface QueuedAgentMessage {
  * ending a usage hold (`manualContinuation` needs no origin): a protected
  * thread keeps it as an automatic wake-up that waits behind the hold.
  */
-export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId: string, input: QueueAgentMessageInput): Promise<QueuedAgentMessage> {
+export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId: string, input: QueueAgentMessageInput, snapshot?: readonly QueueRow[]): Promise<QueuedAgentMessage> {
   const callerId = requireThreadId(rawCallerThreadId);
   const message = input.message.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
@@ -4210,7 +4230,8 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   const thread = (await ctx.store.readThreadRecord(targetId)) ?? started.thread;
   let waitingFor: string[] = [];
   if (turn.status === "queued") {
-    const rows = await queueRows(ctx);
+    const rows = snapshot ? [...snapshot] : await queueRows(ctx);
+    if (snapshot) await queueDependencies(ctx, rows);
     const row = rows.find((candidate) => candidate.thread.id === targetId) ?? { thread, turns: await ctx.store.readTurns(targetId) };
     waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config).blocked : [];
     if (!turn.queue && thread.usagePause) waitingFor = ["Waiting for thread protection"];

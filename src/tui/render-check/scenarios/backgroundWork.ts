@@ -33,6 +33,21 @@ function activityFrame(id: string, kind: string, summary: string, payload: Recor
  * escape-sequence timeout, before capturing.
  */
 export async function runBackgroundWork(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // ModalShell fades in and the input parser has an escape-sequence timeout:
+  // wait for the frame that shows the step landed, never a fixed delay a
+  // loaded renderer overruns.
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
   await act(async () => {
     emitLiveRef.current?.(
       activityFrame("bg-set-1", "background.tasks", "1 background task running", {
@@ -60,12 +75,9 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   const segmentRow = runningRows.findIndex((row) => row.includes("1 shell"));
   const segmentCol = runningRows[segmentRow]!.indexOf("1 shell");
   await act(async () => setup.mockMouse.click(segmentCol + 2, segmentRow));
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
-  await setup.flush();
-  const tab = setup.captureCharFrame();
+  const tab = await waitFor("footer segment did not open the Background tab", () => frame().includes("Running in the background"));
   console.log("--- side panel: background tab ---");
   console.log(tab);
-  if (!tab.includes("Running in the background")) fail("footer segment did not open the Background tab");
   // The strip shortens its labels on a narrow panel so the close control
   // stays reachable; the badge is what this asserts, not the wording.
   if (!/(Background|Bkgd) 1/.test(tab)) fail("Background tab carries no running-count badge");
@@ -78,9 +90,7 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   const taskCol = tabRows[taskRow]!.indexOf("Shell · watch the build log");
   await act(async () => setup.mockMouse.click(taskCol + 2, taskRow));
   // ModalShell fades in over ~150ms; capture once it's opaque.
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
-  await setup.flush();
-  const details = setup.captureCharFrame();
+  const details = await waitFor("Background tab row did not open that task's details", () => frame().includes("● running") && frame().includes("watching build.log"));
   console.log("--- background browser: details ---");
   console.log(details);
   if (!details.includes("Shell · watch the build log")) fail("Background tab row did not open that task's details");
@@ -89,28 +99,17 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
 
   // esc steps back to the list, a second esc closes the browser. A bare
   // ESC only lands once the input parser's escape-sequence timeout passes.
-  const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
   await act(async () => setup.mockInput.pressEscape());
-  await settle();
-  await setup.flush();
   // The list behind it groups tasks by kind, each its name over its command.
-  const list = setup.captureCharFrame();
+  const list = await waitFor("esc from details did not return to the background browser", () =>
+    frame().includes("Background work") && frame().includes("Shells (1)") && frame().includes("watch the build log") && frame().includes("tail -f build.log"));
   console.log("--- background browser: list ---");
   console.log(list);
-  if (!list.includes("Background work")) fail("esc from details did not return to the background browser");
-  if (!list.includes("Shells (1)")) fail("background browser did not group the task under Shells");
-  if (!list.includes("watch the build log") || !list.includes("tail -f build.log")) {
-    fail("background browser row is missing the task's name or command");
-  }
   await act(async () => setup.mockInput.pressEscape());
-  await settle();
-  await setup.flush();
-  if (setup.captureCharFrame().includes("Background work")) fail("esc from the list did not close the browser");
+  await waitFor("esc from the list did not close the browser", () => !frame().includes("Background work"));
   // The panel keeps focus behind the browser: one more esc closes it.
   await act(async () => setup.mockInput.pressEscape());
-  await settle();
-  await setup.flush();
-  if (setup.captureCharFrame().includes("Running in the background")) fail("esc did not close the side panel");
+  await waitFor("esc did not close the side panel", () => !frame().includes("Running in the background"));
 
   // The palette offers to view or stop it.
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
