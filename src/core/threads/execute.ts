@@ -54,7 +54,7 @@ import {
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
 import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
-import { captureRuleBaseline, refreshRuleBaseline } from "./rulefiles.js";
+import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
 import { forgetSession, touchSession, trackSession } from "./idle.js";
@@ -567,13 +567,27 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     if (prompt === null) return;
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
+    // Rule files edited while the session ran the turn before: a patch ahead
+    // of the prompt, like a fresh send. Without a baseline this captures one
+    // and stays quiet.
+    //
+    // No MCP/native-tool refresh here, unlike a fresh send (`startTurn`) or
+    // an admission resume (`runRecoveredTurn`): those recompute the session
+    // setup from config, and this runner cannot — it runs without an
+    // operation context, on whatever the settling runner handed it. The
+    // promotion runs seconds after a turn whose own send applied that
+    // moment's registrations, and the next send or admission refreshes again,
+    // so only an edit landing mid-turn waits one extra turn. Rule files need
+    // no setup, so they do refresh above.
+    const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     claimed = null;
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: prompt.text,
+      prompt: withRuleUpdate(prompt.text, rules?.text ?? null),
+      ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       interactionMode: next.interactionMode,

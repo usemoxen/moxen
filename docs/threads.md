@@ -52,6 +52,15 @@ active again and the provider has room — an unsnooze, or the snooze or
 the limit lapsing, is enough; no message needs to be sent. A message left
 queued any other way still waits for the next message or settle.
 
+A send on an idle thread never jumps ahead of an older held turn: the new
+message queues behind it, held for admission in turn, and the send reports
+it queued (it waits in the Work queue, it is not lost). The older turn goes
+first once nothing blocks it. A held turn that genuinely cannot run yet — a
+snoozed thread, a provider with no room — still holds its place, so the new
+message waits behind it rather than running first; unsnoozing, or the limit
+lapsing, releases both in order. Sending an immediate user message to end
+usage protection is the exception: it releases that hold and runs first.
+
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.
@@ -297,8 +306,12 @@ automatic protection also placed pauses it until the next reset, as it does for
 any automatic hold. Protecting a thread during an automatic wrap-up lets that
 wrap-up finish rather than starting a second one. A turn the user's protection
 interrupts carries `StoredTurn.usagePause.forced`.
-Archived threads cannot be protected. Settled threads can be protected but remain
-settled; automatic input never unsettles them while held.
+Archived threads cannot be protected, and neither can settled ones: a forced
+hold ends on a message, but settled threads refuse messages and the queue
+cannot cancel a forced hold, so a hold that outlived its thread would stick
+forever. Settling a thread ends its manual protection; a forced hold found on
+a settled thread from before is released instead — on the next tick. Automatic
+input never unsettles a settled thread while held.
 
 While held, automatic deliveries become durable conditional queue entries rather
 than new turns or steers: delegated-task reports (including their structured
@@ -784,6 +797,52 @@ copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
 than an error, so the orchestrator can fall back to `thread_read`. The call
 waits at most 45 seconds, then returns a `timedOut` result; the task is
 unchanged either way.
+
+### Where a delegated task works
+
+`delegate` defaults to a worktree: the child gets its own checkout on a new
+branch cut from the parent's, so two agents never edit the same files at
+once. The branch is read from the parent's checkout, even when the parent
+thread's record names none (threads the TUI creates record none). A
+`fork: true` task always shares the parent's checkout, since its copied
+conversation belongs to the directory it runs in, and an explicit
+`isolation: "shared"` is for read-only work, or when nothing else writes at
+the same time. Where there is no branch to cut from — a detached HEAD, or a
+project that is not a git repository at all — there is no worktree to give,
+so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
+`isolation: "shared"`. It never quietly shares your checkout.
+
+### Starting several tasks in one call (`delegate`)
+
+One `delegate` call takes shared settings (`provider`, `model`, `effort`,
+`isolation`, plus `rules`: instructions appended to every task's prompt
+under "Common rules for this task") beside a `tasks` list of at most 20
+entries. Each entry has its own `title` and `task` text and may override
+`provider`, `model`, `effort` or `isolation`; an entry takes no other field.
+An entry on another provider does not inherit the shared `model` or
+`effort`: it names its own model, or its start fails. `mode` and `fork` are
+shared by the whole call. The single-task form (`task` plus `title`) keeps
+working unchanged, and `researchProposal` cannot be combined with `tasks`.
+
+What is bad on its face — a malformed entry or list, a forked task in a
+worktree, a provider with no model anywhere — fails the whole call with
+nothing started. Once starting, each task is on its own: one that fails to
+start is reported as that entry's `error` while the rest still start, so the
+others are neither lost nor silently doubled. A top-level `idempotencyKey`
+is derived per entry from the key plus the entry's own title and task, so
+retrying the whole call — in any order, with entries added or removed —
+returns each original task instead of starting duplicates; a task's own
+`idempotencyKey` wins for that entry. The result lists every task's `taskId`
+and `isolation`, with one `warning` when any task shares your checkout.
+
+### Stopping several tasks at once (`task_cancel`)
+
+`task_cancel` takes `taskId` for one task or `taskIds` for several; its
+thread and worktree are kept either way. Each task's outcome
+(`cancelRequested`, `status`) is reported separately, and one bad id is that
+entry's `error` rather than a failed call, so it never stops the others. A
+repeated id stops once, in order. When the parent itself is missing, the
+call fails as the single form does instead of reporting one error per id.
 
 ### Queueing a message from an agent (`message_queue`)
 
