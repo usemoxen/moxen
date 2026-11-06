@@ -170,7 +170,16 @@ moxen config set thinkingEffort xhigh
 
 **Older keys.** Settings reshaped since an older build (for example `ui.autoHandoff`, `providers.claude.autoCompact`, `providers.opencode.compactBuffer`, `installSkills`, `providers.harness.webBrowser`) still load, and `config get` / `config set` still accept them; `config list` lists them too. A newer key wins once it is set; while it is unset, the older key is what applies, and the settings page names it as the Default. Loading a file never rewrites it in the new shape: the file is only written when a setting is changed, and then the older keys stay in it, so an older Moxen build sharing `~/.moxen/config.json` keeps working. The one exception is a value an older build reads the same way, such as `threadEnvMode: "auto"`, saved as `local`.
 
-The settings page files every key under General, Defaults, Sessions, Long threads, Agent context, Interface, Git and forges, one tab per provider (each in the same order: Defaults, Tools, Long threads, Sessions, Setup, then what is particular to it), and MCP servers. Where a setting lives on the page never changes its key.
+The settings page files every key under General, Defaults, Sessions, Long threads, Agent context, Interface, Git and forges, one tab per provider (each in the same order: Defaults, Tools, Long threads, Sessions, Model prices, Setup, then what is particular to it), and MCP servers. Where a setting lives on the page never changes its key.
+
+**Model prices.** `providers.<claude|codex|opencode|harness>.model{Input,Output,CacheRead,CacheWrite}Prices` value a model's tokens in USD per million, as `model=price` pairs, one per line or comma-separated:
+
+```bash
+moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'
+moxen config set providers.opencode.modelOutputPrices 'opencode-go/muse-spark-1.3-contributor=10'
+```
+
+A row you set beats Moxen's shipped price list for that model on that provider; clearing a row, or a model from it, returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. The same rows are on each provider's settings page under Model prices.
 
 **Theme.** `ui.theme` picks the TUI colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. A running TUI picks up a change without restarting.
 

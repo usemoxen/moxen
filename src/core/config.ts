@@ -11,6 +11,7 @@ import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
 import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
 import { isSecretRef, secretRef, writeSecret } from "./secrets.js";
+import { normalizePriceMap } from "./modelprices.js";
 import type {
   ClaudeProviderConfig,
   CodexProviderConfig,
@@ -19,6 +20,7 @@ import type {
   GitConfig,
   HarnessProviderConfig,
   InteractionMode,
+  ModelPriceMaps,
   OpencodeProviderConfig,
   OpenMode,
   ProjectPolicy,
@@ -345,6 +347,19 @@ function checkTyped(kind: string, value: unknown, label: string): unknown {
 
 type PerModelFields = Pick<ClaudeProviderConfig, "autoHandoffModels" | "compactAtModels" | "handoffModels" | "compactionModels">;
 
+/** A provider section's per-model token prices (USD per million tokens), as the fields to merge in. */
+function modelPricesOf(section: unknown, prefix: string): ModelPriceMaps | undefined {
+  const input = asSection(section, prefix);
+  const out: ModelPriceMaps = {};
+  for (const field of ["modelInputPrices", "modelOutputPrices", "modelCacheReadPrices", "modelCacheWritePrices"] as const) {
+    const raw = input[field];
+    if (raw === undefined || raw === null) continue;
+    const map = normalizePriceMap(raw, `${prefix}.${field}`);
+    if (map) out[field] = map;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** A provider section's per-model hand-off and compaction overrides (sizes and choices), as the fields to merge in. */
 function handoffModelsOf(section: unknown, prefix: string): PerModelFields | undefined {
   const input = asSection(section, prefix);
@@ -409,23 +424,27 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
     const launchArgs = asSection(input.claude, "providers.claude").launchArgs;
     const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
     const models = handoffModelsOf(input.claude, "providers.claude");
-    if (claude || args || models) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models };
+    const prices = modelPricesOf(input.claude, "providers.claude");
+    if (claude || args || models || prices) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models, ...prices };
   }
   if (input.codex !== undefined) {
     const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"]);
     const models = handoffModelsOf(input.codex, "providers.codex");
-    if (codex || models) result.codex = { ...codex, ...models };
+    const prices = modelPricesOf(input.codex, "providers.codex");
+    if (codex || models || prices) result.codex = { ...codex, ...models, ...prices };
   }
   if (input.opencode !== undefined) {
     const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"]);
     const models = handoffModelsOf(input.opencode, "providers.opencode");
-    if (opencode || models) result.opencode = { ...opencode, ...models };
+    const prices = modelPricesOf(input.opencode, "providers.opencode");
+    if (opencode || models || prices) result.opencode = { ...opencode, ...models, ...prices };
   }
   if (input.harness !== undefined) {
     const withProfiles = normalizeHarnessConfig(input.harness);
     const defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
     const models = handoffModelsOf(input.harness, "providers.harness");
-    if (withProfiles || defaults || models) result.harness = { ...defaults, ...withProfiles, ...models };
+    const prices = modelPricesOf(input.harness, "providers.harness");
+    if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

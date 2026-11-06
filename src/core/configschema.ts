@@ -41,6 +41,7 @@ import {
   type LongThreadKind,
 } from "./threads/longthreads.js";
 import { isSecretRef } from "./secrets.js";
+import { formatPriceMap } from "./modelprices.js";
 import { MCP_RUNNER_SETTING, MCP_SERVERS_SETTING } from "./mcpschema.js";
 import { describeMcpServers } from "./mcpview.js";
 import { HARNESS_PROFILES_SETTING } from "./providers/harness/profileschema.js";
@@ -605,6 +606,29 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
     { ...base, key: `providers.${kind}.compactAtModels`, label: "Compact at, per model", description: "Token counts at which particular models of this provider are compacted, as model=tokens pairs (claude-opus-5=400k). Wins over 'Compact at' for those models.", kind: { type: "string", placeholder: "model=400k", multiline: true } },
     { ...base, key: `providers.${kind}.handoffModels`, label: "Hand off, per model", description: "Whether particular models of this provider are handed off, as model=choice pairs (claude-opus-5=off): ask, auto or off. Wins over 'Hand off' for those models.", kind: { type: "string", placeholder: "model=off", multiline: true } },
     { ...base, key: `providers.${kind}.compactionModels`, label: "Compaction, per model", description: `Who compacts particular models of this provider, as model=choice pairs (claude-opus-5=auto): ${COMPACTION_MODES[kind].join(", ")}. Wins over 'Compaction' for those models.`, kind: { type: "string", placeholder: "model=auto", multiline: true } },
+  ];
+}
+
+/** One Model prices group per provider, from one template so the four tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
+function priceSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+  const name = PROVIDER_NAME[kind];
+  const section = `provider:${kind}` as const;
+  const group = "Model prices";
+  const row = (leaf: "modelInputPrices" | "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
+    key: `providers.${kind}.${leaf}`,
+    label,
+    description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (opencode-go/muse-spark-1.3-contributor=2). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
+    section,
+    group,
+    kind: { type: "string", placeholder: "model=2", multiline: true },
+    defaultValue: undefined,
+    fallback: { text: "Moxen's shipped prices" },
+  });
+  return [
+    row("modelInputPrices", "Input price", "input"),
+    row("modelOutputPrices", "Output price", "output"),
+    row("modelCacheReadPrices", "Cache read price", "cache-read"),
+    row("modelCacheWritePrices", "Cache write price", "cache-write"),
   ];
 }
 
@@ -1408,6 +1432,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
 
   ...sessionSettings("claude"),
   ...longThreadSettings("claude"),
+  ...priceSettings("claude"),
 
   // -- OpenCode --------------------------------------------------------------
   {
@@ -1461,6 +1486,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   ...toolSettings("codex"),
   ...sessionSettings("codex"),
   ...longThreadSettings("codex"),
+  ...priceSettings("codex"),
   ...(["binaryPath", "homePath", "launchArgs"] as const).map((field): SettingDescriptor => ({
     key: `providers.codex.${field}`,
     label: { binaryPath: "Executable", homePath: "Config directory", launchArgs: "Launch arguments" }[field],
@@ -1569,6 +1595,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
 
   ...sessionSettings("opencode"),
   ...longThreadSettings("opencode"),
+  ...priceSettings("opencode"),
 
   // -- Moxen Harness ---------------------------------------------------------
   {
@@ -1710,6 +1737,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   },
   ...sessionSettings("harness"),
   ...longThreadSettings("harness"),
+  ...priceSettings("harness"),
   HARNESS_PROFILES_SETTING,
 
   // -- MCP servers -----------------------------------------------------------
@@ -1723,7 +1751,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
  * thread starts with, the tools, how long threads are handled, then whatever is
  * particular to that provider, and where it lives last.
  */
-const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Setup", "Output", "Ultracode", "Prompt", "Web search", "Model servers"];
+const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Model prices", "Setup", "Output", "Ultracode", "Prompt", "Web search", "Model servers"];
 
 /** The Defaults tab in the order a new thread's choices are made: provider, model, effort, then permissions and checkout. */
 const DEFAULTS_ORDER = ["provider", "model", "speedMode", "thinkingEffort", "runtimeMode", "interactionMode", "threadEnvMode"];
@@ -1817,6 +1845,9 @@ export function readSetting(config: CliConfig, key: string): SettingValue {
   if (typeof raw === "string" || typeof raw === "boolean" || typeof raw === "number") return raw;
   if ((key.endsWith(".autoHandoffModels") || key.endsWith(".compactAtModels")) && typeof raw === "object") return formatHandoffModels(raw as Record<string, number>);
   if ((key.endsWith(".handoffModels") || key.endsWith(".compactionModels")) && typeof raw === "object") return formatModeModels(raw as Record<string, string>);
+  if ((key.endsWith(".modelInputPrices") || key.endsWith(".modelOutputPrices") || key.endsWith(".modelCacheReadPrices") || key.endsWith(".modelCacheWritePrices")) && typeof raw === "object") {
+    return formatPriceMap(raw as Record<string, number>);
+  }
   return undefined;
 }
 

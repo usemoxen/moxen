@@ -173,7 +173,7 @@ export interface ProvidersConfig {
 }
 
 /** Moxen Harness: our own agent loop against endpoints the user configures. */
-export interface HarnessProviderConfig {
+export interface HarnessProviderConfig extends ModelPriceMaps {
   memory?: boolean;
   /** Whether the Harness compacts on its own. Unset: `autoCompact`, else on. */
   compaction?: "ask" | "auto" | "off";
@@ -309,6 +309,23 @@ export interface HarnessProbedConfig {
 /** The wire format an endpoint speaks: OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. */
 export type HarnessApiFormat = "chat" | "responses" | "anthropic";
 
+/**
+ * Per-model token prices in USD per million tokens, as model slug to price,
+ * on one provider (`providers.<kind>.model{Input,Output,CacheRead,CacheWrite}Prices`).
+ * A model priced here beats Moxen's shipped list for those fields on this
+ * provider; a model priced nowhere stays unpriced.
+ */
+export interface ModelPriceMaps {
+  /** What one million input tokens of a model cost, as model slug to USD. */
+  modelInputPrices?: Record<string, number>;
+  /** What one million output tokens of a model cost, as model slug to USD. */
+  modelOutputPrices?: Record<string, number>;
+  /** What one million cache-read tokens of a model cost, as model slug to USD. */
+  modelCacheReadPrices?: Record<string, number>;
+  /** What one million cache-write tokens of a model cost, as model slug to USD. */
+  modelCacheWritePrices?: Record<string, number>;
+}
+
 export interface HarnessProfileConfig {
   /** Becomes the instance id `harness/<id>`. */
   id: string;
@@ -341,7 +358,7 @@ export interface HarnessProfileConfig {
 }
 
 /** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
-export interface OpencodeProviderConfig {
+export interface OpencodeProviderConfig extends ModelPriceMaps {
   memory?: boolean;
   /** Who compacts: OpenCode itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact` (off when false), else OpenCode. */
   compaction?: "provider" | "ask" | "auto" | "off";
@@ -406,7 +423,7 @@ export interface OpencodeProviderConfig {
   compactBuffer?: number;
 }
 
-export interface ClaudeProviderConfig {
+export interface ClaudeProviderConfig extends ModelPriceMaps {
   /** Prefer Claude's automatic allowance instead of proactive Moxen wrap-up. */
   usageWrapUp?: "moxen" | "provider";
   memory?: boolean;

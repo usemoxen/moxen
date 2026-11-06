@@ -400,10 +400,12 @@ are excluded. It budgets cached reads, cache writes and 4,096 output tokens for
 each model's wrap-up, with a 50%
 margin and between two and ten percentage points of reserve. The ten-point cap
 prevents delayed cost reports from stopping work before 87% usage. Before
-calibration or for unknown model prices, it reserves two points per running
-thread, capped at ten. Claude's reported
+calibration, or where a running model's wrap-up has no price, it reserves two
+points per running thread, capped at ten. Claude's reported
 cumulative cost is counted by gains (native child costs are not added again);
-Codex tokens use a dated API-equivalent price table. `usage status --json` labels
+turns that report no cost are valued at the model's current prices: the
+provider's Model prices rows over Moxen's shipped list, and a model with no
+price anywhere counts as zero here. `usage status --json` labels
 the cost source. These are estimates, not subscription charges or an invoice.
 
 Recovery waits for the reset of the window that triggered protection or ran out,
@@ -1056,8 +1058,10 @@ over the thread's previous turn, and the thread's total as its final value, so
 threads stored before this read the same way; a total that drops (a resumed
 process starts counting again) counts as new spend. Where the provider reports a cost
 (`costUsd`: Claude's `total_cost_usd`, OpenCode's per-step `cost`) the turn
-records it too, an estimate and not a bill; without one the field is absent
-and the turn reads as unpriced.
+records it too, an estimate and not a bill; without one the field is absent.
+A turn that recorded no cost keeps none on the ledger: Stats and usage
+protection price it at the model's current prices instead (below), and only a
+model with no price anywhere reads as unpriced.
 
 ### Stats
 
@@ -1067,8 +1071,25 @@ shareable PNG for a range. Both read every thread that is not deleted, a turn
 counting on the day it started in the machine's local time, and a turn still
 queued counting for nothing. Sessions are the threads with a turn in the
 range, messages are the user's and the assistant's (not notes Moxen wrote),
-and a streak is consecutive days with a turn. Cost adds the costs providers
-reported and stays unset, never zero, where none did; a reported zero (a free
-model) is free. A Claude turn's spend is the gain over the previous turn, as
+and a streak is consecutive days with a turn. Cost adds what the providers
+reported, and estimates the rest at the model's current prices: the
+per-provider Model prices rows over Moxen's shipped price list, which also
+drive usage protection's estimates (see below). A turn's recorded cost is
+never rewritten: a past turn with a reported cost keeps it, and one without is
+priced at today's values. Cost stays unset, never zero, where no turn was
+priced; a reported or priced zero (a free model) is free. A model with no price
+anywhere stays unpriced. A Claude turn's spend is the gain over the previous turn, as
 above, so the instances stored as running totals are the Claude ones
 (`core/usage/statsstore.ts`).
+
+### Model prices
+
+Each provider's settings page, under Model prices, values that provider's
+models in USD per million tokens: an input, output, cache-read and
+cache-write price per model, as `model=price` pairs
+(`moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'`).
+A row you set beats Moxen's shipped price for those fields on that provider,
+so the same model can cost differently on two providers; clearing a row, or a
+model from it, returns to the shipped price. A price with only some fields
+values what it names and counts the rest as zero. Models match by the string
+Stats buckets them under, slash included.
