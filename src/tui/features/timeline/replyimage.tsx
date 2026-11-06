@@ -136,7 +136,7 @@ function ImagePicture({
     >
       <box ref={ref} style={{ height: cells.rows, width: cells.columns, flexShrink: 0 }}>
         {!visible ? null : mosaic === null ? (
-          <image source={display === null ? original.bytes : display.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: cells.columns, height: cells.rows }} />
+          <image source={display.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: cells.columns, height: cells.rows }} />
         ) : (
           mosaic.map((runs, row) => (
             <text key={row} selectable={false}>
