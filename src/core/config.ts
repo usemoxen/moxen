@@ -626,31 +626,31 @@ export async function backupConfigFile(configPath: string): Promise<void> {
   }
 }
 
-/** Keys `MOXEN_*` may override, so a save must never persist them from memory. */
+/** Suffixes `MOXEN_*` may override (read via `appEnv`, which adds the prefix), so a save must never persist them from memory. */
 const ENV_OVERRIDDEN_KEYS = [
-  "MOXEN_PROJECT_POLICY",
-  "MOXEN_WORKSPACE_MODE",
-  "MOXEN_OPEN_MODE",
-  "MOXEN_THREAD_ENV_MODE",
-  "MOXEN_RUNTIME_MODE",
-  "MOXEN_INTERACTION_MODE",
-  "MOXEN_PROVIDER",
-  "MOXEN_MODEL",
-  "MOXEN_SPEED_MODE",
-  "MOXEN_THINKING_EFFORT",
+  "PROJECT_POLICY",
+  "WORKSPACE_MODE",
+  "OPEN_MODE",
+  "THREAD_ENV_MODE",
+  "RUNTIME_MODE",
+  "INTERACTION_MODE",
+  "PROVIDER",
+  "MODEL",
+  "SPEED_MODE",
+  "THINKING_EFFORT",
 ] as const;
 
 const ENV_TO_KEY = {
-  MOXEN_PROJECT_POLICY: "projectPolicy",
-  MOXEN_WORKSPACE_MODE: "workspaceMode",
-  MOXEN_OPEN_MODE: "openMode",
-  MOXEN_THREAD_ENV_MODE: "threadEnvMode",
-  MOXEN_RUNTIME_MODE: "runtimeMode",
-  MOXEN_INTERACTION_MODE: "interactionMode",
-  MOXEN_PROVIDER: "provider",
-  MOXEN_MODEL: "model",
-  MOXEN_SPEED_MODE: "speedMode",
-  MOXEN_THINKING_EFFORT: "thinkingEffort",
+  PROJECT_POLICY: "projectPolicy",
+  WORKSPACE_MODE: "workspaceMode",
+  OPEN_MODE: "openMode",
+  THREAD_ENV_MODE: "threadEnvMode",
+  RUNTIME_MODE: "runtimeMode",
+  INTERACTION_MODE: "interactionMode",
+  PROVIDER: "provider",
+  MODEL: "model",
+  SPEED_MODE: "speedMode",
+  THINKING_EFFORT: "thinkingEffort",
 } as const;
 
 /**
@@ -659,19 +659,23 @@ const ENV_TO_KEY = {
  * that exactly matches an active `MOXEN_*` override is read back as the
  * file's own value instead, so `applyEnvironmentOverrides` can never leak
  * into a saved file — while a value the user actually changed still saves
- * as intended. Unknown keys travel in the config itself (`normalizeFileConfig`
+ * as intended. Setting a key to the exact override value is the one
+ * exception that is not written: the file keeps its own value, and the
+ * override still wins in memory, so the save is behaviorally a no-op.
+ * Unknown keys travel in the config itself (`normalizeFileConfig`
  * keeps them), so clearing a known setting never resurrects it from an old read.
+ * A save that changes nothing skips the backup and the rewrite.
  */
 export async function saveConfig(configPath: string, config: CliConfig): Promise<void> {
   // Loaded here rather than at the top: `core/config` is imported during
   // test setup, before any file mock registers, and a static edge would pin
   // the atomic write to the real filesystem for the whole test run.
   const { writeAtomic } = await import("./infra/atomic.js");
-  await backupConfigFile(configPath);
   let next = config as unknown as Record<string, unknown>;
+  let current: string | null = null;
   try {
-    const raw = JSON.parse(await readFile(configPath, "utf8")) as unknown;
-    const baseline = normalizeFileConfig(raw) as unknown as Record<string, unknown>;
+    current = await readFile(configPath, "utf8");
+    const baseline = normalizeFileConfig(JSON.parse(current) as unknown) as unknown as Record<string, unknown>;
     const out = { ...next };
     for (const env of ENV_OVERRIDDEN_KEYS) {
       const override = appEnv(env);
@@ -688,7 +692,10 @@ export async function saveConfig(configPath: string, config: CliConfig): Promise
   } catch {
     // Missing or unreadable: nothing to strip against; write what was passed.
   }
-  await writeAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
+  const text = `${JSON.stringify(next, null, 2)}\n`;
+  if (current === text) return;
+  await backupConfigFile(configPath);
+  await writeAtomic(configPath, text);
 }
 
 /**

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeFileConfig, saveConfig, setConfigValue } from "../config.js";
+import type { CliConfig } from "../types.js";
 import { readSetting } from "../configschema.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
@@ -217,6 +218,40 @@ describe("config keeps unknown keys", () => {
       if (previous === undefined) delete process.env.MOXEN_PROVIDER;
       else process.env.MOXEN_PROVIDER = previous;
     }
+  });
+
+  it("reads a leaked override back as the file's own value when a save is handed the effective config", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-envleak-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ provider: "file-provider" }, null, 2));
+    const previous = process.env.MOXEN_PROVIDER;
+    process.env.MOXEN_PROVIDER = "env-provider";
+    try {
+      const loaded = await loadConfig(file);
+      // A caller that hands the effective config to the save (rather than the
+      // file's config) must not persist the override.
+      const leaked = { ...loaded.fileConfig, provider: loaded.config.provider } as unknown as CliConfig;
+      await saveConfig(file, leaked);
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).provider).toBe("file-provider");
+      // A value the user actually changed still saves as intended.
+      await saveConfig(file, { ...loaded.fileConfig, provider: "user-choice" });
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).provider).toBe("user-choice");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_PROVIDER;
+      else process.env.MOXEN_PROVIDER = previous;
+    }
+  });
+
+  it("skips the backup and the rewrite when a save changes nothing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-noop-"));
+    const file = path.join(dir, "config.json");
+    const first = normalizeFileConfig({ projectPolicy: "existing" });
+    await saveConfig(file, first);
+    expect(readdirSync(dir).sort()).toEqual(["config.json"]);
+    const before = statSync(file).mtimeMs;
+    await saveConfig(file, normalizeFileConfig(JSON.parse(readFileSync(file, "utf8"))));
+    expect(readdirSync(dir).sort()).toEqual(["config.json"]);
+    expect(statSync(file).mtimeMs).toBe(before);
   });
 
   it("keeps a keychain reference as a reference, never a secret", async () => {
