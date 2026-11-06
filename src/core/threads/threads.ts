@@ -142,6 +142,15 @@ function requireNotArchived(thread: StoredThread, action: string): void {
   }
 }
 
+function requireNotDeleted(thread: StoredThread, action: string): void {
+  if (thread.deletedAt != null) {
+    throw new CliError("THREAD_ARCHIVED", `Thread ${thread.id} is deleted and cannot ${action}.`, {
+      exitCode: 4,
+      details: { threadId: thread.id, deletedAt: thread.deletedAt },
+    });
+  }
+}
+
 export async function createThread(
   store: ThreadStore,
   input: CreateThreadInput,
@@ -292,6 +301,7 @@ export async function sendTurn(
     const now = store.nowIso();
     let thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "receive a new turn");
+    requireNotDeleted(thread, "receive a new turn");
     if ((origin === "usage-protection" || origin === "usage-continue" && input.queue?.requestId?.startsWith("usage:")) && thread.usageProtectionOverride && usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, Date.parse(now))) {
       throw new CliError("USAGE_PROTECTION_OVERRIDDEN", "Usage protection is paused for this thread until the next allowance reset.");
     }
@@ -567,8 +577,27 @@ export async function startBackgroundTurn(
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    requireNotArchived(thread, "start a background turn");
+    requireNotDeleted(thread, "start a background turn");
     if (thread.usagePause && thread.usagePause.phase !== "resuming") {
       throw new CliError("USAGE_PROTECTED_BACKGROUND", "Usage protection is holding this thread's background work.");
+    }
+    if (threadStatus(thread, Date.parse(now)) === "settled") {
+      throw new CliError(
+        "SETTLED_THREAD_CONFIRMATION_REQUIRED",
+        `Thread ${threadId} is settled and background work cannot wake it.`,
+        { exitCode: 4, details: { threadId, settledAt: thread.settledAt } },
+      );
+    }
+    // Re-checked inside the lock: the wait above runs before it, so two
+    // concurrent starts (or a send that won the race) would otherwise both
+    // record a running turn.
+    if (openTurn(await store.readTurns(threadId))) {
+      throw new CliError(
+        "THREAD_BUSY",
+        "The thread has an active turn. Retry when idle or use ifBusy inject.",
+        { details: { threadId } },
+      );
     }
     const turn: StoredTurn = {
       id: store.newId(),

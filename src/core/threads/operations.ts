@@ -2276,7 +2276,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   );
   if (tasks.length === 0) return;
   const parent = await ctx.store.readThreadRecord(parentThreadId);
-  if (!parent || parent.archivedAt != null) return;
+  if (!parent || parent.archivedAt != null || parent.deletedAt != null) return;
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
   await startTurn(ctx, {
@@ -2511,11 +2511,23 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   const idempotencyKey = request.idempotencyKey?.trim() || undefined;
   if (idempotencyKey !== undefined) {
-    const prior = [...(await ctx.store.readDelegations())].reverse().find(
-      (row) => row.parentThreadId === parentThreadId && row.idempotencyKey === idempotencyKey && row.continuedIn === undefined,
+    const rows = await ctx.store.readDelegations();
+    const initial = [...rows].reverse().find(
+      (row) => row.parentThreadId === parentThreadId && row.idempotencyKey === idempotencyKey,
     );
-    // A retry whose original child is gone (deleted thread) falls through and delegates anew.
-    if (prior && (await ctx.store.readThreadRecord(prior.childThreadId))) return await describeDelegation(prior.childThreadId, prior);
+    if (initial) {
+      // A retry after the task handed off finds the original row (which now
+      // carries `continuedIn`) and follows it to the current incarnation,
+      // whose continuation row holds no key (MXN-290).
+      let row = initial;
+      for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+        const next = rows.find((candidate) => candidate.childThreadId === row.continuedIn);
+        if (!next) break;
+        row = next;
+      }
+      // A retry whose current child is gone (deleted thread) falls through and delegates anew.
+      if (await ctx.store.readThreadRecord(row.childThreadId)) return await describeDelegation(row.childThreadId, row);
+    }
   }
 
   // A fork starts from a copy of the parent's own conversation, made before

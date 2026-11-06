@@ -12,7 +12,7 @@ import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import { CliError } from "../../errors.js";
 import { openThreadStore } from "../store.js";
-import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn } from "../threads.js";
+import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
@@ -441,6 +441,87 @@ describe("context usage", () => {
     expect((await store.readTurns(thread.id))[0]?.status).toBe("completed");
     expect((await store.readActivities(thread.id)).some((row) => row.kind === "context-window.updated")).toBe(false);
   });
+
+  /** MXN-290: a turn that fails by exception still writes its context reading and checkpoint before its outcome. */
+  it("records the context reading and checkpoint before a failed turn's outcome", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-fail-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    let now = Date.parse("2026-09-20T12:00:00.000Z");
+    const store = await openThreadStore(root, { clock: () => (now += 1000) });
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Context",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const reading = { usedTokens: 12_000, maxTokens: 200_000, cachedInputTokens: 11_000, autoCompactThreshold: null, compactsAutomatically: true };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => {
+        throw new Error("provider exploded");
+      },
+      streamEvents: Stream.never,
+      contextUsage: async () => reading,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("failed");
+    const kinds = (await store.readActivities(thread.id)).map((row) => row.kind);
+    const context = kinds.indexOf("context-window.updated");
+    const failed = kinds.indexOf("turn.failed");
+    expect(context).toBeGreaterThan(-1);
+    expect(failed).toBeGreaterThan(-1);
+    expect(context).toBeLessThan(failed);
+    const checkpoints = await store.readCheckpoints(thread.id);
+    expect(checkpoints).toHaveLength(1);
+    expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(
+      Date.parse((await store.readActivities(thread.id))[failed]!.createdAt),
+    );
+  });
+
+  /** MXN-290: a turn aborted mid-run still writes its context reading and checkpoint before it is marked interrupted. */
+  it("records the context reading and checkpoint before an aborted turn stops", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-abort-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    let now = Date.parse("2026-09-20T12:00:00.000Z");
+    const store = await openThreadStore(root, { clock: () => (now += 1000) });
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Context",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const reading = { usedTokens: 12_000, maxTokens: 200_000, cachedInputTokens: 11_000, autoCompactThreshold: null, compactsAutomatically: true };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => {
+        throw new CliError("TURN_ABORTED", "Interrupted before result");
+      },
+      streamEvents: Stream.never,
+      contextUsage: async () => reading,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");
+    const activities = await store.readActivities(thread.id);
+    const kinds = activities.map((row) => row.kind);
+    const context = kinds.indexOf("context-window.updated");
+    const interrupted = kinds.indexOf("turn.interrupted");
+    expect(context).toBeGreaterThan(-1);
+    expect(interrupted).toBeGreaterThan(-1);
+    expect(context).toBeLessThan(interrupted);
+    const checkpoints = await store.readCheckpoints(thread.id);
+    expect(checkpoints).toHaveLength(1);
+    expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(Date.parse(activities[interrupted]!.createdAt));
+  });
 });
 
 describe("live checklist", () => {
@@ -541,6 +622,28 @@ describe("provider-side interruptions", () => {
     const reopened = await openThreadStore(root);
     expect(await reopened.readMessages(thread.id)).toEqual(messages);
     expect(await reopened.readTurns(thread.id)).toEqual(turns);
+  });
+
+  /** MXN-290: a background provider turn on a settled thread is stopped, never recorded, and never wakes it. */
+  it("stops a background provider turn on a settled thread without recording or waking it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-settled-bg-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "Settled", modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" }, env: { mode: "local", path: root, branch: null } });
+    await settleThread(store, thread.id);
+    const driver = await scriptedDriver(thread.id, []);
+    const interrupt = vi.fn(() => Effect.void);
+    const close = vi.fn(() => Effect.void);
+    Object.assign(driver, { interruptTurn: interrupt, stopSession: close });
+    watchDriverSession(store, driver, thread.id, root);
+    const queue = (driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue;
+    await Effect.runPromise(Queue.offer(queue, {
+      type: "turn.started", provider: "claude", threadId: thread.id, turnId: "late-settled", origin: "background",
+    }));
+    await vi.waitFor(() => expect(close).toHaveBeenCalledWith(thread.id), { timeout: 10_000 });
+    expect(interrupt).toHaveBeenCalledWith(thread.id);
+    expect(await store.readTurns(thread.id)).toHaveLength(0);
+    expect((await store.readThreadRecord(thread.id))?.settledAt).not.toBeNull();
   });
 
   it("records a session-wide model fallback and moves the turn and the thread to the new model", async () => {

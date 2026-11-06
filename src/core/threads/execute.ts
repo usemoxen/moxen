@@ -744,11 +744,13 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       void forgetToldModes(store, threadId);
     }
     if (event.type === "turn.started" && event.origin === "background") {
-      void chain.then(() => {
+      // Chained, so concurrent background starts serialize instead of
+      // racing each other (and a send) into two running turns (MXN-290).
+      chain = chain.then(async () => {
         const captured = capturedWakeUp;
         capturedWakeUp = false;
-        return runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle, captured, event.wakeUpPrompt);
-      });
+        await runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle, captured, event.wakeUpPrompt);
+      }).catch(() => undefined);
       return;
     }
     if (event.type === "background.wake-up") {
@@ -871,6 +873,18 @@ async function runBackgroundTurn(
           queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
         }).catch(() => undefined);
       }
+      await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
+      if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
+      return;
+    }
+    if (cause instanceof CliError && (cause.code === "THREAD_BUSY" || cause.code === "THREAD_ARCHIVED" || cause.code === "SETTLED_THREAD_CONFIRMATION_REQUIRED" || cause.code === "THREAD_NOT_FOUND")) {
+      // MXN-290: the provider already started this turn, but it cannot be
+      // recorded (busy, settled, archived, deleted, or gone). Stop it and
+      // close the session rather than leaving real work running with no
+      // turn. It never unsettles a settled thread, never unarchives, and
+      // never queues a retry — the first recorded turn wins. Usage
+      // protection above is the one exception: it queues a durable wake-up.
+      await persistResumeCursor(store, driver, threadId);
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
       return;
@@ -1330,18 +1344,22 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     await recordTools.saveUnfinishedText();
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       interrupted = true;
+      // As in `settleTurn`: the checkpoint and the context reading land
+      // before the outcome, so whoever sees the turn stop sees both (MXN-290).
+      await recordContextUsage(store, driver, threadId, storeTurnId).catch(() => undefined);
+      await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
       await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
-      await settleCheckpoints(store, args, cwd, pre);
       return;
     }
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
+    await recordContextUsage(store, driver, threadId, storeTurnId).catch(() => undefined);
+    await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
     } catch {
       // Already terminal (e.g. a concurrent interrupt won the race).
     }
-    await settleCheckpoints(store, args, cwd, pre);
   } finally {
     clearInterval(liveContext);
     controller.signal.removeEventListener("abort", onAbort);

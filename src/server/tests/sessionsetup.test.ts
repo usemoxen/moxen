@@ -778,6 +778,39 @@ describe("delegating with an idempotency key, and handing the shared entry back"
     }
   });
 
+  /** MXN-290: a retry after the task handed off returns the current incarnation, not a duplicate. */
+  it("follows the continuedIn chain for an idempotency-key retry after the task handed off", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
+    try {
+      const key = randomUUID();
+      const first = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      const continued = await connection.dispatch({ type: "thread.continue", threadId: first.child.id });
+      expect(continued.threadId).not.toBe(first.child.id);
+      const retry = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      expect(retry.child.id).toBe(continued.threadId);
+      expect(retry.task.taskId).toBe(continued.threadId);
+      // No duplicate: the original row plus its continuation, and still one row carrying the key.
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(2);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("hands the moxen entry back to the parent once a shared child settles", async () => {
     const { connection, restored, parentThreadId } = await sharedWorld();
     try {
