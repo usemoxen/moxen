@@ -182,11 +182,14 @@ describe("task_send: a task that is idle when the orchestrator continues", () =>
     const t = await setup();
     try {
       const taskId = await t.delegate();
-      // A delegated turn completes on its own runner: on a loaded machine
-      // that takes longer than vitest's default 1s `waitFor` timeout, so the
-      // wait states its bound (like the one below) instead of flaking there.
-      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 8_000 });
       // The task's first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
+      // One wait, not two: the report is queued only after the task's turn
+      // settles (and delivered after the batch window), so seeing it already
+      // means the turn completed. A second bounded wait on the turns would
+      // stack its bound on top of this one's inside the same 20s test budget
+      // and time out a slow but healthy machine. On a loaded machine settling
+      // takes longer than vitest's default 1s `waitFor` timeout, so the wait
+      // states its bound.
       await vi.waitFor(async () => expect(await t.notifications()).toHaveLength(1), { timeout: 8_000 });
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
