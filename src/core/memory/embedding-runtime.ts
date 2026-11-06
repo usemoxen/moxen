@@ -69,7 +69,7 @@ export class EmbeddingRuntime implements EmbeddingEncoder {
     this.idle.unref();
   }
 
-  private receive(timeout: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  private receive(timeout: number, signal?: AbortSignal, sent?: () => boolean): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const finish = (fn: () => void) => {
         clearTimeout(timer);
@@ -77,7 +77,23 @@ export class EmbeddingRuntime implements EmbeddingEncoder {
         this.pending = null;
         fn();
       };
-      const abort = () => this.fail("Embedding request cancelled");
+      // A plain cancel rejects only this caller and never fails the runtime.
+      // The child protocol has no cancel verb and no request ids, so when the
+      // request already reached the child its late reply would resolve the
+      // next caller's receive: restart the child to keep replies matched.
+      const abort = () => {
+        if (sent?.() ?? true) {
+          const child = this.child;
+          this.child = null;
+          if (this.idle) {
+            clearTimeout(this.idle);
+            this.idle = null;
+          }
+          child?.kill();
+          this.status = { ...this.status, state: "stopped" };
+        }
+        finish(() => reject(new Error("Embedding request cancelled")));
+      };
       const timer = setTimeout(() => this.fail("Embedding request timed out"), timeout);
       this.pending = { resolve: (value) => finish(() => resolve(value)), reject: (error) => finish(() => reject(error)) };
       signal?.addEventListener("abort", abort, { once: true });
@@ -229,10 +245,13 @@ export class EmbeddingRuntime implements EmbeddingEncoder {
       if (signal?.aborted) throw new Error("Embedding request cancelled");
       if (this.idle) clearTimeout(this.idle);
       await this.start(false, signal);
-      const response = this.receive(30_000, signal);
+      if (signal?.aborted) throw new Error("Embedding request cancelled");
+      let sent = false;
+      const response = this.receive(30_000, signal, () => sent);
       try {
         const child = this.child;
         child?.stdin.write(`${JSON.stringify({ texts })}\n`, (error) => { if (error && this.child === child) this.fail("Embedding process input failed"); });
+        sent = true;
         const value = await response;
         if (!Array.isArray(value.vectors) || value.vectors.length !== texts.length || !value.vectors.every(validEmbedding)) {
           this.fail("Invalid embedding vectors");

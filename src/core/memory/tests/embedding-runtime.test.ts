@@ -68,3 +68,35 @@ for await (const line of createInterface({input:process.stdin})) {
   runtime.close();
   expect(runtime.status.state).toBe("stopped");
 });
+
+it("rejects only the aborted caller on cancel, never fails the runtime, and never mismatches a late reply", async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), "moxen-encoder-cancel-"));
+  const file = path.join(root, "slow.mjs");
+  await writeFile(file, `
+import { createInterface } from 'node:readline';
+console.log(JSON.stringify({ready:true,device:'cpu'}));
+for await (const line of createInterface({input:process.stdin})) {
+  const {texts} = JSON.parse(line);
+  if (texts[0] === 'slow') {
+    console.log(JSON.stringify({progress:'slow-received',percent:10}));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    console.log(JSON.stringify({vectors:texts.map(()=>[9,...Array(767).fill(0)])}));
+  } else {
+    console.log(JSON.stringify({vectors:texts.map(()=>[1,...Array(767).fill(0)])}));
+  }
+}
+`);
+  runtime = new EmbeddingRuntime(root, file);
+  const active = runtime;
+  expect((await active.encode(["first"]))[0]?.[0]).toBe(1);
+  const abort = new AbortController();
+  const slow = active.encode(["slow"], abort.signal);
+  // The request reached the child: its late reply would resolve the next
+  // caller's receive, so cancelling must restart the child to stay correct.
+  await vi.waitFor(() => expect(active.status.file).toBe("slow-received"), { timeout: 10_000 });
+  abort.abort();
+  await expect(slow).rejects.toThrow("cancelled");
+  expect(active.status.state).not.toBe("failed");
+  expect((await active.encode(["fresh"]))[0]).toEqual([1, ...Array(767).fill(0)]);
+  expect(active.status.state).toBe("ready");
+});

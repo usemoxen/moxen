@@ -181,7 +181,15 @@ async function turnSettled(harness: TestHarness, threadId: string): Promise<void
   const deadline = Date.now() + 15_000;
   for (;;) {
     const turns = await harness.store.readTurns(threadId);
-    if (turns.length > 0 && turns.every((turn) => turn.status !== "running" && turn.status !== "queued")) return;
+    const done = turns.length > 0 && turns.every((turn) => turn.status !== "running" && turn.status !== "queued");
+    if (done) {
+      // The terminal status lands one write before its activity row; a read
+      // between the two sees a settled turn with no ending.
+      const settled = turns.filter((turn) => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted");
+      const rows = await harness.store.readActivities(threadId);
+      const ended = new Set(["turn.completed", "turn.failed", "turn.interrupted"]);
+      if (settled.every((turn) => rows.some((row) => row.turnId === turn.id && ended.has(row.kind)))) return;
+    }
     if (Date.now() > deadline) throw new Error(`turns on ${threadId} never settled`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

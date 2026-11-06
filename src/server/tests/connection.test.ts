@@ -1588,6 +1588,7 @@ describe("DirectConnection revert", () => {
     }
   });
 
+  // Three full turns plus a revert, every one of them through git: a loaded runner does not fit in the twenty-second default.
   it("just cuts the ledger when no provider remembers the turns", async () => {
     const driver = new RecordingDriver("native-1");
     const { harness, connection, threadId } = await threeTurns(driver);
@@ -1605,7 +1606,7 @@ describe("DirectConnection revert", () => {
     } finally {
       await later.close();
     }
-  });
+  }, 60_000);
 });
 
 describe("DirectConnection images", () => {

@@ -759,7 +759,10 @@ describe("provider-side interruptions", () => {
       await backgroundStarted(watching.queue, thread.id, "native-busy-1", "native news");
       const wake = await queuedWakeUp(store, thread.id);
       expect(wake.queue).toMatchObject({ wakeUp: true, requestId: "native-turn:native-busy-1" });
-      expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
+      // The wake-up message is appended after the turn row: wait for it rather than racing the write.
+      await vi.waitFor(async () => {
+        expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
+      }, { timeout: 10_000 });
       // The winner was never touched: still running, session never interrupted or closed.
       expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
       expect(watching.interrupt).not.toHaveBeenCalled();
@@ -889,7 +892,10 @@ describe("provider-side interruptions", () => {
     await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go", modelSelection });
     // The turn is over; only the session watcher still hears the stop.
     await Effect.runPromise(Queue.offer((driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue, subagent("stopped")));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The watcher records it on its own chain: wait for the row, not a fixed sleep.
+    await vi.waitFor(async () => {
+      expect((await store.readActivities(thread.id)).filter((row) => row.kind === "subagent")).toHaveLength(2);
+    }, { timeout: 10_000 });
 
     const rows = (await store.readActivities(thread.id)).filter((row) => row.kind === "subagent");
     // Once each: mid-turn the runner records it and the watcher stands aside.

@@ -16,6 +16,8 @@ export interface ProcessOptions {
   input?: string;
   timeoutMs?: number;
   allowFailure?: boolean;
+  /** Grace from SIGTERM to SIGKILL after a timeout. Defaults to 2000; 0 kills immediately. */
+  forceKillAfterMs?: number;
 }
 
 export async function runProcess(
@@ -32,10 +34,53 @@ export async function runProcess(
     });
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
+    let settled = false;
+    let forceTimer: ReturnType<typeof setTimeout> | null = null;
+    const settle = (fn: () => void): void => {
+      clearTimeout(timeout);
+      if (forceTimer !== null) {
+        clearTimeout(forceTimer);
+        forceTimer = null;
+      }
+      if (settled) return;
+      settled = true;
+      fn();
+    };
     const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill();
+      // A timeout settles on its own: 'close' also waits for stdio a
+      // grandchild may hold, and the child may ignore the first kill.
+      // Escalate like the provider transport (SIGTERM, then SIGKILL).
+      try {
+        killProcessTree(child, "SIGTERM");
+      } catch {
+        // Already gone.
+      }
+      // Release our side of the pipes so 'close' can still fire once the child ends.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      settle(() => {
+        reject(new CliError("PROCESS_TIMEOUT", `${command} timed out.`, { details: { command } }));
+      });
+      const grace = options.forceKillAfterMs ?? 2_000;
+      if (grace <= 0) {
+        try {
+          killProcessTree(child, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      } else {
+        forceTimer = setTimeout(() => {
+          forceTimer = null;
+          try {
+            killProcessTree(child, "SIGKILL");
+          } catch {
+            // Already gone.
+          }
+        }, grace);
+        if (typeof (forceTimer as unknown as { unref?: unknown }).unref === "function") {
+          (forceTimer as unknown as { unref(): void }).unref();
+        }
+      }
     }, options.timeoutMs ?? 60_000);
 
     child.stdout.setEncoding("utf8");
@@ -47,25 +92,25 @@ export async function runProcess(
       stderr += chunk;
     });
     child.on("error", (cause) => {
-      clearTimeout(timeout);
-      reject(new CliError("PROCESS_START_FAILED", `Could not start ${command}.`, { cause }));
+      settle(() => {
+        reject(new CliError("PROCESS_START_FAILED", `Could not start ${command}.`, { cause }));
+      });
     });
     child.on("close", (code) => {
-      clearTimeout(timeout);
       const exitCode = code ?? 1;
-      if (timedOut) {
-        reject(new CliError("PROCESS_TIMEOUT", `${command} timed out.`, { details: { command } }));
-        return;
-      }
       if (exitCode !== 0 && !options.allowFailure) {
-        reject(
-          new CliError("PROCESS_FAILED", `${command} exited with code ${exitCode}.`, {
-            details: { command, exitCode, stderr: stderr.trim() },
-          }),
-        );
+        settle(() => {
+          reject(
+            new CliError("PROCESS_FAILED", `${command} exited with code ${exitCode}.`, {
+              details: { command, exitCode, stderr: stderr.trim() },
+            }),
+          );
+        });
         return;
       }
-      resolve({ stdout, stderr, exitCode });
+      settle(() => {
+        resolve({ stdout, stderr, exitCode });
+      });
     });
 
     if (options.input !== undefined) child.stdin.end(options.input);
