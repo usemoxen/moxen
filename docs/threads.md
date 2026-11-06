@@ -351,8 +351,10 @@ continuations, and provider-native task/Monitor notifications. Scheduled message
 keep their existing conditions and are held at admission. Native completion
 notifications retain the SDK payload, including the summary and output-file
 reference; replay does not look up a still-live task. Provider-native injected
-messages retain their text. Held task reports bypass the volatile batching timer;
-an existing batch is flushed when protection begins. Wake-ups retain insertion
+messages retain their text. Held task reports stay in the durable notification
+batch instead of starting a wake-up turn behind the hold; an existing batch is
+kept when protection begins, and goes out as one message once the thread
+recovers, or with the user's releasing turn. Wake-ups retain insertion
 order and content across a server restart, then run separately through the work
 queue after automatic recovery, or after the user's releasing turn. The existing
 allowance reserves and inactive-thread checks still apply. Archived, deleted,
@@ -868,6 +870,31 @@ on its own. Where Moxen cannot check — no live session here, or a provider
 that cannot report it all (OpenCode reports only the background shells and
 subagents its own server started) — the notification and `task_status` say so
 plainly instead of implying nothing is running.
+
+### A delegated task that runs out of usage
+
+A task that runs out of usage auto-continues as any thread does: a continue
+is scheduled for just after the reset (or protection holds and recovers it),
+and the work goes on there. Its parent is told twice: once when the task
+pauses, with the expected resume time, and again with the normal report when
+the task finishes. `task_status` reads `running` while the resume waits,
+so a waiter does not mistake the pause for the task failing.
+
+Cancelling that automatic continue ends the resume, and the task will not
+pick the work back up on its own. In the TUI this asks first: Cancel and
+notify parent (the default), Cancel without notifying, or Go back. Without a
+modal — the CLI, or another agent cancelling through `task_cancel` — the
+parent is told by default. Either way `task_status` reads `cancelled` from
+then on, until a wake (`task_send` with `wake: true`) revives the task.
+
+A parent that has itself run out of usage does not receive task notices yet:
+they wait, durably — a restart inside the wait loses nothing — and arrive
+together as one message once its usage is back. When its automatic continue
+is switched off, there is no recovery to ride on, so they go out with the
+user's next message instead, all together rather than each on its own.
+Continuing the parent into a new thread moves the wait with it: the live
+thread resolves through `continuedIn`, so the new parent gets the message
+and the old one gets nothing.
 
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the
