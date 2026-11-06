@@ -1022,7 +1022,7 @@ describe("DirectConnection model and session continuity", () => {
       // here the stdio child, bound to this thread and this store (no HTTP
       // endpoint: this connection never became a long-lived owner).
       expect(servers[1]).toMatchObject({ name: "moxen", type: "in-process", alwaysLoad: true });
-      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "web_fetch", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       const fallback = servers[1]!.fallback as { type: string; env: Record<string, string>; args: string[] };
       expect(fallback).toMatchObject({ type: "stdio", env: { MOXEN_STORE_ROOT: harness.root } });
       expect(fallback.args.slice(-2)).toEqual(["--thread", "thread-m"]);
@@ -1693,6 +1693,64 @@ describe("DirectConnection plan usage", () => {
       await connection.close();
     }
   });
+
+  it("refreshes usage from drivers that can read it cheaply, and skips the rest", async () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const refreshing = {
+      refreshUsage: async () => ({
+        key: "claude",
+        windows: [{ id: "session", label: "Session", resetsAt, exhausted: false, usedPercent: 94 }],
+      }),
+    } as unknown as TurnDriver;
+    const refusing = {
+      refreshUsage: async (): Promise<never> => {
+        throw new Error("probe refused");
+      },
+    } as unknown as TurnDriver;
+    const harness = await testHarness({ drivers: { claude: () => refreshing, codex: () => refusing } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      // Any driver use takes ownership; skills.list needs nothing but the driver itself.
+      await connection.query({ type: "skills.list", instanceId: "claudeAgent", cwd: harness.work });
+      await connection.query({ type: "skills.list", instanceId: "codex", cwd: harness.work });
+      const refreshed = await connection.query({ type: "usage.refresh" });
+      expect(refreshed.providers.claude?.windows).toEqual([{ id: "session", kind: "session", label: "Session", usedPercent: 94, resetsAt }]);
+      expect(refreshed.providers.codex).toBeUndefined();
+      // The stored snapshot carries the probe now too.
+      expect((await connection.query({ type: "usage.limits" })).providers.claude?.checkedAt).toBe(refreshed.providers.claude?.checkedAt);
+    } finally {
+      resetUsageLimitsForTests();
+      await connection.close();
+    }
+  });
+
+  // Slow on purpose (~6s): pins that one hung probe cannot stall the round,
+  // and the fast driver's windows still land in the partial snapshot.
+  it("cuts a hung probe off at the per-driver deadline and keeps the fast driver's windows", async () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const hanging = {
+      refreshUsage: async () => await new Promise<never>(() => undefined),
+    } as unknown as TurnDriver;
+    const fast = {
+      refreshUsage: async () => ({
+        key: "codex",
+        windows: [{ id: "session", label: "Session", resetsAt, exhausted: false, usedPercent: 41 }],
+      }),
+    } as unknown as TurnDriver;
+    const harness = await testHarness({ drivers: { claude: () => hanging, codex: () => fast } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      // Any driver use takes ownership; skills.list needs nothing but the driver itself.
+      await connection.query({ type: "skills.list", instanceId: "claudeAgent", cwd: harness.work });
+      await connection.query({ type: "skills.list", instanceId: "codex", cwd: harness.work });
+      const refreshed = await connection.query({ type: "usage.refresh" });
+      expect(refreshed.providers.codex?.windows).toEqual([{ id: "session", kind: "session", label: "Session", usedPercent: 41, resetsAt }]);
+      expect(refreshed.providers.claude).toBeUndefined();
+    } finally {
+      resetUsageLimitsForTests();
+      await connection.close();
+    }
+  }, 15_000);
 });
 
 describe("DirectConnection settings", () => {

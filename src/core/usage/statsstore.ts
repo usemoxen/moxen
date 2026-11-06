@@ -6,7 +6,8 @@
  * passed as such (see `StatsOptions`).
  */
 import type { ThreadStore } from "../threads/store.js";
-import { driverKindOfInstance } from "../types.js";
+import { driverKindOfInstance, type CliConfig } from "../types.js";
+import { modelPriceFor } from "./prices.js";
 import { type CardPalette, renderStatsCard } from "./card.js";
 import { type StatsOptions, type StatsRange, type StatsThreadInput, type UsageStats, computeUsageStats, dayKey } from "./stats.js";
 
@@ -23,8 +24,7 @@ async function readThread(store: ThreadStore, threadId: string): Promise<StatsTh
   }
 }
 
-async function readInputs(store: ThreadStore): Promise<{ inputs: StatsThreadInput[]; options: StatsOptions }> {
-  const ids = await store.listThreadIds().catch(() => [] as string[]);
+async function readInputs(store: ThreadStore, config?: Pick<CliConfig, "providers">): Promise<{ inputs: StatsThreadInput[]; options: StatsOptions }> {  const ids = await store.listThreadIds().catch(() => [] as string[]);
   const inputs: StatsThreadInput[] = [];
   for (let start = 0; start < ids.length; start += READ_AT_ONCE) {
     const batch = await Promise.all(ids.slice(start, start + READ_AT_ONCE).map((id) => readThread(store, id)));
@@ -36,11 +36,14 @@ async function readInputs(store: ThreadStore): Promise<{ inputs: StatsThreadInpu
       if (instanceId && driverKindOfInstance(instanceId) === "claude") runningTotals.add(instanceId);
     }
   }
-  return { inputs, options: { runningTotals } };
+  // Turns that recorded no provider cost are priced at the current values:
+  // the user's per-provider rows over Moxen's shipped list.
+  const priceFor: StatsOptions["priceFor"] = config === undefined ? undefined : (kind, model) => modelPriceFor(config, kind, model);
+  return { inputs, options: { runningTotals, ...(priceFor === undefined ? {} : { priceFor }) } };
 }
 
-export async function readUsageStats(store: ThreadStore, range: StatsRange, now: Date = new Date()): Promise<UsageStats> {
-  const { inputs, options } = await readInputs(store);
+export async function readUsageStats(store: ThreadStore, range: StatsRange, now: Date = new Date(), config?: Pick<CliConfig, "providers">): Promise<UsageStats> {
+  const { inputs, options } = await readInputs(store, config);
   return computeUsageStats(inputs, range, now, options);
 }
 
@@ -51,8 +54,8 @@ export interface UsageCard {
 }
 
 /** The shareable stats card for a range, in the client's colours when it sends them: all time is read too, so the heatmap keeps earlier days in grey. */
-export async function readUsageCard(store: ThreadStore, range: StatsRange, now: Date = new Date(), palette?: CardPalette): Promise<UsageCard> {
-  const { inputs, options } = await readInputs(store);
+export async function readUsageCard(store: ThreadStore, range: StatsRange, now: Date = new Date(), palette?: CardPalette, config?: Pick<CliConfig, "providers">): Promise<UsageCard> {
+  const { inputs, options } = await readInputs(store, config);
   const stats = computeUsageStats(inputs, range, now, options);
   const all = range === "all" ? stats : computeUsageStats(inputs, "all", now, options);
   return {

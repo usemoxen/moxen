@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { StoredTurn } from "../../threads/types.js";
-import { type StatsThreadInput, computeUsageStats, rangeStart } from "../stats.js";
+import { type StatsOptions, type StatsThreadInput, computeUsageStats, rangeStart } from "../stats.js";
+import { modelPriceFor } from "../prices.js";
 
 const NOW = new Date(2026, 9, 29, 12, 0, 0);
 
@@ -112,6 +113,39 @@ describe("computeUsageStats", () => {
   it("reads a reported cost of zero as free, not unpriced", () => {
     const stats = computeUsageStats([thread("a", [turn(at(0), "opus", { ...small, costUsd: 0 })])], "all", NOW);
     expect(stats.costUsd).toBe(0);
+    expect(stats.unpricedTurns).toBe(0);
+  });
+
+  it("prices a turn that reported no cost at the current prices, and leaves a priceless model unpriced", () => {
+    const config = { providers: { opencode: { modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": 10 } } } };
+    const options: StatsOptions = { priceFor: (kind, model) => modelPriceFor(config, kind, model) };
+    const priced = { ...small, input: 1e6, output: 1e6 };
+    const stats = computeUsageStats(
+      [
+        thread("a", [turn(at(0), "muse", priced, { modelSelection: { instanceId: "opencode/opencode-go", model: "opencode-go/muse-spark-1.3-contributor" } })]),
+        thread("b", [turn(at(0), "gpt-6.1-sol", priced)]),
+        thread("c", [turn(at(0), "mystery", priced, { modelSelection: { instanceId: "harness/local", model: "mystery" } })]),
+      ],
+      "all",
+      NOW,
+      options,
+    );
+    // The user's rows price Muse; the shipped list prices the Codex model; mystery stays unpriced.
+    expect(stats.costUsd).toBeCloseTo(12 + 12, 9);
+    expect(stats.unpricedTurns).toBe(1);
+    expect(stats.byModel.find((bucket) => bucket.key === "opencode-go/muse-spark-1.3-contributor")?.costUsd).toBeCloseTo(12, 9);
+    expect(stats.byModel.find((bucket) => bucket.key === "mystery")?.costUsd).toBeNull();
+  });
+
+  it("keeps a reported cost where one was recorded, even with prices at hand", () => {
+    const options: StatsOptions = { priceFor: (kind, model) => modelPriceFor({ providers: {} }, kind, model) };
+    const stats = computeUsageStats(
+      [thread("a", [turn(at(0), "gpt-6.1-sol", { ...small, input: 1e6, output: 1e6, costUsd: 5 })])],
+      "all",
+      NOW,
+      options,
+    );
+    expect(stats.costUsd).toBe(5);
     expect(stats.unpricedTurns).toBe(0);
   });
 

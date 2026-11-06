@@ -211,9 +211,9 @@ async function runSettings(): Promise<void> {
   await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
   await setup.flush();
 
-  // The page runs Defaults, Tools, Long threads, Sessions, Setup, Output, Ultracode: walk the whole of it.
+  // The page runs Defaults, Tools, Long threads, Sessions, Model prices, Setup, Output, Ultracode: walk the whole of it.
   const claudeFrames: string[] = [];
-  for (let step = 0; step < 20; step += 1) {
+  for (let step = 0; step < 26; step += 1) {
     await act(async () => setup.mockInput.pressArrow("down"));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     await setup.flush();
@@ -222,7 +222,7 @@ async function runSettings(): Promise<void> {
   const seenOn = (text: string) => claudeFrames.findIndex((frame) => frame.includes(text));
   console.log("--- settings page, Claude Code tab, last row ---");
   console.log(claudeFrames.at(-1));
-  for (const expected of ["Claude executable", "next server start", "Compaction", "Hand off at", "Long threads", "Setup"]) {
+  for (const expected of ["Claude executable", "next server start", "Compaction", "Hand off at", "Long threads", "Setup", "Model prices", "Input price"]) {
     if (seenOn(expected) < 0) fail(`the Claude Code tab never shows "${expected}"`);
   }
   if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Compaction") && row.includes("Default (Moxen asks)")))) fail("the Claude Code tab does not say who compacts");
@@ -230,6 +230,28 @@ async function runSettings(): Promise<void> {
   if (seenOn("Moxen's skills") >= 0) fail("the Claude Code tab still offers Moxen's skills, which Moxen no longer ships");
   // Under the same headings, in the same order, as the other providers: Long threads before Setup.
   if (!(seenOn("Long threads") <= seenOn("Setup"))) fail("the Claude Code tab files Setup before Long threads");
+  if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Input price") && row.includes("Moxen's shipped")))) fail("the Claude Code tab does not price models at Moxen's shipped list by default");
+  // A price row opens its editor: walk back up to its label (not a fixed
+  // row) and click it — a multiline box with the pair format said under it.
+  for (let step = 0; step < 30 && !setup.captureCharFrame().includes("Input price"); step += 1) {
+    await act(async () => setup.mockInput.pressArrow("up"));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    await setup.flush();
+  }
+  const priceRows = setup.captureCharFrame().split("\n");
+  const priceRow = priceRows.findIndex((row) => row.includes("Input price"));
+  if (priceRow < 0) fail("the Claude Code tab has no input price row to click");
+  await act(async () => setup.mockMouse.click(priceRows[priceRow]!.indexOf("Input price") + 1, priceRow));
+  await setup.flush();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
+  await setup.flush();
+  const priceEditor = setup.captureCharFrame();
+  console.log("--- settings page, a model price editor ---");
+  console.log(priceEditor);
+  if (!priceEditor.includes("model=USD pairs")) fail("the model price editor does not say the pair format");
+  await act(async () => setup.mockInput.pressEscape());
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+  await setup.flush();
 
   // OpenCode has its own pane now, with the same card.
   await act(async () => setup.mockInput.pressTab());
@@ -245,7 +267,7 @@ async function runSettings(): Promise<void> {
   let sawExecutable = false;
   // A choice with no default of its own reads as what applies (OpenCode compacts by itself unless told otherwise).
   let sawDefaultOn = false;
-  for (let step = 0; step < 24 && !sawExecutable; step += 1) {
+  for (let step = 0; step < 30 && !sawExecutable; step += 1) {
     await act(async () => setup.mockInput.pressArrow("down"));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     await setup.flush();

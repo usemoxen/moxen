@@ -18,7 +18,8 @@
 import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor } from "./idle.js";
 import * as Effect from "effect/Effect";
-import { appendFile, mkdir, readFile } from "node:fs/promises";import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { decodeDataUrl, imageMention, type ImageAttachmentUpload } from "../attachments.js";
@@ -2528,6 +2529,16 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   if (tasks.length === 0) return;
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return;
+  if (parent.deletedAt != null) {
+    // Dropped, not queued and not thrown: the conversation is gone. One
+    // line in the server log; nothing more (MXN-290 review).
+    await appendFile(
+      path.join(ctx.storeRoot, "server.log"),
+      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${tasks.length} task(s)\n`,
+      "utf8",
+    ).catch(() => undefined);
+    return;
+  }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
   await startTurn(ctx, {
@@ -2776,11 +2787,33 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   const idempotencyKey = request.idempotencyKey?.trim() || undefined;
   if (idempotencyKey !== undefined) {
-    const prior = [...(await ctx.store.readDelegations())].reverse().find(
-      (row) => row.parentThreadId === parentThreadId && row.idempotencyKey === idempotencyKey && row.continuedIn === undefined,
+    const rows = await ctx.store.readDelegations();
+    // The caller's own lineage, as in `ownedDelegation`: a continuation
+    // retries under its own name, but never into another home.
+    const lineage = await threadLineage(ctx, parentThreadId);
+    const initial = [...rows].reverse().find(
+      (row) => lineage.has(row.parentThreadId) && row.idempotencyKey === idempotencyKey,
     );
-    // A retry whose original child is gone (deleted thread) falls through and delegates anew.
-    if (prior && (await ctx.store.readThreadRecord(prior.childThreadId))) return await describeDelegation(prior.childThreadId, prior);
+    if (initial) {
+      // A retry after the task handed off finds the original row (which now
+      // carries `continuedIn`) and follows it to the current incarnation,
+      // whose continuation row holds no key (MXN-290).
+      let row = initial;
+      let current = true;
+      for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+        const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
+        if (!next) {
+          current = false;
+          break;
+        }
+        row = next;
+      }
+      // A broken chain, the hop cap, or a gone child falls through to a
+      // fresh delegate rather than returning a superseded row.
+      if (current && row.continuedIn === undefined && (await ctx.store.readThreadRecord(row.childThreadId))) {
+        return await describeDelegation(row.childThreadId, row);
+      }
+    }
   }
 
   // A fork starts from a copy of the parent's own conversation, made before
