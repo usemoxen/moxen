@@ -13,7 +13,8 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -129,6 +130,28 @@ describe("conditional work queue", () => {
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === held.turn.id)?.status).toBe("queued");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === ordinary.turn.id)?.status).toBe("running");
     expect((await w.store.readMessages(thread.id)).find((m) => m.id === held.messageId)?.turnId).toBe(held.turn.id);
+  });
+
+  it("re-asks user content folded into an unanswered continue, without the nudge", async () => {
+    const w = await world(); const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    // The real automatic shape, due almost at once.
+    const continued = (await scheduleUsageContinue(w.ctx, thread.id, running.turn.id, new Date(Date.now() - 59_000).toISOString()))!;
+    const folded = await sendTurn(w.store, thread.id, { prompt: "folded user content", delivery: "queue" });
+    await vi.waitFor(() => expect(Date.now() >= Date.parse(continued.scheduledFor!)).toBe(true), { timeout: 120_000, interval: 25 });
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    // The continue ran with the folded message in one turn...
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === continued.id)?.status).toBe("running");
+    expect(turns.some((turn) => turn.id === folded.turn.id)).toBe(false);
+    // ...then ended with no provider output on a fresh conversation.
+    await w.store.updateTurn(thread.id, continued.id, { status: "completed", completedAt: w.store.nowIso(), unanswered: true });
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "next question" });
+    await settleRuns();
+    const prompt = w.sent.at(-1)!.prompt;
+    expect(prompt).toContain("folded user content");
+    expect(prompt).toContain("next question");
+    expect(prompt).not.toContain(USAGE_CONTINUE_PROMPT);
   });
 
   it("latches cross-provider events durably while other conditions are still blocked", async () => {

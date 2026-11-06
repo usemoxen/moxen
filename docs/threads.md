@@ -492,7 +492,10 @@ shows the limit block from the start, and holds task notifications without
 spending a turn, and its first turn is the recovery entry that runs once
 the reset comes. Otherwise the scheduled turn is created without the hold
 and runs at its time. An immediate message still releases a hold and runs
-first, as on any held thread.
+first, as on any held thread. A pause notice batched for the source but not
+yet delivered moves to the continuation when it inherits the hold, so the
+parent still hears it naming the live task; without an inherited hold it is
+dropped, and the task's settle report covers it.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle

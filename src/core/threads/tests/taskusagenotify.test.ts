@@ -147,6 +147,39 @@ describe("a delegated task that pauses for usage", () => {
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
   });
 
+  it("moves a pending pause notice to the continuation that inherits the hold", async () => {
+    const w = await world({ autoContinueAtUsageLimit: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt }]);
+    const continued = await scheduleUsageContinue(w.ctx, child.id, stopped.id, resetsAt);
+    expect(continued).not.toBeNull();
+    // No flush yet: the pause entry is still in its batch window. The thread
+    // is held for the same reset before the window lapses...
+    await w.store.withThreadLock(child.id, async () => {
+      const current = (await w.store.readThreadRecord(child.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt, order: 1, phase: "waiting", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    const next = await continueThread(w.ctx, { threadId: child.id, scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+    // ...and the destination inherits the hold.
+    expect((await w.store.readThreadRecord(next.threadId))?.usagePause).toMatchObject({ phase: "waiting" });
+
+    // The reset lapses; the parent still hears the pause notice — naming the
+    // live task, not the dormant source.
+    resetUsageLimitsForTests();
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const notes = await notificationsIn(w, parent.id);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("paused for usage");
+    expect(notes[0]).toContain(next.threadId);
+  });
+
   it("takes back a stale automatic continue without cancelling the task, and the parent still gets its settle report", async () => {
     const w = await world({ autoContinueAtUsageLimit: true });
     const parent = await w.make("orchestrator");

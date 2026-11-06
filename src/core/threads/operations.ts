@@ -215,6 +215,21 @@ function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
 }
 
 /**
+ * What an unanswered continue still owes its conversation: never the
+ * automatic nudge itself, but any user messages folded into its turn —
+ * without them the re-ask would leave that content in neither the new
+ * prompt nor any live session.
+ */
+function unansweredContinueText(messages: readonly StoredMessage[], turn: StoredTurn): string | null {
+  const riders = messages
+    .filter((message) => message.turnId === turn.id && message.role === "user" && message.id !== turn.messageId && message.text.trim().length > 0)
+    .map((message) => message.text.trim());
+  const first = messages.find((message) => message.id === turn.messageId);
+  if (first && first.text.trim().length > 0 && first.text.trim() !== USAGE_CONTINUE_PROMPT.trim()) riders.unshift(first.text.trim());
+  return riders.length > 0 ? riders.join("\n\n") : null;
+}
+
+/**
  * A conversation with no history starts clean, but an earlier turn on it may
  * have ended with no output from the provider (a usage limit; see `unanswered`
  * on the turn): the provider never read that prompt, and the work is in it
@@ -239,8 +254,10 @@ async function withUnansweredPrompts(
   for (const turn of turns) {
     if (turn.id === turnId || driverKey((turn.modelSelection ?? thread.modelSelection).instanceId) !== setup.key) continue;
     if (turn.unanswered) {
-      const own = turn.scheduleReason === "usage-reset" ? null : turnPrompt(messages, turn);
-      if (own) owed.push(own.text);
+      // A usage continue is only a nudge and stays out — but user messages
+      // folded into its turn still need asking.
+      const own = turn.scheduleReason === "usage-reset" ? unansweredContinueText(messages, turn) : turnPrompt(messages, turn)?.text;
+      if (own) owed.push(own);
     } else if (turn.owner && (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) owed = [];
   }
   return owed.length === 0 ? prompt : `${owed.join("\n\n")}\n\n${prompt}`;
@@ -3436,6 +3453,23 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // A pause or cancellation a settle report covers is stale: the settle says where the task stands.
   // One whose task handed off is the continuation's to report.
   const pauseIds = mine.filter((entry) => pendingEntryKind(entry) === "pause" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
+  // A pause batched for a task that has since continued belongs to the live
+  // conversation when that conversation is itself held for the reset: report
+  // the continuation as paused. Otherwise (no inherited hold, nothing left to
+  // resume) dropping stays correct.
+  const continuedPauses = (await Promise.all(mine.filter((entry) => pendingEntryKind(entry) === "pause" && movedOn(entry.child)).map(async (entry) => {
+    const seen = new Set([entry.child]);
+    let next = rows.find((row) => row.childThreadId === entry.child && row.parentThreadId === parentThreadId)?.continuedIn;
+    while (next !== undefined && !seen.has(next)) {
+      seen.add(next);
+      const record = await ctx.store.readThreadRecord(next).catch(() => null);
+      if (record?.usagePause?.phase === "waiting") return { ...entry, child: next };
+      next = rows.find((row) => row.childThreadId === next && row.parentThreadId === parentThreadId)?.continuedIn;
+    }
+    return null;
+  }))).filter((entry): entry is PendingTaskNotification => entry !== null);
+  pauseIds.push(...continuedPauses.map((entry) => entry.child));
+  const pauseEntries = [...mine, ...continuedPauses];
   const cancelIds = mine.filter((entry) => pendingEntryKind(entry) === "cancel" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
   // The settle generation each snapshot was taken at: a turn settling between
@@ -3454,7 +3488,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const pauseTasks = (await Promise.all(pauseIds.map(async (id): Promise<TaskNotification | null> => {
     const task = await taskNotificationOf(ctx, id);
     if (!task || movedOn(id) || (await taskHasSettledForGood(ctx, id))) return null;
-    const resumesAt = mine.find((entry) => entry.child === id && pendingEntryKind(entry) === "pause")?.resumesAt ?? null;
+    const resumesAt = pauseEntries.find((entry) => entry.child === id && pendingEntryKind(entry) === "pause")?.resumesAt ?? null;
     return { ...task, status: "running" as const, resumesAt };
   }))).filter(
     (task): task is TaskNotification => task !== null,
