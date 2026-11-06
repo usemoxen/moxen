@@ -30,3 +30,14 @@ export interface StoreProblem {
 export function storeProblemId(problem: Omit<StoreProblem, "id" | "message">): string {
   return [problem.kind, problem.file, problem.line ?? "", problem.threadId ?? "", problem.turnId ?? ""].join("|");
 }
+
+const KNOWN_TURN_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "completed", "interrupted", "failed"]);
+
+/**
+ * Whether a turn's status is one a build writes. Anything else came from a
+ * hand edit or a newer build: it shows as its own state (never silently as
+ * completed) and can be stopped, so it never stays stuck.
+ */
+export function isKnownTurnStatus(status: string): boolean {
+  return KNOWN_TURN_STATUSES.has(status);
+}

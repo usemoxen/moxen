@@ -162,6 +162,7 @@ import {
 import { toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
+import { isKnownTurnStatus } from "../core/threads/problems.js";
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
@@ -1854,7 +1855,9 @@ export class DirectConnection implements ClientApi {
     if (!turn) {
       throw new CliError("TURN_NOT_FOUND", `No turn exists with id ${turnId}.`, { exitCode: 3, details: { threadId, turnId } });
     }
-    return turn.status;
+    // A status no build writes reads as unknown on the wire, never raw: the
+    // contract names every state a client can see.
+    return isKnownTurnStatus(turn.status) ? turn.status : "unknown";
   }
 
   /**

@@ -19,7 +19,7 @@ import type {
   RuntimeMode,
 } from "../types.js";
 import { ThreadStore } from "./store.js";
-import type { StoreProblem } from "./problems.js";
+import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
   CreateThreadInput,
   ReadView,
@@ -74,15 +74,28 @@ export function openTurn(turns: StoredTurn[]): StoredTurn | null {
   return turns.find((turn) => turn.status === "running") ?? null;
 }
 
-const KNOWN_TURN_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "completed", "interrupted", "failed"]);
-
 /**
- * Whether a turn's status is one a build writes. Anything else came from a
- * hand edit or a newer build: it shows as its own state (never silently as
- * completed) and can be stopped, so it never stays stuck.
+ * The turn that makes the thread live: the running one, else one with a
+ * status no build writes (it never settles on its own, so nothing may start
+ * or promote past it). Ownerless running turns are running, so the first
+ * branch covers them.
  */
-export function isKnownTurnStatus(status: string): boolean {
-  return KNOWN_TURN_STATUSES.has(status);
+export function liveTurn(turns: StoredTurn[]): StoredTurn | null {
+  return openTurn(turns) ?? turns.find((turn) => !isKnownTurnStatus(turn.status)) ?? null;
+}
+
+/** A turns ledger problem hiding rows of this thread, if one is reported. */
+function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
+  const file = store.turnsFile(threadId);
+  return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
+}
+
+function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
+  return new CliError(
+    "TURNS_LEDGER_CORRUPT",
+    `Thread ${threadId} may have an active turn hidden in an unreadable ledger line (${problem.file}${problem.line === undefined ? "" : `:${problem.line}`}). Move the bad line aside first — the TUI warning offers it, or remove the line by hand — then retry.`,
+    { exitCode: 4, details: { threadId, problemId: problem.id } },
+  );
 }
 
 /**
@@ -341,6 +354,8 @@ export async function sendTurn(
     }
 
     let turns = await store.readTurns(threadId);
+    const hidden = hiddenTurnsProblem(store, threadId);
+    if (hidden) throw unreadableTurnsError(threadId, hidden);
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
       if (existing) {
@@ -354,6 +369,14 @@ export async function sendTurn(
       }
     }
     let running = openTurn(turns);
+    const stuck = running === null ? liveTurn(turns) : null;
+    if (stuck !== null) {
+      throw new CliError(
+        "THREAD_BUSY",
+        `Thread ${threadId} has a turn that will never settle (status ${JSON.stringify(stuck.status)}). Stop it before sending.`,
+        { exitCode: 4, details: { threadId, turnId: stuck.id } },
+      );
+    }
     // A message sent to a running turn does not carry a mode of its own (`/research` is for a prompt that starts one).
     if (running && !manualContinuation && input.interactionMode !== undefined) throw modeLocked(threadId);
 
@@ -614,11 +637,21 @@ export async function startBackgroundTurn(
     // Re-checked inside the lock: the wait above runs before it, so two
     // concurrent starts (or a send that won the race) would otherwise both
     // record a running turn.
-    if (openTurn(await store.readTurns(threadId))) {
+    const live = liveTurn(await store.readTurns(threadId));
+    if (live !== null && live.status === "running") {
       throw new CliError(
         "THREAD_BUSY",
         "The thread has an active turn. Retry when idle or use ifBusy inject.",
         { details: { threadId } },
+      );
+    }
+    const unreadable = hiddenTurnsProblem(store, threadId);
+    if (unreadable) throw unreadableTurnsError(threadId, unreadable);
+    if (live !== null) {
+      throw new CliError(
+        "THREAD_BUSY",
+        `Thread ${threadId} has a turn that will never settle (status ${JSON.stringify(live.status)}). Stop it before starting background work.`,
+        { exitCode: 4, details: { threadId, turnId: live.id } },
       );
     }
     const turn: StoredTurn = {
@@ -886,7 +919,9 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   const pause = thread.usagePause;
   if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
   const turns = await store.readTurns(threadId);
-  if (openTurn(turns)) return;
+  // A live turn blocks promotion: a running one, an ownerless one, or one
+  // with a status no build writes. So does a turns ledger hiding rows.
+  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
   const threadHeld = admittedId === undefined && threadStatus(thread, instant) !== "active";
@@ -1116,10 +1151,19 @@ export async function interruptTurn(
     const turns = await store.readTurns(threadId);
     const target = turnId
       ? (turns.find((turn) => turn.id === turnId) ?? null)
-      : (openTurn(turns) ?? null);
+      : liveTurn(turns);
     // A turn with a status no build writes is stuck by definition: stopping
     // it is the fix, so it stops like a running one.
-    if (!target || (isKnownTurnStatus(target.status) && target.status !== "running" && target.status !== "queued")) {
+    if (!target) {
+      // The row is hidden in a skipped line, but this process runs the turn:
+      // abort the run. Anything else is for the quarantine, not a stop.
+      if (turnId !== undefined && store.isTracked(turnId)) {
+        store.abortRunning(turnId);
+        return { thread, turn: null, interrupted: true };
+      }
+      return { thread, turn: null, interrupted: false };
+    }
+    if (isKnownTurnStatus(target.status) && target.status !== "running" && target.status !== "queued") {
       return { thread, turn: target, interrupted: false };
     }
     // Whether a run in this process will take the turn this promotes: the
@@ -1201,14 +1245,16 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
       if (id === threadId) requireNotArchived(thread, "change settlement state");
       if (thread.archivedAt != null || thread.deletedAt != null) continue;
       members.push(thread);
-      const running = openTurn(await store.readTurns(id)) !== null;
+      const running = liveTurn(await store.readTurns(id)) !== null;
       if (running || thread.hasPendingApprovals || thread.hasPendingUserInput) blocked.push({ id, running, thread });
     }
     if (blocked.length > 0 && options.stop === true) {
       for (const entry of blocked) {
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
-          if (turn.status === "running" || turn.status === "queued") await interruptTurnLocked(store, entry.thread, turn, now);
+          if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
+            await interruptTurnLocked(store, entry.thread, turn, now);
+          }
         }
         const index = members.findIndex((member) => member.id === entry.id);
         if (index !== -1) members[index] = { ...members[index]!, hasPendingApprovals: false, hasPendingUserInput: false };

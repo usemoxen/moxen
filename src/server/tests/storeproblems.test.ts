@@ -112,8 +112,7 @@ describe("bad records over the server", () => {
       }
   });
 
-  it("removing a skipped profile by id clears it instead of carrying it back", async () => {
-    const harness = await testHarness();
+  it("removing a skipped profile by id clears it instead of carrying it back", async () => {    const harness = await testHarness();
     const file = path.join(harness.root, "profile-config.json");
     await writeFile(
       file,
@@ -128,6 +127,60 @@ describe("bad records over the server", () => {
       const saved = JSON.parse(await readFile(file, "utf8"));
       expect(saved.providers).toBeUndefined();
       expect(saved.projectPolicy).toBe("create");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("awaiting an unknown-status turn answers at once with the unknown status in contract", async () => {
+    const harness = await testHarness();
+    const store = await openThreadStore(harness.root);
+    const thread = await createThread(store, { projectId: "project-1", title: "Unknown", modelSelection: { instanceId: "claude", model: "test-model" } });
+    const { sendTurn } = await import("../../core/threads/threads.js");
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, status: "bogus" })));
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      const read = await connection.query({ type: "thread.read", threadId: thread.id, view: "messages" });
+      expect(read.thread.latestTurn).toMatchObject({ turnId: sent.turn.id, state: "unknown" });
+      await expect(connection.query({ type: "thread.turn.await", threadId: thread.id, turnId: sent.turn.id })).resolves.toMatchObject({ status: "unknown" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("reverting keeps bad ledger lines in every ledger it rewrites", async () => {
+    const harness = await testHarness();
+    const store = await openThreadStore(harness.root);
+    const thread = await createThread(store, { projectId: "project-1", title: "Revert", modelSelection: { instanceId: "claude", model: "test-model" } });
+    const { completeTurn, sendTurn } = await import("../../core/threads/threads.js");
+    const first = await sendTurn(store, thread.id, { prompt: "one" });
+    await completeTurn(store, thread.id, first.turn.id, { text: "first reply" });
+    const second = await sendTurn(store, thread.id, { prompt: "two" });
+    await completeTurn(store, thread.id, second.turn.id, { text: "second reply" });
+    const dir = path.join(harness.root, "threads", thread.id);
+    const bad = "{bad\n";
+    for (const name of ["turns", "messages", "activity", "checkpoints"] as const) {
+      await appendFile(path.join(dir, `${name}.jsonl`), bad, "utf8");
+    }
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await connection.query({ type: "thread.read", threadId: thread.id, view: "messages" });
+      expect((await connection.query({ type: "store.problems" })).problems).toHaveLength(4);
+      await connection.dispatch({ type: "thread.conversation.revert", threadId: thread.id, turnCount: 1 });
+      for (const name of ["turns", "messages", "activity", "checkpoints"] as const) {
+        expect(await readFile(path.join(dir, `${name}.jsonl`), "utf8")).toContain(bad.trim());
+      }
+      // Turn two is gone, its rows dropped; the bad lines are still reported.
+      const reread = await connection.query({ type: "thread.read", threadId: thread.id, view: "messages" });
+      expect(reread.thread.messages?.map((message) => message.text)).toContain("first reply");
+      expect(reread.thread.messages?.map((message) => message.text)).not.toContain("second reply");
+      expect((await connection.query({ type: "store.problems" })).problems.map((problem) => problem.kind)).toEqual([
+        "ledger-line",
+        "ledger-line",
+        "ledger-line",
+        "ledger-line",
+      ]);
     } finally {
       await connection.close();
     }

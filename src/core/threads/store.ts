@@ -31,7 +31,7 @@ import type {
   StoredThread,
   StoredTurn,
 } from "./types.js";
-import { type StoreProblem, storeProblemId } from "./problems.js";
+import { type StoreProblem, isKnownTurnStatus, storeProblemId } from "./problems.js";
 
 export interface ThreadStoreOptions {
   readonly bus?: EventBus<BackendEvent>;
@@ -48,23 +48,37 @@ export function resolveStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
 
 type LedgerName = "turns" | "messages" | "activity" | "checkpoints";
 
+/**
+ * Thread ids are directory names under the store: letters, digits and a
+ * few safe characters, never a separator or an escape. Checked at the read
+ * boundary, so no caller can reach a path outside the store.
+ */
+const THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function checkThreadId(threadId: string): void {
+  if (!THREAD_ID.test(threadId)) {
+    throw new CliError("INVALID_THREAD_ID", `Invalid thread id: ${JSON.stringify(threadId)}.`, {
+      exitCode: 2,
+      details: { threadId },
+    });
+  }
+}
+
 function ledgerFile(root: string, threadId: string, name: LedgerName): string {
+  checkThreadId(threadId);
   return path.join(root, "threads", threadId, `${name}.jsonl`);
 }
 
-function parseLedgerLine<T>(line: string, file: string, lineNumber: number): { value: T } | { problem: Omit<StoreProblem, "id"> } {
-  try {
-    return { value: JSON.parse(line) as T };
-  } catch {
-    return {
-      problem: {
-        kind: "ledger-line",
-        file,
-        line: lineNumber,
-        message: `Line ${lineNumber} of ${file} is not valid JSON and was skipped; the rest of the ledger still loads.`,
-      },
-    };
-  }
+function ledgerProblem(kind: "ledger-line" | "delegation-line", file: string, lineNumber: number): Omit<StoreProblem, "id"> {
+  return {
+    kind,
+    file,
+    line: lineNumber,
+    message:
+      kind === "ledger-line"
+        ? `Line ${lineNumber} is not valid JSON and was skipped; the rest of the ledger still loads.`
+        : `Line ${lineNumber} is not valid JSON and was skipped; the other tasks still load.`,
+  };
 }
 
 export class ThreadStore {
@@ -74,6 +88,12 @@ export class ThreadStore {
   private readonly clock: () => number;
   /** Bad records readers skipped, by stable id: reported once, kept until fixed. */
   private readonly problems = new Map<string, StoreProblem>();
+  /**
+   * A bad final line without a trailing newline may be a torn append — a
+   * crash between the bytes and the newline — rather than corruption. It is
+   * reported only once it is still there on the next read.
+   */
+  private readonly pendingTorn = new Map<string, { line: number; raw: string }>();
 
   private constructor(
     private readonly root: string,
@@ -181,17 +201,29 @@ export class ThreadStore {
     if (!problem) {
       throw new CliError("PROBLEM_NOT_FOUND", `No bad record is reported with id ${id}.`, { details: { id } });
     }
+    // Problems resolve from the store's own log by id, so a client can
+    // never name an arbitrary path — and the file is still verified to be
+    // the expected file inside the store before any rename or write.
+    this.assertInsideRoot(problem.file);
     const stale = (message: string): Error => {
       this.problems.delete(id);
       return new CliError("PROBLEM_STALE", message, { details: { id } });
     };
     const quarantineDir = path.join(this.root, "quarantine");
-    const movedName = (base: string): string => path.join(quarantineDir, `${base}-${process.pid}-${Date.now()}`);
+    const movedName = (base: string): string => {
+      const movedTo = path.join(quarantineDir, `${base}-${process.pid}-${Date.now()}-${this.newId()}`);
+      this.assertInsideRoot(movedTo);
+      return movedTo;
+    };
     if (problem.kind === "turn-status" || problem.kind === "turn-ownerless") {
       throw new CliError("PROBLEM_NOT_QUARANTINED", `This problem is a stuck turn, not a bad record: stop it with thread.turn.interrupt instead.`, { details: { id } });
     }
     if (problem.kind === "thread-record") {
       const threadId = problem.threadId!;
+      checkThreadId(threadId);
+      if (problem.file !== this.threadFile(threadId)) {
+        throw new CliError("INVALID_STORE_PATH", `Refusing to move an unexpected file aside: ${problem.file}.`, { details: { id } });
+      }
       return await this.withThreadLock(threadId, async () => {
         let raw: string;
         try {
@@ -206,6 +238,13 @@ export class ThreadStore {
           if (error instanceof CliError) throw error;
           // Still bad: move it aside below.
         }
+        const live = (await this.readTurns(threadId)).some((turn) => turn.status === "running" || !isKnownTurnStatus(turn.status) || this.isTracked(turn.id));
+        if (live) {
+          throw new CliError("THREAD_BUSY", `Thread ${threadId} has a live turn: stop it before moving its record aside.`, {
+            exitCode: 4,
+            details: { threadId },
+          });
+        }
         await mkdir(quarantineDir, { recursive: true });
         const movedTo = movedName(`${threadId}-thread.json`);
         await renameReplacing(problem.file, movedTo);
@@ -214,16 +253,24 @@ export class ThreadStore {
       });
     }
     const line = problem.line!;
+    const kind = problem.kind === "delegation-line" ? ("delegation-line" as const) : ("ledger-line" as const);
+    if (problem.kind === "delegation-line") {
+      if (problem.file !== this.delegationsFile()) {
+        throw new CliError("INVALID_STORE_PATH", `Refusing to move an unexpected file aside: ${problem.file}.`, { details: { id } });
+      }
+    } else {
+      const threadId = problem.threadId!;
+      checkThreadId(threadId);
+      const ledgers = (["turns", "messages", "activity", "checkpoints"] as const).map((name) => ledgerFile(this.root, threadId, name));
+      if (!ledgers.includes(problem.file)) {
+        throw new CliError("INVALID_STORE_PATH", `Refusing to move an unexpected file aside: ${problem.file}.`, { details: { id } });
+      }
+    }
     const lockId = problem.kind === "delegation-line" ? "!delegations" : problem.threadId!;
     return await this.withThreadLock(lockId, async () => {
-      let raw: string;
-      try {
-        raw = await readFile(problem.file, "utf8");
-      } catch {
-        throw stale(`The file is already gone, so there is nothing to move aside.`);
-      }
-      const lines = raw.split("\n");
-      const bad = lines[line - 1];
+      const current = await this.readRawLedgerLines(problem.file);
+      if (current === null) throw stale(`The file is already gone, so there is nothing to move aside.`);
+      const bad = current[line - 1];
       if (bad === undefined || bad.trim().length === 0) throw stale(`Line ${line} is already gone, so there is nothing to move aside.`);
       try {
         JSON.parse(bad);
@@ -234,10 +281,11 @@ export class ThreadStore {
       }
       await mkdir(quarantineDir, { recursive: true });
       const movedTo = movedName(path.basename(problem.file));
-      await writeFile(movedTo, raw, "utf8");
-      const kept = [...lines.slice(0, line - 1), ...lines.slice(line)];
-      await writeFile(problem.file, kept.join("\n"), "utf8");
-      this.problems.delete(id);
+      await writeFile(movedTo, `${current.join("\n")}\n`, "utf8");
+      this.assertInsideRoot(movedTo);
+      const kept = [...current.slice(0, line - 1), ...current.slice(line)];
+      await this.writeLedgerFile(problem.file, kept);
+      this.resyncLedgerProblems(problem.file, kind, problem.kind === "delegation-line" ? undefined : problem.threadId, kept);
       return { movedTo };
     });
   }
@@ -277,11 +325,22 @@ export class ThreadStore {
   }
 
   private threadDir(threadId: string): string {
+    checkThreadId(threadId);
     return path.join(this.root, "threads", threadId);
   }
 
   private threadFile(threadId: string): string {
     return path.join(this.threadDir(threadId), "thread.json");
+  }
+
+  /** Refuse any path that is not the expected file inside the store root. */
+  private assertInsideRoot(file: string): void {
+    const relative = path.relative(this.root, file);
+    if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new CliError("INVALID_STORE_PATH", `Refusing a path outside the thread store: ${file}.`, {
+        details: { file },
+      });
+    }
   }
 
   async readThreadRecord(threadId: string): Promise<StoredThread | null> {
@@ -397,17 +456,46 @@ export class ThreadStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
+    return this.parseLedgerLines<T>(raw, file, "ledger-line", threadId);
+  }
+
+  /**
+   * Parse raw ledger lines into rows, reporting what cannot be read. Returns
+   * the rows; rewrites re-read the file themselves and splice skipped lines
+   * back, so no writer below can lose what it could not read.
+   */
+  private parseLedgerLines<T>(raw: string, file: string, kind: "ledger-line" | "delegation-line", threadId?: string): T[] {
     const rows: T[] = [];
     const lines = raw.split("\n");
+    const complete = raw.endsWith("\n");
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]!;
       if (line.trim().length === 0) continue;
-      const parsed = parseLedgerLine<T>(line, file, index + 1);
-      if ("value" in parsed) {
-        rows.push(parsed.value);
-        // Fixed by hand since: the warning goes with the bad bytes.
-        this.problems.delete(storeProblemId({ kind: "ledger-line", threadId, file, line: index + 1 }));
-      } else this.noteProblem({ ...parsed.problem, threadId });
+      const lineNumber = index + 1;
+      let value: T | null = null;
+      try {
+        const parsed = JSON.parse(line) as T;
+        // A row is an object; anything else parses but reads as corruption.
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) value = parsed;
+      } catch {
+        // Not JSON: possibly a torn append, reported below.
+      }
+      if (value !== null) {
+        rows.push(value);
+        // Fixed by hand since, or complete now: the warning goes with the bad bytes.
+        this.problems.delete(storeProblemId({ kind, file, line: lineNumber, ...(threadId !== undefined ? { threadId } : {}) }));
+        if (this.pendingTorn.get(file)?.line === lineNumber) this.pendingTorn.delete(file);
+        continue;
+      }
+      if (index === lines.length - 1 && !complete) {
+        const pending = this.pendingTorn.get(file);
+        if (!pending || pending.line !== lineNumber || pending.raw !== line) {
+          // First sight: a crash in flight, not corruption yet. Re-read once.
+          this.pendingTorn.set(file, { line: lineNumber, raw: line });
+          continue;
+        }
+      }
+      this.noteProblem({ ...ledgerProblem(kind, file, lineNumber), ...(threadId !== undefined ? { threadId } : {}) });
     }
     return rows;
   }
@@ -435,13 +523,98 @@ export class ThreadStore {
     return { type: "image", id, name: upload.name, mimeType: decoded.mimeType, sizeBytes: bytes.length, path: file };
   }
 
-  /** Replace a ledger wholesale (tmp file + rename). Caller holds the thread lock. */
-  async rewriteLedger(threadId: string, name: LedgerName, rows: readonly unknown[]): Promise<void> {
-    await mkdir(this.threadDir(threadId), { recursive: true });
-    const file = ledgerFile(this.root, threadId, name);
+  /** Raw lines of a ledger file, exactly as stored; null when it does not exist. */
+  private async readRawLedgerLines(file: string): Promise<string[] | null> {
+    this.assertInsideRoot(file);
+    try {
+      return (await readFile(file, "utf8")).split("\n");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  /** Write ledger lines atomically (tmp file + rename), so a crash cannot tear the ledger. */
+  private async writeLedgerFile(file: string, lines: string[]): Promise<void> {
+    this.assertInsideRoot(file);
+    await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
-    await writeFile(tmp, rows.map((row) => `${JSON.stringify(row)}\n`).join(""), "utf8");
+    await writeFile(tmp, lines.length > 0 ? `${lines.join("\n")}\n` : "", "utf8");
     await renameReplacing(tmp, file);
+  }
+
+  /**
+   * Drop this file's line problems and report what its new lines show, so
+   * line numbers stay accurate across rewrites. A rewritten file always
+   * ends complete, so bad lines are reported at once here.
+   */
+  private resyncLedgerProblems(file: string, kind: "ledger-line" | "delegation-line", threadId: string | undefined, lines: string[]): void {
+    for (const [id, problem] of [...this.problems]) {
+      if (problem.file === file && problem.kind === kind) this.problems.delete(id);
+    }
+    this.pendingTorn.delete(file);
+    lines.forEach((line, index) => {
+      if (line.trim().length === 0) return;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return;
+      } catch {
+        // Falls through to the report below.
+      }
+      this.noteProblem({ ...ledgerProblem(kind, file, index + 1), ...(threadId !== undefined ? { threadId } : {}) });
+    });
+  }
+
+  /**
+   * Splice a row list into raw ledger lines: rows replace the parsed line
+   * with the same id, parsed lines with no match in the list are dropped,
+   * and every other line — a bad line, a blank — is kept byte-for-byte.
+   * Rows without an id in the file are appended. Blank lines are dropped,
+   * as rewrites always normalized them away.
+   */
+  private mergeLedgerLines(current: string[], rows: readonly unknown[]): string[] {
+    const wanted = new Map<string, unknown>();
+    const idless: unknown[] = [];
+    for (const row of rows) {
+      const id = (row as { id?: unknown } | null)?.id;
+      if (typeof id === "string") wanted.set(id, row);
+      else idless.push(row);
+    }
+    const seen = new Set<string>();
+    const next: string[] = [];
+    for (const raw of current) {
+      if (raw.trim().length === 0) continue;
+      let id: string | null = null;
+      try {
+        const parsed = JSON.parse(raw) as { id?: unknown } | null;
+        id = typeof parsed?.id === "string" ? parsed.id : null;
+      } catch {
+        next.push(raw);
+        continue;
+      }
+      if (id === null) {
+        next.push(raw);
+        continue;
+      }
+      if (!wanted.has(id)) continue;
+      seen.add(id);
+      next.push(JSON.stringify(wanted.get(id)));
+    }
+    for (const [id, row] of wanted) if (!seen.has(id)) next.push(JSON.stringify(row));
+    for (const row of idless) next.push(JSON.stringify(row));
+    return next;
+  }
+
+  /**
+   * Replace a ledger from an explicit row list. Rows the list drops go;
+   * lines the list cannot replace (bad lines) stay byte-for-byte.
+   * Caller holds the thread lock.
+   */
+  async rewriteLedger(threadId: string, name: LedgerName, rows: readonly unknown[]): Promise<void> {
+    const file = ledgerFile(this.root, threadId, name);
+    const next = this.mergeLedgerLines((await this.readRawLedgerLines(file)) ?? [], rows);
+    await this.writeLedgerFile(file, next);
+    this.resyncLedgerProblems(file, "ledger-line", threadId, next);
   }
 
   async appendLedger(threadId: string, name: LedgerName, row: unknown): Promise<void> {
@@ -465,10 +638,7 @@ export class ThreadStore {
     if (index < 0) return null;
     const updated = { ...turns[index]!, ...patch, id: turnId, threadId };
     const next = [...turns.slice(0, index), updated, ...turns.slice(index + 1)];
-    const file = ledgerFile(this.root, threadId, "turns");
-    const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
-    await writeFile(tmp, next.map((turn) => JSON.stringify(turn)).join("\n") + "\n", "utf8");
-    await renameReplacing(tmp, file);
+    await this.rewriteLedger(threadId, "turns", next);
     return updated;
   }
 
@@ -496,19 +666,7 @@ export class ThreadStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
-    const file = this.delegationsFile();
-    const rows: StoredDelegation[] = [];
-    const lines = raw.split("\n");
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index]!;
-      if (line.trim().length === 0) continue;
-      const parsed = parseLedgerLine<StoredDelegation>(line, file, index + 1);
-      if ("value" in parsed) {
-        rows.push(parsed.value);
-        this.problems.delete(storeProblemId({ kind: "delegation-line", file, line: index + 1 }));
-      } else this.noteProblem({ ...parsed.problem, kind: "delegation-line", message: `Line ${index + 1} of ${file} is not valid JSON and was skipped; the other tasks still load.` });
-    }
-    return rows;
+    return this.parseLedgerLines<StoredDelegation>(raw, this.delegationsFile(), "delegation-line");
   }
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
@@ -530,10 +688,7 @@ export class ThreadStore {
         updatedAt: this.nowIso(),
       };
       const next = [...all.slice(0, index), updated, ...all.slice(index + 1)];
-      const file = this.delegationsFile();
-      const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
-      await writeFile(tmp, next.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
-      await renameReplacing(tmp, file);
+      await this.writeDelegationRows(next);
       return updated;
     });
   }
@@ -553,11 +708,16 @@ export class ThreadStore {
         const patch = wanted.get(delegation.id);
         return patch === undefined ? delegation : { ...delegation, ...patch, id: delegation.id, updatedAt: this.nowIso() };
       });
-      const file = this.delegationsFile();
-      const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
-      await writeFile(tmp, next.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
-      await renameReplacing(tmp, file);
+      await this.writeDelegationRows(next);
     });
+  }
+
+  /** Replace the delegations ledger, splicing skipped lines back byte-for-byte. Caller holds the lock. */
+  private async writeDelegationRows(rows: readonly StoredDelegation[]): Promise<void> {
+    const file = this.delegationsFile();
+    const next = this.mergeLedgerLines((await this.readRawLedgerLines(file)) ?? [], rows);
+    await this.writeLedgerFile(file, next);
+    this.resyncLedgerProblems(file, "delegation-line", undefined, next);
   }
 }
 
