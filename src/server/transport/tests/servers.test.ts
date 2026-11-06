@@ -157,6 +157,21 @@ describe("paired servers", () => {
     expect(tokens.values.has(serverTokenName(second.deviceId))).toBe(true);
   });
 
+  it("forgets two servers at once, instead of erroring and leaving one behind", async () => {
+    // Both writers once shared one tmp name and raced outside any queue:
+    // the second rename threw ENOENT, and the entry it forgot came back.
+    const file = await tempFile("servers.json");
+    const tokens = memoryTokens();
+    const servers = new PairedServers({ file, tokens });
+    const seed = [
+      { name: "a", host: "10.0.0.1", port: 1, fingerprint: "x", deviceId: "da", pairedAt: new Date().toISOString() },
+      { name: "b", host: "10.0.0.2", port: 1, fingerprint: "x", deviceId: "db", pairedAt: new Date().toISOString() },
+    ];
+    await writeFile(file, JSON.stringify({ servers: seed }, null, 2), "utf8");
+    await Promise.all([servers.forget("a"), servers.forget("b")]);
+    expect(await servers.list()).toEqual([]);
+  });
+
   it("reports an unreachable server plainly", async () => {
     await expect(
       RemoteConnection.connect("127.0.0.1:1", { reconnect: false, tls: { host: "127.0.0.1", port: 1 } }),

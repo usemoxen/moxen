@@ -259,8 +259,23 @@ describe("settlement and snooze", () => {
     expect(await statuses()).toEqual(["settled", "settled", "settled", "settled", "active"]);
   });
 
-  it("stops a family's running and queued work before settling it, when asked to", async () => {
+  it("settling a thread ends its forced hold, and keeps an automatic one", async () => {
     const store = await testStore();
+    const forced = await createThread(store, { projectId: "p", title: "forced", modelSelection: MODEL });
+    await store.writeThreadRecord({ ...forced, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false, forced: true } });
+    // A forced hold ends on a message, settled threads refuse messages, and
+    // the queue cannot cancel a forced hold — so keeping it would stick
+    // forever. Settling ends it instead.
+    const settled = await settleThread(store, forced.id);
+    expect(threadStatus(settled)).toBe("settled");
+    expect(settled.usagePause).toBeNull();
+    const automatic = await createThread(store, { projectId: "p", title: "automatic", modelSelection: MODEL });
+    await store.writeThreadRecord({ ...automatic, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 2, phase: "waiting", handoff: false } });
+    const settledAuto = await settleThread(store, automatic.id);
+    expect(settledAuto.usagePause).toMatchObject({ provider: "codex" });
+  });
+
+  it("stops a family's running and queued work before settling it, when asked to", async () => {    const store = await testStore();
     const root = await createThread(store, { projectId: "p", title: "root", modelSelection: MODEL });
     const child = await createThread(store, { projectId: "p", title: "child", modelSelection: MODEL });
     await store.appendDelegation({ id: "d-child", parentThreadId: root.id, childThreadId: child.id, prompt: "child", status: "running", createdAt: child.createdAt, updatedAt: child.createdAt });
@@ -329,8 +344,7 @@ describe("settlement and snooze", () => {
 });
 
 describe("interrupt", () => {
-  it("reports idle threads and aborts tracked runners", async () => {
-    const store = await testStore();
+  it("reports idle threads and aborts tracked runners", async () => {    const store = await testStore();
     const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
     const idle = await interruptTurn(store, thread.id);
     expect(idle.interrupted).toBe(false);
@@ -344,6 +358,22 @@ describe("interrupt", () => {
     expect(result.interrupted).toBe(true);
     expect(result.turn?.status).toBe("interrupted");
     expect(aborted).toBe(true);
+  });
+
+  it("leaves a queued turn runnable when the stop finds no live runner", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const running = await sendTurn(store, thread.id, { prompt: "one" });
+    const queued = await sendTurn(store, thread.id, { prompt: "two", delivery: "queue" });
+    // No runner in this process ever took the running turn (a dead runner, or
+    // a stop from another process): promoting the queued turn to `running`
+    // would strand it with an owner but no run, so it stays queued instead —
+    // held for the admission path, never stranded.
+    const result = await interruptTurn(store, thread.id);
+    expect(result.interrupted).toBe(true);
+    const turns = await store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
+    expect(turns.find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
   });
 });
 

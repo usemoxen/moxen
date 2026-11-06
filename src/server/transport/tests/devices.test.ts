@@ -2,9 +2,22 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DeviceRegistry, PAIRING_MAX_ATTEMPTS, PAIRING_TTL_MS, tokenName, type TokenStore } from "../devices.js";
+
+/** How many times the device list replacement went through the retrying rename. */
+const replacingRenames = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../../../core/infra/atomic.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../core/infra/atomic.js")>();
+  return {
+    ...actual,
+    renameReplacing: async (from: string, to: string) => {
+      replacingRenames.count += 1;
+      return actual.renameReplacing(from, to);
+    },
+  };
+});
 
 function memoryTokens(): TokenStore & { readonly values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -85,5 +98,17 @@ describe("DeviceRegistry", () => {
     const { device } = await devices.pair(devices.startPairing().code, `evil\u001b[2Jname${"x".repeat(100)}`);
     expect(device.name.startsWith("evil[2Jname")).toBe(true);
     expect(device.name.length).toBe(64);
+  });
+
+  it("replaces the device list through the retrying rename, which survives a briefly locked target on Windows", async () => {
+    // A plain `rename` fails with EBUSY/EPERM/EACCES while anything holds
+    // the target; `renameReplacing` retries. The retry itself is pinned by
+    // the atomic helper's own tests — here the list must go through it.
+    const { devices } = await registry();
+    const { code } = devices.startPairing();
+    const before = replacingRenames.count;
+    const { device } = await devices.pair(code, "laptop");
+    expect(await devices.list()).toEqual([device]);
+    expect(replacingRenames.count).toBe(before + 1);
   });
 });
