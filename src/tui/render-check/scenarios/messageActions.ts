@@ -115,6 +115,15 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   await waitFor("sidebar did not open t-xash", () => /Neural|Radiance|viability/.test(threadHeader()), 15000);
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
+  {
+    const sel = (): string => {
+      try {
+        return (setup.renderer as unknown as { getSelection?: () => { getSelectedText?: () => string } | null }).getSelection?.()?.getSelectedText?.() ?? "<none>";
+      } catch { return "<threw>"; }
+    };
+    // eslint-disable-next-line no-console
+    console.log(`--- pre-prompt-click: modal=${frame().includes("Message actions")} selection=${JSON.stringify(sel())} ---`);
+  }
   await clickPrompt();
   // ModalShell fades in; wait for its rows to read cleanly instead of
   // capturing mid-fade, when the composite garbles label matches.

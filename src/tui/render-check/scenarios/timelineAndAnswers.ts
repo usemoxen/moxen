@@ -28,10 +28,9 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   console.log(setup.captureCharFrame());
 
   // Clicking the assistant's closing reply opens the same modal (Copy plus
-  // Revert, resolved through its turn). The rail cell is part of the card and
-  // hit-tests; the padding beside it does not, and a well-right-of-the-text
-  // cell can land in the side panel whenever the pane narrows — so click the
-  // rail, found fresh by the reply's label, and only once it is up.
+  // Revert, resolved through its turn). Click the header text found fresh by
+  // its label: the row shifts as folds above it change, and text clicks are
+  // what open message actions everywhere else in this walkthrough.
   const frame = () => setup.captureCharFrame();
   const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<boolean> => {
     const deadline = Date.now() + timeoutMs;
@@ -48,7 +47,7 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     const rows = frame().split("\n");
     const y = rows.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
     if (y === -1) fail("closing reply header not visible");
-    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") - 3, y));
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") + 2, y));
     await setup.flush();
   };
   // A stale modal would swallow the click into its backdrop instead of
@@ -62,9 +61,8 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     await waitFor("an earlier dismiss window never expired", () => !wasModalJustDismissed());
   }
   await clickReply();
-  // A toast expiring mid-gesture can shift the rows under a click: if the
-  // first click missed, resolve the header again on a live frame and click
-  // once more rather than failing outright.
+  // Re-resolve and click once more when the first click missed: a toast
+  // expiring mid-gesture can shift the rows under it.
   if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy"), 2000))) {
     await clickReply();
     if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy")))) {
