@@ -137,6 +137,7 @@ it("decodes conditional queue entries without trusting internal latches or admis
   expect(() => decodeCommand({ type: "queue.edit", threadId: "thread", turnId: "turn", action: "edit", policy: { conditions: [{ type: "usage", provider: "codex", window: "weekly", minimum: -1 }] } })).toThrow();
 });
 
+// Twenty threads of setup plus two queue scans: a loaded runner does not fit in the twenty-second default.
 it("reads the work queue from candidate threads without rereading idle history", async () => {
   const w = await testHarness();
   for (let index = 0; index < 20; index++) {
@@ -156,4 +157,4 @@ it("reads the work queue from candidate threads without rereading idle history",
     expect(lists).not.toHaveBeenCalled();
     expect(turns.mock.calls.every(([id]) => id === busy.id)).toBe(true);
   } finally { await api.close(); }
-});
+}, 60_000);
