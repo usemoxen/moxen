@@ -211,6 +211,8 @@ export interface OpencodeServerConnection {
   /**
    * The server's event stream, translated. Resolves once the stream is live:
    * v2 does not replay events, so anything sent before this returns can be missed.
+   * Rejects when the first frame never arrives (the server accepted SSE but
+   * never sent `server.connected`): that is not a live stream.
    */
   subscribeEvents(input: { signal: AbortSignal }): Promise<{ stream: AsyncIterable<OpencodeSubscribedEvent> }>;
   dispose(): Promise<void>;
@@ -339,9 +341,10 @@ const sessionStateOf = (label: string, data: unknown): OpencodeSessionState => {
 const MESSAGE_PAGE_SIZE = 100;
 const MESSAGE_MAX_PAGES = 200;
 /** How long `subscribeEvents` waits for the stream's first frame (`server.connected`). */
-const SUBSCRIBE_READY_MS = 10_000;
+export const SUBSCRIBE_READY_MS = 10_000;
 
-class LiveOpencodeServerConnection implements OpencodeServerConnection {
+/** Live `OpencodeServerConnection`, over the generated client. Exported for tests: it owns the first-frame wait. */
+export class LiveOpencodeServerConnection implements OpencodeServerConnection {
   private disposed = false;
   private readonly translator = new OpencodeEventTranslator();
   readonly closed: Promise<void>;
@@ -671,32 +674,52 @@ class LiveOpencodeServerConnection implements OpencodeServerConnection {
   async subscribeEvents(input: { signal: AbortSignal }): Promise<{ stream: AsyncIterable<OpencodeSubscribedEvent> }> {
     const translator = this.translator;
     translator.resetLive();
-    const iterator = this.client.event.subscribe({ signal: input.signal })[Symbol.asyncIterator]();
-    // Events before the first frame (`server.connected`) are not replayed, so
-    // do not report the stream live until the server has confirmed it. A
-    // rejected first frame (bad password, server gone) is the caller's to see.
-    const first = iterator.next();
-    void first.catch(() => undefined);
+    // The caller's signal aborts the subscription; so does the timeout below.
+    // A server that accepts SSE and never sends `server.connected` is not a
+    // live stream: reporting it live would deliver nothing until the stall
+    // watchdog notices, minutes later.
+    const controller = new AbortController();
+    const stop = (): void => controller.abort();
+    if (input.signal.aborted) controller.abort();
+    else input.signal.addEventListener("abort", stop, { once: true });
+    const iterator = this.client.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      first,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, SUBSCRIBE_READY_MS);
-        (timer as { unref?: () => void }).unref?.();
-      }),
-    ]).finally(() => clearTimeout(timer));
-    async function* events(): AsyncGenerator<OpencodeSubscribedEvent> {
-      try {
-        let step = await first;
-        while (!step.done) {
-          for (const event of translator.translate(step.value)) yield event;
-          step = await iterator.next();
+    try {
+      const first = await Promise.race([
+        iterator.next(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new CliError("OPENCODE_SUBSCRIBE_TIMEOUT", `The OpenCode event stream sent no first frame within ${SUBSCRIBE_READY_MS / 1000}s, so it is not live.`, {
+                  details: { timeoutMs: SUBSCRIBE_READY_MS },
+                }),
+              ),
+            SUBSCRIBE_READY_MS,
+          );
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      async function* events(): AsyncGenerator<OpencodeSubscribedEvent> {
+        try {
+          let step = first;
+          while (!step.done) {
+            for (const event of translator.translate(step.value)) yield event;
+            step = await iterator.next();
+          }
+        } finally {
+          await iterator.return?.().catch(() => undefined);
         }
-      } finally {
-        await iterator.return?.().catch(() => undefined);
       }
+      return { stream: events() };
+    } catch (cause) {
+      controller.abort();
+      await iterator.return?.().catch(() => undefined);
+      throw cause;
+    } finally {
+      clearTimeout(timer);
+      input.signal.removeEventListener("abort", stop);
     }
-    return { stream: events() };
   }
 
   async dispose(): Promise<void> {
