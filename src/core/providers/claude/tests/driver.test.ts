@@ -248,6 +248,20 @@ describe("claude driver turns", () => {
     expect(outcome).toMatchObject({ status: "failed", usage: { costUsd: expected } });
     expect(events).toContainEqual(expect.objectContaining({ type: "token-usage.updated", raw: { costUsd: expected } }));
   });
+  it("aborting one awaitTurn waiter leaves the other waiter to settle", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const first = new AbortController();
+    const second = new AbortController();
+    const waitingFirst = driver.awaitTurn("thread-1", sent.turnId, first.signal);
+    const waitingSecond = driver.awaitTurn("thread-1", sent.turnId, second.signal);
+    first.abort();
+    await expect(waitingFirst).rejects.toMatchObject({ code: "TURN_ABORTED" });
+    transport.created[0]!.push(successResult("done"));
+    await expect(waitingSecond).resolves.toMatchObject({ status: "completed", text: "done" });
+  });
 });
 
 describe("claude driver permissions", () => {
@@ -259,13 +273,13 @@ describe("claude driver permissions", () => {
     await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
     transport.created[0]!.push(assistantToolUse("tu-1", "Bash"));
     await sleep(20);
-    const pending = driver.handlePermissionRequest(
+    const pending = transport.created[0]!.options.canUseTool!(
       "Bash",
       { command: "ls" },
       permissionCallbackOptions("tu-1"),
     );
     const events = await eventsPromise;
-    return { driver, pending, events };
+    return { driver, transport, pending, events };
   }
 
   it("parks tool requests until answered", async () => {
@@ -278,12 +292,12 @@ describe("claude driver permissions", () => {
   });
 
   it("acceptForSession allows later tools without parking", async () => {
-    const { driver, pending, events } = await parkedSetup();
+    const { driver, transport, pending, events } = await parkedSetup();
     const requestId = openedRequestId(events, "permission.request.opened");
     await Effect.runPromise(driver.respondToRequest("thread-1", requestId, { kind: "acceptForSession" }));
     await expect(pending).resolves.toMatchObject({ behavior: "allow" });
 
-    const second = await driver.handlePermissionRequest(
+    const second = await transport.created[0]!.options.canUseTool!(
       "Bash",
       { command: "pwd" },
       permissionCallbackOptions("tu-2"),
@@ -306,7 +320,7 @@ describe("claude driver permissions", () => {
     const driver = new ClaudeDriver({ transport });
     const eventsPromise = collectEvents(driver, 2);
     await Effect.runPromise(driver.startSession(START));
-    const pending = driver.handlePermissionRequest(
+    const pending = transport.created[0]!.options.canUseTool!(
       "AskUserQuestion",
       { questions: [{ question: "Which?", options: [] }] },
       permissionCallbackOptions(),
@@ -328,7 +342,7 @@ describe("claude driver permissions", () => {
     const eventsPromise = collectEvents(driver, 2);
     await Effect.runPromise(driver.startSession(START));
     const input = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }] }] };
-    const pending = driver.handlePermissionRequest("AskUserQuestion", input, permissionCallbackOptions());
+    const pending = transport.created[0]!.options.canUseTool!("AskUserQuestion", input, permissionCallbackOptions());
     const requestId = openedRequestId(await eventsPromise, "user-input.request.opened");
     await Effect.runPromise(driver.respondToUserInput("thread-1", requestId, { Which: "A" }));
     await expect(pending).resolves.toMatchObject({
@@ -344,7 +358,7 @@ describe("claude driver permissions", () => {
     const driver = new ClaudeDriver({ transport });
     const eventsPromise = collectEvents(driver, 2);
     await Effect.runPromise(driver.startSession(START));
-    const pending = driver.handlePermissionRequest(
+    const pending = transport.created[0]!.options.canUseTool!(
       "AskUserQuestion",
       { questions: [{ question: "Which?", options: [] }] },
       permissionCallbackOptions(),
@@ -376,12 +390,34 @@ describe("claude driver permissions", () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
     await Effect.runPromise(driver.startSession(START));
-    const allowed = await driver.handlePermissionRequest(
+    const allowed = await transport.created[0]!.options.canUseTool!(
       "Bash",
       { command: "ls" },
       permissionCallbackOptions(),
     );
     expect(allowed).toMatchObject({ behavior: "allow" });
+  });
+
+  it("denies a permission callback from a closed thread instead of parking it on the survivor", async () => {
+    // A closed thread's in-flight `canUseTool` call can still arrive on its
+    // query's callback: with only the surviving session left, it must be
+    // denied, never parked there (answering it would drive the dead
+    // thread's tool call under the survivor).
+    const transport = new FakeTransport([[initMessage()], [initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    await Effect.runPromise(driver.startSession({ ...START, threadId: "thread-2" }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    transport.created[0]!.push(assistantToolUse("tu-1", "Bash"));
+    await sleep(20);
+    await Effect.runPromise(driver.stopSession("thread-1"));
+    const pending = transport.created[0]!.options.canUseTool!(
+      "Bash",
+      { command: "ls" },
+      permissionCallbackOptions("tu-1"),
+    );
+    const result = await Promise.race([pending, sleep(100).then(() => "still-parked")]);
+    expect(result).toMatchObject({ behavior: "deny" });
   });
 });
 

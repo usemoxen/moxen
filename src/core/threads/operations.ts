@@ -1059,6 +1059,15 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     });
     await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
   }
+  // An unclaimed run-size question moves with the thread: the continuation
+  // has not been offered one either, so its first real prompt still asks.
+  if (source.researchPicker === true) {
+    const targetId = existing ? existing.id : created.id;
+    await store.withThreadLock(targetId, async () => {
+      const current = await store.readThreadRecord(targetId);
+      if (current && current.researchPicker !== true) await store.writeThreadRecord({ ...current, researchPicker: true });
+    });
+  }
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
   const adopted = await adoptRunningTasks(store, source.id, created.id);
@@ -2467,10 +2476,11 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const interactionMode: InteractionMode = request.interactionMode ?? "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
-  // A thread created without a branch (and a continuation that copied it) can
-  // still run in a checkout on a real branch: ask the checkout instead of
-  // trusting the record.
-  const parentBranch = isolated && !parentEnv.branch
+  // When isolated, the branch always comes from the checkout, never the
+  // record: the record can name a branch the checkout has left (detached
+  // HEAD, or moved to another branch since), or none at all (threads the
+  // TUI creates record none).
+  const parentBranch = isolated
     ? ((await readStatus(parentEnv.path))?.branch ?? null)
     : parentEnv.branch;
   if (isolated && !parentBranch) {

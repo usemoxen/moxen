@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { newOpencodeMessageId, request } from "../transport.js";
+import { LiveOpencodeServerConnection, SUBSCRIBE_READY_MS, newOpencodeMessageId, request } from "../transport.js";
 
 describe("newOpencodeMessageId", () => {
   it("matches the server's msg_ + 12 hex + 14 base62 format", () => {
@@ -44,5 +44,33 @@ describe("request, when the server answers 503", () => {
     let calls = 0;
     await expect(request("session.prompt", async () => { calls += 1; throw unavailable(); }, [0, 0])).rejects.toThrow();
     expect(calls).toBe(1);
+  });
+});
+
+describe("subscribeEvents without a first frame", () => {
+  it("rejects and aborts the subscription instead of reporting a stream that never delivers", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const client = {
+        event: {
+          subscribe: ({ signal }: { signal: AbortSignal }) => {
+            signal.addEventListener("abort", () => { aborted = true; });
+            return {
+              [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }),
+            };
+          },
+        },
+      };
+      const connection = new LiveOpencodeServerConnection("http://127.0.0.1:1", "2.0.0", true, client as never, null, "/repo", {});
+      const pending = connection.subscribeEvents({ signal: new AbortController().signal });
+      // Attach before advancing: the rejection fires while the clock moves.
+      const assertion = expect(pending).rejects.toMatchObject({ code: "OPENCODE_SUBSCRIBE_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_READY_MS);
+      await assertion;
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

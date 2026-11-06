@@ -204,6 +204,17 @@ export function isCompactCommand(prompt: string): boolean {
   return prompt.trim() === "/compact";
 }
 
+/**
+ * One `awaitTurn` caller aborted: drop only its waiter, so the turn's other
+ * waiters still settle. Removing the whole list (as aborting used to) rejects
+ * every waiter on the turn with TURN_ABORTED, including callers that never
+ * aborted.
+ */
+export function dropTurnWaiter<T>(waiters: T[], waiter: T): void {
+  const at = waiters.indexOf(waiter);
+  if (at >= 0) waiters.splice(at, 1);
+}
+
 export interface ProviderAdapterCapabilities {
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
   /** Starts a resumed turn with no synthetic user prompt when true. */

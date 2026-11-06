@@ -438,6 +438,48 @@ describe("codex driver approvals", () => {
     await expect(elicited).resolves.toEqual({ action: "accept", content: { token: "t" } });
   });
 
+  it("aborting one awaitTurn waiter leaves the other waiter to settle", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const first = new AbortController();
+    const second = new AbortController();
+    const waitingFirst = driver.awaitTurn("thread-1", sent.turnId, first.signal);
+    const waitingSecond = driver.awaitTurn("thread-1", sent.turnId, second.signal);
+    first.abort();
+    await expect(waitingFirst).rejects.toMatchObject({ code: "TURN_ABORTED" });
+    await Effect.runPromise(driver.interruptTurn("thread-1"));
+    await expect(waitingSecond).resolves.toMatchObject({ status: "interrupted" });
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("answers a server approval with an unknown thread id on the session that owns the peer", async () => {
+    // Approval callbacks arrive on the session's own peer, so a request that
+    // names no live session belongs to that peer's owner — not to whichever
+    // session was last active.
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession({ threadId: "thread-b", workingDirectory: "/repo", runtimeMode: "approval-required" }));
+    await Effect.runPromise(driver.startSession({ threadId: "thread-a", workingDirectory: "/repo", runtimeMode: "approval-required" }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-b", prompt: "hi" }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-a", prompt: "hi" }));
+    const serverA = transport.sessions[1]!.server;
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    try {
+      const answerPromise = serverA.ask("item/commandExecution/requestApproval", { threadId: "codex-thread-stale" });
+      await expect.poll(() => events.some((event) => event.type === "permission.request.opened")).toBe(true);
+      const opened = events.find((event) => event.type === "permission.request.opened") as { requestId: string; threadId: string };
+      expect(opened.threadId).toBe("thread-a");
+      await Effect.runPromise(driver.respondToRequest("thread-a", opened.requestId, { kind: "accept" }));
+      await expect(answerPromise).resolves.toEqual({ decision: "accept" });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
 });
 
 describe("codex driver compaction, rollback, models", () => {
