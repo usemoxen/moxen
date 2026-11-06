@@ -1,6 +1,7 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
+import { SIDEBAR_WIDTH } from "../../app/constants.js";
 import { fail } from "../helpers.js";
 
 /** Prompt-click message actions: copy, and the revert two-step confirm
@@ -83,15 +84,27 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
     await act(async () => setup.mockMouse.click(138, 0));
     await waitFor("stale message modal did not close", () => !setup.captureCharFrame().includes("Message actions"));
   }
-  // Found by its title: the sidebar's rows move whenever a row above them changes.
+  // Open t-xash from the sidebar: found by the thread's own title, in the
+  // sidebar's columns. The project shares its name with nothing here, but a
+  // whole-frame search for it matches the thread's first card line, and the
+  // thread header only ever shows thread titles — never the project name the
+  // old whole-frame search waited for, which could never appear.
+  // (The card's first line carries the project title and badge; the second
+  // carries the thread title that opens it. Either line's box opens it.)
   const sidebarRows = setup.captureCharFrame().split("\n");
-  const xash = sidebarRows.findIndex((line) => line.includes("Xash3D RT Streamline"));
+  const xash = sidebarRows.findIndex((line) => line.includes("Neural Radiance") && line.indexOf("Neural Radiance") < SIDEBAR_WIDTH);
   if (xash === -1) fail("the sidebar does not list t-xash");
   await act(async () => setup.mockMouse.click(10, xash));
   // The thread switch resyncs the transcript; wait for the new thread's
-  // header rather than a fixed delay. Bound generously: the resync waits on
-  // the thread poll tick, which a loaded machine can stall badly.
-  await waitFor("sidebar did not open t-xash", () => frame().includes("╭─ Xash3D RT Streamline"), 15000);
+  // header rather than a fixed delay. The header shows the thread title
+  // (matched loosely: it scrolls longer titles), never the project name.
+  // Bound generously: the resync waits on the thread poll tick, which a
+  // loaded machine can stall badly.
+  const threadHeader = () => {
+    const top = frame().split("\n")[0] ?? "";
+    return top.split("╮")[1] ?? "";
+  };
+  await waitFor("sidebar did not open t-xash", () => /Neural|Radiance|viability/.test(threadHeader()), 15000);
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
   await act(async () => setup.mockMouse.click(60, 5));
