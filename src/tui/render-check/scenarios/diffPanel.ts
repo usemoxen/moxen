@@ -5,6 +5,20 @@ import { fail } from "../helpers.js";
 
 /** The timeline diff row, the Worked fold, and the diff-turn picker. */
 export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
+  const frame = () => setup.captureCharFrame();
+  // Modal opens and timeline jumps settle on their own time, not a fixed
+  // delay a loaded renderer overruns.
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      if (predicate()) return frame();
+    } while (Date.now() < deadline);
+    fail(`${label}:\n${frame()}`);
+  };
   // The timeline's own "diff …" row — the `d` keybinding is gone, so this
   // click is the way a user opens it. Still near the top here (above the
   // fold, no jump-pill overlap yet).
@@ -89,11 +103,17 @@ export async function runDiffPanel(setup: TestRendererSetup): Promise<void> {
   // and the jump must land on the settled post-open layout, at the top).
   await act(async () => setup.mockMouse.click(110, 1));
   await setup.flush();
-  // Found by its label: a fixed cell landed on a user message whenever the
-  // picker was not up, opening message actions over the next scenario.
-  const pickerRows = setup.captureCharFrame().split("\n");
-  const turnRow = pickerRows.findIndex((line) => line.includes("Turn 5"));
-  if (turnRow !== -1) await act(async () => setup.mockMouse.click(pickerRows[turnRow]!.indexOf("Turn 5") + 1, turnRow));
+  // The header click must have opened the picker before touching its rows:
+  // a fixed cell can land on a reply header when the layout shifts, and
+  // "Turn 5" also names a transcript row whose click opens message actions
+  // over the next scenario instead — so only click it below the picker's
+  // own title row, and fail with the real cause when the picker never opens.
+  const pickerFrame = await waitFor("diff-turn picker did not open", () => frame().includes("Select diff turn"));
+  const pickerRows = pickerFrame.split("\n");
+  const titleRow = pickerRows.findIndex((line) => line.includes("Select diff turn"));
+  const turnRow = pickerRows.findIndex((line, index) => index > titleRow && line.includes("Turn 5"));
+  if (turnRow === -1) fail("diff-turn picker offered no Turn 5");
+  await act(async () => setup.mockMouse.click(pickerRows[turnRow]!.indexOf("Turn 5") + 1, turnRow));
   await new Promise((resolve) => setTimeout(resolve, 500));
   await setup.flush();
   console.log("--- diff-turn picked (timeline jumped) ---");
