@@ -1012,7 +1012,7 @@ export async function interruptTurn(
  * or across to its siblings. Archived and deleted members are left out; the
  * requested thread is always in.
  */
-async function threadFamily(store: ThreadStore, threadId: string): Promise<string[]> {
+export async function threadFamily(store: ThreadStore, threadId: string): Promise<string[]> {
   // The parent link lives in the delegations ledger, not on the thread record.
   const rows = await store.readDelegations().catch(() => []);
   const family = new Set([threadId]);

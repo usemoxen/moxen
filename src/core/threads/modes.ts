@@ -51,7 +51,8 @@ const SHARED_STEPS = [
   "- `shared`: the child works in your checkout. Only for read-only work, or when nothing else writes at the same time.",
   "- `fork: true` starts the child from a copy of your conversation; it runs on your provider in your checkout, so keep it read-only.",
   "- Merging is yours: review a child's branch (`git diff <yours>...<branch>`) before taking anything, one branch at a time, testing between merges. " +
-    "Cancel a runaway task with `task_cancel`; its thread and worktree are kept.",
+    "Cancel a runaway task with `task_cancel`; its thread and worktree are kept. Settle a task whose work is done with `task_settle` " +
+    "(`stop: true` ends a still-running one first); `removeWorktree: true` also clears its checkout once its branch is merged, and never otherwise.",
   "- To correct or redirect a task instead of cancelling it, send it a message with `task_send` and read `outcome` — `steered` (the running turn took it) and `started` (a new turn began) mean the task has the message; " +
     "`queued` means the task is busy and cannot take input mid-turn, so the message waits for its next turn and the task has not read it yet (do not assume it acted on it); " +
     "`not_delivered` means send it again once the task settles. A finished or settled task is refused unless you pass `wake: true`, which starts a new turn (spending usage); " +

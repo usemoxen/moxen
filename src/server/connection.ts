@@ -123,6 +123,7 @@ import {
   submitHandoff,
   cancelTask,
   sendTaskMessage,
+  settleTask,
   requireTaskControl,
   continueThread,
   delegate,
@@ -1186,6 +1187,11 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
+      case "thread.task.settle":
+        return await settleTask(await this.context(), command.parentThreadId, command.taskId, {
+          ...(command.stop === true ? { stop: true } : {}),
+          ...(command.removeWorktree === true ? { removeWorktree: true } : {}),
+        });
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
       case "thread.task.ask":
