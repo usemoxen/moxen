@@ -102,7 +102,7 @@ import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, t
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn, UsagePause } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -1297,6 +1297,19 @@ export function firstMessageNote(firstMessage: string | undefined): string {
 }
 
 /**
+ * Whether a source's usage-limit hold applies to its continuation: the
+ * destination runs on the same account (usage key), and the limit still
+ * stands — a reset already past, or windows with room again, release it.
+ * Otherwise the scheduled turn is created without the hold: it must not
+ * wait for a limit that does not apply to it.
+ */
+function continuedHoldApplies(pause: UsagePause, selection: ModelSelection, now = Date.now()): boolean {
+  if (usageKeyForInstance(selection.instanceId) !== pause.provider) return false;
+  if (pause.resetsAt !== null && Number.isFinite(Date.parse(pause.resetsAt)) && Date.parse(pause.resetsAt) <= now) return false;
+  return providerExhausted(pause.provider, now);
+}
+
+/**
  * Finish inheriting a usage-limit hold on a continuation held for the reset:
  * the destination's oldest queued scheduled turn becomes its recovery entry,
  * so the admission path runs it once nothing blocks it; and the source's
@@ -1308,11 +1321,14 @@ async function linkScheduledContinuation(ctx: OperationContext, sourceId: string
   const { store } = ctx;
   await store.withThreadLock(destinationId, async () => {
     const destination = await store.readThreadRecord(destinationId);
-    const pause = destination?.usagePause;
-    if (destination && pause && pause.phase === "waiting" && !pause.recoveryTurnId) {
+    if (!destination) return;
+    const pause = destination.usagePause;
+    if (pause && pause.phase === "waiting" && !pause.recoveryTurnId) {
       const first = (await store.readTurns(destinationId)).find((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string");
       if (first) await store.writeThreadRecord({ ...destination, usagePause: { ...pause, recoveryTurnId: first.id } });
     }
+    const source = await store.readThreadRecord(sourceId).catch(() => null);
+    if (!source?.usagePause || !continuedHoldApplies(source.usagePause, destination.modelSelection)) return;
     const activities = await store.readActivities(destinationId);
     if (activities.some((activity) => activity.kind === "usage.limit" || activity.kind === "usage.wrap-up")) return;
     const marker = await scheduledContinuationMarker(store, sourceId);
@@ -1397,7 +1413,10 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   }
   const live = await store.readThreadRecord(source.id);
   // A continuation held for the reset inherits the hold; one starting now does not.
-  const scheduledHold = request.scheduledFor !== undefined && !request.destinationThreadId;
+  // The hold has to apply to the destination: same account, limit still standing.
+  const scheduledHold = request.scheduledFor !== undefined && !request.destinationThreadId
+    && live?.usagePause != null
+    && continuedHoldApplies(live.usagePause, request.modelSelection ?? source.modelSelection);
   if (live?.usagePause && !request.destinationThreadId) {
     if (live.usagePause.continuedThreadId !== created.id) {
       await store.withThreadLock(source.id, async () => {
@@ -1418,7 +1437,7 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
           await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "waiting", handoff: false } });
         }
       });
-    } else {
+    } else if (request.scheduledFor === undefined) {
       await store.withThreadLock(created.id, async () => {
         const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
         if (destination && !destination.usagePause && pause?.usagePause) {
@@ -1426,6 +1445,8 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
         }
       });
     }
+    // A scheduled continuation the hold does not apply to gets no pause at
+    // all: its turn runs at its time, not behind another account's reset.
   }
   // An unclaimed run-size question moves with the thread: the continuation
   // has not been offered one either, so its first real prompt still asks.

@@ -484,11 +484,15 @@ their own provider and model either way, so the handoff works across
 providers and grants no extra access. No extra guard applies when the new
 thread runs a more restricted runtime mode: the mode governs only that
 thread's own turns, and steering a task is a message, not execution.
-A continuation held for the reset inherits the source's usage-limit hold:
-the new thread waits, shows the limit block from the start, and holds task
-notifications without spending a turn, and its first turn is the recovery
-entry that runs once the reset comes. An immediate message still releases
-the hold and runs first, as on any held thread.
+A continuation held for the reset inherits the source's usage-limit hold
+when the hold applies to it: the new thread runs on the same account (its
+model is on the held provider) and the limit still stands (the reset is
+still ahead and the allowance is still out). Then the new thread waits,
+shows the limit block from the start, and holds task notifications without
+spending a turn, and its first turn is the recovery entry that runs once
+the reset comes. Otherwise the scheduled turn is created without the hold
+and runs at its time. An immediate message still releases a hold and runs
+first, as on any held thread.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle

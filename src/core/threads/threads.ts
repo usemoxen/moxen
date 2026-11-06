@@ -812,9 +812,14 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * before it even sees the second. Their turns never ran, so they are dropped
  * and their messages move onto `next`. A message for another model or mode, or one
  * still waiting for a later time, keeps its own turn.
+ *
+ * A continue set for a usage-limit reset batches the same way even though it
+ * carries its automatic wait: that queue holds no conditions of its own, so
+ * the folded messages ride the same reset. Any other queue-carrying turn (a
+ * wake-up, a handoff, a held entry) keeps its own turn, as before.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
-  if (next.queue) return;
+  if (next.queue && next.scheduleReason !== "usage-reset") return;
   const batch = turns.filter(
     (turn) =>
       turn.id !== next.id &&

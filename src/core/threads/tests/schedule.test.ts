@@ -41,6 +41,17 @@ async function setup(clock?: () => number) {
   return { store, thread, root };
 }
 
+function context(store: Awaited<ReturnType<typeof setup>>["store"], root: string, config: Partial<CliConfig> = {}): OperationContext {
+  return {
+    store,
+    storeRoot: root,
+    config: { autoContinueAtUsageLimit: true, ...config } as CliConfig,
+    driverFor: () => {
+      throw new Error("no driver in this test");
+    },
+  };
+}
+
 describe("scheduled messages", () => {
   it("queue until their time even on an idle thread, and say when", async () => {
     let now = Date.parse("2026-09-25T10:00:00.000Z");
@@ -194,17 +205,6 @@ describe("schedule timers", () => {
 });
 
 describe("continue after a usage limit", () => {
-  function context(store: Awaited<ReturnType<typeof setup>>["store"], root: string, config: Partial<CliConfig> = {}): OperationContext {
-    return {
-      store,
-      storeRoot: root,
-      config: { autoContinueAtUsageLimit: true, ...config } as CliConfig,
-      driverFor: () => {
-        throw new Error("no driver in this test");
-      },
-    };
-  }
-
   it("schedules one continue a minute after the reset, then counts attempts up to the cap", async () => {
     const { store, thread, root } = await setup();
     const ctx = context(store, root);
@@ -339,18 +339,20 @@ describe("holding a queued message for the reset", () => {
 describe("due held turns after the reset", () => {
   it("starts the due continue after the running turn settles, batching later messages into it", async () => {
     let now = Date.parse("2026-09-26T10:00:00.000Z");
-    const { store, thread } = await setup(() => now);
+    const { store, thread, root } = await setup(() => now);
+    const ctx = context(store, root);
     const running = await sendTurn(store, thread.id, { prompt: "work" });
-    const at = "2026-09-26T12:00:00.000Z";
-    const continued = await sendTurn(store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduledFor: at, scheduleReason: "usage-reset" });
+    // The real automatic shape: a bare automatic wait, not a queue-less row.
+    const continued = (await scheduleUsageContinue(ctx, thread.id, running.turn.id, "2026-09-26T12:00:00.000Z"))!;
+    const at = continued.scheduledFor!;
     await sendTurn(store, thread.id, { prompt: "first thought", delivery: "queue" });
     await sendTurn(store, thread.id, { prompt: "second thought", delivery: "queue" });
 
-    now = Date.parse("2026-09-26T12:00:01.000Z");
+    now = Date.parse(at) + 1000;
     await completeTurn(store, thread.id, running.turn.id, { text: "done" });
     const turns = await store.readTurns(thread.id);
     const next = turns.find((turn) => turn.status === "running")!;
-    expect(next.id).toBe(continued.turn.id);
+    expect(next.id).toBe(continued.id);
     expect(turnPrompt(await store.readMessages(thread.id), next)?.text).toBe(`${USAGE_CONTINUE_PROMPT}\n\nfirst thought\n\nsecond thought`);
     expect(turns.filter((turn) => turn.status === "queued")).toHaveLength(0);
     expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.batched")).toBe(true);
@@ -402,6 +404,43 @@ describe("due held turns after the reset", () => {
 
   it("does not fire a stale automatic continue once the thread's work already resumed", async () => {
     let now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread, root } = await setup(() => now);
+    const ctx = context(store, root);
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    const continued = (await scheduleUsageContinue(ctx, thread.id, running.turn.id, "2026-09-26T12:00:00.000Z"))!;
+    const at = continued.scheduledFor!;
+    await store.withThreadLock(thread.id, async () => {
+      const current = (await store.readThreadRecord(thread.id))!;
+      await store.writeThreadRecord({ ...current, usagePause: { provider: "claude", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false }, updatedAt: store.nowIso() });
+    });
+
+    // Past the reset the user resumes the thread themselves: the immediate
+    // message releases the hold and runs first.
+    now = Date.parse(at) + 1000;
+    const resumed = await sendTurn(store, thread.id, { prompt: "I already fixed it" });
+    expect(resumed.turn.status).toBe("running");
+    await completeTurn(store, thread.id, resumed.turn.id, { text: "done" });
+    // The scheduled nudge is pointless now: taken back before it ran, not started.
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.id)).toMatchObject({ status: "interrupted" });
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.interrupted" && row.turnId === continued.id && (row.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    expect((await store.readTurns(thread.id)).some((turn) => turn.status === "running")).toBe(false);
+  });
+
+  it("still fires the continue when the running turn spanned the reset", async () => {
+    let now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread, root } = await setup(() => now);
+    const ctx = context(store, root);
+    const running = await sendTurn(store, thread.id, { prompt: "long work" });
+    const continued = (await scheduleUsageContinue(ctx, thread.id, running.turn.id, "2026-09-26T12:00:00.000Z"))!;
+    const at = continued.scheduledFor!;
+    now = Date.parse(at) + 1000;
+    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
+    // The turn that settled started before the reset: pre-reset work, not a resume.
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.id)?.status).toBe("running");
+  });
+
+  it("keeps a stale wake-up that carries another delivery's report instead of dropping it", async () => {
+    let now = Date.parse("2026-09-26T10:00:00.000Z");
     const { store, thread } = await setup(() => now);
     await store.withThreadLock(thread.id, async () => {
       const current = (await store.readThreadRecord(thread.id))!;
@@ -409,30 +448,17 @@ describe("due held turns after the reset", () => {
     });
     const at = "2026-09-26T12:00:00.000Z";
     const continued = await sendTurn(store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduledFor: at, scheduleReason: "usage-reset" });
-    expect(continued.turn).toMatchObject({ status: "queued", scheduleReason: "usage-reset" });
+    // A native task edge merges its report into the queued wake-up.
+    await store.appendLedger(thread.id, "messages", { id: store.newId(), threadId: thread.id, turnId: continued.turn.id, role: "user", text: "child task finished", createdAt: store.nowIso() });
 
-    // Past the reset the user resumes the thread themselves: the immediate
-    // message releases the hold and runs first.
     now = Date.parse("2026-09-26T12:00:01.000Z");
     const resumed = await sendTurn(store, thread.id, { prompt: "I already fixed it" });
     expect(resumed.turn.status).toBe("running");
     await completeTurn(store, thread.id, resumed.turn.id, { text: "done" });
-    // The scheduled nudge is pointless now: taken back before it ran, not started.
-    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.turn.id)).toMatchObject({ status: "interrupted" });
-    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.interrupted" && row.turnId === continued.turn.id && (row.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    // Stale but carrying a report: it still has something to say, so it waits
+    // for admission instead of being taken back.
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.turn.id)).toMatchObject({ status: "queued" });
     expect((await store.readTurns(thread.id)).some((turn) => turn.status === "running")).toBe(false);
-  });
-
-  it("still fires the continue when the running turn spanned the reset", async () => {
-    let now = Date.parse("2026-09-26T10:00:00.000Z");
-    const { store, thread } = await setup(() => now);
-    const running = await sendTurn(store, thread.id, { prompt: "long work" });
-    const at = "2026-09-26T12:00:00.000Z";
-    const continued = await sendTurn(store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduledFor: at, scheduleReason: "usage-reset" });
-    now = Date.parse("2026-09-26T12:00:01.000Z");
-    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
-    // The turn that settled started before the reset: pre-reset work, not a resume.
-    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.turn.id)?.status).toBe("running");
   });
 });
 

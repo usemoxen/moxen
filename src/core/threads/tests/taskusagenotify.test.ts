@@ -146,6 +146,50 @@ describe("a delegated task that pauses for usage", () => {
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
   });
+
+  it("takes back a stale automatic continue without cancelling the task, and the parent still gets its settle report", async () => {
+    const w = await world({ autoContinueAtUsageLimit: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    // Due almost at once: the long-past reset only sets how far ahead the continue waits.
+    const continued = await scheduleUsageContinue(w.ctx, child.id, stopped.id, new Date(Date.now() - 59_000).toISOString());
+    expect(continued).not.toBeNull();
+
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+
+    // The thread resumes on its own past the reset: a maintenance turn runs
+    // to completion, so the scheduled nudge is stale.
+    const at = continued!.scheduledFor!;
+    await vi.waitFor(() => expect(Date.now() >= Date.parse(at)).toBe(true), { timeout: 120_000, interval: 25 });
+    const resumed = await sendTurn(w.store, child.id, { prompt: "wrap-up notes", usageControl: true });
+    expect(resumed.turn.status).toBe("running");
+    await completeTurn(w.store, child.id, resumed.turn.id, { text: "Stopped safely." });
+
+    // Taken back, not cancelled: no mark on the delegation, no cancel notice.
+    expect((await w.store.readTurns(child.id)).find((turn) => turn.id === continued!.id)).toMatchObject({ status: "interrupted" });
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+    expect(await taskNotificationOf(w.ctx, child.id)).toMatchObject({ status: "completed" });
+
+    // And the parent hears the normal settle report — never left waiting on a resume that will not come.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const both = await notificationsIn(w, parent.id);
+    expect(both).toHaveLength(2);
+    expect(both[1]).toContain("finished");
+    expect(both[1]).toContain(child.id);
+    expect(both[1]).toContain("Stopped safely.");
+    expect(both[1]).not.toContain("paused for usage");
+    expect(both[1]).not.toContain("Resumes at");
+    expect(both[1]).not.toContain("cancelled");
+    expect(await batchesOf(w)).toEqual({});
+  });
 });
 
 describe("a parent that cannot receive task notices yet", () => {
