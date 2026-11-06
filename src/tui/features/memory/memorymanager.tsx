@@ -194,7 +194,8 @@ export function MemoryManagerModal({
   };
 
   const openCreate = () => {
-    setNotice(null);    setDraft({ name: "", description: "", type: "project", body: "", scope: threadId === null ? "global" : "project" });
+    setNotice(null);
+    setDraft({ name: "", description: "", type: "project", body: "", scope: threadId === null ? "global" : "project" });
     setFormKey(null);
     setFieldIndex(0);
     setEditingField(null);
@@ -437,6 +438,7 @@ export function MemoryManagerModal({
         <>
           <SearchField query={query} active={query.length > 0} />
           {notice === null ? null : <text fg={COLOR.added} bg={SURFACE.raised} selectable={false}>{notice}</text>}
+          {listError === null || listed === null ? null : <text fg={COLOR.danger} bg={SURFACE.raised} wrapMode="word">{listError}</text>}
           {semanticNote === null ? null : <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{semanticNote}</text>}
           <scrollbox ref={scrollRef} style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
             {listError !== null && listed === null ? (
