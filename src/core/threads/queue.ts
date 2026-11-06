@@ -84,6 +84,16 @@ export function providerExhausted(provider: string, now = Date.now()): boolean {
   return usageLimitsSnapshot(now)[provider]?.windows.some((window) => window.usedPercent >= 100) === true;
 }
 
+/**
+ * Mirrors `isSnoozed` in threads.ts (settled wins there; settled is checked
+ * beside this here): a past-due snooze reads as active, not held.
+ */
+function snoozeActive(snoozedUntil: string | null, now: number): boolean {
+  if (snoozedUntil === null) return false;
+  const parsed = Date.parse(snoozedUntil);
+  return Number.isFinite(parsed) && parsed > now;
+}
+
 function entryPending(rows: readonly QueueRow[], threadId: string, turnId: string): boolean {
   const seen = new Set<string>();
   let target = rows.find((row) => row.thread.id === threadId)?.turns.find((turn) => turn.id === turnId);
@@ -106,7 +116,7 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   if (row.thread.usagePause?.forced || row.thread.usagePause && row.thread.usagePause.phase !== "resuming" && row.thread.usagePause.recoveryTurnId !== turn.id && !policy?.summaryFor) blocked.push("Waiting for thread protection");
   if (policy?.wakeUp && row.turns.some((previous) => previous.id !== turn.id && previous.queue?.wakeUp && previous.status === "queued" && (previous.queue.order < policy.order || previous.queue.order === policy.order && row.turns.indexOf(previous) < row.turns.indexOf(turn)))) blocked.push("Waiting for preceding wake-up");
   if (policy?.held || policy?.removed) blocked.push(policy.removed ? "Removed from queue" : "Held by you");
-  if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || row.thread.snoozedUntil) blocked.push("Thread is not active");
+  if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || snoozeActive(row.thread.snoozedUntil, now)) blocked.push("Thread is not active");
   if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) blocked.push("Waiting for your answer or approval");
   if (turn.scheduledFor && Date.parse(turn.scheduledFor) > now) blocked.push(`Scheduled for ${turn.scheduledFor}`);
   const provider = usageKeyForInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId);
