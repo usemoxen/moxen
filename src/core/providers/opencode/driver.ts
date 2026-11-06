@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import type { Done } from "effect/Cause";
 
 import { CliError } from "../../errors.js";
 import { permissionEscapes, type WorktreeIsolation } from "../../threads/isolation.js";
@@ -214,7 +215,7 @@ interface OpenCodeSession {
   /** What the native session is already set to; a prompt only changes what differs. */
   applied: AppliedSessionState;
   turns: Map<TurnId, OpenCodeTurn>;
-  waiters: Map<TurnId, Array<{ resolve: (outcome: OpenCodeTurnOutcome) => void; reject: (cause: unknown) => void }>>;
+  waiters: Map<TurnId, Array<{ resolve: (outcome: OpenCodeTurnOutcome) => void; reject: (cause: unknown) => void; signal?: AbortSignal; onAbort?: () => void }>>;
   parked: Map<string, ParkedOpenCode>;
   /** Latest context-window reading, taken when a turn goes idle. */
   context: ContextWindowUsage | null;
@@ -619,6 +620,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly reconcileDelayMs: number;
   private readonly stallTimers = new Map<TurnId, ReturnType<typeof setTimeout>>();
   private readonly sessions = new Map<ThreadId, OpenCodeSession>();
+  /** Sessions being started: a stop for the thread waits for the start first, so it stops what the start made. */
+  private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
   private readonly connections = new Map<string, Promise<OpencodeServerConnection>>();
   /**
    * The tools OpenCode's own server is told to leave off, and whether Moxen's prompt replaces its own, are part of
@@ -646,7 +649,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   /** When each server (by working directory) last had its OpenCode Go usage read. */
   private readonly goUsageReadAt = new Map<string, number>();
   private readonly pumps = new Map<string, { controller: AbortController; ready: Promise<void>; done: Promise<void> }>();
-  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+  /**
+   * Unfinished until `stopAll` ends it, so the event stream ends instead of
+   * hanging: `Queue.end` needs the `Done` channel the stream strips back off.
+   */
+  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent, Done>());
 
   constructor(options: OpenCodeDriverOptions = {}) {
     this.settings = normalizeOpencodeSettings(options.settings);
@@ -1038,6 +1045,20 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.attempt("OPENCODE_SPAWN_FAILED", `Could not start an OpenCode session for thread ${input.threadId}`, async () => {
       const existing = this.sessions.get(input.threadId);
       if (existing && !existing.closed) return this.describeSession(existing);
+      // A start in flight is not in `sessions` yet: a second start for the
+      // thread waits for the first instead of opening a second session.
+      const pending = this.starting.get(input.threadId);
+      if (pending) return await pending;
+      const started = this.openSession(input, existing);
+      this.starting.set(input.threadId, started);
+      try {
+        return await started;
+      } finally {
+        this.starting.delete(input.threadId);
+      }
+    });
+
+  private async openSession(input: ProviderSessionStartInput, existing: OpenCodeSession | undefined): Promise<ProviderSession> {
       this.wantedServerConfig.set(input.workingDirectory, serverShape(input.disabledNativeTools, input.moxenPrompt));
       this.reconcileServers();
       // A server that died unnoticed is dropped and replaced once, rather than failing the first message to it.
@@ -1094,7 +1115,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       // without making the first message wait for that reading.
       this.refreshGoUsage(session);
       return this.describeSession(session);
-    });
+  }
 
   readonly resumeCursor = (threadId: ThreadId): string | null =>
     this.sessions.get(threadId)?.nativeSessionId ?? null;
@@ -1287,23 +1308,27 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       if (turn) turn.interrupting = true;
       // Parked permission/question prompts hold the turn open server-side;
       // reject them first so abort settles instead of hanging.
-      await this.rejectParked(session, "Interrupted.");
-      try {
-        const connection = await this.connectionFor(session);
-        if (turn) await this.cancelQueuedInput(session, connection, turn);
-        await connection.abortSession(session.nativeSessionId);
-        // The parent's turn is waiting on its subagents (a foreground call
-        // returns only when its child does), and aborting the parent does not
-        // reach them: they would run on, unseen. Stop them with it.
-        await this.stopChildren(session, connection);
-      } catch (cause) {
-        if (!session.closed) throw cause;
+      // Only a live connection can have anything to stop: never start a server just to deliver an abort.
+      const connection = this.liveConnections.get(session.workingDirectory) ?? null;
+      await this.rejectParked(session, connection, "Interrupted.");
+      if (connection) {
+        try {
+          if (turn) await this.cancelQueuedInput(session, connection, turn);
+          await connection.abortSession(session.nativeSessionId);
+          // The parent's turn is waiting on its subagents (a foreground call
+          // returns only when its child does), and aborting the parent does not
+          // reach them: they would run on, unseen. Stop them with it.
+          await this.stopChildren(session, connection);
+        } catch (cause) {
+          if (!session.closed) throw cause;
+        }
       }
       // The server confirms an interrupt with its own event, which arrives
       // after this call returns. Settling before it would let a prompt sent
       // right away be completed by the old run's confirmation.
       // (It may already have: the event can beat the HTTP reply.)
-      if (turn && turn.status === "running" && !turn.interruptAcked) {
+      // Without a live connection no server can confirm: settle at once.
+      if (connection && turn && turn.status === "running" && !turn.interruptAcked) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, this.interruptAckTimeoutMs);
           (timer as { unref?: () => void }).unref?.();
@@ -1403,22 +1428,23 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       });
     }
     return await new Promise<OpenCodeTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
+      const waiter: { resolve: (outcome: OpenCodeTurnOutcome) => void; reject: (cause: unknown) => void; signal?: AbortSignal; onAbort?: () => void } = { resolve, reject };
       const list = session.waiters.get(turnId) ?? [];
       list.push(waiter);
       session.waiters.set(turnId, list);
-      signal?.addEventListener(
-        "abort",
-        () => {
+      if (signal) {
+        const onAbort = (): void => {
           dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
           reject(
             new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
               details: { threadId, turnId },
             }),
           );
-        },
-        { once: true },
-      );
+        };
+        waiter.signal = signal;
+        waiter.onAbort = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   }
 
@@ -1496,15 +1522,29 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
     this.attempt("OPENCODE_STOP_FAILED", `Could not stop the OpenCode session for thread ${threadId}`, async () => {
+      // A start in flight is not in `sessions` yet: take over its outcome
+      // first, then stop what it made. Otherwise it resolves live after this
+      // returns, holding a server until stopAll.
+      const pending = this.starting.get(threadId);
+      if (pending) {
+        try {
+          await pending;
+        } catch {
+          // The start failed: nothing it made to stop.
+        }
+      }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
       session.closed = true;
       this.settleOpenTurn(session, "interrupted", "Session stopped.");
-      try {
-        const connection = await this.connectionFor(session);
-        await connection.abortSession(session.nativeSessionId);
-      } catch {
-        // Best effort: the server may already be gone.
+      // Best effort, and never a reason to start a server: the server may already be gone.
+      const connection = this.liveConnections.get(session.workingDirectory);
+      if (connection) {
+        try {
+          await connection.abortSession(session.nativeSessionId);
+        } catch {
+          // Best effort: the server may already be gone.
+        }
       }
       this.sessions.delete(threadId);
       this.transferMoxenEntry(session);
@@ -1596,6 +1636,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     Effect.tryPromise({
       try: async () => {
+        // A start in flight is not in `sessions` yet: let it finish first, so nothing is left running after this returns.
+        const pendings = [...this.starting.values()];
+        if (pendings.length > 0) await Promise.allSettled(pendings);
         for (const session of this.sessions.values()) {
           session.closed = true;
           this.settleOpenTurn(session, "interrupted", "Driver stopped.");
@@ -1609,6 +1652,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         for (const pending of connections) {
           await pending.then((connection) => connection.dispose()).catch(() => undefined);
         }
+        // Signal completion on the event stream: buffered events are still
+        // delivered, the stream then ends so the pump in `threads/execute.ts`
+        // releases its fiber instead of waiting on a driver that is gone.
+        // Offers after this return false and are dropped, never a crash.
+        Effect.runSync(Queue.end(this.queue));
       },
       catch: (cause) => toCliError("OPENCODE_STOP_FAILED", "Could not stop the OpenCode driver", cause),
     });
@@ -1618,17 +1666,20 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   /**
    * The one event pump per server, demuxed by session. Resolves once the
    * subscription is live (v2 replays nothing, so nothing may be sent before
-   * that); a pump whose start fails (no first frame, lost stream) fails the
-   * turns open on its server — their answers can no longer arrive — and the
-   * next call to the server starts a fresh one.
+   * that); a pump whose start fails (no first frame, lost stream) rejects,
+   * so the caller fails instead of sending once on a dead connection. The
+   * dead server is dropped, so the next call starts a fresh one — with no
+   * retry loop against a server that keeps failing.
    */
   private ensurePump(key: string, connection: OpencodeServerConnection): Promise<void> {
     const existing = this.pumps.get(key);
     if (existing) return existing.ready;
     const controller = new AbortController();
-    let markReady: () => void = () => undefined;
-    const ready = new Promise<void>((resolve) => {
+    let markReady!: () => void;
+    let failReady!: (cause: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
       markReady = resolve;
+      failReady = reject;
     });
     const entry = { controller, ready, done: Promise.resolve() };
     this.pumps.set(key, entry);
@@ -1644,9 +1695,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         }
         if (!controller.signal.aborted) this.onPumpLost(key, "the stream ended");
       } catch (cause) {
-        if (!controller.signal.aborted) this.onPumpLost(key, cause instanceof Error ? cause.message : String(cause));
+        // A stop aborts the pump: that is shutdown, not a failure.
+        if (controller.signal.aborted) markReady();
+        else {
+          this.onPumpLost(key, cause instanceof Error ? cause.message : String(cause));
+          failReady(cause);
+        }
       } finally {
-        markReady();
         if (this.pumps.get(key) === entry) this.pumps.delete(key);
       }
     })();
@@ -2392,6 +2447,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const waiters = open ? (session.waiters.get(open.id) ?? []) : [];
     if (open) session.waiters.delete(open.id);
     for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.resolve({
         status,
         text: open?.text ?? "",
@@ -2447,16 +2503,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.stallTimers.set(turn.id, timer);
   }
 
-  private async rejectParked(session: OpenCodeSession, detail: string): Promise<void> {
+  private async rejectParked(session: OpenCodeSession, connection: OpencodeServerConnection | null, detail: string): Promise<void> {
     void detail;
     const parked = [...session.parked.values()];
     session.parked.clear();
-    let connection: OpencodeServerConnection | null = null;
     for (const request of parked) {
       try {
-        connection = connection ?? (await this.connectionFor(session));
-        if (request.kind === "permission") await connection.replyToPermission(session.nativeSessionId, request.nativeId, "reject");
-        else await connection.rejectQuestion(session.nativeSessionId, request.nativeId);
+        if (connection) {
+          if (request.kind === "permission") await connection.replyToPermission(session.nativeSessionId, request.nativeId, "reject");
+          else await connection.rejectQuestion(session.nativeSessionId, request.nativeId);
+        }
       } catch {
         // Best effort: abort still proceeds below.
       }

@@ -97,6 +97,28 @@ describe("HarnessDriver", () => {
     await expect(driver.contextUsage("t1")).resolves.toMatchObject({ usedTokens: 55, maxTokens: 262144 });
   });
 
+  it("awaitTurn removes its abort listener when the turn settles", async () => {
+    const { driver } = driverWith([answer("hi")]);
+    await start(driver);
+    const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "hi" }));
+    const removed: unknown[][] = [];
+    const signal = {
+      aborted: false,
+      addEventListener: () => undefined,
+      removeEventListener: (...args: unknown[]) => void removed.push(args),
+    } as unknown as AbortSignal;
+    await driver.awaitTurn("t1", turnId, signal);
+    expect(removed).toHaveLength(1);
+    expect(removed[0]?.[0]).toBe("abort");
+  });
+
+  it("stopAll ends the event stream instead of leaving it hanging", async () => {
+    const { driver } = driverWith([]);
+    await start(driver);
+    await run(driver.stopAll());
+    await Effect.runPromise(Stream.runCollect(driver.streamEvents));
+  });
+
   it("publishes a tool call in the shape the activity ledger reads", async () => {
     const file = path.join(work, "a.txt");
     fs.writeFileSync(file, "x\n");

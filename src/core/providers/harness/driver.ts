@@ -25,6 +25,7 @@ import path from "node:path";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import type { Done } from "effect/Cause";
 
 import { CliError } from "../../errors.js";
 import { isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
@@ -104,7 +105,7 @@ interface HarnessTurn {
   readonly reasoningStarted: Set<string>;
   /** What the turn's subagents used, which the loop's own totals do not include. */
   readonly subagentUsage: { input: number; cacheRead: number; output: number; thinking: number };
-  readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void }>;
+  readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }>;
 }
 
 export interface HarnessTurnOutcome {
@@ -247,7 +248,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
   private readonly connectMcp: ConnectMcp | undefined;
   private readonly home: string | undefined;
-  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent, Done>());
   /** Titles being made, by session id, so a second ask waits for the first instead of paying for another request. */
   private readonly titling = new Map<string, Promise<string | null>>();
   /** Automatic title attempts that made nothing, by session id; after a few the session is left untitled until asked again. */
@@ -802,7 +803,10 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       ...(outcome.error ? { raw: { error: outcome.error } } : {}),
     });
     const waiters = turn.waiters.splice(0);
-    for (const waiter of waiters) waiter.resolve(outcome);
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(outcome);
+    }
     // Something may have ended after the model's last request: tell it now rather than at its next turn.
     this.scheduleWake(session);
   }
@@ -814,16 +818,17 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     if (turn.status !== "running") return { status: turn.status, text: turn.text, usage: turn.usage, error: turn.error };
     if (signal?.aborted === true) throw new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, { details: { threadId, turnId } });
     return await new Promise<HarnessTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
+      const waiter: { resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void } = { resolve, reject };
       turn.waiters.push(waiter);
-      signal?.addEventListener(
-        "abort",
-        () => {
+      if (signal) {
+        const onAbort = (): void => {
           dropTurnWaiter(turn.waiters, waiter);
           reject(new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, { details: { threadId, turnId } }));
-        },
-        { once: true },
-      );
+        };
+        waiter.signal = signal;
+        waiter.onAbort = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   }
 
@@ -1425,6 +1430,11 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         await this.closeMcp(session);
       }
       this.sessions.clear();
+      // Signal completion on the event stream: buffered events are still
+      // delivered, the stream then ends so the pump in `threads/execute.ts`
+      // releases its fiber instead of waiting on a driver that is gone.
+      // Offers after this return false and are dropped, never a crash.
+      Effect.runSync(Queue.end(this.queue));
     });
 
   /**
