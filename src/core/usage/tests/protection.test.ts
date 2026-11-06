@@ -44,7 +44,13 @@ async function world(provider: "claude" | "codex" = "codex", driverOverride?: Tu
 
 async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId: string) {
   const started = (await w.store.readTurns(threadId)).filter((turn) => turn.status === "running");
-  await flushTurnRunners();
+  await settleRuns();
+  // A blind flush gives up silently after its limit; on a loaded runner the
+  // turns are still going then, so wait for the turns themselves.
+  await expect.poll(
+    async () => (await w.store.readTurns(threadId)).filter((turn) => turn.status === "running").length,
+    { timeout: 10_000 },
+  ).toBe(0);
   const turns = await w.store.readTurns(threadId);
   for (const turn of started) expect(turns.find((settled) => settled.id === turn.id)?.status).toBe("completed");
   expect(openTurn(turns)).toBeNull();
@@ -549,6 +555,7 @@ describe("usage protection", () => {
     }
   });
 
+  // Fifty threads of setup plus repeated ticks: a loaded runner does not fit in the twenty-second default.
   it.each(["off", "auto"] as const)("%s ticks do not reread idle history and discover queued work from store events", async (mode) => {
     const w = await world();
     w.ctx.config.usageProtection = mode;
@@ -594,7 +601,7 @@ describe("usage protection", () => {
     expect(turns.mock.calls.some(([id]) => id === external.id)).toBe(true);
     expect(lists).toHaveBeenCalledTimes(1);
     w.guard.close();
-  });
+  }, 60_000);
 
   it("keeps context readings live without rereading activity history, and replaces live cost on settlement", async () => {
     const w = await world();
@@ -937,6 +944,7 @@ describe("usage protection", () => {
     expect(w.sent).toHaveLength(2);
   });
 
+  // Crash, restart, and two recovery turns: a loaded runner does not fit in the twenty-second default.
   it.each([false, true])("resumes after a crash before recovery admission when wrap-up was skipped (queued input: %s)", async (queued) => {
     const w = await world();
     const id = await w.make("skipped wrap-up");
@@ -959,7 +967,7 @@ describe("usage protection", () => {
     expect((await w.store.readMessages(id)).filter((message) => message.role === "user" && message.origin === "usage-continue")).toHaveLength(1);
     await restarted.tick(reset + 7000);
     expect(restarted.read().queue).toEqual([]);
-  });
+  }, 60_000);
 
   it("reuses a persisted handoff and keeps future scheduled requests out of its prompt", async () => {
     const w = await world();

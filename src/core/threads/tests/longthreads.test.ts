@@ -194,10 +194,11 @@ describe("compacting mid-turn", () => {
     const thread = await claudeThread(harness.store, harness.work);
     await finishedTurn(harness.store, thread.id, "Earlier work.", 60_000);
     await startTurn(ctx, { threadId: thread.id, prompt: "Do a long job.", onEvent: () => undefined });
+    // The run reaches the driver after session setup and checkpoint capture; Windows runners need longer than the one-second default.
+    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 10_000 });
     // The provider reports a request's usage while the turn is running.
-    await vi.waitFor(() => expect(prompts).toHaveLength(1));
     fake.report(thread.id);
-    await vi.waitFor(() => expect(prompts.some((prompt) => prompt.includes(COMPACTED_CONTINUE_PROMPT))).toBe(true), { timeout: 5000 });
+    await vi.waitFor(() => expect(prompts.some((prompt) => prompt.includes(COMPACTED_CONTINUE_PROMPT))).toBe(true), { timeout: 10_000 });
     await settleRuns();
     const order = prompts.map((prompt) => (prompt.includes("Do a long job.") ? "job" : prompt.includes("/compact") ? "compact" : prompt.includes(COMPACTED_CONTINUE_PROMPT) ? "continue" : "other"));
     expect(order).toEqual(["job", "compact", "continue"]);
@@ -220,7 +221,8 @@ describe("compacting mid-turn", () => {
     const thread = await claudeThread(harness.store, harness.work);
     await finishedTurn(harness.store, thread.id, "Earlier work.", 60_000);
     await startTurn(ctx, { threadId: thread.id, prompt: "Do a long job.", onEvent: () => undefined });
-    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    // The run reaches the driver after session setup and checkpoint capture; Windows runners need longer than the one-second default.
+    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 10_000 });
     expect(await compactMidTurn(ctx, thread.id, { usedTokens: 100_000, maxTokens: 200_000 } as never)).toBe(false);
     // On "ask", between the line and the hard line, a card is the answer, not an interruption.
     const asking: OperationContext = { ...ctx, config: { ...harness.config, providers: { claude: { autoCompact: "ask" } } } };

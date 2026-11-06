@@ -266,6 +266,7 @@ describe("a delegated task that ends its turn with background work running", () 
 });
 
 describe("task_status with background work", () => {
+  // Two full child turns plus the task reads: a loaded runner does not fit in the twenty-second default.
   it("lists what is still running and for how long, flagging what is probably forgotten", async () => {
     const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
     const w = await world(() => [
@@ -336,7 +337,7 @@ describe("task_status with background work", () => {
     const agedDescribed = await describeTask(aged.ctx, agedParent.id, agedChild.id);
     expect(agedDescribed.background.tasks[0]!.probablyForgotten).toBe(true);
     expect(durationMs("30m")).toBe(30 * 60_000);
-  });
+  }, 60_000);
 
   it("says it cannot tell when no session holds the task", async () => {
     const w = await world(() => []);
