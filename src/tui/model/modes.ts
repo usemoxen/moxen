@@ -1,9 +1,9 @@
 /**
  * The composer's side of a thread's mode (`InteractionMode`): Shift+Tab
  * cycles Build → Research → Orchestrate and stays there, while `/research` /
- * `/orchestrate` are for one prompt: the thread goes back to its own mode
- * after it. The procedures
- * themselves are the server's (`core/threads/modes.ts`).
+ * `/orchestrate` / `/review` are for one prompt: the thread goes back to its
+ * own mode after it. Review is delegate-and-one-off only, so it never joins
+ * the cycle. The procedures themselves are the server's (`core/threads/modes.ts`).
  */
 import { interactionModeLabel } from "../../core/interactionmode.js";
 import type { InteractionMode } from "../../core/types.js";
@@ -24,12 +24,12 @@ export interface ModeCommand {
 }
 
 /**
- * A draft that opens with `/research` or `/orchestrate`, or null. With text
+ * A draft that opens with `/research`, `/orchestrate` or `/review`, or null. With text
  * after it, that prompt runs in the mode (one-off); alone, it arms the mode
  * for the next prompt you send.
  */
 export function parseModeCommand(draft: string): ModeCommand | null {
-  const match = /^\/(research|orchestrate)(?:\s+([\s\S]*))?$/u.exec(draft.trim());
+  const match = /^\/(research|orchestrate|review)(?:\s+([\s\S]*))?$/u.exec(draft.trim());
   if (match === null) return null;
   return { mode: match[1] as InteractionMode, rest: (match[2] ?? "").trim() };
 }

@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_CONFIG, defaultConfigPath, migrateLegacyConfig, normalizeConfig, setConfigValue } from "../config.js";
+import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, saveConfig, setConfigValue } from "../config.js";
 import { readSetting } from "../configschema.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
@@ -93,7 +93,6 @@ describe("config", () => {
     expect(setConfigValue(set, "providers.opencode.autoHandoffModels", "").providers?.opencode).toBeUndefined();
     expect(() => normalizeConfig({ providers: { claude: { autoHandoffModels: { x: 100 } } } })).toThrow(/token count/);
   });
-
   it("keeps per-model prices, sets them from text, and refuses a negative one", () => {
     const config = normalizeConfig({ providers: { opencode: { modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": "10" } } } });
     expect(config.providers?.opencode).toEqual({ modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": 10 } });
@@ -103,6 +102,19 @@ describe("config", () => {
     expect(setConfigValue(set, "providers.codex.modelInputPrices", "").providers?.codex).toBeUndefined();
     expect(() => setConfigValue(config, "providers.codex.modelInputPrices", "gpt-6.1-sol=-1")).toThrow(/zero or more/);
     expect(() => normalizeConfig({ providers: { codex: { modelOutputPrices: { "gpt-6.1-sol": "many" } } } })).toThrow(/zero or more/);
+  });
+
+  it("replaces the config file when saving, so a crash cannot leave a torn config", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "nested", "config.json");
+    await saveConfig(file, normalizeConfig({}));
+    const before = statSync(file).ino;
+    await saveConfig(file, normalizeConfig({ runtimeMode: "approval-required" }));
+    // A rename, not a rewrite in place: a crash mid-write leaves either the
+    // old file or the new one, never half of one.
+    expect(statSync(file).ino).not.toBe(before);
+    expect((await loadConfig(file)).config.runtimeMode).toBe("approval-required");
+    expect(readdirSync(path.join(dir, "nested"))).toEqual(["config.json"]);
   });
 });
 

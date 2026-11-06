@@ -33,7 +33,12 @@ describe("relabelImageTokens", () => {
       { name: "a.png", label: "[Image #2]", start: 4, end: 14 },
       { name: "b.png", label: "[Image #3]", start: 20, end: 30 },
     ]);
-    // More tokens than images: the rest stay as they were.
-    expect(relabelImageTokens("[Image #1] [Image #2]", ["a.png"], []).text).toBe("[Image #1] [Image #2]");
+    // More tokens than images: the surplus token is dropped, not left dangling with nothing behind it.
+    expect(relabelImageTokens("[Image #1] [Image #2]", ["a.png"], []).text).toBe("[Image #1] ");
+    expect(relabelImageTokens("[Image #1] [Image #2]", ["a.png"], []).spans).toHaveLength(1);
+  });
+
+  it("drops a pasted token whose image was not recovered, keeping the text around it", () => {
+    expect(relabelImageTokens("see [Image #1] then [Image #2]", ["a.png"], []).text).toBe("see [Image #1] then ");
   });
 });

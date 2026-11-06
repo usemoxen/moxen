@@ -5,7 +5,7 @@ import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js"
 import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
-import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
+import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
@@ -76,6 +76,10 @@ export class UsageProtection {
         const thread = await ctx.store.readThreadRecord(threadId);
         if (!thread || thread.deletedAt) throw new CliError("THREAD_NOT_FOUND", "The thread does not exist.");
         if (thread.archivedAt) throw new CliError("THREAD_ARCHIVED", "An archived thread cannot be protected.");
+        // A forced hold ends on a message, but settled threads refuse messages
+        // and the queue cannot cancel a forced hold: accepting this would
+        // leave a hold that sticks forever (released again on the next tick).
+        if (thread.settledAt) throw new CliError("THREAD_SETTLED", "A settled thread cannot be protected. Unsettle it first.");
         if (thread.usagePause?.forced) return;
         const running = openTurn(await ctx.store.readTurns(threadId));
         const provider = usageKeyForInstance((running?.modelSelection ?? thread.modelSelection).instanceId);
@@ -187,6 +191,14 @@ export class UsageProtection {
           });
           thread = (await ctx.store.readThreadRecord(id))!;
         }
+        if (!thread.archivedAt && thread.settledAt && thread.usagePause?.forced) {
+          // A forced hold cannot survive its thread settling: settling ends
+          // it now, and a message can never release it afterwards, so without
+          // this a hold left by an older version would stick forever.
+          // Released here — on the next tick — for those already stuck.
+          await this.pause(ctx, id, null, now);
+          thread = (await ctx.store.readThreadRecord(id))!;
+        }
         if (!thread.archivedAt && thread.usagePause) {
           await recoverOrphanedTurn(ctx, id);
           thread = (await ctx.store.readThreadRecord(id))!;
@@ -278,6 +290,29 @@ export class UsageProtection {
     if (!openTurn(await ctx.store.readTurns(row.thread.id)) && driver.stopSession) {
       await Effect.runPromise(driver.stopSession(row.thread.id));
     }
+  }
+
+  /**
+   * The reset a waiting pause without one should name: the reset of the
+   * window its recovery entry's condition asked about — not the latest reset
+   * across every window running hot. Without a recovery entry yet, the window
+   * `ensureRecovery` is about to ask about. Null while that window's reset is
+   * still unknown: the work stays held until the provider supplies one.
+   */
+  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number): Promise<string | null> {
+    let window: "session" | "weekly" | "all" | null = null;
+    if (pause.recoveryTurnId) {
+      const turns = await ctx.store.readTurns(threadId).catch(() => []);
+      const recovery = turns.find((turn) => turn.id === pause.recoveryTurnId);
+      const reset = recovery?.queue?.conditions.find((condition) => condition.type === "reset");
+      if (reset) window = reset.window;
+      else {
+        const at = recovery?.queue?.conditions.find((condition) => condition.type === "at");
+        if (at) return at.at;
+      }
+    }
+    window ??= windows.some((candidate) => candidate.kind === "session") ? "session" : windows.some((candidate) => candidate.kind === "weekly") ? "weekly" : "all";
+    return nextReset(pause.provider, window, now);
   }
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
@@ -485,9 +520,9 @@ export class UsageProtection {
       if (pause.phase !== "waiting" || pause.error) continue;
       let waiting = pause;
       if (!pause.forced && pause.resetsAt === null) {
-        const resets = windows.filter((window) => window.usedPercent >= 90).map((window) => window.resetsAt);
-        if (resets.length && resets.every((reset) => reset !== null)) {
-          waiting = { ...waiting, resetsAt: resets.sort().at(-1)! };
+        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now);
+        if (resetsAt !== null) {
+          waiting = { ...waiting, resetsAt };
           await this.pause(ctx, row.thread.id, waiting);
         }
       }

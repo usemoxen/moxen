@@ -32,7 +32,7 @@ export function useInteractionMode(params: {
   const threadMode = selected !== null && requested !== null && requested.threadId === selected.id ? requested.mode : stored;
   /** The mode a new prompt starts in and `Shift+Tab` cycles: the thread's own. */
   const stickyMode = creating ? creatingMode : threadMode;
-  // `/research` or `/orchestrate`: the next prompt only. The ref is read at send time, the state draws it.
+  // `/research`, `/orchestrate` or `/review`: the next prompt only. The ref is read at send time, the state draws it.
   const [oneOff, setOneOff] = useState<InteractionMode | null>(null);
   const oneOffRef = useRef<InteractionMode | null>(null);
   const armOneOff = (next: InteractionMode | null) => {
@@ -112,7 +112,7 @@ export function useInteractionMode(params: {
   };
 
   /**
-   * A `/research` or `/orchestrate` draft: the mode applies to one prompt and
+   * A `/research`, `/orchestrate` or `/review` draft: the mode applies to one prompt and
    * the thread's own mode stays. Returns the text to send in it ("" for none,
    * which arms the mode for the next prompt; the same command again disarms),
    * or null when the draft is not one.

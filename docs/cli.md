@@ -24,7 +24,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | `--speed`, `--speed-mode` | `standard`, `fast` |
 | `--thinking-effort` | A model-supported value such as `low`, `medium`, `high`, `xhigh` or `max` |
 | `--permission`, `--runtime-mode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` |
-| `--mode`, `--interaction-mode` | `build`/`default`, `research` or `orchestrate` (see [Modes](threads.md#modes-build-research-and-orchestrate)). Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
+| `--mode`, `--interaction-mode` | `build`/`default`, `research` or `orchestrate` on thread creation (see [Modes](threads.md#modes-build-research-orchestrate-and-review)); `threads delegate --mode` also accepts `review` for a code reviewer. Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
 | `--checkout`, `--env-mode` | `current`/`local`, `worktree`, or the resolved default via `auto` |
 
 Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is `MOXEN_DEFAULT_MODEL` when set, otherwise Claude Code's catalog default when Claude Code is installed. Native Codex is selected with `--provider codex --model <model>` or the corresponding defaults in Settings.
@@ -93,7 +93,7 @@ printf '%s' "New findings that require more work..." \
   | moxen --json threads send --thread <thread-id> --stdin --wake-settled
 ```
 
-The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the permission in the TUI permission picker and the mode with Shift+Tab in the composer, since scheduled runs inherit both (`/research` / `/orchestrate` are for one prompt and are not inherited).
+The turn keeps the thread's model, permission, and mode unless overridden. `--provider`, `--model`, `--speed`, and `--thinking-effort` override the model for that turn only (global `provider`/`model` config is ignored so a stale default cannot flip a scheduled thread's model). There is no `--permission`/`--mode` flag: change the permission in the TUI permission picker and the mode with Shift+Tab in the composer, since scheduled runs inherit both (`/research` / `/orchestrate` / `/review` are for one prompt and are not inherited).
 
 `--delivery` selects follow-up policy (default `auto`; every follow-up is recorded as a `thread.turn.start` turn, so the mode governs preconditions and reporting): `queue` records even when busy and reports `queued`, `steer` requires an active turn and reports `steered`, and `restart` interrupts the active turn first and reports `restarted` (`THREAD_NOT_STEERABLE` when idle). `--handoff-note <text>` records provider-switch context as CLI-side metadata without changing the recorded turn.
 
@@ -121,7 +121,7 @@ moxen threads task-cancel --thread <parent-id> --task <child-thread-id>
 
 `task-cancel` (and the `task_cancel` tool) stop only a task that `--thread` delegated, or that the thread it continued from delegated and was handed to it on `thread.continue`; any other thread id, real or not, fails with `TASK_NOT_FOUND`. `task-status` is unchanged.
 
-`delegate` sends only the task prompt as the child's first turn and waits for its latest turn to reach `completed`, `interrupted`, or `error` (default budget 600000ms via `--timeout-ms`; `--no-wait` returns after acceptance). A wait timeout exits 0 with `data.task.waitTimedOut: true` and never cancels the child — re-poll with `task-status`. `task-cancel` interrupts the live provider run through the store and marks the turn interrupted.
+`delegate` sends only the task prompt as the child's first turn and waits for its latest turn to reach `completed`, `interrupted`, or `error` (default budget 600000ms via `--timeout-ms`; `--no-wait` returns after acceptance). A wait timeout exits 0 with `data.task.waitTimedOut: true` and never cancels the child — re-poll with `task-status`. `task-cancel` interrupts the live provider run through the store and marks the turn interrupted. `--mode review` delegates a code review of the PR or branch in the prompt: the reviewer checks it out in a scratch worktree, changes nothing in it, and ends with `VERDICT: MERGE` or `VERDICT: FIX FIRST`. A finished review task's `task-status` carries a `review` object with the parsed `verdict`, whether the reviewer shares the parent's model (`sameModel`), and a visible `note` when the final message holds no verdict or the model is shared; `review` is absent for other tasks.
 
 Thread targeting uses exit code `3` for a missing target and `4` for a lifecycle/confirmation refusal.
 
@@ -260,7 +260,7 @@ checklist on each provider's tab. The MCP tab shows the answer per provider for 
 `providers` list ("offered to") is read once, as that checklist (a provider it left out has the server switched
 off there), and decides nothing on its own; a project's `moxen.json` may still carry one.
 
-Moxen ships no skills of its own: the Research and Orchestrate modes, Moxen memory and its MCP tools do what its
+Moxen ships no skills of its own: the Research, Orchestrate and Review modes, Moxen memory and its MCP tools do what its
 bundled skills used to. Copies an older Moxen made in a project (folders marked `.moxen-skill.json` in
 `.claude/skills` or `.agents/skills`) are taken out when a session starts there; your own skills are never touched.
 The older keys `skills.moxen`, `providers.<kind>.moxenSkills` and `installSkills` still load and do nothing.

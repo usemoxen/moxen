@@ -749,6 +749,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Build": "Construcción",
   "Research": "Investigación",
   "Orchestrate": "Orquestación",
+  "Review": "Revisión",
   "{pct}% of the window": "{pct}% de la ventana",
   "Reasoning": "Razonamiento",
   "Minimal": "Mínimo",

@@ -279,10 +279,14 @@ export function thoughtDuration(durationMs: number): string {
   return durationMs < 1000 ? `${Math.max(1, Math.floor(durationMs))}ms` : formatDuration(durationMs);
 }
 
-/** `359_000` → `"359k"`, `1_400_000` → `"1.4m"`, `1_000_000` → `"1m"`. */
+/** `359_000` → `"359k"`, `999_999` → `"1m"`, `1_400_000` → `"1.4m"`, `1_000_000` → `"1m"`. */
 export function formatTokenCount(value: number): string {
   if (value < 1000) return String(Math.round(value));
-  if (value < 1_000_000) return `${Math.round(value / 1000)}k`;
+  if (value < 1_000_000) {
+    const thousands = Math.round(value / 1000);
+    // 999_999 rounds to a thousand thousands: read it as millions, in the format below.
+    if (thousands < 1000) return `${thousands}k`;
+  }
   const millions = Math.round((value / 1_000_000) * 10) / 10;
   return `${Number.isInteger(millions) ? millions.toFixed(0) : millions.toFixed(1)}m`;
 }

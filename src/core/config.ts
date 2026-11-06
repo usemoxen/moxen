@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +6,7 @@ import path from "node:path";
 import { CliError } from "./errors.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
 import { normalizeHarnessConfig } from "./providers/harness/profiles.js";
-import { INTERACTION_MODES } from "./interactionmode.js";
+import { STICKY_INTERACTION_MODES } from "./interactionmode.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
 import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeSetting } from "./configschema.js";
@@ -58,7 +58,7 @@ const runtimeModes = new Set<RuntimeMode>([
   "auto",
   "full-access",
 ]);
-const interactionModes = new Set<InteractionMode>(INTERACTION_MODES);
+const interactionModes = new Set<InteractionMode>(STICKY_INTERACTION_MODES);
 /** A saved mode since removed, read as Build (the shared migration rule): plan mode (MXN-136). */
 const REMOVED_INTERACTION_MODES = new Set(["plan"]);
 const speedModes = new Set<SpeedMode>(["standard", "fast"]);
@@ -532,8 +532,11 @@ export async function loadConfig(explicitPath?: string): Promise<{ config: CliCo
 }
 
 export async function saveConfig(configPath: string, config: CliConfig): Promise<void> {
-  await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  // Loaded here rather than at the top: `core/config` is imported during
+  // test setup, before any file mock registers, and a static edge would pin
+  // the atomic write to the real filesystem for the whole test run.
+  const { writeAtomic } = await import("./infra/atomic.js");
+  await writeAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 /**

@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import { decodeCommand, decodeQuery, LOCAL_ONLY_COMMANDS } from "../protocol.js";
 
+describe("harness.models.discover on the wire", () => {
+  it("keeps a missing apiFormat as chat, and refuses one it does not know", () => {
+    expect(
+      decodeCommand({ type: "harness.models.discover", baseUrl: "http://h" }),
+    ).toMatchObject({ type: "harness.models.discover", apiFormat: "chat" });
+    for (const format of ["chat", "responses", "anthropic"]) {
+      expect(
+        decodeCommand({ type: "harness.models.discover", baseUrl: "http://h", apiFormat: format }),
+      ).toMatchObject({ apiFormat: format });
+    }
+    expect(() => decodeCommand({ type: "harness.models.discover", baseUrl: "http://h", apiFormat: "openai" })).toThrow(
+      /apiFormat must be one of chat, responses, anthropic/,
+    );
+  });
+});
+
 describe("provider.update on the wire", () => {
   it("takes only a provider that can update", () => {
     expect(decodeCommand({ type: "provider.update", provider: "opencode" })).toMatchObject({ type: "provider.update", provider: "opencode" });

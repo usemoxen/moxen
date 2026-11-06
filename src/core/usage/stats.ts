@@ -156,7 +156,7 @@ function turnCost(
 ): number | null {
   const usage = turn.usage;
   if (!usage) return null;
-  if (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd)) return usage.costUsd;
+  if (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0) return usage.costUsd;
   const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model), usage);
   return estimated?.usd ?? null;
 }
