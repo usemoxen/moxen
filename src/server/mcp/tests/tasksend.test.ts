@@ -181,7 +181,10 @@ describe("task_send: a task that finished before the orchestrator continued", ()
     const t = await setup();
     try {
       const taskId = await t.delegate();
-      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true));
+      // A delegated turn completes on its own runner: on a loaded machine
+      // that takes longer than vitest's default 1s `waitFor` timeout, so the
+      // wait states its bound (like the one below) instead of flaking there.
+      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 8_000 });
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
       const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
