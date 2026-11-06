@@ -823,6 +823,11 @@ function TaskNotificationBlock({
                 <markdown content={task.headline} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
               </box>
             )}
+            {!task.review ? null : (
+              <text fg={task.verdict === null ? COLOR.warn : task.verdict === "MERGE" ? COLOR.added : COLOR.danger} bg={SURFACE.panel}>
+                {`  ${task.verdict === null ? tr("timeline.reviewNoVerdict") : tr("timeline.reviewVerdict", { verdict: task.verdict })}`}
+              </text>
+            )}
             {footer.length === 0 ? null : <text fg={COLOR.dim} bg={SURFACE.panel}>{`  ${footer.join("  ·  ")}`}</text>}
           </box>
         );

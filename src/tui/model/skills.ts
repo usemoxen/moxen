@@ -33,6 +33,7 @@ const moxenCommands = (): readonly SkillSummary[] => [
   plainSkill("protect", t("cmd.protect")),
   plainSkill("research", t("cmd.research")),
   plainSkill("orchestrate", t("cmd.orchestrate")),
+  plainSkill("review", t("cmd.review")),
 ];
 
 /**

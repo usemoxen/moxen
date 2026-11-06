@@ -92,11 +92,29 @@ each using `provider`, `model` and `thinkingEffort`. The suggestion alone create
 no lead or role thread. Only a user answer starts a full run. Without someone
 to answer, the task runs as one researcher.
 
+Review delegation is a single reviewer: `mode: "review"` with the PR or
+branch named in the task. The reviewer checks the target out in a scratch
+worktree, changes nothing in it, proves each finding with a throwaway test
+(or marks it read from code) and ends with `VERDICT: MERGE` or
+`VERDICT: FIX FIRST` on the report's last line — only a trailing verdict
+counts. Pass target-specific questions to attack in the task;
+the report answers each one first-class. The task notification and
+`task_status` carry the verdict and the review; a finished review with no
+trailing `VERDICT` line is said visibly instead of passed on as finished.
+When the reviewer runs on the same model as the delegating thread, both say so: a
+warning, not a refusal. The comparison reads the models recorded when the
+task was delegated, so a parent that moves on cannot rewrite it. The
+settled verdict is pinned on the delegation: a conversational follow-up
+turn cannot rewrite it, while a follow-up that settles with its own verdict
+re-pins. Continuing a review child starts the new thread in Build, with a
+ledger note saying Review was reset.
+
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and
 starts a full run without a proposal. `--research-models` accepts the model
 entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
+`--mode review` starts a reviewer for the PR or branch in the prompt.
 Existing calls and CLI JSON envelopes are unchanged.
 
 ### Research run view
@@ -565,7 +583,7 @@ One rule, most specific first, the same for `moxen handover`, `moxen threads cre
 
 A follow-up, and a delegated task, keeps its parent thread's selection unless the request overrides it, and never falls back to the settings or the installation default.
 
-## Modes: Build, Research and Orchestrate
+## Modes: Build, Research, Orchestrate and Review
 
 A thread is in one mode until the user changes it: **Build** (the default),
 **Research** or **Orchestrate**. Research and Orchestrate are procedures
@@ -574,11 +592,15 @@ the user's thread as lead, or one researcher when no full run is approved.
 Full-run leads use role tools, never `delegate`; the server enforces the chosen
 size and review gates. Orchestrate splits the work into tasks, each on the
 model that fits it, checking budget, memory and isolation before delegating.
+**Review** is the fourth procedure but not a fourth thread mode: it runs a
+delegated review task (`delegate` with `mode: "review"`), or one prompt
+(`/review`), and never stays on a thread.
 
-- **Switching:** Shift+Tab cycles the thread's mode and it stays until
+- **Switching:** Shift+Tab cycles the thread's mode (Build, Research,
+  Orchestrate) and it stays until
   changed (also `--mode research|orchestrate` on `moxen handover` /
   `threads create`, or the `thread.interaction-mode.set` command).
-  `/research` or `/orchestrate` in the composer are for one prompt: with
+  `/research`, `/orchestrate` or `/review` in the composer are for one prompt: with
   text after them, that prompt runs in the mode; alone, the mode is armed
   for the next prompt (the same command again disarms it). Either way the
   thread's own mode is untouched, and the next prompt is told the mode is
@@ -589,14 +611,14 @@ model that fits it, checking budget, memory and isolation before delegating.
   sent with its own mode.
 - **In the transcript:** the command stays hidden, and each message shows
   the mode it ran in: its rail (and its reply's) takes the mode's colour,
-  and Research or Orchestrate is named beside the time, with "once" when
+  and Research, Orchestrate or Review is named beside the time, with "once" when
   the mode was for that message only. Build looks as it always did. The
   envelope's `turnInteractionModes` (by turn id) carries it, only for turns
-  that ran in Research or Orchestrate. A queued or scheduled message shows
+  that ran outside Build. A queued or scheduled message shows
   nothing until it starts, because it takes the thread's mode then (unless
   it was sent with its own).
 - **Fixed while a turn runs:** the mode cannot change while a turn is
-  running, by Shift+Tab, `/research`, `/orchestrate` or
+  running, by Shift+Tab, `/research`, `/orchestrate`, `/review` or
   `thread.interaction-mode.set`, and a steer, an inject or a queued send
   carries no mode (`MODE_LOCKED_WHILE_RUNNING`). In the TUI a mode command
   typed during a turn stays in the draft and the composer says why. Once the
@@ -607,7 +629,7 @@ model that fits it, checking budget, memory and isolation before delegating.
   off" note the same way. Which mode each provider's conversation was told
   is kept on the thread (`modeState`), and forgotten after a compaction or
   a revert so the procedure is sent again. On OpenCode it is an instruction
-  entry (`moxen-research` / `moxen-orchestrate`), removed in Build.
+  entry (`moxen-research`, `moxen-orchestrate`, `moxen-review`), removed in Build.
 - **Told once the provider answers:** a mode block, and a runtime instruction
   update, count as delivered when the provider has produced output for the
   prompt that carried them, not when it accepts the prompt. A first turn on a
@@ -617,10 +639,11 @@ model that fits it, checking budget, memory and isolation before delegating.
   (a handoff document, say) ahead of it, up to the last turn the provider
   answered, along with the mode block.
 - A new thread starts in Build unless a mode is picked while drafting it,
-  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate. A thread
+  and a delegated task runs in Build unless the model that delegates asks for
+  Research or Review (`delegate`'s `mode`); a task is never in Orchestrate. A thread
   drafted in Research mode asks for the run size on its first prompt.
 - The TUI shows the mode as the composer's left-edge colour (Build sky,
-  Research violet, Orchestrate fuchsia), its running pulse, and in the
+  Research violet, Orchestrate fuchsia, Review orange), its running pulse, and in the
   footer.
 
 ## Memory

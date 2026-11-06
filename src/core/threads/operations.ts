@@ -92,11 +92,11 @@ import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhaust
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
-import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -1059,13 +1059,17 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   const title = continuedTitle(source.title);
   const destinationId = request.destinationThreadId ?? source.usagePause?.continuedThreadId;
   const existing = destinationId ? await store.readThreadRecord(destinationId) : null;
+  // Review never stays on a thread: a continued review child, or a carried
+  // one-off review turn, starts the new thread in Build instead.
+  const carriedMode = request.interactionMode ?? source.interactionMode;
+  const interactionMode = carriedMode === "review" ? "default" : carriedMode;
   const created = existing ?? await createThread(store, {
     ...(destinationId ? { id: destinationId } : {}),
     projectId: source.projectId,
     title,
     modelSelection: request.modelSelection ?? source.modelSelection,
     runtimeMode: request.runtimeMode ?? source.runtimeMode,
-    interactionMode: request.interactionMode ?? source.interactionMode,
+    interactionMode,
     env: source.env,
     continuedFrom: source.id,
   });
@@ -1111,7 +1115,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     threadId: source.id,
     turnId: null,
     kind: "thread.continued",
-    summary: `Continued in "${title}"`,
+    summary: carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`,
     payload: { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null, automatic: request.automatic === true },
     createdAt: store.nowIso(),
   });
@@ -1166,6 +1170,9 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
     status: "running",
     ...(row.baseBranch !== undefined ? { baseBranch: row.baseBranch } : {}),
     ...(row.notify ? { notify: true } : {}),
+    // The continuation is the same task lineage: it inherits who the
+    // reviewer shared a model with, but pins its own verdict when it settles.
+    ...(row.modelSnapshot ? { modelSnapshot: row.modelSnapshot } : {}),
     continuesTaskId: row.continuesTaskId ?? row.childThreadId,
     createdAt: now,
     updatedAt: now,
@@ -2140,7 +2147,7 @@ export interface DelegateRequest extends ModelRequest {
    * empty one: same provider, the parent's checkout (`shared`).
    */
   readonly fork?: boolean;
-  /** The mode the task runs in: Build (the default) or Research. Orchestrate is for the one delegating, so it is refused. */
+  /** The mode the task runs in: Build (the default), Research or Review. Orchestrate is for the one delegating, so it is refused. */
   readonly interactionMode?: InteractionMode;
 }
 
@@ -2343,6 +2350,68 @@ async function taskHasSettledForGood(ctx: OperationContext, childThreadId: strin
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
 }
 
+/**
+ * A review child's facts for its parent, pinned at settle. The pin lives on
+ * the delegation row — the verdict and report of the newest settled turn
+ * whose final message carries a `VERDICT` line — so a conversational
+ * follow-up turn cannot rewrite the settled verdict, while a follow-up
+ * that settles with its own verdict re-pins. The same-model comparison
+ * reads the delegation-time snapshot, never the live records. While the
+ * task runs, the facts are computed live and nothing is pinned.
+ */
+async function reviewFactsForTask(
+  ctx: OperationContext,
+  child: ThreadEnvelope,
+  parent: { modelSelection?: { instanceId: string; model: string } } | null,
+  row: StoredDelegation | undefined | null,
+  task: TaskView,
+): Promise<(ReviewFacts & { report: string | null }) | null> {
+  if (child.interactionMode !== "review") return null;
+  const modelOf = (selection: { instanceId: string; model: string } | undefined | null) =>
+    selection ? `${selection.instanceId}/${selection.model}` : null;
+  const snapshot = row?.modelSnapshot;
+  const childModel = snapshot?.child ?? modelOf(child.modelSelection);
+  const parentModel = snapshot?.parent ?? (parent === null ? null : modelOf(parent.modelSelection));
+  if (task.status === "running") {
+    return { ...reviewFactsOf({ finished: false, interactionMode: "review", report: null, childModel, parentModel })!, report: null };
+  }
+  const pinned = await settledReviewPin(ctx, child);
+  const report = pinned?.report ?? task.summary;
+  const facts = reviewFactsOf({ finished: true, interactionMode: "review", report, childModel, parentModel })!;
+  const owned = row ?? null;
+  if (owned !== null && (owned.review?.verdict !== facts.verdict || owned.review?.report !== report)) {
+    await ctx.store.updateDelegation(owned.id, { review: { verdict: facts.verdict, report } }).catch(() => undefined);
+  }
+  return { ...facts, report };
+}
+
+/**
+ * The newest settled turn whose final message carries a verdict, newest
+ * first. A conversational follow-up settles without one, so the search
+ * walks past it to the settled review; a follow-up that is itself a
+ * review re-pins with its own verdict. Null when no settled turn carries
+ * one — the missing-verdict path then says so visibly.
+ */
+async function settledReviewPin(
+  ctx: OperationContext,
+  child: ThreadEnvelope,
+): Promise<{ verdict: ReviewVerdict; report: string } | null> {
+  const [turns, messages] = await Promise.all([
+    ctx.store.readTurns(child.id).catch(() => [] as StoredTurn[]),
+    ctx.store.readMessages(child.id).catch(() => [] as StoredMessage[]),
+  ]);
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]!;
+    if (turn.status !== "completed") continue;
+    // The completion text lands last, so the first match walking back is
+    // the turn's final message rather than a mid-turn progress note.
+    const text = [...messages].reverse().find((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0)?.text ?? null;
+    const verdict = reviewVerdictOf(text);
+    if (verdict !== null && text !== null) return { verdict, report: text };
+  }
+  return null;
+}
+
 /** One task's settled facts: status, time, model, branch, headline, and what it changed. */
 export async function taskNotificationOf(ctx: OperationContext, childThreadId: string): Promise<TaskNotification | null> {
   const child = await threadWithLedger(ctx.store, childThreadId).catch(() => null);
@@ -2368,6 +2437,15 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  // A review task's verdict and findings ride in the notification itself, and a
+  // missing verdict (or a reviewer on the parent's own model) is said visibly.
+  // The facts are pinned at settle on the delegation row, so a follow-up
+  // turn cannot rewrite the settled verdict.
+  const rows = child.interactionMode === "review" ? await ctx.store.readDelegations().catch(() => []) : [];
+  const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined) ??
+    rows.find((candidate) => candidate.childThreadId === childThreadId);
+  const parent = row ? await ctx.store.readThreadRecord(row.parentThreadId).catch(() => null) : null;
+  const facts = await reviewFactsForTask(ctx, child, parent, row, task);
   return {
     taskId: childThreadId,
     title: child.title,
@@ -2379,6 +2457,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     filesChanged: changes?.files ?? null,
     additions: changes?.additions ?? null,
     deletions: changes?.deletions ?? null,
+    ...(facts === null ? {} : { review: facts }),
   };
 }
 
@@ -2586,9 +2665,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
   const { runtimeMode } = requireParentModes(parent);
-  // A task's mode is the delegating model's choice, Build unless it asks for Research. Orchestrate delegates, and a task never does.
+  // A task's mode is the delegating model's choice, Build unless it asks for Research or Review. Orchestrate delegates, and a task never does.
   if (request.interactionMode === "orchestrate") {
-    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build or Research, never Orchestrate: only the thread that delegates orchestrates.", {
+    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build, Research or Review, never Orchestrate: only the thread that delegates orchestrates.", {
       exitCode: 2,
       details: { interactionMode: request.interactionMode },
     });
@@ -2686,11 +2765,18 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   let created: StoredThread;
   const now = ctx.store.nowIso();
   const recordDelegation = async (): Promise<void> => {
+    const modelOf = (selection: { instanceId: string; model: string } | undefined) =>
+      selection ? `${selection.instanceId}/${selection.model}` : null;
+    const parentModel = modelOf(parent.modelSelection);
+    const childModel = modelOf(modelSelection);
     await ctx.store.appendDelegation({
       id: randomUUID(), parentThreadId, childThreadId, prompt: task, status: "running",
       ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
       ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      // Both sides' models as they stand now: the review same-model check
+      // reads this snapshot, never the live records.
+      ...(parentModel !== null && childModel !== null ? { modelSnapshot: { parent: parentModel, child: childModel } } : {}),
       createdAt: now, updatedAt: now,
     }).catch((cause: unknown) => {
       if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
@@ -3001,6 +3087,13 @@ export interface DescribedTask {
   readonly parent: ThreadEnvelope;
   readonly child: ThreadEnvelope;
   readonly task: TaskView;
+  /**
+   * A review child's verdict, warnings and finished state; null for any
+   * other task. `task_status` and the task notification read this rather
+   * than recomputing it, so a finished review with no `VERDICT` line is
+   * said visibly everywhere instead of passed on as finished.
+   */
+  readonly review: ReviewFacts | null;
 }
 
 /** A delegated task by parent + task id; the task id is the child thread id. */
@@ -3022,11 +3115,18 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
+  const task = taskOf(child, taskId);
+  // A review child's verdict, warnings and finished state ride with the
+  // status. The settled verdict is pinned on the delegation row, so a
+  // follow-up turn cannot rewrite it; `task_status` and the task
+  // notification read the same pinned facts.
+  const facts = await reviewFactsForTask(ctx, child, parent, delegation, task);
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
     child,
-    task: taskOf(child, taskId),
+    task,
+    review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
 }
 

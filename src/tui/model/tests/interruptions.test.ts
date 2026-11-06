@@ -102,10 +102,28 @@ describe("task notifications", () => {
       },
     } as unknown as MessageEnvelope;
     expect(taskNotifications(written)).toEqual([
-      { taskId: "t1", source: "moxen", title: "scout routes", status: "completed", durationMs: 192_000, model: "codex/gpt-5.5", branch: "moxen/scout", headline: "2 missing auth checks", filesChanged: 0, additions: 0, deletions: 0 },
+      { taskId: "t1", source: "moxen", title: "scout routes", status: "completed", durationMs: 192_000, model: "codex/gpt-5.5", branch: "moxen/scout", headline: "2 missing auth checks", filesChanged: 0, additions: 0, deletions: 0, verdict: null, review: false },
     ]);
     expect(taskNotifications(message("m", "hello"))).toBeNull();
     expect(taskNotifications(null)).toBeNull();
+  });
+
+  it("reads a review task's verdict, and marks a review with none", () => {
+    const written = {
+      ...message("n1", "<task-notification>…</task-notification>"),
+      role: "user",
+      origin: "task-notification",
+      notification: {
+        tasks: [
+          { taskId: "r1", title: "review login", status: "completed", review: { verdict: "FIX FIRST", sameModel: false, note: null, report: "Verdict." } },
+          { taskId: "r2", title: "review other", status: "completed", review: { verdict: null, sameModel: true, note: "no VERDICT", report: null } },
+        ],
+      },
+    } as unknown as MessageEnvelope;
+    expect(taskNotifications(written)).toEqual([
+      expect.objectContaining({ taskId: "r1", verdict: "FIX FIRST", review: true }),
+      expect.objectContaining({ taskId: "r2", verdict: null, review: true }),
+    ]);
   });
 });
 
@@ -168,7 +186,7 @@ describe("waiting messages", () => {
   });
 
   it("labels a queued task notification by what settled, not by its tag", () => {
-    const task = { taskId: "t1", source: "moxen" as const, title: "Analyze SFU", status: "completed", durationMs: null, model: null, branch: null, headline: null, filesChanged: null, additions: null, deletions: null };
+    const task = { taskId: "t1", source: "moxen" as const, title: "Analyze SFU", status: "completed", durationMs: null, model: null, branch: null, headline: null, filesChanged: null, additions: null, deletions: null, verdict: null, review: false };
     expect(queuedLabel({ text: "<task-notification>\nA task…", tasks: [task] })).toBe("Analyze SFU finished");
     expect(queuedLabel({ text: "<task-notification>", tasks: [task, { ...task, taskId: "t2" }] })).toBe("2 delegated tasks settled");
     expect(queuedLabel({ text: "  run the tests\nthen lint" })).toBe("run the tests");
@@ -413,7 +431,7 @@ describe("native subagent notices", () => {
     const notice = timeline(state({ activities })).find((entry) => entry.kind === "user");
     expect(notice?.turnId).toBe("turn-2");
     expect(taskNotifications(notice!.message)).toEqual([
-      { taskId: "ag", source: "native", title: "Explore · Count TODOs", status: "completed", durationMs: 13_000, model: null, branch: null, headline: "Found 3.", filesChanged: null, additions: null, deletions: null },
+      { taskId: "ag", source: "native", title: "Explore · Count TODOs", status: "completed", durationMs: 13_000, model: null, branch: null, headline: "Found 3.", filesChanged: null, additions: null, deletions: null, verdict: null, review: false },
     ]);
     // The card explains the wake-up, so its "Woken by a background task" row goes.
     expect(timeline(state({ activities })).some((entry) => entry.activityKind === "turn.background")).toBe(false);
@@ -448,7 +466,7 @@ describe("native subagent notices from OpenCode", () => {
     const notice = timeline(state({ activities })).find((entry) => entry.kind === "user");
     expect(notice?.turnId).toBe("turn-2");
     expect(taskNotifications(notice!.message)).toEqual([
-      { taskId: "ses_kid", source: "native", title: "explore · Map auth", status: "completed", durationMs: 38_000, model: null, branch: null, headline: "Auth lives in src/auth.", filesChanged: null, additions: null, deletions: null },
+      { taskId: "ses_kid", source: "native", title: "explore · Map auth", status: "completed", durationMs: 38_000, model: null, branch: null, headline: "Auth lives in src/auth.", filesChanged: null, additions: null, deletions: null, verdict: null, review: false },
     ]);
     expect(timeline(state({ activities })).some((entry) => entry.activityKind === "turn.background")).toBe(false);
   });

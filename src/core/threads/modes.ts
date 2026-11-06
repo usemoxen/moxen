@@ -104,6 +104,31 @@ const RESEARCH = [
   "Each role is a separate thread and spends provider usage. Keep questions scoped and do not start roles the request does not need.",
 ].join("\n");
 
+const REVIEW = [
+  "Review mode is on: run this request as a code review. The request names the target — a pull or merge request (a number or URL) or a branch — and may carry the caller's own questions or suspicions about it.",
+  "",
+  "## Resolve the target, change nothing",
+  "- Resolve the target to a commit: a PR or MR with a read-only forge command (`gh pr view`, `glab mr view`), a branch with `git rev-parse`. Fetch it when needed, and read it in a scratch worktree of your own (`git worktree add` under the system temp dir), so you see the reviewed code at exactly that commit and your own checkout stays untouched. Remove the scratch worktree when done (`git worktree remove`), so no worktree metadata is left behind.",
+  "- Change nothing in the target: no edits, no commits, no pushes there. This is a trusted rule, not an enforced lock — honor it. A throwaway test that proves a finding lives outside the target (the scratch dir, or your own worktree uncommitted) and is never committed.",
+  "",
+  "## The caller's questions come first",
+  "- The task may name specific questions, suspicions or areas to attack. Treat each as a directed, first-class check, not background: reproduce or disprove each one against the scratch checkout and answer each explicitly under its own heading in the report. These directed checks are what found real bugs before; do not let the checklist below bury them. A question the target leaves unanswerable is answered as such, with why.",
+  "",
+  "## Prove each finding",
+  "- Work from the diff against the target's base, then the tests around it, its callers and its error paths.",
+  "- Every finding is either proven — a throwaway test or command you ran against the scratch checkout, quoted with its output — or plainly marked `read from code` with your confidence (high, medium or low). A finding you could have run but did not is not proven.",
+  "",
+  "## Report format",
+  "The report opens with one line summing up the outcome, then one section per finding, then the caller's questions when there are any, and ends with exactly one line, `VERDICT: MERGE` or `VERDICT: FIX FIRST`, with nothing after it. Each finding:",
+  "- `Finding N of M — <short title>`",
+  "- `Severity: blocker | major | minor` — blocker: a bug, security hole, data loss or crash in the change, so merging must wait. major: a real defect that should block merging. minor: polish, naming or style, which never blocks on its own.",
+  "- `Where: path/to/file.ts:line`",
+  "- `Sequence: the numbered steps that reproduce or trigger it, or \"not runnable\" for a read-from-code finding`",
+  "- `Proof: the command or test you ran and what it showed, or \"read from code (confidence: high|medium|low)\"`",
+  "- `Fix: the concrete remedy`",
+  "The verdict is FIX FIRST when any finding is blocker or major, MERGE when the findings are minor only or there are none. Keep the report tight: findings with proof, no padding.",
+].join("\n");
+
 const ORCHESTRATE = [
   "Orchestrate mode is on: the user switched it on, and it stays on until they switch it off. You are the orchestrator:",
   "break the goal into tasks, give each the provider, model and effort that fits it, run independent tasks in parallel through Moxen's `delegate` tool, " +
@@ -115,6 +140,9 @@ const ORCHESTRATE = [
   "- Full research run: claims that matter and need an adversarial check. Use mode research with researchProposal to suggest size and per-role models; " +
     "only the user's answer starts it. It costs a lead, researchers, critics and one finalizer. " +
     "One researcher remains the default for read-only reviews and scout passes, and the fallback when nobody answers.",
+  "- Reviewer: a read-through of a PR or branch. Use mode review: the reviewer checks the target out in a scratch worktree, changes nothing in it, " +
+    "proves each finding with a throwaway test (or marks it read from code) and ends with VERDICT: MERGE or VERDICT: FIX FIRST. " +
+    "Pass target-specific questions to attack in the task; the report answers each one first-class.",
   "- Implementer: makes a change in its own worktree once scouts or researchers reported, scoped to named files.",
   "- Critic: checks another child's findings adversarially before you trust them, for high-stakes claims only.",
   "- Merger: usually you. Rank, deduplicate and combine the reports.",
@@ -125,10 +153,11 @@ const ORCHESTRATE = [
 const PROCEDURES: Readonly<Partial<Record<InteractionMode, { readonly name: string; readonly text: string }>>> = {
   research: { name: "Research", text: RESEARCH },
   orchestrate: { name: "Orchestrate", text: ORCHESTRATE },
+  review: { name: "Review", text: REVIEW },
 };
 
-/** The modes that carry a procedure, in the order a client cycles them. */
-export const PROCEDURE_MODES: readonly InteractionMode[] = ["research", "orchestrate"];
+/** Every mode that carries a procedure (the OpenCode driver keeps one instruction entry per mode). */
+export const PROCEDURE_MODES: readonly InteractionMode[] = ["research", "orchestrate", "review"];
 
 /** The instruction key a mode's procedure goes under (`moxen-research`), null for Build. */
 export function modeInstructionKey(mode: InteractionMode): string | null {
