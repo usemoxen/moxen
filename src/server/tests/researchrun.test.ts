@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { randomUUID } from "node:crypto";
+
 import { testHarness } from "../../core/testing/harness.js";
 import { openThreadStore, ThreadStore } from "../../core/threads/store.js";
 import { DirectConnection } from "../connection.js";
@@ -237,6 +239,137 @@ describe("full research runs", () => {
       await connection.dispatch({ type: "research.proposal.answer", proposalId: (await proposals(own.threadId))[0]!.id, choice: "single" });
       await oneOff;
     } finally { vi.restoreAllMocks(); unsubscribe(); await connection.close(); }
+  });
+
+  it("marks a thread created in Research mode, so its first prompt asks the run size", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    const proposals = async (threadId: string) => await connection.query({ type: "research.proposals", threadId });
+    try {
+      const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      // The TUI generates the id up front and sends no mode with the turn.
+      const threadId = randomUUID();
+      await connection.dispatch({ type: "thread.create", threadId, projectId: project.project.id, title: "Fresh research", interactionMode: "research" });
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      unsubscribe = connection.subscribeShell({ researchProposals: [threadId] }, () => {}, () => {});
+      const first = connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "First question" }, wait: true });
+      await expect.poll(async () => (await proposals(threadId)).length, WAIT).toBe(1);
+      const [proposal] = await proposals(threadId);
+      expect(proposal).toMatchObject({ target: "user-thread", expiresAt: null });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await first;
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBeUndefined();
+      // Answered once: a later prompt in the mode does not ask again.
+      await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "Second question" }, wait: true });
+      expect(await proposals(threadId)).toEqual([]);
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
+  it("never marks delegated children, research roles or handoffs, so they never ask", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      // A delegated Research task runs as one researcher, with no question.
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Scout ahead", interactionMode: "research", wait: true, notify: false });
+      expect((await store.readThreadRecord(delegated.child.id))?.researchPicker).toBeUndefined();
+      expect(await connection.query({ type: "research.run", threadId: delegated.child.id })).toBeNull();
+      expect(await connection.query({ type: "research.proposals", threadId: delegated.child.id })).toEqual([]);
+      // A research role thread is Research from birth and still never asks.
+      const lead = await connection.startResearchRun({ parentThreadId: parent.threadId, task: "Investigate", wait: true, notify: false }, { researchers: 1, critics: 1 });
+      const role = await connection.dispatch({ type: "research.role.start", leadThreadId: lead.child.id, role: "researcher", question: "Gather evidence" });
+      expect((await store.readThreadRecord(role.child.id))?.researchPicker).toBeUndefined();
+      expect(await connection.query({ type: "research.proposals", threadId: role.child.id })).toEqual([]);
+      // A handoff born in Research mode runs its prompt and asks on no later one.
+      const moved = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Carried on", wait: true, threadEnvMode: "local", interactionMode: "research" });
+      expect((await store.readThreadRecord(moved.threadId))?.researchPicker).toBeUndefined();
+      unsubscribe = connection.subscribeShell({ researchProposals: [moved.threadId] }, () => {}, () => {});
+      await connection.dispatch({ type: "thread.turn.start", threadId: moved.threadId, message: { text: "Follow up" }, wait: true });
+      expect(await connection.query({ type: "research.proposals", threadId: moved.threadId })).toEqual([]);
+      expect((await store.readThreadRecord(moved.threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
+  });
+
+  it("asks nothing while a full run is active, even on an idle lead", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    try {
+      const own = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: false, threadEnvMode: "local" });
+      await expect.poll(async () => (await store.readTurns(own.threadId)).at(-1)?.status, WAIT).toBe("running");
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId: own.threadId });
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: own.threadId, interactionMode: "research" });
+      unsubscribe = connection.subscribeShell({ researchProposals: [own.threadId] }, () => {}, () => {});
+      const asking = connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "Research me" }, wait: false });
+      await expect.poll(async () => (await connection.query({ type: "research.proposals", threadId: own.threadId })).length, WAIT).toBe(1);
+      const [proposal] = await connection.query({ type: "research.proposals", threadId: own.threadId });
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "start", plan: { size: { researchers: 1, critics: 1 } } });
+      await asking;
+      const role = await connection.dispatch({ type: "research.role.start", leadThreadId: own.threadId, role: "researcher", question: "Gather evidence" });
+      await expect.poll(async () => (await store.readTurns(role.child.id)).at(-1)?.status, WAIT).toBe("running");
+      // The lead's turn stops but its role is still working: the run stays
+      // active while the thread is idle.
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId: own.threadId });
+      await expect.poll(async () => (await connection.query({ type: "research.run", threadId: own.threadId }))?.state, WAIT).toBe("running");
+      // A one-off `/research` while the run is active starts a plain turn: no new question.
+      await connection.dispatch({ type: "thread.turn.start", threadId: own.threadId, message: { text: "More" }, interactionMode: "research", wait: false });
+      expect(await connection.query({ type: "research.proposals", threadId: own.threadId })).toEqual([]);
+    } finally {
+      unsubscribe();
+      for (const threadId of await store.listThreadIds()) await connection.dispatch({ type: "thread.turn.interrupt", threadId });
+      await connection.close();
+    }
+  });
+
+  it("leaves the mark alone for maintenance sends, so the first real prompt still asks", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const store = await openThreadStore(harness.root);
+    let unsubscribe = () => {};
+    const proposals = async (threadId: string) => await connection.query({ type: "research.proposals", threadId });
+    try {
+      const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      const threadId = randomUUID();
+      await connection.dispatch({ type: "thread.create", threadId, projectId: project.project.id, title: "Fresh research", interactionMode: "research" });
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      unsubscribe = connection.subscribeShell({ researchProposals: [threadId] }, () => {}, () => {});
+      // Either the turn runs (fixed) or a proposal parks it (the bug): answer
+      // a parked question so the dispatch can settle, then fail on the spent mark.
+      const settleSend = async (send: Promise<unknown>): Promise<void> => {
+        await expect.poll(async () => {
+          if ((await proposals(threadId)).length > 0) return "asked";
+          const turns = await store.readTurns(threadId);
+          return turns.length > 0 && turns.every((turn) => turn.status !== "running" && turn.status !== "queued") ? "settled" : "waiting";
+        }, WAIT).not.toBe("waiting");
+        if ((await proposals(threadId)).length > 0) {
+          const [proposal] = await proposals(threadId);
+          await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+        }
+        await send;
+      };
+      // A bare `/compact` turn neither asks nor spends the question.
+      await settleSend(connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "/compact" }, wait: false }));
+      expect(await proposals(threadId)).toEqual([]);
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      // A held work-queue entry neither asks nor spends it either.
+      const held = await connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "Later" }, wakeSettled: true, queue: { conditions: [], held: true, order: 1, sequential: true, continuation: "same-thread" }, wait: false });
+      expect(await proposals(threadId)).toEqual([]);
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBe(true);
+      await connection.dispatch({ type: "thread.turn.interrupt", threadId, turnId: held.turnId });
+      // The first real prompt still asks.
+      const first = connection.dispatch({ type: "thread.turn.start", threadId, message: { text: "First question" }, wait: true });
+      await expect.poll(async () => (await proposals(threadId)).length, WAIT).toBe(1);
+      const [proposal] = await proposals(threadId);
+      await connection.dispatch({ type: "research.proposal.answer", proposalId: proposal!.id, choice: "single" });
+      await first;
+      expect((await store.readThreadRecord(threadId))?.researchPicker).toBeUndefined();
+    } finally { unsubscribe(); await connection.close(); }
   });
 
   it("does not propose research while busy and preserves mode-lock and delivery semantics", async () => {
