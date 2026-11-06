@@ -18,8 +18,7 @@
 import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor } from "./idle.js";
 import * as Effect from "effect/Effect";
-import { mkdir, readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile } from "node:fs/promises";import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { decodeDataUrl, imageMention, type ImageAttachmentUpload } from "../attachments.js";
@@ -36,6 +35,7 @@ import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
+import { renameReplacing, writeAtomic } from "../infra/atomic.js";
 import {
   ensureStoredProject,
   listStoredProjects,
@@ -75,6 +75,7 @@ import {
   delegationForChild,
   failTurn,
   reconcileOrphanedTurn,
+  holdStrandedPromotions,
   inspectThread,
   interruptTurn,
   listThreads,
@@ -411,55 +412,77 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
 /** The caller has claimed `turn` (`claimRun`); every way out here settles or frees it. */
 async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<void> {
   const { store } = ctx;
-  const thread = await store.readThreadRecord(threadId);
-  if (!thread) { store.untrackRunning(turn.id); return; }
-  // One message, or several queued ones batched into this turn at promotion.
-  const message = turnPrompt(await store.readMessages(threadId), turn);
-  if (message === null) {
-    await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
-    return;
-  }
-  const selection = turn.modelSelection ?? thread.modelSelection;
-  const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
-  let driver: TurnDriver;
-  let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
-    driver = ctx.driverFor(selection.instanceId);
-    // Codex and Harness fix MCP definitions at session creation. Resume the
-    // same provider conversation with the request-scoped submission tool.
-    if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
-    setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
-    await driver.updateMcpServers?.(threadId, setup.mcpServers);
-  } catch (cause) {
-    const error = cause instanceof Error ? cause.message : String(cause);
-    await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
-    return;
-  }
-  const images = await imagesOf(message.attachments);
-  const steps = deliveredSteps(setup);
-  void executeTurn({
-    store,
-    driver,
-    threadId,
-    storeTurnId: turn.id,
-    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup),
-    ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
-    ...(setup.fresh ? { freshConversation: true } : {}),
-    interactionMode: turn.interactionMode,
-    ...(images.length > 0 ? { images } : {}),
-    modelSelection: selection,
-    workingDirectory: thread.env.path,
-    ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
-    ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
-  })
-    // A delegated task resumed after a usage limit (or recovered after a crash)
-    // still owes its parent the report when it finally ends.
-    .then(async () => {
-      await syncResearchRun(ctx, threadId);
-      await notifyParentOfResumedTask(ctx, threadId);
+    const thread = await store.readThreadRecord(threadId);
+    if (!thread) { store.untrackRunning(turn.id); return; }
+    // Turns queued behind this one if it settles below with no runner to take
+    // a promotion: settled without promoting, held for admission instead.
+    const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
+    // One message, or several queued ones batched into this turn at promotion.
+    const message = turnPrompt(await store.readMessages(threadId), turn);
+    if (message === null) {
+      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
+    const selection = turn.modelSelection ?? thread.modelSelection;
+    const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
+    let driver: TurnDriver;
+    let setup: Awaited<ReturnType<typeof sessionSetup>>;
+    try {
+      driver = ctx.driverFor(selection.instanceId);
+      // Codex and Harness fix MCP definitions at session creation. Resume the
+      // same provider conversation with the request-scoped submission tool.
+      if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
+      setup = await sessionSetup(ctx, turnThread, selection.instanceId);
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+      await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
+      // Config or rule files changed while the session sat idle: a live session
+      // takes them now, like a fresh send does — never a reason to fail the resume.
+      await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      // The failed start settled nothing that runs: a promotion it made has no
+      // runner to take it, so hand those turns back to the admission path.
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
+    // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
+    const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const images = await imagesOf(message.attachments);
+    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    void executeTurn({
+      store,
+      driver,
+      threadId,
+      storeTurnId: turn.id,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
+      ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+      ...(setup.fresh ? { freshConversation: true } : {}),
+      interactionMode: turn.interactionMode,
+      ...(images.length > 0 ? { images } : {}),
+      modelSelection: selection,
+      workingDirectory: thread.env.path,
+      ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
+      ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
     })
-    .catch(() => undefined);
+      // A delegated task resumed after a usage limit (or recovered after a crash)
+      // still owes its parent the report when it finally ends.
+      .then(async () => {
+        await syncResearchRun(ctx, threadId);
+        await notifyParentOfResumedTask(ctx, threadId);
+      })
+      .catch(() => undefined);
+  } catch (cause) {
+    // A ledger read (or prompt build) failed before any runner took the turn:
+    // free the admission claim — the turn stays running for orphan recovery
+    // to reap later — and let the caller see the failure.
+    store.untrackRunning(turn.id);
+    throw cause;
+  }
 }
 
 // -- scheduled turns --------------------------------------------------------------
@@ -1277,7 +1300,21 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
   }
   const fresh = (sent.delivery === "started" || sent.delivery === "restarted") && sent.turn.status === "running";
-  if (!fresh) return { ...sent, run: null };
+  if (!fresh) {
+    // A send that queued behind an older held turn: start the older now when
+    // it is admissible, so it goes first without waiting for the next tick.
+    // Anything still blocked simply stays queued.
+    if (sent.turn.status === "queued" && sent.turn.heldAtSettle === true && sent.delivery === "queued" && !input.queue && input.scheduledFor === undefined) {
+      await runDueScheduledTurn(ctx, thread.id).catch(() => undefined);
+    }
+    return { ...sent, run: null };
+  }
+  // The turn is live in this process from here until `executeTurn` takes it:
+  // a stop landing while the session starts still promotes the turn queued
+  // behind it, and this claim is what tells that stop a runner is coming.
+  // Every exit below either hands the turn to `executeTurn` (which replaces
+  // the claim with its abort) or releases it.
+  const claimed = store.claimRun(sent.turn.id);
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
@@ -1297,7 +1334,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
+    const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
+    if (claimed) store.untrackRunning(sent.turn.id);
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    // The failed start settled nothing that runs: a promotion it made has no
+    // runner to take it, so hand those turns back to the admission path.
+    await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   // A stop that landed while the session was starting already settled the
@@ -1333,6 +1375,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
     });
+    if (claimed) store.untrackRunning(sent.turn.id);
     return { ...sent, run: Promise.resolve() };
   }
   const images = providerImages(uploads);
@@ -1343,24 +1386,32 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
-  const run = executeTurn({
-    store,
-    driver,
-    threadId: thread.id,
-    storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
-    ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
-    ...(setup.fresh ? { freshConversation: true } : {}),
-    ...(images.length > 0 ? { images } : {}),
-    // Always the turn's own model, so a live session switches when the
-    // thread's model changed since it started.
-    modelSelection: turnModel,
-    interactionMode: sent.turn.interactionMode,
-    workingDirectory: sent.thread.env.path,
-    ...(onEvent ? { onEvent } : {}),
-    ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
-    ...longThreadHook(ctx, thread.id),
-  }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  let run: Promise<void>;
+  try {
+    run = executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: sent.turn.id,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+      ...(setup.fresh ? { freshConversation: true } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      // Always the turn's own model, so a live session switches when the
+      // thread's model changed since it started.
+      modelSelection: turnModel,
+      interactionMode: sent.turn.interactionMode,
+      workingDirectory: sent.thread.env.path,
+      ...(onEvent ? { onEvent } : {}),
+      ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
+      ...longThreadHook(ctx, thread.id),
+    }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  } catch (cause) {
+    // The prompt never reached a runner (a ledger read failed while building
+    // it): release the claim rather than leaving the turn tracked forever.
+    if (claimed) store.untrackRunning(sent.turn.id);
+    throw cause;
+  }
   return { ...sent, run };
 }
 
@@ -2138,15 +2189,97 @@ export const TASK_NOTIFICATION_BATCH_MS = 2_000;
 
 const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; taskIds: string[] }>();
 
+/** Pending notification batches beside the thread store, so a server restart inside the batch window loses nothing. */
+const TASK_NOTIFICATION_BATCHES_FILE = "task-notification-batches.json";
+
+function taskNotificationBatchesFile(storeRoot: string): string {
+  return path.join(storeRoot, TASK_NOTIFICATION_BATCHES_FILE);
+}
+
+async function readTaskNotificationBatches(storeRoot: string): Promise<Record<string, string[]>> {
+  const file = taskNotificationBatchesFile(storeRoot);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    // Missing (or unreadable for now): no batches pending.
+    return {};
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not a batch map");
+  } catch {
+    // Never silently drop every pending batch: move the corrupt file aside
+    // and leave a warning where the server's own warnings go.
+    await quarantineTaskNotificationBatches(storeRoot, file, text).catch(() => undefined);
+    return {};
+  }
+  const batches: Record<string, string[]> = {};
+  for (const [parent, taskIds] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof parent === "string" && Array.isArray(taskIds) && taskIds.every((id): id is string => typeof id === "string" && id.length > 0)) batches[parent] = [...new Set(taskIds)];
+  }
+  return batches;
+}
+
+/** A corrupt batch file is moved aside (never deleted) with a server.log warning, so its batches are visibly dropped, not silently lost. */
+async function quarantineTaskNotificationBatches(storeRoot: string, file: string, text: string): Promise<void> {
+  const quarantined = `${file}.corrupt-${process.pid}-${Date.now()}`;
+  try {
+    await renameReplacing(file, quarantined);
+  } catch {
+    await writeAtomic(quarantined, text);
+  }
+  const line = `${new Date().toISOString()} task notifications: ${path.basename(file)} was corrupt; moved to ${path.basename(quarantined)} and its pending batches were dropped. The tasks must settle again to be reported.\n`;
+  await appendFile(path.join(storeRoot, "server.log"), line, "utf8");
+}
+
+/** File writes chain behind each other, so batches queued on different parents cannot drop each other's entries. */
+let batchFileChain: Promise<unknown> = Promise.resolve();
+
+async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, string[]>) => void): Promise<void> {
+  const run = batchFileChain.then(async () => {
+    const batches = await readTaskNotificationBatches(storeRoot);
+    update(batches);
+    await writeAtomic(taskNotificationBatchesFile(storeRoot), `${JSON.stringify(batches)}\n`);
+  });
+  batchFileChain = run.catch(() => undefined);
+  await run.catch(() => undefined);
+}
+
 /** Move an in-flight notification batch onto a newly protected thread's durable queue. */
 export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
     const pending = pendingNotifications.get(parentThreadId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    pendingNotifications.delete(parentThreadId);
-    await deliverTaskNotifications(ctx, parentThreadId, pending.taskIds);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingNotifications.delete(parentThreadId);
+    }
+    // Delivered before it is forgotten: a crash between the two replays the
+    // batch on restart (at-least-once), while forgetting first could lose it
+    // with the dying process. The union below keeps one flush to one message.
+    let replay: string[] = [];
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      replay = batches[parentThreadId] ?? [];
+    });
+    await deliverTaskNotifications(ctx, parentThreadId, [...new Set([...(pending?.taskIds ?? []), ...replay])]);
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      delete batches[parentThreadId];
+    });
   });
+}
+
+/**
+ * Deliver notification batches a restarted server inherited: tasks that
+ * settled inside the batch window before the previous process died. Called
+ * once at startup; each batch is forgotten once delivered, so replaying
+ * finds nothing left and delivers nothing twice.
+ */
+export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
+  const batches = await readTaskNotificationBatches(ctx.storeRoot);
+  for (const parentThreadId of Object.keys(batches)) {
+    await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
+  }
 }
 
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
@@ -2161,6 +2294,11 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
       const pending = pendingNotifications.get(parentThreadId);
       if (pending) clearTimeout(pending.timer);
       const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
+      // Persisted before the timer is armed: a restart inside the batch
+      // window replays the file, and the replay unions what is on disk.
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        batches[parentThreadId] = [...new Set([...(batches[parentThreadId] ?? []), ...taskIds])];
+      });
       const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
       timer.unref?.();
       pendingNotifications.set(parentThreadId, { timer, taskIds });

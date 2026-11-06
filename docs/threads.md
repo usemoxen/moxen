@@ -52,6 +52,15 @@ active again and the provider has room — an unsnooze, or the snooze or
 the limit lapsing, is enough; no message needs to be sent. A message left
 queued any other way still waits for the next message or settle.
 
+A send on an idle thread never jumps ahead of an older held turn: the new
+message queues behind it, held for admission in turn, and the send reports
+it queued (it waits in the Work queue, it is not lost). The older turn goes
+first once nothing blocks it. A held turn that genuinely cannot run yet — a
+snoozed thread, a provider with no room — still holds its place, so the new
+message waits behind it rather than running first; unsnoozing, or the limit
+lapsing, releases both in order. Sending an immediate user message to end
+usage protection is the exception: it releases that hold and runs first.
+
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.
@@ -297,8 +306,12 @@ automatic protection also placed pauses it until the next reset, as it does for
 any automatic hold. Protecting a thread during an automatic wrap-up lets that
 wrap-up finish rather than starting a second one. A turn the user's protection
 interrupts carries `StoredTurn.usagePause.forced`.
-Archived threads cannot be protected. Settled threads can be protected but remain
-settled; automatic input never unsettles them while held.
+Archived threads cannot be protected, and neither can settled ones: a forced
+hold ends on a message, but settled threads refuse messages and the queue
+cannot cancel a forced hold, so a hold that outlived its thread would stick
+forever. Settling a thread ends its manual protection; a forced hold found on
+a settled thread from before is released instead — on the next tick. Automatic
+input never unsettles a settled thread while held.
 
 While held, automatic deliveries become durable conditional queue entries rather
 than new turns or steers: delegated-task reports (including their structured
