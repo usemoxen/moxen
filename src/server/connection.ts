@@ -127,6 +127,7 @@ import {
   settleTask,
   requireTaskControl,
   continueThread,
+  continueOwnThread,
   delegate,
   beginResearchRun,
   isResearchRunActive,
@@ -1441,6 +1442,8 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.continue":
         return await this.continueThread(command);
+      case "thread.continue-agent":
+        return await this.continueAgentThread(command);
       case "thread.side-question":
         return await this.sideQuestion(command);
       case "prompt.improve":
@@ -1663,6 +1666,29 @@ export class DirectConnection implements ClientApi {
       threadId: command.threadId,
       ...(modelRequested ? { modelSelection } : {}),
       ...(command.scheduledFor !== undefined ? { scheduledFor: command.scheduledFor } : {}),
+    });
+    return { ...continued, accepted: true };
+  }
+
+  /**
+   * An agent continuing its own thread in a new one (`continueOwnThread`):
+   * the same `continueThread` the palette action runs, with the
+   * agent-written handoff and first message. The model resolves like a
+   * follow-up: the source thread's model unless the request overrides it.
+   */
+  private async continueAgentThread(command: CommandOf<"thread.continue-agent">): Promise<CommandResult<"thread.continue-agent">> {
+    const ctx = await this.context();
+    const source = await ctx.store.readThreadRecord(command.threadId);
+    if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${command.threadId}.`, { exitCode: 2 });
+    const modelRequested = command.modelSelection !== undefined || command.provider !== undefined
+      || command.model !== undefined || command.speedMode !== undefined || command.thinkingEffort !== undefined;
+    const modelSelection = command.modelSelection ?? followUpSelection(source.modelSelection, ctx.config, command, "") ?? source.modelSelection;
+    const continued = await continueOwnThread(ctx, {
+      threadId: command.threadId,
+      summary: command.summary,
+      ...(command.firstMessage !== undefined ? { firstMessage: command.firstMessage } : {}),
+      ...(command.idempotencyKey !== undefined ? { idempotencyKey: command.idempotencyKey } : {}),
+      ...(modelRequested ? { modelSelection } : {}),
     });
     return { ...continued, accepted: true };
   }

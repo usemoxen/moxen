@@ -522,6 +522,28 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   }
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
+  // An entry or thread condition can name a thread whose owner died
+  // mid-turn: nothing there will ever settle it, so recover those threads
+  // too instead of holding the waiter forever. Cheap when there is nothing
+  // to do, like recovering the thread itself.
+  const depended = new Set<string>();
+  for (const turn of row.turns) {
+    if (turn.status !== "queued" || !turn.queue) continue;
+    for (const condition of turn.queue.conditions) {
+      if ((condition.type === "entry" || condition.type === "thread") && condition.threadId !== threadId) depended.add(condition.threadId);
+    }
+  }
+  for (const dependency of depended) await recoverOrphanedTurn(ctx, dependency);
+  for (const dependency of depended) {
+    // Recovery settles the dependency after the snapshot above was taken;
+    // refresh its row so admission reads the settled turn, not the orphan.
+    const thread = await ctx.store.readThreadRecord(dependency);
+    if (!thread || thread.deletedAt) continue;
+    const turns = await ctx.store.readTurns(dependency);
+    const at = rows.findIndex((r) => r.thread.id === dependency);
+    if (at >= 0) rows[at] = { thread, turns };
+    else rows.push({ thread, turns });
+  }
   const idle = !openTurn([...row.turns]);
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued") continue;
@@ -1055,6 +1077,15 @@ export interface ContinueThreadRequest {
   readonly scheduledFor?: string;
   /** The server did it on its own (hand-off set to Automatic), not a client. */
   readonly automatic?: boolean;
+  /** An agent's opening instruction for the new thread, folded into its first turn. */
+  readonly firstMessage?: string;
+  /** Mark the continuation as an agent's own doing (loop guard, activity note). */
+  readonly byAgent?: boolean;
+  /**
+   * A client-generated idempotency key: a retry with the same key rejoins
+   * the reserved destination instead of refusing as a repeat.
+   */
+  readonly idempotencyKey?: string;
 }
 
 export interface ContinuedThread {
@@ -1064,26 +1095,109 @@ export interface ContinuedThread {
 }
 
 /**
+ * In-flight continuations by source thread. Overlapping `continueThread`
+ * calls on one source (an agent's continuation racing the user's palette
+ * action, two queue passes) share one execution: the second awaits the
+ * first instead of creating a second destination. The reservation below
+ * is what makes a retry after a crash rejoin rather than duplicate.
+ */
+const continuationRuns = new Map<string, Promise<ContinuedThread>>();
+
+/**
  * A new thread that carries on from `threadId`: same project, model,
  * modes and checkout — the work so far is on that disk — opened with a
  * handoff document built from the old thread's ledger. The old thread is
  * left as it is, with a note pointing at its continuation.
+ *
+ * Concurrent calls on one source share a single destination (see
+ * `continuationRuns`), and a retry after a crash rejoins the reserved
+ * destination instead of creating another (`reserveContinuation`).
  */
-export async function continueThread(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
+export function continueThread(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
+  const ongoing = continuationRuns.get(request.threadId);
+  if (ongoing) return ongoing;
+  const run = continueThreadInner(ctx, request).finally(() => {
+    if (continuationRuns.get(request.threadId) === run) continuationRuns.delete(request.threadId);
+  });
+  continuationRuns.set(request.threadId, run);
+  return run;
+}
+
+/**
+ * Pick the destination before creating it, persisting a new id on the
+ * source under its thread lock. An explicit id (a queued handoff's) is
+ * its own reservation; otherwise a usage-recovery reservation wins, then
+ * a note an earlier call left, then a fresh id recorded now — so a second
+ * overlapping call, or a retry after a crash between reservation and
+ * creation, finds the same destination instead of creating another.
+ */
+async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string): Promise<string> {
+  if (request.destinationThreadId) return request.destinationThreadId;
+  if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
+  return await store.withThreadLock(source.id, async () => {
+    const current = await store.readThreadRecord(source.id);
+    if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
+    const notes = await store.readActivities(source.id);
+    const prior = notes.find((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string");
+    if (prior) return prior.payload!.threadId as string;
+    const id = store.newId();
+    await store.appendLedger(source.id, "activity", {
+      id: store.newId(),
+      threadId: source.id,
+      turnId: null,
+      kind: "thread.continued",
+      summary: noteSummary,
+      payload: {
+        threadId: id,
+        title,
+        scheduledFor: request.scheduledFor ?? null,
+        automatic: request.automatic === true,
+        ...(request.byAgent === true ? { byAgent: true } : {}),
+        ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      },
+      createdAt: store.nowIso(),
+    });
+    store.emit(source.id, "thread-continued");
+    return id;
+  });
+}
+
+/** The delegation row a handoff's continuation reports through, when the parent asked to be told. */
+async function continuationNotifier(store: ThreadStore, destinationId: string): Promise<string | null> {
+  const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === destinationId && candidate.notify === true && candidate.continuedIn === undefined);
+  return row ? row.parentThreadId : null;
+}
+
+/** Tell the parent when a rejoined continuation settles: now if it already did, or by watching it. */
+async function watchContinuation(ctx: OperationContext, parentThreadId: string, destinationId: string): Promise<void> {
+  if (await taskHasSettledForGood(ctx, destinationId)) await queueTaskNotification(ctx, parentThreadId, destinationId);
+  else notifyWhenTaskSettles(ctx, parentThreadId, destinationId);
+}
+
+/** An agent's opening instruction for the new thread, folded into its first turn. */
+export function firstMessageNote(firstMessage: string | undefined): string {
+  const text = firstMessage?.trim();
+  if (!text) return "";
+  return `\n\n## What to do first\n\n${text}`;
+}
+
+async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
-  const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
   const title = continuedTitle(source.title);
-  const destinationId = request.destinationThreadId ?? source.usagePause?.continuedThreadId;
-  const existing = destinationId ? await store.readThreadRecord(destinationId) : null;
   // Review never stays on a thread: a continued review child, or a carried
   // one-off review turn, starts the new thread in Build instead.
   const carriedMode = request.interactionMode ?? source.interactionMode;
   const interactionMode = carriedMode === "review" ? "default" : carriedMode;
+  const noteSummary = carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`;
+  const destinationId = await reserveContinuation(store, source, request, title, noteSummary);
+  const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
+  const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
-    ...(destinationId ? { id: destinationId } : {}),
+    id: destinationId,
     projectId: source.projectId,
     title,
     modelSelection: request.modelSelection ?? source.modelSelection,
@@ -1098,12 +1212,22 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
       if (current) await store.writeThreadRecord({ ...current, continuedFrom: source.id });
     });
   }
-  if (source.usagePause && !existing && !request.destinationThreadId) {
-    await store.withThreadLock(source.id, async () => {
-      const current = await store.readThreadRecord(source.id);
-      if (current?.usagePause) await store.writeThreadRecord({ ...current, usagePause: { ...current.usagePause, continuedThreadId: created.id } });
+  const live = await store.readThreadRecord(source.id);
+  if (live?.usagePause && !request.destinationThreadId) {
+    if (live.usagePause.continuedThreadId !== created.id) {
+      await store.withThreadLock(source.id, async () => {
+        const current = await store.readThreadRecord(source.id);
+        if (current?.usagePause && current.usagePause.continuedThreadId !== created.id) {
+          await store.writeThreadRecord({ ...current, usagePause: { ...current.usagePause, continuedThreadId: created.id } });
+        }
+      });
+    }
+    await store.withThreadLock(created.id, async () => {
+      const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
+      if (destination && !destination.usagePause && pause?.usagePause) {
+        await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "resuming", handoff: false } });
+      }
     });
-    await store.writeThreadRecord({ ...created, usagePause: { provider: source.usagePause.provider, resetsAt: source.usagePause.resetsAt, order: source.usagePause.order, phase: "resuming", handoff: false } });
   }
   // An unclaimed run-size question moves with the thread: the continuation
   // has not been offered one either, so its first real prompt still asks.
@@ -1120,7 +1244,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
-      prompt: handoff + runningTasksNote(adopted),
+      prompt: handoff + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
@@ -1128,18 +1252,287 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     });
     // A queued continuation reports through `runRecoveredTurn` when it is admitted; one started now reports here.
     if (notifyParent && started.run !== null) void started.run.then(() => queueTaskNotification(ctx, notifyParent, created.id)).catch(() => undefined);
+    else if (existing !== null) {
+      // A retry rejoining a reserved destination: the first attempt may have
+      // died before wiring the parent's notification, so watch the turn.
+      const parent = notifyParent ?? (await continuationNotifier(store, created.id));
+      if (parent) await watchContinuation(ctx, parent, created.id);
+    }
+  } else if (existing !== null) {
+    // A retry after the first turn was already started: make sure the parent
+    // still hears when the continuation settles.
+    const parent = notifyParent ?? (await continuationNotifier(store, created.id));
+    if (parent) await watchContinuation(ctx, parent, created.id);
   }
-  await store.appendLedger(source.id, "activity", {
-    id: store.newId(),
-    threadId: source.id,
-    turnId: null,
-    kind: "thread.continued",
-    summary: carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`,
-    payload: { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null, automatic: request.automatic === true },
-    createdAt: store.nowIso(),
-  });
+  if (!(await store.readActivities(source.id)).some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === created.id)) {
+    await store.appendLedger(source.id, "activity", {
+      id: store.newId(),
+      threadId: source.id,
+      turnId: null,
+      kind: "thread.continued",
+      summary: noteSummary,
+      payload: { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null, automatic: request.automatic === true, ...(request.byAgent === true ? { byAgent: true } : {}), ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}) },
+      createdAt: store.nowIso(),
+    });
+  }
   store.emit(source.id, "thread-continued");
   return { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null };
+}
+
+export interface ContinueOwnThreadRequest {
+  /** The calling thread: an agent may only continue its own thread, never another one. */
+  readonly threadId: string;
+  /** The handoff summary the agent wrote: the new thread's handoff, replacing the generated record. */
+  readonly summary: string;
+  /** What the new thread should do first, folded into its first turn. */
+  readonly firstMessage?: string;
+  /** The model the new thread runs on: resolved like a follow-up, or the source's when absent. */
+  readonly modelSelection?: ModelSelection;
+  /**
+   * A client-generated idempotency key: repeating the same continuation
+   * with the same key returns the original thread instead of refusing as
+   * a repeat. Generate one UUID per new continuation.
+   */
+  readonly idempotencyKey?: string;
+}
+
+export interface ContinuedOwnThread extends ContinuedThread {
+  readonly adoptedTasks: readonly { readonly taskId: string; readonly title: string }[];
+  /** Present on an idempotent replay naming a different summary: the first handoff was kept. */
+  readonly note?: string;
+}
+
+/** At most this many agent continuations in a row with no user message between them. */
+export const MAX_CONSECUTIVE_AGENT_CONTINUATIONS = 3;
+
+/**
+ * Trailing agent hops ending at this thread: each hop the thread's own
+ * `thread.continued` note marked `byAgent`, stopping at a user-driven hop,
+ * at a thread carrying a real user message (the streak is only consecutive
+ * while the user stays out of it), or at the lineage root. A reservation
+ * whose destination was never created cannot appear here: the walk follows
+ * existing threads through `continuedFrom`.
+ */
+async function countConsecutiveAgentContinuations(store: ThreadStore, caller: StoredThread): Promise<number> {
+  if (await hasRealUserMessage(store, caller)) return 0;
+  let streak = 0;
+  let current: StoredThread = caller;
+  while (current.continuedFrom) {
+    const parentId: string = current.continuedFrom;
+    const childId: string = current.id;
+    const parent: StoredThread | null = await store.readThreadRecord(parentId).catch(() => null);
+    if (!parent) break;
+    const hop = (await store.readActivities(parent.id).catch(() => [] as StoredActivity[])).some(
+      (activity) => activity.kind === "thread.continued" && activity.payload?.threadId === childId && activity.payload?.byAgent === true,
+    );
+    if (!hop) break;
+    streak += 1;
+    current = parent;
+    if (await hasRealUserMessage(store, current)) break;
+  }
+  return streak;
+}
+
+/**
+ * Whether a real user message landed in this thread: role `user` with no
+ * origin (agent, notification and usage messages carry one). The thread's
+ * handoff prompt is skipped: on a continued thread that is what Moxen
+ * wrote to open it, not the user speaking — while a user steer into that
+ * same first turn still counts.
+ */
+async function hasRealUserMessage(store: ThreadStore, thread: StoredThread): Promise<boolean> {
+  const [turns, messages] = await Promise.all([
+    store.readTurns(thread.id).catch(() => [] as StoredTurn[]),
+    store.readMessages(thread.id).catch(() => [] as StoredMessage[]),
+  ]);
+  const firstMessageId = [...turns].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.messageId;
+  return messages.some((message) => message.role === "user" && message.origin == null && message.id !== firstMessageId);
+}
+
+/**
+ * An agent continuing its own thread in a new one, through the same
+ * `continueThread` the palette action uses: the agent's summary replaces
+ * the generated handoff record, running delegated children move to the
+ * new thread, and the new thread's first turn waits until the source has
+ * nothing running or queued (it shares the source's checkout, so the two
+ * must not start side by side). A later plain send on the source is the
+ * user's own choice, as after the palette action, and is not refused. The
+ * caller must then end its turn promptly; once it settles its provider
+ * session is closed so nothing wakes the old thread again.
+ *
+ * Refuses what the palette path refuses (no thread, archived, settled),
+ * plus what only applies to an agent: a usage hold, research runs,
+ * delegated tasks, more than a few consecutive agent hops, and anyone
+ * but the thread's own agent (the tool names no thread, so reaching
+ * another thread — a parent included — is not expressible).
+ */
+export async function continueOwnThread(ctx: OperationContext, request: ContinueOwnThreadRequest): Promise<ContinuedOwnThread> {
+  const callerId = requireThreadId(request.threadId);
+  const summary = request.summary.trim();
+  if (!summary || summary.length > 64_000) throw new CliError("INVALID_HANDOFF", "Submit a non-empty handoff of at most 64000 characters.");
+  const firstMessage = request.firstMessage?.trim();
+  if (request.firstMessage !== undefined && !firstMessage) throw new CliError("INVALID_HANDOFF", "The new thread's first message must be non-empty.");
+  const caller = await ctx.store.readThreadRecord(callerId);
+  if (!caller || caller.deletedAt) throw new CliError("THREAD_NOT_FOUND", `No thread exists with id ${callerId}.`, { exitCode: 3 });
+  if (caller.archivedAt) {
+    throw new CliError("THREAD_ARCHIVED", `Thread ${callerId} is archived and cannot be continued.`, {
+      exitCode: 4,
+      details: { threadId: callerId, archivedAt: caller.archivedAt },
+    });
+  }
+  if (caller.settledAt) {
+    throw new CliError("THREAD_SETTLED", `Thread ${callerId} is settled and cannot be continued. Unsettle it first.`, {
+      exitCode: 4,
+      details: { threadId: callerId, settledAt: caller.settledAt },
+    });
+  }
+  if (caller.usagePause) {
+    throw new CliError(
+      "THREAD_CONTINUE_PROTECTED",
+      `Thread ${callerId} is held by usage protection and cannot be continued now. Send a message to end the hold, or wait for its recovery, then continue it in a new thread.`,
+      { exitCode: 4, details: { threadId: callerId, phase: caller.usagePause.phase } },
+    );
+  }
+  if (caller.researchRole || isResearchRunActive(caller.researchRun)) {
+    throw new CliError(
+      "THREAD_CONTINUE_RESEARCH",
+      "A research run's roles and lead continue only through the run (research_message_submit, and the lead's follow-ups), which are scoped and capped: thread_continue does not reach them.",
+      { exitCode: 4, details: { threadId: callerId } },
+    );
+  }
+  if (await delegationOf(ctx.store, callerId)) {
+    throw new CliError(
+      "THREAD_CONTINUE_DELEGATED",
+      "A delegated task cannot continue itself in a new thread: finish with a report and let the thread that delegated it decide what runs next. A full context there is compacted in place.",
+      { exitCode: 4, details: { threadId: callerId } },
+    );
+  }
+  const key = request.idempotencyKey?.trim() || undefined;
+  const notes = await ctx.store.readActivities(callerId);
+  if (key) {
+    const replay = notes.find((activity) => activity.kind === "thread.continued" && activity.payload?.idempotencyKey === key);
+    if (replay && typeof replay.payload?.threadId === "string") {
+      const destination = await ctx.store.readThreadRecord(replay.payload.threadId);
+      if (destination) {
+        return {
+          threadId: destination.id,
+          title: destination.title,
+          scheduledFor: null,
+          adoptedTasks: await adoptedTasksOf(ctx, destination.id),
+          note: `Already continued as ${destination.id} for this key; the first summary was kept.`,
+        };
+      }
+      // A crash between reservation and creation names a thread that was
+      // never created: fall through and finish the job below.
+    }
+  }
+  const streak = await countConsecutiveAgentContinuations(ctx.store, caller);
+  if (streak >= MAX_CONSECUTIVE_AGENT_CONTINUATIONS) {
+    throw new CliError(
+      "THREAD_CONTINUE_LIMIT",
+      `Thread ${callerId} was already continued by its agent ${streak} times in a row with no user message since. Ask the user how to proceed (they can continue it in a new thread).`,
+      { exitCode: 4, details: { threadId: callerId, consecutiveAgentContinuations: streak } },
+    );
+  }
+  const running = openTurn(await ctx.store.readTurns(callerId));
+  const continued = await continueThread(ctx, {
+    threadId: callerId,
+    modelSummary: summary,
+    ...(firstMessage ? { firstMessage } : {}),
+    ...(request.modelSelection ? { modelSelection: request.modelSelection } : {}),
+    ...(running
+      ? {
+          queue: {
+            // The new thread shares the source checkout: it waits until the
+            // source has nothing running or queued, not just until this turn
+            // ends. A later plain send on the source is the user's own
+            // choice, as after the palette action, and is not refused.
+            conditions: [
+              { type: "entry", threadId: callerId, turnId: running.id },
+              { type: "thread", threadId: callerId },
+            ],
+            held: false,
+            order: Date.now(),
+            sequential: false,
+            continuation: "same-thread" as const,
+          },
+        }
+      : {}),
+    byAgent: true,
+    ...(key ? { idempotencyKey: key } : {}),
+  });
+  if (running) closeContinuedSessionWhenSettled(ctx, callerId, continued.threadId);
+  return { ...continued, adoptedTasks: await adoptedTasksOf(ctx, continued.threadId) };
+}
+
+/** The tasks the new thread took over: every delegation row re-pointed at it, except history rows. Research roles are excluded, like the transfer itself. */
+async function adoptedTasksOf(ctx: OperationContext, destinationId: string): Promise<readonly { taskId: string; title: string }[]> {
+  const rows = (await ctx.store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
+    (row) => row.parentThreadId === destinationId && row.continuedIn === undefined,
+  );
+  const children = await Promise.all(rows.map((row) => ctx.store.readThreadRecord(row.childThreadId).catch(() => null)));
+  return rows.flatMap((row, index) => {
+    const child = children[index];
+    if (child?.researchRole !== undefined) return [];
+    return [{ taskId: row.childThreadId, title: child?.title ?? row.childThreadId }];
+  });
+}
+
+/**
+ * Close the continued thread's provider session once its calling turn
+ * settles — any terminal state, not only a clean finish — watched from the
+ * settle path's own ledger events, not a session subscription. The session
+ * is left alone while a turn runs (stopping it would cut the turn off), and
+ * a newer running turn keeps it too: only an idle thread is closed, checked
+ * again under the thread lock so a turn that starts in between wins, so a
+ * background task or late notification can no longer wake the old thread.
+ * The watch also ends when the destination starts (the source is idle by
+ * admission then): after that the source is the user's revived thread and
+ * its session is left alone. After a restart there is nothing to close —
+ * sessions live in the process, so no live session means no wake-up, and
+ * orphan recovery owns the ledger. Best effort throughout: losing the race
+ * never fails the continuation.
+ */
+function closeContinuedSessionWhenSettled(ctx: OperationContext, sourceId: string, destinationId: string): void {
+  let done = false;
+  let checking = false;
+  let again = false;
+  const stop = ctx.store.subscribe((event) => {
+    if (event.type !== "backend.thread.changed") return;
+    if (event.threadId === sourceId) {
+      if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
+    } else if (event.threadId !== destinationId) return;
+    void check();
+  });
+  const check = async (): Promise<void> => {
+    if (done) return;
+    if (checking) { again = true; return; }
+    checking = true;
+    try {
+      do {
+        again = false;
+        if (done) continue;
+        const closed = await ctx.store.withThreadLock(sourceId, async () => {
+          const turns = await ctx.store.readTurns(sourceId).catch(() => []);
+          if (turns.some((turn) => turn.status === "running")) return false;
+          try {
+            const source = await ctx.store.readThreadRecord(sourceId).catch(() => null);
+            const driver = source ? ctx.driverFor(source.modelSelection.instanceId) : null;
+            if (driver?.stopSession) await Effect.runPromise(driver.stopSession(sourceId)).catch(() => undefined);
+          } catch {
+            // Best effort: the continuation stands whether or not the old session could be ended.
+          }
+          return true;
+        }).catch(() => false);
+        if (!closed) continue;
+        done = true;
+        stop();
+      } while (again);
+    } finally {
+      checking = false;
+    }
+  };
+  void check();
 }
 
 /**

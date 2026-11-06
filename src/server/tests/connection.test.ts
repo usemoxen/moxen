@@ -1074,7 +1074,7 @@ describe("DirectConnection model and session continuity", () => {
       // here the stdio child, bound to this thread and this store (no HTTP
       // endpoint: this connection never became a long-lived owner).
       expect(servers[1]).toMatchObject({ name: "moxen", type: "in-process", alwaysLoad: true });
-      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect((servers[1]!.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_continue", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       const fallback = servers[1]!.fallback as { type: string; env: Record<string, string>; args: string[] };
       expect(fallback).toMatchObject({ type: "stdio", env: { MOXEN_STORE_ROOT: harness.root } });
       expect(fallback.args.slice(-2)).toEqual(["--thread", "thread-m"]);
