@@ -336,6 +336,11 @@ moxen models hide --provider opencode --model opencode/muse-spark-1.3-contributo
 moxen models show --provider opencode --model opencode/muse-spark-1.3-contributor-free
 moxen efforts list --provider claudeAgent --model claude-sonnet-5
 moxen memory list --cwd .
+moxen memory read <name> --cwd .
+moxen memory save <name> --description <text> --type project --body <text> --cwd .
+moxen memory edit <name> --old-text <text> --new-text <text> --cwd .
+moxen memory delete <name> --yes --cwd .
+moxen memory search <query> --cwd .
 moxen memory import-claude --cwd .
 moxen threads create --stdin
 moxen threads list --status active --cwd .
@@ -448,7 +453,12 @@ install or rollback on a source checkout or a paired server, and never checks in
 Changed on purpose: the plain `moxen self-update` used to exit 1 with
 `SELF_UPDATE_UNAVAILABLE`; it now updates.
 
-`moxen memory list` lists the current project's and global memories. Agents
+`moxen memory list` lists the current project's and global memories. `moxen memory read <name>`
+reads one in full; `save`, `edit` and `delete` write through the server (`--scope project|global`,
+`--cwd` like `list`). A save takes `--description`, `--type` and a body from `--body` or stdin; an
+edit replaces one piece of the body (`--old-text` with `--new-text`, `--body` or stdin) and can also
+replace the description; a delete asks first unless `--yes` (outside a terminal `--yes` is required).
+`moxen memory search <query>` searches the same way agents search, with `--limit` (1–50). Agents
 can also use the read-only `memory_search` MCP tool to search names,
 descriptions and bodies by keyword, including entries omitted from the
 capped index. It returns up to 10 excerpts by default (`limit`: 1–50), with
