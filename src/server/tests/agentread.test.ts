@@ -99,6 +99,19 @@ describe("thread_read", () => {
     }
   });
 
+  it("refuses a caller that does not exist instead of reading across projects", async () => {
+    const { connection } = await world();
+    try {
+      // No scope check can run without the caller's project: a bogus
+      // caller must fail, not read another project's thread.
+      await expect(
+        connection.query({ type: "thread.agent-read", callerThreadId: "bogus", threadId: "foreign" }),
+      ).rejects.toMatchObject({ code: "THREAD_NOT_FOUND" });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("holds the answer to a share of the caller's free context, and only the outline when it is nearly full", async () => {
     expect(agentReadBudget(null)).toEqual({ chars: AGENT_READ_DEFAULT_CHARS, outlineOnly: false, reason: null });
     expect(agentReadBudget(null, 1_000_000).chars).toBe(AGENT_READ_MAX_CHARS);

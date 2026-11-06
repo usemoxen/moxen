@@ -21,11 +21,22 @@ export async function runSkillsAndContext(setup: TestRendererSetup): Promise<voi
   const unfiltered = setup.captureCharFrame();
   console.log(unfiltered);
   // Skills come from the provider's own inventory (`skills.list`).
-  if (!unfiltered.includes("xlsx")) fail("skill picker is empty: the provider's inventory never reached it");
   if (unfiltered.includes("agent-only-skill")) fail("skill picker offers an agent-only skill");
-  // The picker names each skill the way it will be typed: /name, whatever the provider.
-  if (!unfiltered.includes("/xlsx")) fail("skill picker does not show skills as /name");
   if (unfiltered.includes("$xlsx")) fail("skill picker still shows a $ prefix");
+  // Nine entries no longer fit the eight-row popup, so the last one (`xlsx`)
+  // scrolls into view with the arrow keys; the header's count says the full
+  // inventory arrived.
+  if (!unfiltered.includes("1/9")) fail("skill picker did not list every command and skill");
+  for (let index = 0; index < 8; index += 1) {
+    await act(async () => setup.mockInput.pressArrow("down"));
+    await setup.flush();
+  }
+  console.log("--- skill picker (scrolled to the last entry) ---");
+  const scrolled = setup.captureCharFrame();
+  console.log(scrolled);
+  if (!scrolled.includes("xlsx")) fail("skill picker is empty: the provider's inventory never reached it");
+  // The picker names each skill the way it will be typed: /name, whatever the provider.
+  if (!scrolled.includes("/xlsx")) fail("skill picker does not show skills as /name");
   for (const char of ["p", "d"]) {
     await act(async () => setup.mockInput.pressKey(char));
     await setup.flush();

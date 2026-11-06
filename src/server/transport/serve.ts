@@ -128,6 +128,11 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   let lastHeard = Date.now();
   let watchdog: ReturnType<typeof setInterval> | null = null;
   const silenceMs = context.silenceMs ?? CLIENT_SILENCE_MS;
+  // A wait (`thread.turn.await`, `wait: true`) only means something to a
+  // client that is still here: when this socket goes, every in-flight wait
+  // on it stops instead of polling the ledger forever.
+  const waiting = new AbortController();
+  socket.once("close", () => waiting.abort());
   /** Armed by the first ping: from then on this client has said it will keep being heard from. */
   const watch = (): void => {
     if (watchdog !== null) return;
@@ -209,10 +214,10 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
 
     switch (method) {
       case "dispatch":
-        reply(id, () => api.dispatch(message.params as never));
+        reply(id, () => api.dispatch(message.params as never, { signal: waiting.signal }));
         break;
       case "query":
-        reply(id, () => api.query(message.params as never));
+        reply(id, () => api.query(message.params as never, { signal: waiting.signal }));
         break;
       case "getConfig":
         reply(id, () => api.getConfig());

@@ -505,6 +505,30 @@ describe("DirectConnection subscriptions", () => {
     }
   });
 
+  it("fails a thread subscription when the thread is missing, and still delivers one created just after", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    const frames: unknown[] = [];
+    const errors: unknown[] = [];
+    const stop = connection.subscribeThread("late-thread", {}, (frame) => frames.push(frame), (error) => errors.push(error));
+    try {
+      // The first poll finds nothing: the error, not silence.
+      await waitFor("THREAD_NOT_FOUND", async () => errors.length > 0);
+      expect(errors[0]).toMatchObject({ code: "THREAD_NOT_FOUND" });
+      // Created just after subscribing is still this view's thread.
+      await createThread(harness.store, {
+        id: "late-thread", projectId: "test-project", title: "Late",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      await waitFor("the late snapshot", async () =>
+        frames.some((frame) => (frame as { kind?: string }).kind === "snapshot" && JSON.stringify(frame).includes("late-thread")),
+      );
+    } finally {
+      stop();
+      await connection.close();
+    }
+  });
+
   it.each(["shell", "thread"] as const)("does not overlap slow %s polls or deliver their results after unsubscribe", async (kind) => {
     const harness = await testHarness();
     await createThread(harness.store, {
@@ -1148,6 +1172,59 @@ describe("DirectConnection capabilities (formerly CLI-only)", () => {
         taskId: delegated.task.taskId,
       });
       expect(cancelled).toMatchObject({ interruptRequested: false, task: { status: "completed" } });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses task.status for a same-project thread nobody delegated", async () => {
+    const { harness, connection } = await connected();
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true });
+      const other = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Other", wait: true });
+      await expect(
+        connection.query({ type: "thread.task.status", parentThreadId: parent.threadId, taskId: other.threadId }),
+      ).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("still reports a research role with no delegation row of its own", async () => {
+    const { harness, connection } = await connected();
+    try {
+      const selection = { instanceId: "opencode", model: "gpt-5.4" };
+      const lead = await createThread(harness.store, { id: "lead", projectId: "test-project", title: "Lead", modelSelection: selection });
+      await createThread(harness.store, { id: "role", projectId: "test-project", title: "Role", modelSelection: selection });
+      const now = new Date().toISOString();
+      await harness.store.writeThreadRecord({
+        ...lead,
+        researchRun: { leadThreadId: "lead", roles: [{ threadId: "role", role: "researcher", question: "Survey" }], state: "running", createdAt: now, updatedAt: now },
+      });
+      const status = await connection.query({ type: "thread.task.status", parentThreadId: "lead", taskId: "role" });
+      expect(status.child.id).toBe("role");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("stops a turn.await wait when the caller goes away, and still waits while it stays", async () => {
+    const driver = new GateDriver();
+    const { harness, connection } = await connected({ driver });
+    try {
+      const first = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Long job" });
+      const turnId = first.started!.turnId;
+      const controller = new AbortController();
+      const waited = connection.query({ type: "thread.turn.await", threadId: first.threadId, turnId }, { signal: controller.signal });
+      const staying = connection.query({ type: "thread.turn.await", threadId: first.threadId, turnId });
+      setTimeout(() => controller.abort(), 100);
+      const deadline = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("turn.await did not stop after abort")), 5000),
+      );
+      await expect(Promise.race([waited, deadline])).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+      // The connected wait is untouched: it still resolves once the turn settles.
+      await driver.release();
+      await expect(staying).resolves.toMatchObject({ status: "completed" });
     } finally {
       await connection.close();
     }
@@ -1812,6 +1889,30 @@ describe("DirectConnection settings", () => {
       await expect(connection.dispatch({ type: "settings.set", key: "nope", value: "1" })).rejects.toThrow(
         "Unknown config key: nope",
       );
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps every edit when two settings.set run at once, instead of reverting one", async () => {
+    // Both writers read before either writes; without the write queue the
+    // second save reverts the first.
+    const harness = await testHarness();
+    const configPath = path.join(harness.root, "concurrent-config.json");
+    await writeFile(configPath, "{}\n", "utf8");
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, configPath });
+    try {
+      await Promise.all([
+        connection.dispatch({ type: "settings.set", key: "ui.backdrop", value: "off" }),
+        connection.dispatch({ type: "settings.set", key: "git.historyLimit", value: "120" }),
+        connection.dispatch({ type: "settings.set", key: "ui.autoHandoffPercent", value: "60" }),
+        connection.dispatch({ type: "settings.set", key: "providers.claude.autoCompactPercent", value: "80" }),
+      ]);
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toMatchObject({
+        ui: { backdrop: "off", autoHandoffPercent: 60 },
+        git: { historyLimit: 120 },
+        providers: { claude: { autoCompactPercent: 80 } },
+      });
     } finally {
       await connection.close();
     }

@@ -27,4 +27,23 @@ describe("commands after plan mode", () => {
     }
     expect(decodeCommand({ type: "thread.create", projectId: "p1", interactionMode: "default" })).toMatchObject({ interactionMode: "default" });
   });
+
+  it("takes review only on a turn or a delegation, never as a thread's own mode", () => {
+    expect(
+      decodeCommand({ type: "thread.turn.start", threadId: "t1", message: { text: "look" }, interactionMode: "review" }),
+    ).toMatchObject({ interactionMode: "review" });
+    expect(
+      decodeCommand({ type: "thread.delegate", parentThreadId: "p1", task: "review it", interactionMode: "review" }),
+    ).toMatchObject({ interactionMode: "review" });
+    for (const command of [
+      { type: "thread.create", projectId: "p1", interactionMode: "review" },
+      { type: "thread.handover", cwd: "/tmp", prompt: "hi", interactionMode: "review" },
+      { type: "thread.interaction-mode.set", threadId: "t1", interactionMode: "review" },
+      { type: "thread.runtime-mode.set", threadId: "t1", runtimeMode: "full-access", interactionMode: "review" },
+    ]) {
+      const refused = refusal(() => decodeCommand(command));
+      expect(refused.code).toBe("INVALID_THREAD_OPTION");
+      expect(refused.message).toContain("Review");
+    }
+  });
 });

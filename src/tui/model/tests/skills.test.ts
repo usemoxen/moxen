@@ -147,11 +147,13 @@ describe("pickerEntries", () => {
     expect(entries.map((entry) => entry.name)).toEqual(["compact", "btw", "protect", "research", "orchestrate", "review", "pdf"]);
     // Moxen's compact wins over the provider's, and a hint rides in front of the description.
     expect(entries[0]!.description).toBe("Summarize the conversation to free up context");
-    expect(entries[5]!.shortDescription).toBe("<pr>  Review a PR");
+    // Moxen's review wins over the provider's review command and skill of the same name.
+    expect(entries[5]!.description).toBe("Review mode: one read-through of a PR or branch, changing nothing (again: back to Build)");
+    expect(entries[5]!.shortDescription).toBeNull();
   });
 
   it("still offers Moxen's commands when the provider has nothing", () => {
-    expect(pickerEntries({ commands: [], skills: [] })!.map((entry) => entry.name)).toEqual(["compact", "btw", "protect", "research", "orchestrate"]);
+    expect(pickerEntries({ commands: [], skills: [] })!.map((entry) => entry.name)).toEqual(["compact", "btw", "protect", "research", "orchestrate", "review"]);
   });
 });
 
