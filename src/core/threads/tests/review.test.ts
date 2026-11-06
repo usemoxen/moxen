@@ -24,6 +24,8 @@ function task(overrides: Partial<TaskNotification> & { title: string }): TaskNot
     filesChanged: 2,
     additions: 10,
     deletions: 3,
+    background: [],
+    backgroundUnknown: false,
     ...overrides,
   };
 }

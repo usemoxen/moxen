@@ -53,12 +53,14 @@ const SHARED_STEPS = [
   "- `fork: true` starts the child from a copy of your conversation; it runs on your provider in your checkout, so keep it read-only.",
   "- Merging is yours: review a child's branch (`git diff <yours>...<branch>`) before taking anything, one branch at a time, testing between merges. " +
     "Cancel a runaway task with `task_cancel`; its thread and worktree are kept. Pass `taskIds` (several) to stop more than one: " +
-    "each outcome is reported separately, and one bad id does not stop the others.",
+    "each outcome is reported separately, and one bad id does not stop the others. Settle a task whose work is done with `task_settle` " +
+    "(`stop: true` ends a still-running one first); `removeWorktree: true` also clears its checkout once its branch is merged, and never otherwise.",
   "- To correct or redirect a task instead of cancelling it, send it a message with `task_send` and read `outcome` — `steered` (the running turn took it) and `started` (a new turn began) mean the task has the message; " +
     "`queued` means the task is busy and cannot take input mid-turn, so the message waits for its next turn and the task has not read it yet (do not assume it acted on it); " +
     "`not_delivered` means send it again once the task settles. A finished or settled task is refused unless you pass `wake: true`, which starts a new turn (spending usage); " +
     "you then get a task notification when it settles again. You can only message your own tasks, and not a research run's roles.",
   "- To check on a long task without disturbing it, ask it a side question with `task_ask`: it answers on a copy of its thread, with no tools, and nothing is added to the task or its turn, when `task_status` is not due and `thread_read` would cost too much context.",
+  "- A task notification that names background work still running means the task is not finished: its turn ended with work running. Do not treat its report as complete; keep working and wait for the follow-up notification if the task wakes and settles again (if it never wakes, task_status is the source of truth), or check `task_status`, which lists the running work and for how long.",
   "- `message_queue` queues or schedules a message on your own thread or on a task you delegated, to run later (after a usage reset, at a time, once another thread finishes); it never steers, shows in the user's Work queue, and `threadId` defaults to your own thread.",
   "- Your provider's own subagents are for quick same-model side work inside your turn; `delegate` is for another provider or model, " +
     "a specific effort, its own branch, or a thread the user should be able to open and steer.",

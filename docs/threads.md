@@ -694,6 +694,15 @@ so a change on Claude's side does not change it.
   `memory_search`, `memory_save`, `memory_edit`, `memory_append` and
   `memory_delete` on the `moxen` MCP server. The model picks the scope.
   A delegated task gets `memory_read` and `memory_search` only.
+- **Managing:** the TUI's memory manager shows the same memories the agents
+  see: open it from Settings > Memory (Manage memories) or the command
+  palette. Memories read global first, then this project, with the same
+  search agents use. One opens in full; creating and editing take a name,
+  description, type, scope and body. Saving over a name that exists asks
+  first, deleting asks first, and a memory another agent saved while it was
+  open is shown rather than silently overwritten. Viewing works with memory
+  off, and says so; saving, editing and deleting are refused while it is off,
+  in the manager, the CLI and on the server.
 - **Reading:** the index is not shipped in the runtime instructions: it can
   reach 200 lines / 25 KB, and `memory_read` with no name returns it as it is
   now, so the rules point there instead of duplicating it. A memory itself is
@@ -824,6 +833,24 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
+A turn-end notification always fires on time and nothing can hold it. When the
+task's turn ends with background work still running, the notification names
+that work and for how long (for example "turn ended, 1 background process
+still running: bun run check, 4m"), and reads as not finished: the parent must
+not treat the task's report as complete. The named list is a snapshot taken
+when the notification is assembled; work may have ended or started since.
+When that work ends, the task wakes to pick up the result where its provider
+allows it, and the parent gets a second notification if the task wakes and
+next has nothing left to run. Work its provider never wakes stays visible in
+task_status instead of arriving as a notification, and work that never ends
+(a dev-server watcher) sends nothing further and blocks nothing. `task_status`
+lists what is still running and for how long; past `backgroundForgottenAfter`
+(30m unless set) it is flagged as probably forgotten, and Moxen never stops it
+on its own. Where Moxen cannot check — no live session here, or a provider
+that cannot report it all (OpenCode reports only the background shells and
+subagents its own server started) — the notification and `task_status` say so
+plainly instead of implying nothing is running.
+
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the
 new thread — running, idle, finished, cancelled, and carried-on alike — so from then on `task_send`,
@@ -874,6 +901,21 @@ project that is not a git repository at all — there is no worktree to give,
 so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
 `isolation: "shared"`. It never quietly shares your checkout.
 
+OpenCode keys MCP servers by name per directory, so every thread in one
+checkout shares a single `moxen` entry. The first thread to start keeps it:
+a later session on the same server never replaces it (replacing it would
+restart the server mid-call), and when the owning thread's session closes,
+ownership passes to the earliest session still running. Each tool call is
+routed to the session that made it, so a shared task still gets only its
+own tools — a delegated task's `delegate` call is refused even though the
+shared listing shows the owner's catalog. A call naming a session that is
+not live fails instead of landing on another thread; a call with no session
+at all fails too while sessions share the server, and otherwise runs as the
+entry owner's thread. Changing the entry itself — the owning thread's own
+tool settings changing — still restarts that checkout's server, interrupting
+whatever else is running on it; nothing else on the server re-registers, so
+nothing else pays that price.
+
 ### Starting several tasks in one call (`delegate`)
 
 One `delegate` call takes shared settings (`provider`, `model`, `effort`,
@@ -905,6 +947,42 @@ thread and worktree are kept either way. Each task's outcome
 entry's `error` rather than a failed call, so it never stops the others. A
 repeated id stops once, in order. When the parent itself is missing, the
 call fails as the single form does instead of reporting one error per id.
+
+### Settling a delegated task (`task_settle`)
+
+`task_settle` marks a delegated task finished once its work is done and
+reviewed: use it (not `task_cancel`) when the report is in and nothing is
+left to run. It takes `taskId` (or `taskIds` for several, each reported
+separately so one bad id never stops the others), plus two optional flags.
+It goes through the same settle path as `threads settle`: the task and the
+tasks it delegated settle, the parent and siblings are untouched, and a task
+that is still running is refused unless `stop: true` ends its work first, as
+with `threads settle --stop`. The task's thread and branch are always kept.
+
+With `removeWorktree: true` the task's worktree checkout goes too, once it is
+safe to lose: only a Moxen-managed checkout belonging to that task's own
+thread (never a shared checkout, never the parent's own directory), with no
+uncommitted or untracked changes (ignored files like build output don't
+count), and only when its branch is merged into the default branch or it
+never committed. Ancestry alone says "not merged" for squash-merged work, so
+an equivalent patch upstream (`git cherry` `-`) and an empty merge
+(`git merge-tree` giving the default branch's own tree) count as merged too;
+anything inconclusive refuses, and the branch stays either way. An idle
+provider session in that checkout is closed first, so nothing keeps running in
+a deleted directory, and a removal the OS refuses (a locked directory on
+Windows) is reported rather than thrown. Settling still happens when the
+removal is refused: the result says `settled` with `worktreeRemoved: false`
+and the reason, so a refusal never looks like a failed settle. Waking a task
+whose worktree is gone (`task_send` with `wake: true`) fails plainly
+(`TASK_WORKTREE_REMOVED`): re-delegate the follow-up as a new task.
+
+Only the thread that owns a task settles it: the one that delegated it, or
+the continuation that took it over — exactly like `task_cancel`. Continuing
+hands every delegation row to the new thread, so from then on `task_settle`
+resolves against the new parent and reads as `TASK_NOT_FOUND` on the old one.
+A research run's lead and roles have no
+delegation rows, so they are refused with the same `TASK_NOT_FOUND` another
+thread's id gets.
 
 ### Queueing a message from an agent (`message_queue`)
 
@@ -939,7 +1017,12 @@ a monitor event. That output arrives as a turn like any other and is shown
 in the side panel's Background tab, which can also list and stop running
 background work. Background work lives in the session, so it outlasts a
 turn only where the session does: in a shared server, or a client that
-stays open.
+stays open. What `moxen threads background` lists comes from the same
+driver view: Claude, Codex and the Harness report their background commands,
+monitors and subagents; OpenCode reports the background shells and subagents
+its own server started, and cannot see a shell background process started any
+other way. A settled thread's background work cannot wake it: the wake-up
+arrives as a turn, and a settled thread takes no turn.
 
 A thread that has only finished a turn keeps those wake-ups: an orchestrator
 relies on a watcher to wake it. A thread that was continued in a new one does

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import type { RuntimeMode } from "../../../types.js";
-import type { McpServerSpec } from "../../../mcp.js";
+import type { McpServerSpec, InProcessMcpTool } from "../../../mcp.js";
 import { userInputActivityRow } from "../../../threads/requestactivity.js";
 import { answersFor, OpenCodeDriver, opencodeCompactionThreshold, opencodeContextOf, parseOpencodeModel } from "../driver.js";
 import { translateTimeline } from "../translate.js";
@@ -1211,6 +1211,27 @@ describe("opencode driver", () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 
+    it("reports background shells and subagents through backgroundTasks", async () => {
+      const SHELL = "sh_bg1";
+      const transport = new FakeOpencodeTransport({});
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      const events: ProviderRuntimeEvent[] = [];
+      const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+      expect(driver.backgroundTasks("thread-unknown")).toEqual([]);
+      const server = transport.servers[0]!;
+      await server.pushRaw(call("session.tool.input.started", { name: "shell", id: "call_sh" }));
+      await server.pushRaw(call("session.tool.called", { id: "call_sh", input: { command: "sleep 300", background: true } }));
+      await server.pushRaw(call("session.tool.progress", { id: "call_sh", metadata: { shellID: SHELL } }));
+      expect(driver.backgroundTasks("thread-1")).toMatchObject([{ taskId: SHELL, command: "sleep 300" }]);
+      await server.pushRaw({ type: "shell.exited", data: { id: SHELL, status: "exited" } });
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+      await Effect.runPromise(Fiber.interrupt(fiber));
+    });
+
     it("answers a subagent's own prompts itself: permissions allowed, questions dismissed", async () => {
       const { server, fiber, subagents } = await running({ parents: { ses_late: PARENT, ses_stranger: "ses_other_client" } });
       await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));
@@ -1308,6 +1329,16 @@ const MCP = [
 ];
 
 describe("opencode MCP injection", () => {
+  const moxenInProcess = (thread: string, extraArgs: readonly string[] = [], tools: readonly InProcessMcpTool[] = []): McpServerSpec => ({
+    name: "moxen",
+    type: "in-process",
+    tools,
+    call: async () => ({ text: "", isError: false as const }),
+    fallback: { name: "moxen", type: "stdio", command: "moxen-mcp", args: ["--thread", thread, ...extraArgs], env: {} },
+  });
+  const moxenAdded = (transport: FakeOpencodeTransport) =>
+    transport.servers[0]!.callsTo("mcp.add").map((call) => (call.args as { config: { command: string[] } }).config.command).filter((command) => command[0] === "moxen-mcp");
+
   it("adds each server to the directory's instance once, not once per session", async () => {
     const transport = new FakeOpencodeTransport();
     const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
@@ -1355,41 +1386,91 @@ describe("opencode MCP injection", () => {
     }
   });
 
-  it("hands the moxen entry back to the parent after a same-directory child replaced it, and stays quiet when it already serves the parent", async () => {
+  it("keeps one stable moxen entry per server: a same-directory session never re-adds it", async () => {
     const transport = new FakeOpencodeTransport();
     const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
-    const moxenInProcess = (thread: string): McpServerSpec => ({
-      name: "moxen",
-      type: "in-process",
-      tools: [],
-      call: async () => ({ text: "", isError: false as const }),
-      fallback: { name: "moxen", type: "stdio", command: "moxen-mcp", args: ["--thread", thread], env: {} },
-    });
     try {
       await Effect.runPromise(driver.startSession({ threadId: "parent", workingDirectory: "/repo", mcpServers: [moxenInProcess("parent")] }));
-      // A same-directory child's session start replaces the entry: the parent's in-flight call dies with `Connection closed`.
-      await Effect.runPromise(driver.startSession({ threadId: "child", workingDirectory: "/repo", mcpServers: [moxenInProcess("child")] }));
-      const added = () =>
-        transport.servers[0]!.callsTo("mcp.add").map((call) => (call.args as { config: { command: string[] } }).config.command);
-      expect(added()).toEqual([
-        ["moxen-mcp", "--thread", "parent"],
-        ["moxen-mcp", "--thread", "child"],
+      // A same-directory child's session start used to replace the entry (restarting the
+      // server and killing the parent's in-flight call with `Connection closed`).
+      await Effect.runPromise(driver.startSession({ threadId: "child", workingDirectory: "/repo", mcpServers: [moxenInProcess("child", ["--delegated"])] }));
+      expect(moxenAdded(transport)).toEqual([["moxen-mcp", "--thread", "parent"]]);
+      // Another thread's update cannot move the entry either: its calls are routed per call.
+      const dummy = { name: "git", type: "stdio" as const, command: "git-mcp", args: [], env: {} };
+      await driver.updateMcpServers("child", [moxenInProcess("child", ["--delegated"]), dummy]);
+      expect(moxenAdded(transport)).toEqual([["moxen-mcp", "--thread", "parent"]]);
+      expect(transport.servers[0]!.callsTo("mcp.add").map((call) => (call.args as { name: string }).name)).toEqual([
+        "moxen",
+        "git",
       ]);
-      // The child settles: the parent's entry is re-registered, healing the parent's later calls.
-      await driver.restoreMcpServers("parent");
-      expect(added()).toEqual([
+      // The owning thread's own change still re-registers it, so a genuinely changed entry is picked up.
+      await driver.updateMcpServers("parent", [moxenInProcess("parent", ["--delegated"], [{ name: "t", description: "t", inputSchema: {} }])]);
+      expect(moxenAdded(transport)).toEqual([
         ["moxen-mcp", "--thread", "parent"],
-        ["moxen-mcp", "--thread", "child"],
-        ["moxen-mcp", "--thread", "parent"],
+        ["moxen-mcp", "--thread", "parent", "--delegated"],
       ]);
-      // Already serving the parent: no gratuitous `mcp.add` restarts a healthy entry.
-      await driver.restoreMcpServers("parent");
-      expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(3);
       // Unknown and closed threads are a quiet no-op.
-      await driver.restoreMcpServers("elsewhere");
+      await driver.updateMcpServers("elsewhere", [moxenInProcess("elsewhere")]);
       await Effect.runPromise(driver.stopSession("parent"));
-      await driver.restoreMcpServers("parent");
-      expect(transport.servers[0]!.callsTo("mcp.add")).toHaveLength(3);
+      await driver.updateMcpServers("parent", [moxenInProcess("parent")]);
+      expect(moxenAdded(transport)).toHaveLength(2);
+    } finally {
+      await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  });
+
+  it("hands entry ownership to a surviving session when the owner closes, without touching the entry", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "test-key" } });
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "parent", workingDirectory: "/repo", mcpServers: [moxenInProcess("parent")] }));
+      await Effect.runPromise(driver.startSession({ threadId: "child", workingDirectory: "/repo", mcpServers: [moxenInProcess("child")] }));
+      await Effect.runPromise(driver.stopSession("parent"));
+      // The close itself re-adds nothing: the entry stays put, so nothing in flight dies.
+      expect(moxenAdded(transport)).toEqual([["moxen-mcp", "--thread", "parent"]]);
+      // The heir may now re-register its own changed spec; the dead owner cannot move it.
+      await driver.updateMcpServers("parent", [moxenInProcess("parent", [], [{ name: "t", description: "t", inputSchema: {} }])]);
+      await driver.updateMcpServers("child", [moxenInProcess("child", ["--delegated"], [{ name: "t", description: "t", inputSchema: {} }])]);
+      expect(moxenAdded(transport)).toEqual([
+        ["moxen-mcp", "--thread", "parent"],
+        ["moxen-mcp", "--thread", "child", "--delegated"],
+      ]);
+      // With no live session left the next start registers fresh.
+      await Effect.runPromise(driver.stopSession("child"));
+      await Effect.runPromise(driver.startSession({ threadId: "third", workingDirectory: "/repo", mcpServers: [moxenInProcess("third")] }));
+      expect(moxenAdded(transport)).toEqual([
+        ["moxen-mcp", "--thread", "parent"],
+        ["moxen-mcp", "--thread", "child", "--delegated"],
+        ["moxen-mcp", "--thread", "third"],
+      ]);
+    } finally {
+      await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  });
+
+  it("maps a live native session to its thread, following child sessions to their parent", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+    try {
+      await Effect.runPromise(
+        driver.startSession({ threadId: "parent", workingDirectory: "/repo", resumeCursor: "ses-parent" }),
+      );
+      expect(driver.threadForNativeSession?.("ses-parent")).toBe("parent");
+      expect(driver.threadForNativeSession?.("ses-unknown")).toBeNull();
+      // A native subagent's calls belong to the thread whose session started it.
+      await Effect.runPromise(driver.sendTurn({ threadId: "parent", prompt: "go" }));
+      const server = transport.servers[0]!;
+      const call = (type: string, data: Record<string, unknown>) => ({
+        type,
+        created: 1790820781870,
+        data: { sessionID: "ses-parent", assistantMessageID: "m", id: "call_sub", ...data },
+      });
+      await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));
+      await server.pushRaw(call("session.tool.progress", { metadata: { sessionID: "ses_child", status: "running" } }));
+      await waitFor("child session tracked", () => driver.threadForNativeSession?.("ses_child") === "parent");
+      expect(driver.threadForNativeSession?.("ses_child")).toBe("parent");
+      await Effect.runPromise(driver.stopSession("parent"));
+      expect(driver.threadForNativeSession?.("ses-parent")).toBeNull();
     } finally {
       await Effect.runPromise(driver.stopAll()).catch(() => undefined);
     }

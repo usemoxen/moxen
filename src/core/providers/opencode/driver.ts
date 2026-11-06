@@ -34,6 +34,7 @@ import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
 import { dropTurnWaiter, isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
+  BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
   ProviderAdapter,
@@ -312,8 +313,8 @@ const INSTRUCTIONS_KEY = "moxen";
 /**
  * The name agents see moxen's tools under (`MOXEN_MCP_SERVER_NAME` in
  * `src/server/mcp/main.ts`, which core cannot import — the layering test
- * pins that direction). Kept as the literal here so the driver can tell a
- * same-directory child's replacement of the entry from any other server's.
+ * pins that direction). Kept as the literal here so the driver can keep the
+ * directory's single `moxen` entry stable while other servers dedupe by key.
  */
 const MOXEN_MCP_SERVER_NAME = "moxen";
 
@@ -331,13 +332,6 @@ function mcpRegistration(server: OutOfProcessMcpServerSpec): { key: string; conf
           ...(Object.keys(server.env).length > 0 ? { environment: server.env } : {}),
         };
   return { key: `${server.name}:${JSON.stringify(config)}`, config };
-}
-
-/** This session's `moxen` entry key, or null when the thread has no `moxen` server. */
-function moxenRegistrationKey(servers: readonly McpServerSpec[], checklist: boolean): string | null {
-  const moxen = servers.find((server) => server.name === MOXEN_MCP_SERVER_NAME);
-  if (!moxen) return null;
-  return mcpRegistration((checklist ? outOfProcessWithChecklist : outOfProcess)(moxen)).key;
 }
 
 /**
@@ -529,35 +523,40 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     if (!session || session.closed) return;
     if (mcpSignature(servers) === mcpSignature(session.mcpServers)) return;
     session.mcpServers = servers;
-    await this.registerMcpServers(await this.connectionFor(session), servers, session.checklist);
+    await this.registerMcpServers(await this.connectionFor(session), servers, session.checklist, threadId);
   };
 
   /**
-   * Hand the directory's `moxen` entry back to this thread after a session
-   * sharing its provider server replaced it. A same-directory delegated
-   * task's session start registers the child's `moxen` config over the
-   * parent's (OpenCode keys servers by name per directory), killing the
-   * in-flight call with `Connection closed`; once that child settles, the
-   * parent's later calls would otherwise keep landing on the child's entry.
-   * A no-op when the entry already serves this thread (tracked per
-   * connection, so a gratuitous `mcp.add` never restarts a healthy entry),
-   * when the thread has no live server, or when it has no `moxen` server.
-   * Best-effort: never throws.
+   * The thread whose live native session this is, for routing the directory's
+   * single `moxen` entry to the session that made each call: OpenCode sends
+   * its session id in `CallToolRequest.params._meta["ai.opencode/sessionID"]`.
+   * Follows OpenCode's own child sessions to the thread whose session started
+   * them. Null when no live session matches: the caller must fail safe, never
+   * serve another thread.
    */
-  readonly restoreMcpServers = async (threadId: ThreadId): Promise<void> => {
-    try {
-      const session = this.sessions.get(threadId);
-      if (!session || session.closed) return;
-      const connection = this.liveConnections.get(session.workingDirectory);
-      if (!connection) return;
-      const wanted = moxenRegistrationKey(session.mcpServers, session.checklist);
-      if (wanted === null || this.moxenEntry.get(connection) === wanted) return;
-      const done = this.mcpRegistered.get(connection);
-      if (done) for (const key of [...done]) if (key.startsWith(`${MOXEN_MCP_SERVER_NAME}:`)) done.delete(key);
-      await this.registerMcpServers(connection, session.mcpServers, session.checklist);
-    } catch {
-      // Best effort: the entry heals on the next session start.
+  readonly threadForNativeSession = (nativeSessionId: string): string | null => {
+    const session = this.sessionForNative(nativeSessionId);
+    if (session) return session.threadId;
+    const child = this.children.get(nativeSessionId);
+    if (child && !child.parent.closed) return child.parent.threadId;
+    return null;
+  };
+
+  /**
+   * Live sessions that could place calls on this thread's entry: every live
+   * session on its server, since the directory's single `moxen` entry serves
+   * them all. More than one makes a call without session identity ambiguous,
+   * so it fails instead of running as the entry owner's thread. A thread
+   * with no live session is not provably single, so it counts as shared.
+   */
+  readonly entrySessionCount = (threadId: string): number => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return 2;
+    let count = 0;
+    for (const candidate of this.sessions.values()) {
+      if (!candidate.closed && candidate.workingDirectory === session.workingDirectory) count += 1;
     }
+    return count;
   };
 
   /**
@@ -634,8 +633,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   private readonly liveConnections = new Map<string, OpencodeServerConnection>();
   /** `name:config` already registered per server connection (see `registerMcpServers`). */
   private readonly mcpRegistered = new WeakMap<OpencodeServerConnection, Set<string>>();
-  /** The `moxen` entry key each connection's live entry last registered with (see `restoreMcpServers`). */
-  private readonly moxenEntry = new WeakMap<OpencodeServerConnection, string>();
+  /**
+   * The `moxen` entry each connection's live entry last registered with, and
+   * which thread registered it: one stable entry per OpenCode server. Every
+   * call is routed per call by the session id OpenCode sends in
+   * `CallToolRequest.params._meta`, so a session starting later on the same
+   * server never replaces the entry (replacing it restarts the server with
+   * `mcp.add`, killing in-flight calls). Only the thread that registered the
+   * entry re-registers it, when its own spec changes.
+   */
+  private readonly moxenEntry = new WeakMap<OpencodeServerConnection, { owner: ThreadId; key: string }>();
   /** When each server (by working directory) last had its OpenCode Go usage read. */
   private readonly goUsageReadAt = new Map<string, number>();
   private readonly pumps = new Map<string, { controller: AbortController; ready: Promise<void>; done: Promise<void> }>();
@@ -722,12 +729,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * their config changes — `mcp.add` restarts the server on every call.
    * Same rule as OpenCode's own ACP server (`acp/service.ts`,
    * `mcpRegistrationKey`), including that a failed add does not fail the
-   * session: it is retried on the next start.
+   * session: it is retried on the next start. The `moxen` entry is the one
+   * exception to "changed": it stays the first thread's, and later sessions
+   * on the same server never replace it — their calls are routed per call by
+   * the session id OpenCode sends in `CallToolRequest.params._meta` instead.
    */
   private async registerMcpServers(
     connection: OpencodeServerConnection,
     servers: readonly McpServerSpec[],
     checklist = true,
+    owner: ThreadId,
   ): Promise<void> {
     if (servers.length === 0) return;
     let done = this.mcpRegistered.get(connection);
@@ -737,16 +748,49 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     }
     // v2 has no `todowrite`: moxen's server lends its checklist tool.
     for (const server of servers.map(checklist ? outOfProcessWithChecklist : outOfProcess)) {
+      if (server.name === MOXEN_MCP_SERVER_NAME) {
+        await this.registerMoxenServer(connection, server, owner);
+        continue;
+      }
       const { key, config } = mcpRegistration(server);
       if (done.has(key)) continue;
       try {
         await connection.addMcpServer(server.name, config);
         registerOpencodeMcpServer(server.name);
         done.add(key);
-        if (server.name === MOXEN_MCP_SERVER_NAME) this.moxenEntry.set(connection, key);
       } catch {
         // Retried on the next session start.
       }
+    }
+  }
+
+  /**
+   * One stable `moxen` entry per server: the first thread's registration
+   * wins, and only that thread re-registers it when its own spec changes. A
+   * same-directory session (a shared or fork delegate) registering its own
+   * config here would flip the entry mid-call, killing the in-flight call
+   * with `Connection closed` and landing later calls on the wrong thread's
+   * tools; those calls are routed per call instead.
+   *
+   * Residual shared fate: the owner's own re-registration still restarts the
+   * server with `mcp.add`, which kills whatever else is in flight on it —
+   * the price of the owner's entry genuinely changing. Nothing else on the
+   * server re-registers, so nothing else pays it.
+   */
+  private async registerMoxenServer(
+    connection: OpencodeServerConnection,
+    server: OutOfProcessMcpServerSpec,
+    owner: ThreadId,
+  ): Promise<void> {
+    const { key, config } = mcpRegistration(server);
+    const entry = this.moxenEntry.get(connection);
+    if (entry !== undefined && (entry.owner !== owner || entry.key === key)) return;
+    try {
+      await connection.addMcpServer(server.name, config);
+      registerOpencodeMcpServer(server.name);
+      this.moxenEntry.set(connection, { owner, key });
+    } catch {
+      // Retried on the next session start.
     }
   }
 
@@ -1003,7 +1047,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       for (let attempt = 0; ; attempt += 1) {
         connection = await this.connectionForSession(input.threadId, input.workingDirectory);
         try {
-          await this.registerMcpServers(connection, input.mcpServers ?? [], input.checklist !== false);
+          await this.registerMcpServers(connection, input.mcpServers ?? [], input.checklist !== false, input.threadId);
           // OpenCode keeps sessions on disk, so the previous one — from this
           // process or an earlier one — is reattached with its history rather
           // than replaced by an empty session.
@@ -1143,7 +1187,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       try {
         const connection = await this.connectionFor(session);
         // A replacement server (see `dropConnection`) has lost the runtime MCP registrations.
-        await this.registerMcpServers(connection, session.mcpServers, session.checklist);
+        await this.registerMcpServers(connection, session.mcpServers, session.checklist, session.threadId);
         turn.credentialHint = await this.missingCredentialHint(model, connection);
         await this.applySessionState(session, connection, model, input.interactionMode, turn.credentialHint);
         if (turn.compacting) {
@@ -1293,6 +1337,30 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   }
 
   /**
+   * The background work this thread's session is still running: background
+   * subagents and background `shell` commands. Only what the server told
+   * this driver about — a shell background process started any other way
+   * is invisible here — so callers must never read an empty list as proof
+   * that nothing is running.
+   */
+  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return [];
+    const agents = [...this.children]
+      .filter(([, other]) => other.parent === session && other.background && !other.stopped)
+      .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
+    const shells = [...(session.backgroundShells ?? [])].map(([taskId, shell]) => ({
+      taskId,
+      taskType: "local_bash",
+      description: shell.command.split("\n")[0]?.trim() ?? "",
+      toolName: "Bash",
+      command: shell.command,
+      startedAt: shell.startedAt,
+    }));
+    return [...agents, ...shells];
+  };
+
+  /**
    * Stop one background task without touching its parent turn: a native
    * subagent's call comes back with whatever the child had, and carries on;
    * a background command is killed and the model is told it ended.
@@ -1439,7 +1507,28 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         // Best effort: the server may already be gone.
       }
       this.sessions.delete(threadId);
+      this.transferMoxenEntry(session);
     });
+
+  /**
+   * Ownership of the directory's `moxen` entry follows liveness, without
+   * touching the entry itself (re-registering would restart the server and
+   * kill in-flight calls): when the owning thread's session closes, the
+   * earliest surviving session on the server may re-register it when its own
+   * spec changes. With no live session left the next start registers fresh.
+   * The entry's own config — and so the fallback for a call without session
+   * identity — stays the first owner's until anything re-registers.
+   */
+  private transferMoxenEntry(session: OpenCodeSession): void {
+    const connection = this.liveConnections.get(session.workingDirectory);
+    const entry = connection ? this.moxenEntry.get(connection) : undefined;
+    if (!connection || !entry || entry.owner !== session.threadId) return;
+    const heir = [...this.sessions.values()].find(
+      (candidate) => !candidate.closed && candidate.workingDirectory === session.workingDirectory,
+    );
+    if (heir) this.moxenEntry.set(connection, { owner: heir.threadId, key: entry.key });
+    else this.moxenEntry.delete(connection);
+  }
 
   readonly listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
     Effect.succeed([...this.sessions.values()].filter((session) => !session.closed).map((session) => this.describeSession(session)));

@@ -16,8 +16,9 @@
  * own compatibility surface and stay there.
  */
 import { removeProjectSkills } from "../skills/projectskills.js";
-import { sessionTtlFor } from "./idle.js";
+import { sessionTtlFor, durationMs } from "./idle.js";
 import * as Effect from "effect/Effect";
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -58,7 +59,7 @@ import type {
   WorkspaceMode,
   WorkspaceResolution,
 } from "../types.js";
-import { isCompactCommand, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
+import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
@@ -83,6 +84,8 @@ import {
   openTurn,
   promoteDueScheduledTurn,
   sendTurn,
+  settleThread,
+  threadFamily,
   turnPrompt,
   updateThreadMeta,
   type SendTurnResult,
@@ -93,7 +96,7 @@ import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhaust
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
-import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
@@ -1283,6 +1286,40 @@ async function projectById(storeRoot: string, projectId: string): Promise<Stored
   return (await listStoredProjects(storeRoot)).find((candidate) => candidate.id === projectId) ?? null;
 }
 
+/** What one thread is offered from Moxen's own tools, for routing the directory's shared `moxen` entry to the session that made each call. */
+export interface MoxenSessionRouting {
+  readonly threadId: string;
+  /** No delegation tools: a delegated task, a research run, or orchestration switched off. */
+  readonly delegated: boolean;
+  readonly webFetch: boolean;
+  readonly memory: "write" | "read" | "off";
+  readonly checklist: boolean;
+}
+
+/**
+ * The gating one thread's calls run under: the same shape its session
+ * started with (`sessionSetup`). Null when the thread is gone — the call
+ * must then fail safe, never land on another thread.
+ */
+export async function moxenRoutingFor(ctx: OperationContext, threadId: string): Promise<MoxenSessionRouting | null> {
+  const thread = await ctx.store.readThreadRecord(threadId);
+  if (!thread) return null;
+  const delegation = await delegationOf(ctx.store, thread.id);
+  const kind = driverKindOfInstance(thread.modelSelection.instanceId);
+  const providerConfig = kind === null ? undefined : ctx.config.providers?.[kind];
+  const reach = moxenToolsOf(providerConfig);
+  const project = await projectById(ctx.storeRoot, thread.projectId);
+  const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
+  const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
+  return {
+    threadId,
+    delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
+    webFetch: reach.webFetch,
+    memory: !memoryOn ? "off" : delegation !== null ? "read" : "write",
+    checklist: providerConfig?.todos !== false,
+  };
+}
+
 function requireThreadId(value: string): string {
   const threadId = value.trim();
   if (!threadId) {
@@ -2362,26 +2399,6 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
 }
 
 /**
- * Hand the directory's `moxen` entry back to the parent once a shared child
- * is done. The child's session start registered the child's entry over the
- * parent's on their shared OpenCode server (`mcp.add` restarts the server
- * on every call), which also killed the in-flight delegate call with
- * `Connection closed`; without this, the parent's later calls keep landing
- * on the child's entry until the server turns over. A child with more work
- * queued keeps the entry until it is truly done. Best-effort: never throws.
- */
-async function restoreParentMcpEntry(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
-  try {
-    if (!(await taskHasSettledForGood(ctx, childThreadId))) return;
-    const parent = await ctx.store.readThreadRecord(parentThreadId);
-    if (!parent) return;
-    await ctx.driverFor(parent.modelSelection.instanceId).restoreMcpServers?.(parentThreadId);
-  } catch {
-    // Best effort: the entry heals on the next session start.
-  }
-}
-
-/**
  * A resumed turn of a delegated task ended: tell the parent, if it asked to be
  * told and the task is not simply waiting for another resume.
  */
@@ -2394,6 +2411,83 @@ async function notifyParentOfResumedTask(ctx: OperationContext, childThreadId: s
 async function taskHasSettledForGood(ctx: OperationContext, childThreadId: string): Promise<boolean> {
   const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
+}
+
+/** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
+async function settledTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
+  const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
+  return turns.filter((turn) => turn.completedAt !== null).length;
+}
+
+/** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
+const BACKGROUND_FORGOTTEN_AFTER_DEFAULT_MS = 30 * 60_000;
+
+/** Past this age, background work a task left running is flagged as probably forgotten (`backgroundForgottenAfter`). */
+export function backgroundForgottenAfterMs(config: CliConfig): number {
+  return durationMs(config.backgroundForgottenAfter) ?? BACKGROUND_FORGOTTEN_AFTER_DEFAULT_MS;
+}
+
+/** One background task still running on a delegated task's thread. */
+export interface TaskBackgroundWork extends BackgroundWorkNote {
+  /** How long it had been running when read; null when its start is unknown. */
+  readonly ageMs: number | null;
+  /** Past `backgroundForgottenAfter`: worth asking about, never stopped. */
+  readonly probablyForgotten: boolean;
+}
+
+/** The background work a delegated task's thread is still running, if Moxen can tell. */
+export interface TaskBackgroundState {
+  /** True when Moxen could not check (no live session here, or the provider cannot report it all). */
+  readonly unknown: boolean;
+  readonly tasks: readonly TaskBackgroundWork[];
+}
+
+/**
+ * What background work a task's thread is still running. Best-effort and
+ * never blocking: no live session in this process (or no driver support)
+ * reads as unknown rather than empty, and OpenCode's list is partial — it
+ * reports only the background shells and subagents its own server started,
+ * so its list never proves nothing is running.
+ */
+async function taskBackgroundState(
+  ctx: OperationContext,
+  childThreadId: string,
+  modelSelection: ModelSelection | null,
+  nowMs: number = Date.now(),
+): Promise<TaskBackgroundState> {
+  const unknown: TaskBackgroundState = { unknown: true, tasks: [] };
+  if (!modelSelection) return unknown;
+  let driver: TurnDriver;
+  try {
+    driver = ctx.driverFor(modelSelection.instanceId);
+  } catch {
+    return unknown;
+  }
+  const live = await Effect.runPromise(driver.hasSession(childThreadId)).catch(() => false);
+  if (!live) return unknown;
+  let summaries: readonly BackgroundTaskSummary[];
+  try {
+    summaries = driver.backgroundTasks?.(childThreadId) ?? [];
+  } catch {
+    return unknown;
+  }
+  const forgottenAfter = backgroundForgottenAfterMs(ctx.config);
+  return {
+    unknown: driver.backgroundTasks === undefined || driverKey(modelSelection.instanceId) === "opencode",
+    tasks: summaries.map((task) => {
+      const startedAt = task.startedAt ?? null;
+      const rawAge = startedAt === null ? null : nowMs - Date.parse(startedAt);
+      const ageMs = rawAge === null || !Number.isFinite(rawAge) || rawAge < 0 ? null : rawAge;
+      return {
+        taskId: task.taskId,
+        description: task.description,
+        command: task.command ?? null,
+        startedAt,
+        ageMs,
+        probablyForgotten: ageMs !== null && ageMs >= forgottenAfter,
+      };
+    }),
+  };
 }
 
 /**
@@ -2483,6 +2577,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  const background = await taskBackgroundState(ctx, childThreadId, child.modelSelection ?? null);
   // A review task's verdict and findings ride in the notification itself, and a
   // missing verdict (or a reviewer on the parent's own model) is said visibly.
   // The facts are pinned at settle on the delegation row, so a follow-up
@@ -2503,6 +2598,13 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     filesChanged: changes?.files ?? null,
     additions: changes?.additions ?? null,
     deletions: changes?.deletions ?? null,
+    background: background.tasks.map((work) => ({
+      taskId: work.taskId,
+      description: work.description,
+      command: work.command,
+      startedAt: work.startedAt,
+    })),
+    backgroundUnknown: background.unknown,
     ...(facts === null ? {} : { review: facts }),
   };
 }
@@ -2539,14 +2641,39 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     (id): id is string => id !== null,
   );
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
+  // The settle generation each snapshot was taken at: a turn settling between
+  // the snapshot and the arming below must still report at once (finding: the
+  // gap), rather than arming a watcher that only hears future settles.
+  const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
+    const since = await settledTurnCount(ctx, id);
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
+    if (task) generations.set(task.taskId, since);
     return task && from ? { ...task, continuedFrom: from } : task;
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
   if (tasks.length === 0) return;
+  // A task that ended its turn with background work still running is not
+  // done: when that work ends, the provider wakes the task where it can, and
+  // the parent hears again once the task next has nothing left to run. Work
+  // that never ends wakes nothing, so it sends nothing further and blocks nothing.
+  for (const task of tasks) {
+    const row = rows.find(
+      (candidate) =>
+        candidate.childThreadId === task.taskId &&
+        candidate.parentThreadId === parentThreadId &&
+        candidate.notify === true &&
+        candidate.continuedIn === undefined,
+    );
+    if (!row) continue;
+    const child = await ctx.store.readThreadRecord(task.taskId);
+    if (!child || threadStatus(child) === "settled") continue;
+    if (task.background.length > 0 || task.backgroundUnknown) {
+      notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true, generations.get(task.taskId) ?? null);
+    }
+  }
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return;
   if (parent.deletedAt != null) {
@@ -2921,9 +3048,6 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // the child it is a delegated task (`core/threads/instructions.ts`).
   if (options.researchRole === undefined) await recordDelegation();
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
-    // The child's session start may have flipped the directory's `moxen`
-    // entry before failing: hand it back, since this child will never run.
-    if (worktree === null) void restoreParentMcpEntry(ctx, parentThreadId, created.id);
     throw new CliError(
       "THREAD_START_FAILED",
       `Created delegated thread ${created.id} but could not start its task turn. The child thread was left untouched.`,
@@ -2931,16 +3055,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     );
   });
 
-  // A shared child runs on the parent's OpenCode server, whose single
-  // `moxen` entry the child's session start flipped to the child (killing
-  // the in-flight call with `Connection closed` when it came over MCP).
-  // Hand the entry back once the child settles, so the parent's later calls
-  // land on the parent again. Worktree children have their own server, and
-  // a child with more work queued keeps the entry until it is truly done.
-  if (worktree === null) {
-    const settled = started.run ?? Promise.resolve();
-    void settled.then(() => restoreParentMcpEntry(ctx, parentThreadId, created.id));
-  }
+  // A shared child runs on the parent's OpenCode server, whose single `moxen`
+  // entry stays the parent's: the child's session start never replaces it,
+  // and each call is routed per call by the session id OpenCode sends in
+  // `CallToolRequest.params._meta` instead.
 
   // A delegation nobody waits on reports back by itself once the task
   // settles: the parent gets a message instead of having to poll for it.
@@ -3178,6 +3296,8 @@ export interface DescribedTask {
   readonly parent: ThreadEnvelope;
   readonly child: ThreadEnvelope;
   readonly task: TaskView;
+  /** Background work still running on the task's thread, if Moxen can tell. */
+  readonly background: TaskBackgroundState;
   /**
    * A review child's verdict, warnings and finished state; null for any
    * other task. `task_status` and the task notification read this rather
@@ -3223,6 +3343,7 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
     parent,
     child: seen,
     task,
+    background: await taskBackgroundState(ctx, child.id, child.modelSelection ?? null),
     review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
 }
@@ -3331,6 +3452,175 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   };
 }
 
+export interface SettledTask extends Omit<DescribedTask, "task"> {
+  readonly task: Omit<TaskView, "status"> & { readonly status: DelegatedTaskStatus };
+  /** A running task is refused without `stop`; true when this call ended running work first. */
+  readonly stopped: boolean;
+  /** Only with `removeWorktree`: whether the task's checkout is gone. A refusal still settled the task. */
+  readonly worktreeRemoved?: boolean;
+  /** Only with `removeWorktree`, when the checkout was kept: why. */
+  readonly worktreeReason?: string;
+}
+
+/**
+ * Settle a delegated task through the same path as `threads settle`: the
+ * task and its own delegated tasks settle, the parent and siblings are
+ * untouched, and running or blocked work refuses (`THREAD_SETTLE_BLOCKED`)
+ * unless `stop` ends it first. Only the thread that owns the task may — the
+ * one that delegated it, or the continuation a continue handed it to —
+ * exactly like `task_cancel`: a research run's roles and lead have no
+ * delegation rows, so they are refused with the same `TASK_NOT_FOUND`.
+ * With `removeWorktree`
+ * the task's worktree checkout goes too, once it is safe; the branch stays.
+ */
+export async function settleTask(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+  options: { readonly stop?: boolean; readonly removeWorktree?: boolean } = {},
+): Promise<SettledTask> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
+  const described = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const family = await threadFamily(ctx.store, described.child.id);
+  let hadRunning = false;
+  for (const id of family) {
+    if (openTurn(await ctx.store.readTurns(id)) !== null) {
+      hadRunning = true;
+      break;
+    }
+  }
+  await settleThread(ctx.store, described.child.id, options.stop === true ? { stop: true } : {});
+  const after = await describeTask(ctx, parentThreadId, row.childThreadId);
+  const stopped = options.stop === true && hadRunning;
+  if (options.removeWorktree !== true) return { ...after, stopped };
+  const parentRecord = await ctx.store.readThreadRecord(parentThreadId);
+  const childRecord = await ctx.store.readThreadRecord(after.child.id);
+  const removal =
+    parentRecord && childRecord
+      ? await removeSettledTaskWorktree(ctx, parentRecord, childRecord)
+      : { removed: false as const, reason: "the task's thread no longer exists" };
+  return {
+    ...after,
+    stopped,
+    worktreeRemoved: removal.removed,
+    ...(removal.reason === undefined ? {} : { worktreeReason: removal.reason }),
+  };
+}
+
+/** Running `git` for a worktree-removal check: null when it cannot answer. */
+async function removalGit(cwd: string, args: readonly string[], options: { readonly timeoutMs?: number; readonly noPrompt?: boolean } = {}): Promise<string | null> {
+  try {
+    const result = await runProcess("git", [...args], {
+      cwd,
+      timeoutMs: options.timeoutMs ?? 30_000,
+      allowFailure: true,
+      // A fetch must never wait on a credential prompt inside a tool call.
+      ...(options.noPrompt === true ? { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } } : {}),
+    });
+    return result.exitCode === 0 ? result.stdout.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The default branch's up-to-date ref to judge a removed worktree against:
+ * `origin/<name>` (fetched first, best effort) when there is one, else the
+ * local `<name>`. Null when no default branch can be named — refusing then
+ * is safer than guessing.
+ */
+async function removalDefaultRef(repo: string): Promise<{ readonly name: string; readonly ref: string } | null> {
+  const originHead = await removalGit(repo, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  const names = originHead?.startsWith("origin/") ? [originHead.slice("origin/".length)] : ["main", "master"];
+  for (const name of names) {
+    if (originHead?.startsWith("origin/")) {
+      // Best effort: a squash-merge that landed on the forge is not in a stale local ref yet.
+      await removalGit(repo, ["fetch", "origin", name], { timeoutMs: 20_000, noPrompt: true });
+      if ((await removalGit(repo, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`])) !== null) {
+        return { name, ref: `refs/remotes/origin/${name}` };
+      }
+    }
+    if ((await removalGit(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`])) !== null) {
+      return { name, ref: `refs/heads/${name}` };
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the checkout at `repo` holds nothing worth keeping against
+ * `defRef`: every commit of its own is already there. Ancestry alone says
+ * "not merged" for squash-merged work, so a `-` from `git cherry` (an
+ * equivalent patch upstream) and an empty merge ( folding the branch changes
+ * nothing) count as merged too. Anything inconclusive refuses: a false
+ * refusal keeps a checkout, a false removal loses work.
+ */
+async function removalMergedState(repo: string, defRef: string): Promise<{ readonly merged: boolean; readonly unmergedCommits: number | null }> {
+  if ((await removalGit(repo, ["merge-base", "--is-ancestor", "HEAD", defRef])) !== null) return { merged: true, unmergedCommits: 0 };
+  const cherry = await removalGit(repo, ["cherry", defRef, "HEAD"]);
+  const marks = cherry === null ? null : cherry.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  if (marks !== null && marks.every((line) => line.startsWith("-"))) return { merged: true, unmergedCommits: 0 };
+  // A rename or rewrite can read as `+` to cherry while the merge is empty, so the tree still gets its say.
+  const tree = await removalGit(repo, ["merge-tree", "--write-tree", defRef, "HEAD"]);
+  const base = tree === null ? null : await removalGit(repo, ["rev-parse", `${defRef}^{tree}`]);
+  if (tree !== null && base !== null && tree === base) return { merged: true, unmergedCommits: 0 };
+  return { merged: false, unmergedCommits: marks === null ? null : marks.filter((line) => line.startsWith("+")).length };
+}
+
+/**
+ * Clear a settled task's worktree checkout. Only a Moxen-managed checkout
+ * belonging to that task's own thread (`thread.env.mode === "worktree"`,
+ * under the store's `worktrees` dir — the helper `removeThreadWorktree`
+ * enforces this too); never a shared checkout, never the parent's own
+ * directory, and never outside what that helper manages. Refuses, with the
+ * reason, when the checkout has uncommitted or untracked work (ignored files
+ * don't count) or its commits are not merged — the branch stays either way.
+ * A removal that still fails (a locked directory on Windows refuses) is a
+ * `false` with a reason, never a thrown error: the task already settled.
+ */
+async function removeSettledTaskWorktree(
+  ctx: OperationContext,
+  parent: StoredThread,
+  child: StoredThread,
+): Promise<{ readonly removed: boolean; readonly reason?: string }> {
+  if (child.env.mode !== "worktree" || !child.env.path.trim()) {
+    return { removed: false, reason: "the task has no worktree checkout of its own to remove (it shares a checkout)" };
+  }
+  const dir = path.resolve(child.env.path);
+  if (path.dirname(dir) !== path.join(path.resolve(ctx.storeRoot), "worktrees")) {
+    return { removed: false, reason: "the task's checkout is not a Moxen-managed worktree" };
+  }
+  if (parent.env.path.trim() !== "" && dir === path.resolve(parent.env.path)) {
+    return { removed: false, reason: "the task's checkout is the parent's own directory" };
+  }
+  if (!existsSync(dir)) return { removed: false, reason: "the task's worktree checkout is already gone" };
+  const dirty = await removalGit(dir, ["status", "--porcelain"]);
+  if (dirty === null) return { removed: false, reason: "the checkout could not be inspected for uncommitted work" };
+  if (dirty !== "") {
+    return { removed: false, reason: "the checkout has uncommitted or untracked changes (ignored files don't count): commit, stash or discard them first" };
+  }
+  const target = await removalDefaultRef(dir);
+  if (target === null) return { removed: false, reason: "no default branch could be named to judge the task's commits against" };
+  const state = await removalMergedState(dir, target.ref);
+  if (!state.merged) {
+    const count = state.unmergedCommits === null ? "unresolved" : `${state.unmergedCommits}`;
+    return { removed: false, reason: `the task's branch holds ${count === "1" ? "1 commit" : `${count} commits`} not in ${target.name}: merge it there first` };
+  }
+  // An idle provider session survives settle with the checkout as its working
+  // directory; close it before the directory goes, best effort like elsewhere.
+  try {
+    const driver = ctx.driverFor(child.modelSelection.instanceId);
+    if (driver.stopSession) await Effect.runPromise(driver.stopSession(child.id)).catch(() => undefined);
+  } catch {
+    // Best effort: the removal below refuses on its own when the checkout is held.
+  }
+  if (!(await removeThreadWorktree(ctx.storeRoot, child))) {
+    return { removed: false, reason: "git could not remove the checkout — often a file another process still holds open, which locks the directory on Windows; the branch is kept" };
+  }
+  return { removed: true };
+}
+
 /** A task a caller may act on with `task_send` or `task_ask`: its delegation row and the task thread. */
 export interface ControlledTask {
   readonly row: StoredDelegation;
@@ -3424,6 +3714,13 @@ export async function sendTaskMessage(
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
   const { row, target } = await requireTaskControl(ctx, parentThreadId, rawTaskId, "task_send");
+  if (target.env.mode === "worktree" && target.env.path.trim() !== "" && !existsSync(target.env.path)) {
+    throw new CliError(
+      "TASK_WORKTREE_REMOVED",
+      `Task ${row.childThreadId} cannot take the message: its worktree checkout was removed after it settled, and its branch ${target.env.branch ?? "(unknown)"} is kept. Re-delegate the follow-up as a new task.`,
+      { exitCode: 4, details: { taskId: row.childThreadId, branch: target.env.branch } },
+    );
+  }
 
   const before = await describeTask(ctx, parentThreadId, row.childThreadId);
   const turns = await ctx.store.readTurns(target.id);
@@ -3571,8 +3868,22 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * Tell a task's parent when the task next has nothing left to run. Watches the
  * ledger's turn events rather than one run: a message queued behind a running
  * turn is run by that turn's runner, which nothing awaits.
+ *
+ * `onlyFutureSettles` skips the check of the task as it stands: the caller
+ * just reported this settle, so only a later turn settling may report again.
+ * Without it, arming on an already-settled task would notify at once.
+ * `sinceGeneration` is the settle generation the caller's snapshot was taken
+ * at: when set, a settle that landed between the snapshot and this arming
+ * reports at once instead of being lost. A task that has not settled since
+ * keeps waiting for a future one.
  */
-function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, childThreadId: string): void {
+function notifyWhenTaskSettles(
+  ctx: OperationContext,
+  parentThreadId: string,
+  childThreadId: string,
+  onlyFutureSettles = false,
+  sinceGeneration: number | null = null,
+): void {
   let done = false;
   let checking = false;
   let again = false;
@@ -3589,6 +3900,11 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
       do {
         again = false;
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
+        if (sinceGeneration !== null && (await settledTurnCount(ctx, childThreadId)) <= sinceGeneration) {
+          // No settle since the caller's snapshot: a turn settling in the gap
+          // would have moved the generation. Keep waiting for a future one.
+          continue;
+        }
         done = true;
         stop();
         await queueTaskNotification(ctx, parentThreadId, childThreadId);
@@ -3597,7 +3913,8 @@ function notifyWhenTaskSettles(ctx: OperationContext, parentThreadId: string, ch
       checking = false;
     }
   };
-  void check();
+  if (!onlyFutureSettles) void check();
+  else if (sinceGeneration !== null) void check();
 }
 
 /** One checklist item, as the tasks panel reads it (`turn.plan.updated`'s `plan`). */

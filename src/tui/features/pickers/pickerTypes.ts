@@ -23,6 +23,7 @@ export type PickerName =
   | "work-queue"
   | "queue-schedule"
   | "search"
+  | "memory"
   | "remote-servers"
   | "remote-devices"
   | "remote-pair-address"

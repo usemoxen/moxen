@@ -124,11 +124,13 @@ import {
   submitHandoff,
   cancelTask,
   sendTaskMessage,
+  settleTask,
   requireTaskControl,
   continueThread,
   delegate,
   beginResearchRun,
   isResearchRunActive,
+  moxenRoutingFor,
   resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
@@ -393,6 +395,26 @@ export class DirectConnection implements ClientApi {
     const root = project?.workspaceRoot ?? null;
     if (await projectMemorySetting(root) === false) return false;
     return (await projectMemorySetting(root, "memoryEmbeddings") ?? config.memoryEmbeddings) === true;
+  }
+
+  /**
+   * Whether memory writes are allowed here. The global switch and the
+   * project's own `moxen.json` gate agents, so they gate user writes too —
+   * a write agents can never read back is refused rather than silently kept.
+   * Reads stay allowed either way.
+   */
+  private async memoryWritable(location: MemoryLocation): Promise<boolean> {
+    const config = await this.loadConfig();
+    if (config.memory === false) return false;
+    if (location.projectId === null) return true;
+    const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
+    return (await projectMemorySetting(project?.workspaceRoot ?? null)) !== false;
+  }
+
+  private async requireMemoryWritable(location: MemoryLocation): Promise<void> {
+    if (!(await this.memoryWritable(location))) {
+      throw new CliError("MEMORY_DISABLED", "Memory is turned off.");
+    }
   }
 
   private async applyEmbeddingPolicy(): Promise<void> {
@@ -1323,6 +1345,11 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
+      case "thread.task.settle":
+        return await settleTask(await this.context(), command.parentThreadId, command.taskId, {
+          ...(command.stop === true ? { stop: true } : {}),
+          ...(command.removeWorktree === true ? { removeWorktree: true } : {}),
+        });
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
       case "thread.task.ask":
@@ -1351,22 +1378,35 @@ export class DirectConnection implements ClientApi {
       }
       case "model.visibility.set":
         return { hidden: await setModelHidden(this.storeRoot, command.instanceId, command.model, command.hidden) };
-      case "memory.save":
-        return await saveMemory(await this.memoryLocation(command), {
+      case "memory.save": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await saveMemory(location, {
           name: command.name,
           description: command.description,
           type: command.memoryType,
           body: command.body,
           scope: command.scope,
         });
-      case "memory.edit":
-        return await editMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, oldText: command.oldText, newText: command.newText, description: command.description });
-      case "memory.append":
-        return await appendMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, text: command.text });
-      case "memory.delete":
-        return await deleteMemory(await this.memoryLocation(command), command.name, command.scope);
+      }
+      case "memory.edit": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await editMemory(location, { name: command.name, scope: command.scope, oldText: command.oldText, newText: command.newText, description: command.description });
+      }
+      case "memory.append": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await appendMemory(location, { name: command.name, scope: command.scope, text: command.text });
+      }
+      case "memory.delete": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await deleteMemory(location, command.name, command.scope);
+      }
       case "memory.import-claude": {
         const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
         const project = location.projectId === null ? undefined : (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
         if (project === undefined || project.scratch === true) {
           throw new CliError("MEMORY_PROJECT_REQUIRED", "Importing Claude Code's memory needs a project: its memory is kept per folder.", { exitCode: 2 });
@@ -1933,6 +1973,17 @@ export class DirectConnection implements ClientApi {
     // The shipped manual must still work when configuration cannot be loaded.
     if (query.type === "knowledge.search") return searchKnowledge(query.query);
     if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
+    // Routing a call without session identity needs no configuration either:
+    // the thread record names the driver, which counts the sessions sharing
+    // the entry — so an offline knowledge call never fails on config. A
+    // thread with no record (or no driver) keeps the entry owner's fallback:
+    // the entry serves it alone until anything proves otherwise.
+    if (query.type === "thread.entry-sessions") {
+      const record = await (await this.store()).readThreadRecord(query.threadId).catch(() => null);
+      const instanceId = record?.modelSelection.instanceId ?? null;
+      if (!record || !instanceId) return { count: 1 };
+      return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
+    }
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":
@@ -1990,6 +2041,18 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "opencode.session-thread": {
+        // The thread behind a live OpenCode session, for routing the
+        // directory's shared `moxen` entry to the session that made each
+        // call. The drivers that own live sessions answer; null fails the
+        // call safe rather than serving another thread.
+        for (const driver of this.ownedDrivers) {
+          const threadId = driver.threadForNativeSession?.(query.nativeSessionId) ?? null;
+          if (threadId === null) continue;
+          return await moxenRoutingFor(ctx, threadId);
+        }
+        return null;
+      }
       case "research.proposals":
         this.expireResearchProposals();
         return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);
@@ -2008,7 +2071,15 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
-        return driver ? { live: true, tasks: driver.backgroundTasks?.(query.threadId) ?? [] } : { live: false, tasks: [] };
+        if (!driver) return { live: false, partial: false, tasks: [] };
+        // OpenCode reports only the background shells and subagents its own
+        // server started: a live empty list from it never proves nothing runs.
+        const store = await this.store();
+        const thread = await store.readThreadRecord(query.threadId);
+        const turns = await store.readTurns(query.threadId);
+        const latest = [...turns].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
+        const partial = latest !== undefined && driverKey(latest.instanceId) === "opencode";
+        return { live: true, partial, tasks: driver.backgroundTasks?.(query.threadId) ?? [] };
       }
       case "thread.context-reading":
         return await readContextReading(await this.store(), query.threadId);

@@ -37,6 +37,7 @@ import type {
   AskedTask,
   CancelledTask,
   SentTaskMessage,
+  SettledTask,
   QueuedAgentMessage,
   ChecklistStep,
   DelegateRequest,
@@ -269,6 +270,14 @@ export type CommandBody =
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * Settle a task the caller delegated (moxen's `task_settle`), through the
+   * same path as `threads settle`. `stop` ends running work first; a running
+   * task without it is refused. `removeWorktree` also clears the task's
+   * worktree checkout once its branch is merged; a refusal keeps the checkout
+   * and still settles. The thread and its branch are always kept.
+   */
+  | { readonly type: "thread.task.settle"; readonly parentThreadId: string; readonly taskId: string; readonly stop?: boolean; readonly removeWorktree?: boolean }
   /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
   | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
   /**
@@ -455,6 +464,7 @@ export interface CommandResults {
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
+  "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
   "thread.task.ask": AskedTask;
   "thread.message.queue": QueuedAgentMessage;
@@ -533,6 +543,18 @@ export type Query =
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
   | { readonly type: "research.run"; readonly threadId: string }
+  /**
+   * The thread behind a live OpenCode session: which thread's tools and
+   * identity serve the session's calls on the directory's shared `moxen`
+   * entry, with the gating those calls run under. Null when no live session
+   * matches — the call then fails safe, never lands on another thread.
+   */
+  | {
+      readonly type: "opencode.session-thread";
+      readonly nativeSessionId: string;
+    }
+  /** How many live sessions could place calls on a thread's entry: more than one makes a call without session identity ambiguous. */
+  | { readonly type: "thread.entry-sessions"; readonly threadId: string }
   | { readonly type: "research.proposals"; readonly threadId: string }
   | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
@@ -712,6 +734,14 @@ export interface QueryResults {
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
   "research.run": ResearchRunView | null;
+  "opencode.session-thread": {
+    readonly threadId: string;
+    readonly delegated: boolean;
+    readonly webFetch: boolean;
+    readonly memory: "write" | "read" | "off";
+    readonly checklist: boolean;
+  } | null;
+  "thread.entry-sessions": { readonly count: number };
   "research.proposals": readonly ResearchProposal[];
   "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
@@ -722,7 +752,7 @@ export interface QueryResults {
   "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
   "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
   "skills.manage.read": { readonly text: string };
-  "thread.background.list": { readonly live: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
+  "thread.background.list": { readonly live: boolean; readonly partial: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
   "thread.agent-read": { readonly text: string };
   "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
   "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };
@@ -1259,6 +1289,15 @@ export function decodeCommand(value: unknown): Command {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
       };
+    case "thread.task.settle":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+        ...optionalBoolean(record, "stop"),
+        ...optionalBoolean(record, "removeWorktree"),
+      };
     case "thread.task.send":
       return {
         ...meta,
@@ -1622,6 +1661,10 @@ export function decodeQuery(value: unknown): Query {
     case "research.proposals":
     case "research.run":
     case "research.messages":
+      return { type, threadId: requireThreadId(record.threadId) };
+    case "opencode.session-thread":
+      return { type, nativeSessionId: requireField(record.nativeSessionId, type, "nativeSessionId") };
+    case "thread.entry-sessions":
       return { type, threadId: requireThreadId(record.threadId) };
     case "research.role.report":
       return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };

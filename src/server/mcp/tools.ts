@@ -20,6 +20,7 @@ import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
@@ -190,6 +191,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     name: "task_status",
     description:
       "Where a delegated task stands: running, or finished with the subagent's report and the branch holding its work. " +
+      "Lists background work still running on the task's thread and for how long; work past the forgotten age is flagged, and a task whose notification names running work is not finished. " +
       "For a full report after a task notification, or one deliberate check on a task taking far longer than expected; never as a polling loop. " +
       `Waits up to waitMs (max ${MAX_WAIT_MS}) for it to finish first.`,
     inputSchema: {
@@ -266,6 +268,25 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       properties: {
         taskId: { type: "string", description: "One delegated task to stop. Not with taskIds." },
         taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to stop, each reported separately. Not with taskId." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_settle",
+    description:
+      "Mark a delegated task finished once its work is done and reviewed: use it (not task_cancel) when the report is in and nothing is left to run. " +
+      "A task that is still running is refused unless stop is true, which ends its work first, including work it delegated itself. " +
+      "With removeWorktree, its worktree checkout goes too, but only once its branch is merged (squash-merges count) or it never committed: anything else keeps the checkout and says why, while the task still settles. " +
+      "The task's thread and branch are always kept. Pass taskId for one task or taskIds for several: each outcome is reported separately, and one bad id does not stop the others.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "One delegated task to settle. Not with taskIds." },
+        taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to settle, each reported separately. Not with taskId." },
+        stop: { type: "boolean", description: "End a still-running task's work first instead of refusing (default false)." },
+        removeWorktree: { type: "boolean", description: "Also remove the task's worktree checkout once its branch is merged (default false). The branch stays either way." },
       },
       required: [],
       additionalProperties: false,
@@ -397,7 +418,7 @@ export const THREAD_TOOLS: readonly McpTool[] = [
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task is itself the delegation, so it gets none.
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -567,13 +588,98 @@ export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
-export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+export async function moxenOptionsFor(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<MoxenToolOptions> {
   const run = await api.query({ type: "research.run", threadId }).catch(() => null);
   const active = isResearchRunActive(run);
   const researchLead = active && run?.leadThreadId === threadId;
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
   const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
-  return moxenToolsFor({ ...options, ...(run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {}), imageGeneration, handoff, researchLead, researchMember: active });
+  return { ...options, ...forceDelegated(run, threadId, active), imageGeneration, handoff, researchLead, researchMember: active };
+}
+
+/** A research run in progress takes the delegation tools away, like the list does. */
+function forceDelegated(
+  run: { readonly leadThreadId: string } | null,
+  threadId: string,
+  active: boolean,
+): { readonly delegated?: true } {
+  return run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {};
+}
+
+export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+  return moxenToolsFor(await moxenOptionsFor(api, threadId, options));
+}
+
+/**
+ * Where OpenCode names the session a tool call runs for: request metadata,
+ * not a tool argument, so it is absent from the model-visible schema
+ * (`docs/external/opencode-v2/mcp-servers.md#context`). The id identifies
+ * the invoking OpenCode session, never the MCP transport session; a model
+ * cannot set it, so it selects which thread's tools and identity serve the
+ * call rather than authorizing anything.
+ */
+export const OPENCODE_SESSION_META_KEY = "ai.opencode/sessionID";
+
+/** The native OpenCode session a request runs for, from its MCP request metadata. */
+function sessionOf(params: Record<string, unknown>): string | null {
+  const meta = params._meta;
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const id = (meta as Record<string, unknown>)[OPENCODE_SESSION_META_KEY];
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/**
+ * Who a request runs for on the directory's shared `moxen` entry. A request
+ * carrying a known session id runs with that session's thread and gating; a
+ * request carrying an unknown session id fails rather than landing on
+ * another thread. A request without one falls back to the entry's own
+ * thread — except a `tools/call`, which would otherwise silently execute as
+ * the owner (a `delegate` creating the owner's task, a `memory_save` in the
+ * owner's scope): when sessions share the entry the call is ambiguous, so
+ * it fails naming the missing key, and with one session at most the
+ * fallback cannot land on another thread.
+ */
+export async function routeMcpSession(
+  api: ClientApi,
+  fallback: { readonly threadId: string; readonly options: MoxenToolOptions },
+  params: Record<string, unknown>,
+  requireSession: boolean,
+): Promise<{ readonly threadId: string; readonly options: MoxenToolOptions } | { readonly error: string }> {
+  const nativeSessionId = sessionOf(params);
+  if (nativeSessionId === null) {
+    if (!requireSession) return fallback;
+    // Sessions that could have placed this call on the entry: one at most
+    // and the fallback cannot land on another thread; more and the call is
+    // ambiguous, so it fails naming the missing key. Anything unparsable
+    // fails closed too.
+    let sessions = 2;
+    try {
+      const answer = await api.query({ type: "thread.entry-sessions", threadId: fallback.threadId });
+      if (typeof answer?.count === "number") sessions = answer.count;
+    } catch (cause) {
+      return { error: `Could not count the sessions sharing this entry: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
+    if (sessions <= 1) return fallback;
+    return {
+      error:
+        `Missing "${OPENCODE_SESSION_META_KEY}" in this tools/call: the shared moxen entry serves ${sessions} live sessions, ` +
+        `so the call cannot be attributed to one thread and is refused instead of running as another thread.`,
+    };
+  }
+  let routing;
+  try {
+    routing = await api.query({ type: "opencode.session-thread", nativeSessionId });
+  } catch (cause) {
+    return { error: `Could not resolve the OpenCode session behind this call: ${cause instanceof Error ? cause.message : String(cause)}` };
+  }
+  if (routing === null) {
+    return { error: `Unknown OpenCode session "${nativeSessionId}": the shared moxen entry serves only live sessions, never another thread.` };
+  }
+  const run = await api.query({ type: "research.run", threadId: routing.threadId }).catch(() => null);
+  return {
+    threadId: routing.threadId,
+    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
+  };
 }
 
 /**
@@ -825,6 +931,25 @@ export async function callMoxenTool(
         await throwIfParentMissing(api, parentThreadId, tasks, firstFailure);
         return ok({ tasks });
       }
+      case "task_settle": {
+        if (args.stop !== undefined && typeof args.stop !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "stop must be true or false.");
+        if (args.removeWorktree !== undefined && typeof args.removeWorktree !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "removeWorktree must be true or false.");
+        const options = { ...(args.stop === true ? { stop: true } : {}), ...(args.removeWorktree === true ? { removeWorktree: true } : {}) };
+        const ids = settleIds(args);
+        if (args.taskIds === undefined) {
+          const settled = await settleOne(api, parentThreadId, ids[0]!, options);
+          return ok(settled);
+        }
+        const tasks: Array<Record<string, unknown>> = [];
+        for (const taskId of ids) {
+          try {
+            tasks.push(await settleOne(api, parentThreadId, taskId, options));
+          } catch (cause) {
+            tasks.push({ taskId, error: toolErrorText(cause) });
+          }
+        }
+        return ok({ tasks });
+      }
       case "task_send": {
         if (args.wake !== undefined && typeof args.wake !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "wake must be true or false.");
         const taskId = argString(args, "taskId", true)!;
@@ -857,6 +982,36 @@ export async function callMoxenTool(
 }
 
 const SEARCH_SNIPPET_CHARS = 120;
+
+/** Exactly one of `taskId` (one task) or `taskIds` (several): one bad id never stops the others. */
+function settleIds(args: Record<string, unknown>): string[] {
+  const single = argString(args, "taskId");
+  const many = args.taskIds;
+  if (single !== undefined && many !== undefined) {
+    throw new CliError("INVALID_TOOL_INPUT", "Pass either taskId for one task, or taskIds for several — not both.");
+  }
+  if (many !== undefined) {
+    if (!Array.isArray(many) || many.length === 0) throw new CliError("INVALID_TOOL_INPUT", "taskIds must be a non-empty array of task ids.");
+    return many.map((id, index) => {
+      if (typeof id !== "string" || !id.trim()) throw new CliError("INVALID_TOOL_INPUT", `taskIds[${index + 1}] must be a non-empty string.`);
+      return id.trim();
+    });
+  }
+  if (single === undefined) throw new CliError("INVALID_TOOL_INPUT", "Pass taskId for one task, or taskIds for several.");
+  return [single];
+}
+
+async function settleOne(api: ClientApi, parentThreadId: string, taskId: string, options: { stop?: boolean; removeWorktree?: boolean }) {
+  const settled = await api.dispatch({ type: "thread.task.settle", parentThreadId, taskId, ...options });
+  return {
+    taskId,
+    settled: true as const,
+    status: settled.task.status,
+    stopped: settled.stopped,
+    ...(settled.worktreeRemoved === undefined ? {} : { worktreeRemoved: settled.worktreeRemoved }),
+    ...(settled.worktreeReason === undefined ? {} : { worktreeReason: settled.worktreeReason }),
+  };
+}
 
 /** `thread_search`: the store's search, scoped to the caller's project unless asked for all, the caller itself left out. */
 async function threadSearchTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>): Promise<ToolResult> {
@@ -1323,6 +1478,17 @@ async function statusTool(
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
+    background: {
+      unknown: described.background.unknown,
+      tasks: described.background.tasks.map((task) => ({
+        taskId: task.taskId,
+        description: task.description,
+        ...(task.command ? { command: task.command } : {}),
+        ...(task.startedAt ? { startedAt: task.startedAt } : {}),
+        ...(task.ageMs === null ? {} : { age: formatTaskDuration(task.ageMs) }),
+        probablyForgotten: task.probablyForgotten,
+      })),
+    },
     // A review child's verdict and warnings ride with the status; a finished
     // review with no VERDICT line is said visibly here, not passed on as one.
     ...(described.review === null ? {} : { review: described.review }),
