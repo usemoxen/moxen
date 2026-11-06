@@ -188,7 +188,7 @@ describe("Moxen-run OpenCode compaction", () => {
         },
       },
     };
-    const plugin = (await import(pathToFileURL(path.join(locateCompactionMod()!, "index.js")).href)).default;
+    const plugin = (await import(pathToFileURL(path.join(await stageMod(), "index.js")).href)).default;
     await plugin.setup(ctx);
     const fire = async (kind: string, messages: Message[]) => {
       const event: any = { sessionID: "session", model, messages, system: [], options: {} };
