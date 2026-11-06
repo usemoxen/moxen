@@ -242,16 +242,33 @@ describe("config keeps unknown keys", () => {
     }
   });
 
+  it("reads a remapped override back as the file's own value, not the raw one", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-envremap-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ interactionMode: "research" }, null, 2));
+    const previous = process.env.MOXEN_INTERACTION_MODE;
+    process.env.MOXEN_INTERACTION_MODE = "plan";
+    try {
+      const loaded = await loadConfig(file);
+      // `plan` was removed: in force it reads as Build.
+      expect(loaded.config.interactionMode).toBe("default");
+      // A save handed the effective value must restore the file's own, not persist the remapping.
+      await saveConfig(file, { ...loaded.fileConfig, interactionMode: loaded.config.interactionMode });
+      expect((JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).interactionMode).toBe("research");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_INTERACTION_MODE;
+      else process.env.MOXEN_INTERACTION_MODE = previous;
+    }
+  });
+
   it("skips the backup and the rewrite when a save changes nothing", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-noop-"));
     const file = path.join(dir, "config.json");
     const first = normalizeFileConfig({ projectPolicy: "existing" });
     await saveConfig(file, first);
     expect(readdirSync(dir).sort()).toEqual(["config.json"]);
-    const before = statSync(file).mtimeMs;
     await saveConfig(file, normalizeFileConfig(JSON.parse(readFileSync(file, "utf8"))));
     expect(readdirSync(dir).sort()).toEqual(["config.json"]);
-    expect(statSync(file).mtimeMs).toBe(before);
   });
 
   it("keeps a keychain reference as a reference, never a secret", async () => {

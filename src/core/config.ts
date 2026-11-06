@@ -525,29 +525,56 @@ function envOverride(name: string): string | undefined {
   return appEnv(name);
 }
 
+/** Suffixes `MOXEN_*` may override (read via `appEnv`, which adds the prefix), so a save must never persist them from memory. */
+const ENV_OVERRIDDEN_KEYS = [
+  "PROJECT_POLICY",
+  "WORKSPACE_MODE",
+  "OPEN_MODE",
+  "THREAD_ENV_MODE",
+  "RUNTIME_MODE",
+  "INTERACTION_MODE",
+  "PROVIDER",
+  "MODEL",
+  "SPEED_MODE",
+  "THINKING_EFFORT",
+] as const;
+
+const ENV_TO_KEY = {
+  PROJECT_POLICY: "projectPolicy",
+  WORKSPACE_MODE: "workspaceMode",
+  OPEN_MODE: "openMode",
+  THREAD_ENV_MODE: "threadEnvMode",
+  RUNTIME_MODE: "runtimeMode",
+  INTERACTION_MODE: "interactionMode",
+  PROVIDER: "provider",
+  MODEL: "model",
+  SPEED_MODE: "speedMode",
+  THINKING_EFFORT: "thinkingEffort",
+} as const;
+
+/**
+ * One override's value in force: the raw `MOXEN_*` value with the same
+ * remappings a load applies (`THREAD_ENV_MODE=auto` reads as the project
+ * checkout, a removed `INTERACTION_MODE` as Build). Both
+ * `applyEnvironmentOverrides` and the save's safety net read through here,
+ * so a future remapping cannot reach the file by drifting from the load.
+ */
+function effectiveEnvOverride(suffix: (typeof ENV_OVERRIDDEN_KEYS)[number]): string | undefined {
+  const raw = envOverride(suffix);
+  if (!raw) return undefined;
+  if (suffix === "THREAD_ENV_MODE" && raw === "auto") return "local";
+  if (suffix === "INTERACTION_MODE" && REMOVED_INTERACTION_MODES.has(raw)) return "default";
+  return raw;
+}
+
 export function applyEnvironmentOverrides(config: CliConfig): CliConfig {
-  const next = { ...config };
-  const projectPolicy = envOverride("PROJECT_POLICY");
-  if (projectPolicy) next.projectPolicy = projectPolicy as ProjectPolicy;
-  const workspaceMode = envOverride("WORKSPACE_MODE");
-  if (workspaceMode) next.workspaceMode = workspaceMode as WorkspaceMode;
-  const openMode = envOverride("OPEN_MODE");
-  if (openMode) next.openMode = openMode as OpenMode;
-  const threadEnvMode = envOverride("THREAD_ENV_MODE");
-  if (threadEnvMode) next.threadEnvMode = (threadEnvMode === "auto" ? "local" : threadEnvMode) as ThreadEnvMode;
-  const runtimeMode = envOverride("RUNTIME_MODE");
-  if (runtimeMode) next.runtimeMode = runtimeMode as RuntimeMode;
-  const interactionMode = envOverride("INTERACTION_MODE");
-  if (interactionMode) next.interactionMode = (REMOVED_INTERACTION_MODES.has(interactionMode) ? "default" : interactionMode) as InteractionMode;
-  const provider = envOverride("PROVIDER");
-  if (provider) next.provider = provider;
-  const model = envOverride("MODEL");
-  if (model) next.model = model;
-  const speedMode = envOverride("SPEED_MODE");
-  if (speedMode) next.speedMode = speedMode as SpeedMode;
-  const thinkingEffort = envOverride("THINKING_EFFORT");
-  if (thinkingEffort) next.thinkingEffort = thinkingEffort;
-  return normalizeConfigValues(next);
+  const next = { ...config } as unknown as Record<string, unknown>;
+  for (const suffix of ENV_OVERRIDDEN_KEYS) {
+    const value = effectiveEnvOverride(suffix);
+    if (value === undefined) continue;
+    next[ENV_TO_KEY[suffix]] = value;
+  }
+  return normalizeConfigValues(next as unknown as CliConfig);
 }
 
 function normalizeConfigValues(config: CliConfig): CliConfig {
@@ -626,33 +653,6 @@ export async function backupConfigFile(configPath: string): Promise<void> {
   }
 }
 
-/** Suffixes `MOXEN_*` may override (read via `appEnv`, which adds the prefix), so a save must never persist them from memory. */
-const ENV_OVERRIDDEN_KEYS = [
-  "PROJECT_POLICY",
-  "WORKSPACE_MODE",
-  "OPEN_MODE",
-  "THREAD_ENV_MODE",
-  "RUNTIME_MODE",
-  "INTERACTION_MODE",
-  "PROVIDER",
-  "MODEL",
-  "SPEED_MODE",
-  "THINKING_EFFORT",
-] as const;
-
-const ENV_TO_KEY = {
-  PROJECT_POLICY: "projectPolicy",
-  WORKSPACE_MODE: "workspaceMode",
-  OPEN_MODE: "openMode",
-  THREAD_ENV_MODE: "threadEnvMode",
-  RUNTIME_MODE: "runtimeMode",
-  INTERACTION_MODE: "interactionMode",
-  PROVIDER: "provider",
-  MODEL: "model",
-  SPEED_MODE: "speedMode",
-  THINKING_EFFORT: "thinkingEffort",
-} as const;
-
 /**
  * Write the file's config (no environment overrides: callers pass
  * `fileConfig`, or the result of editing one). As a safety net, a value
@@ -677,12 +677,10 @@ export async function saveConfig(configPath: string, config: CliConfig): Promise
     current = await readFile(configPath, "utf8");
     const baseline = normalizeFileConfig(JSON.parse(current) as unknown) as unknown as Record<string, unknown>;
     const out = { ...next };
-    for (const env of ENV_OVERRIDDEN_KEYS) {
-      const override = appEnv(env);
-      if (override === undefined) continue;
-      const key = ENV_TO_KEY[env];
-      // Thread env `auto` reads as `local`: compare the normalized override.
-      const wanted = key === "threadEnvMode" && override === "auto" ? "local" : override;
+    for (const suffix of ENV_OVERRIDDEN_KEYS) {
+      const wanted = effectiveEnvOverride(suffix);
+      if (wanted === undefined) continue;
+      const key = ENV_TO_KEY[suffix];
       if (String(out[key]) === String(wanted) && String(baseline[key] ?? "") !== String(wanted)) {
         if (baseline[key] === undefined) delete out[key];
         else out[key] = baseline[key];
