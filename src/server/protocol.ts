@@ -30,7 +30,7 @@ import { CliError } from "../core/errors.js";
 import type { KnowledgeReading, KnowledgeSearch } from "../core/knowledge/types.js";
 import { knowledgeInput } from "../core/knowledge/input.js";
 import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
-import { requestedInteractionMode } from "../core/interactionmode.js";
+import { INTERACTION_MODES, requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
 import type {
@@ -180,7 +180,7 @@ export type CommandBody =
       readonly threadId: string;
       readonly message: ThreadMessageInput;
       readonly modelSelection?: ModelSelection;
-      /** The mode for this prompt only (`/research`); the thread's own mode is unchanged. */
+      /** The mode for this prompt only (`/research`, `/review`); the thread's own mode is unchanged. */
       readonly interactionMode?: InteractionMode;
       /** What a busy thread does with a plain send: refuse (default) or take it as a steer. */
       readonly ifBusy?: SendIfBusy;
@@ -348,12 +348,19 @@ export type CommandBody =
   /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
   | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
   /**
-   * Continue a thread in a new one: same project, model and modes, opened
-   * with a handoff written from the old thread's ledger. `scheduledFor`
-   * holds that first message until then (after a usage limit resets, say);
-   * without it the new thread starts at once.
+   * Continue a thread in a new one: same project and checkout, opened with a
+   * handoff written from the old thread's ledger. Without a model request the
+   * new thread keeps the old thread's model; a model request hands off to
+   * another model instead, resolved like a follow-up — the old thread's
+   * selection unless the request overrides it, never the settings or the
+   * installation default. The request is either a full `modelSelection`
+   * (what a picker sends, effort options included) or `provider`/`model`
+   * with the optional `speedMode`/`thinkingEffort` (what the CLI sends).
+   * Delegated tasks keep their own provider and model; only the parent link
+   * moves. `scheduledFor` holds that first message until then (after a usage
+   * limit resets, say); without it the new thread starts at once.
    */
-  | { readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string }
+  | ({ readonly type: "thread.continue"; readonly threadId: string; readonly scheduledFor?: string; readonly modelSelection?: ModelSelection } & ModelRequest)
   /**
    * `/btw`: a side question answered on a copy of the thread's context,
    * with no tools, and never recorded in the thread. A command rather than
@@ -595,6 +602,13 @@ export type Query =
    */
   | { readonly type: "usage.limits" }
   | { readonly type: "usage.protection" }
+  /**
+   * Ask every owned driver for a fresh usage reading where that is cheap (an
+   * open session or live connection - never a new session, never a model
+   * call), then answer the stored snapshot, refreshed where the probe
+   * landed. Read-only; drivers with nothing cheap to read sit the round out.
+   */
+  | { readonly type: "usage.refresh" }
   | { readonly type: "queue.read" }
   | { readonly type: "handoff.pending"; readonly threadId: string }
   /** Token, cost and activity statistics over every thread's turns, for a range of days. `all` unless given. */
@@ -728,6 +742,7 @@ export interface QueryResults {
   "usage.stats": UsageStats;
   "usage.card": UsageCard;
   "usage.limits": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
+  "usage.refresh": { readonly providers: Readonly<Record<string, ProviderUsageLimits>> };
   "usage.protection": UsageProtectionSnapshot;
   "queue.read": { readonly entries: readonly WorkQueueEntry[] };
   "handoff.pending": { readonly requestId: string | null };
@@ -1042,7 +1057,8 @@ export function decodeCommand(value: unknown): Command {
         message: decodeMessage(record.message),
         ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue) } : {}),
         ...(selection ? { modelSelection: selection } : {}),
-        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
+        // A one-off (`/research`, `/review`) runs this prompt in that mode; the thread keeps its own.
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
         ...optionalEnum(record, "delivery", ["auto", "steer", "restart", "queue"] as const, type),
         ...optionalBoolean(record, "wakeSettled"),
@@ -1233,7 +1249,8 @@ export function decodeCommand(value: unknown): Command {
         ...optionalBoolean(record, "fork"),
         ...(record.research === undefined ? {} : { research: decodeResearchPlan(record.research) }),
         ...(record.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(record.researchProposal) }),
-        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
+        // A delegated task runs in Build, Research or Review — never Orchestrate, which the operation refuses.
+        ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
       };
     case "thread.task.cancel":
       return {
@@ -1346,13 +1363,22 @@ export function decodeCommand(value: unknown): Command {
         threadId: requireThreadId(record.threadId),
         question: requireField(record.question, type, "question"),
       };
-    case "thread.continue":
+    case "thread.continue": {
+      const selection = asModelSelection(record.modelSelection);
+      const namesModel = asString(record.provider) !== null || asString(record.model) !== null
+        || asString(record.speedMode) !== null || asString(record.thinkingEffort) !== null;
+      if (selection && namesModel) {
+        throw new CliError("INVALID_THREAD_OPTION", "thread.continue takes either modelSelection or provider/model, not both.", { exitCode: 2 });
+      }
       return {
         ...meta,
         type,
         threadId: requireThreadId(record.threadId),
         ...optionalString(record, "scheduledFor"),
+        ...(selection ? { modelSelection: selection } : {}),
+        ...decodeModelRequest(record, type),
       };
+    }
     case "forge.request.create":
       return {
         ...meta,
@@ -1412,12 +1438,12 @@ export function decodeCommand(value: unknown): Command {
     case "harness.profile.test":
       return { ...meta, type, profileId: requireField(record.profileId, type, "profileId"), ...(asString(record.model) !== null ? { model: asString(record.model)! } : {}) };
     case "harness.models.discover": {
-      const format = asString(record.apiFormat);
+      const { apiFormat } = optionalEnum(record, "apiFormat", ["chat", "responses", "anthropic"] as const, type);
       return {
         ...meta,
         type,
         baseUrl: requireField(record.baseUrl, type, "baseUrl"),
-        apiFormat: format === "responses" || format === "anthropic" ? format : "chat",
+        apiFormat: apiFormat ?? "chat",
         ...(asString(record.apiKeyEnv) !== null ? { apiKeyEnv: asString(record.apiKeyEnv)! } : {}),
       };
     }
@@ -1626,6 +1652,7 @@ export function decodeQuery(value: unknown): Query {
     case "usage.stats":
       return { type, ...optionalEnum(record, "range", ["7d", "30d", "all"] as const satisfies readonly StatsRange[], type) };
     case "usage.limits":
+    case "usage.refresh":
     case "usage.protection":
     case "queue.read":
     case "remote.status":

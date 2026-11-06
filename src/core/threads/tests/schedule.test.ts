@@ -318,11 +318,12 @@ describe("holding a queued message for the reset", () => {
     const row = { thread: (await store.readThreadRecord(thread.id))!, turns: await store.readTurns(thread.id) };
     const waiting = row.turns.find((turn) => turn.id === queued.turn.id)!;
     expect(queueAdmission(row, waiting, [row], {} as CliConfig, now).blocked).toContain("claude: usage exhausted");
-    // After the reset lapses the next settle promotes it.
+    // After the reset lapses the held turn is runnable again — and a fresh
+    // send queues behind it instead of running ahead of it.
     now += 3600_000 + 1000;
     const retry = await sendTurn(store, thread.id, { prompt: "meanwhile" });
-    await completeTurn(store, thread.id, retry.turn.id, { text: "done" });
-    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "running" });
+    expect(retry.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
   });
 });
 
@@ -367,13 +368,18 @@ describe("a snoozed thread holds its queued turn at settle", () => {
     const row = { thread: (await store.readThreadRecord(thread.id))!, turns: await store.readTurns(thread.id) };
     const waiting = row.turns.find((turn) => turn.id === queued.turn.id)!;
     expect(queueAdmission(row, waiting, [row], {} as CliConfig, now).blocked).toContain("Thread is not active");
-    // Once the thread is active again the next settle promotes it, so the
-    // held turn is not stranded: it runs with the following turn.
+    // Once the thread is active again the held turn is admissible: a fresh
+    // send queues behind it, and the admission path runs the older first —
+    // taking the newer message along, older text first.
     await unsnoozeThread(store, thread.id);
     const retry = await sendTurn(store, thread.id, { prompt: "meanwhile" });
-    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: retry.turn.id, prompt: "meanwhile" });
+    expect(retry.turn).toMatchObject({ status: "queued", heldAtSettle: true });
+    const admitted = await promoteDueScheduledTurn(store, thread.id, queued.turn.id);
+    expect(admitted?.id).toBe(queued.turn.id);
+    const text = turnPrompt(await store.readMessages(thread.id), admitted!)?.text ?? "sent while it ran";
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: admitted!.id, prompt: text });
     await settleRuns();
-    expect(sent).toEqual(["the turn that settles", "meanwhile", "sent while it ran"]);
+    expect(sent).toEqual(["the turn that settles", "sent while it ran\n\nmeanwhile"]);
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "completed" });
   });
 
@@ -385,11 +391,13 @@ describe("a snoozed thread holds its queued turn at settle", () => {
     const queued = await sendTurn(store, thread.id, { prompt: "queued behind it", delivery: "queue" });
     await snoozeThread(store, thread.id, until);
     await interruptTurn(store, thread.id, running.turn.id);
-    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+    // A fresh send queues behind the held turn instead of running on the snoozed thread.
+    const retry = await sendTurn(store, thread.id, { prompt: "work again" });
+    expect(retry.turn).toMatchObject({ status: "queued", heldAtSettle: true });
     // Orphan recovery: the replacement turn's owner is gone, but the thread
     // is still snoozed, so recovery interrupts without promoting.
-    const retry = await sendTurn(store, thread.id, { prompt: "work again" });
-    await store.updateTurn(thread.id, retry.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    await store.updateTurn(thread.id, retry.turn.id, { status: "running", owner: { pid: 2_147_483_647, host: os.hostname() } });
     const recovered = await reconcileOrphanedTurn(store, thread.id);
     expect(recovered?.promoted).toBeNull();
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === retry.turn.id)).toMatchObject({ status: "interrupted" });

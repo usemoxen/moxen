@@ -21,10 +21,8 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import type {
-  CanUseTool,
   HookCallbackMatcher,
   HookEvent,
-  OnUserDialog,
   PermissionMode,
   PermissionResult,
   SDKMessage,
@@ -55,11 +53,13 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   ThreadId,
   TurnId,
   SideAnswer,
   SideQuestionInput,
 } from "../spi.js";
+import { dropTurnWaiter } from "../spi.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { mcpSignature, type McpServerSpec } from "../../mcp.js";
 import {
@@ -242,7 +242,6 @@ interface ClaudeSession {
   basePermissionMode: PermissionMode;
   runtimeMode: RuntimeMode;
   interactionMode: InteractionMode;
-  toolUseThreads: Map<string, ThreadId>;
   /**
    * Name and input per in-flight `tool_use` id. The matching `tool_result`
    * carries neither, and the transcript folds a call's rows onto the
@@ -250,7 +249,6 @@ interface ClaudeSession {
    * collapses from "Read note.txt" to a nameless "Tool call".
    */
   toolUseCalls: Map<string, { name: string; input: Record<string, unknown> }>;
-  lastActiveThreadId: ThreadId | null;
   parkedPermissions: Map<string, ParkedRequest>;
   parkedInputs: Map<string, ParkedRequest & { input: Record<string, unknown> }>;
   sessionAllows: Set<string>;
@@ -415,11 +413,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   private readonly resumable = new Map<ThreadId, string>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
-  /** The exact callback handed to the SDK as `canUseTool`; tests drive it directly. */
-  readonly handlePermissionRequest: CanUseTool;
-  /** The exact callback handed to the SDK as `onUserDialog`; tests drive it directly. */
-  readonly handleUserDialog: OnUserDialog;
-
   constructor(options: ClaudeDriverOptions = {}) {
     this.settings = normalizeClaudeSettings(options.settings);
     this.baseEnv = options.env ?? process.env;
@@ -427,9 +420,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.sessionApi = options.sessionApi ?? new SdkSessionApi();
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
     this.skillsMod = options.skillsMod ?? null;
-    this.handlePermissionRequest = (toolName, input, callbackOptions) =>
-      this.onPermissionRequest(toolName, input, callbackOptions);
-    this.handleUserDialog = (request, dialogOptions) => this.onUserDialog(request, dialogOptions);
   }
 
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
@@ -543,9 +533,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         basePermissionMode,
         runtimeMode: input.runtimeMode ?? "full-access",
         interactionMode: input.interactionMode ?? "default",
-        toolUseThreads: new Map(),
         toolUseCalls: new Map(),
-        lastActiveThreadId: null,
         parkedPermissions: new Map(),
         parkedInputs: new Map(),
         sessionAllows: new Set(),
@@ -612,6 +600,18 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     await this.refreshCost(session);
     const mapped = claudeContextUsageOf(await session.query.getContextUsage({ detail: "summary" }));
     return mapped === null ? null : { ...mapped, costUsd: session.usage.costUsd };
+  };
+
+  /**
+   * Explicit freshness ask: probe an already-open session, never start one.
+   * The probe publishes through the normal event path too; the returned
+   * windows let the caller record them without waiting for the pump.
+   */
+  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
+    if (!session) return null;
+    const windows = await this.probeUsage(session);
+    return windows.length > 0 ? { key: "claude", windows } : null;
   };
 
   /**
@@ -897,7 +897,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       };
       session.transcript.push(turn);
       session.turnsSinceCompaction += 1;
-      session.lastActiveThreadId = session.threadId;
       session.input.push(promptForEffort(input.prompt, effort), input.images ?? []);
       return { threadId: session.threadId, turnId: turn.id };
     });
@@ -986,21 +985,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       });
     }
     return await new Promise<DriverTurnOutcome>((resolve, reject) => {
+      const waiter = { resolve, reject };
       const list = session.waiters.get(turnId) ?? [];
-      list.push({ resolve, reject });
+      list.push(waiter);
       session.waiters.set(turnId, list);
       signal?.addEventListener(
         "abort",
         () => {
-          const pending = session.waiters.get(turnId) ?? [];
-          session.waiters.delete(turnId);
-          for (const waiter of pending) {
-            waiter.reject(
-              new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-                details: { threadId, turnId },
-              }),
-            );
-          }
+          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
+          reject(
+            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+              details: { threadId, turnId },
+            }),
+          );
         },
         { once: true },
       );
@@ -1030,31 +1027,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
 
   // -- permissions --------------------------------------------------------
 
-  private sessionForToolUse(toolUseId: string | undefined): ClaudeSession | null {
-    if (toolUseId) {
-      for (const session of this.sessions.values()) {
-        const threadId = session.toolUseThreads.get(toolUseId);
-        if (threadId === session.threadId) return session;
-      }
-    }
-    // Unambiguous single session (e.g. a parked prompt answered before any
-    // tool_use block was observed).
-    if (this.sessions.size === 1) {
-      return [...this.sessions.values()][0]!;
-    }
-    for (const session of this.sessions.values()) {
-      if (session.lastActiveThreadId === session.threadId) return session;
-    }
-    return null;
-  }
-
+  /**
+   * A permission callback belongs to the session whose query made it: the
+   * closure below hands each query its own, so a closed thread's in-flight
+   * call can never be parked on (and answered for) a surviving session.
+   * Fail closed: a callback for a session that is gone is denied.
+   */
   private onPermissionRequest(
+    session: ClaudeSession,
     toolName: string,
     input: Record<string, unknown>,
     callbackOptions: { toolUseID?: string; signal: AbortSignal },
   ): Promise<PermissionResult> {
-    const session = this.sessionForToolUse(callbackOptions.toolUseID);
-    if (!session || session.closed) {
+    if (session.closed) {
       return Promise.resolve({ behavior: "deny", message: "Claude session is unavailable." });
     }
     // AskUserQuestion always surfaces, regardless of runtime mode.
@@ -1835,8 +1820,6 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         this.flushNote(session, open);
       }
       if (block["type"] === "tool_use" && typeof block["id"] === "string") {
-        session.toolUseThreads.set(block["id"] as string, session.threadId);
-        session.lastActiveThreadId = session.threadId;
         const name = typeof block["name"] === "string" ? (block["name"] as string) : "unknown";
         const input = block["input"] !== null && typeof block["input"] === "object" && !Array.isArray(block["input"])
           ? (block["input"] as Record<string, unknown>)
@@ -2200,12 +2183,12 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * through the answer panel — and answered with the CLI's own result ids.
    */
   private async onUserDialog(
+    session: ClaudeSession,
     request: UserDialogRequest,
     options: { signal: AbortSignal },
   ): Promise<UserDialogResult | null> {
     if (request.dialogKind !== REFUSAL_FALLBACK_DIALOG) return { behavior: "cancelled" };
-    const session = this.sessionForToolUse(request.toolUseID);
-    if (!session || session.closed) return { behavior: "cancelled" };
+    if (session.closed) return { behavior: "cancelled" };
     const payload = request.payload;
     const original = typeof payload["originalModel"] === "string" ? claudeModelName(payload["originalModel"]) : "The model";
     const fallback = typeof payload["fallbackModel"] === "string" ? claudeModelName(payload["fallbackModel"]) : "the fallback model";
@@ -2250,19 +2233,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     await Promise.race([this.probeUsage(session), new Promise((resolve) => setTimeout(resolve, COST_REFRESH_WAIT_MS))]);
   }
 
-  private async probeUsage(session: ClaudeSession): Promise<void> {
+  private async probeUsage(session: ClaudeSession): Promise<RateLimitWindow[]> {
     session.usageProbedAt = Date.now();
     try {
       // Method call (not detached): control methods may rely on `this`.
       const query = session.query;
-      if (typeof query.usageExperimental !== "function") return;
+      if (typeof query.usageExperimental !== "function") return [];
       const response = (await Promise.race([
         query.usageExperimental({ skipBehaviors: true }),
         new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error("usage probe timed out")), this.usageProbeTimeoutMs);
         }),
       ])) as Parameters<typeof mapUsageProbe>[0];
-      if (session.closed) return;
+      if (session.closed) return [];
       // The session's running cost, counted per request — unlike a turn's
       // `result`, which only arrives when the turn ends (and never during a
       // long one). A resumed session's restored spend arrives here too.
@@ -2270,22 +2253,25 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         session.usage = { ...session.usage, costUsd: Math.max(session.usage.costUsd, response.session.total_cost_usd) };
       }
       const mapped = mapUsageProbe(response);
-      if (!mapped.available) return;
+      if (!mapped.available) return [];
+      const windows: RateLimitWindow[] = mapped.windows.map((window) => ({
+        id: window.id,
+        label: window.label,
+        resetsAt: window.resetsAt,
+        exhausted: window.usedPercent >= 100,
+        usedPercent: window.usedPercent,
+      }));
       this.publish({
         type: "rate-limits.updated",
         provider: "claude",
         threadId: session.threadId,
-        windows: mapped.windows.map((window) => ({
-          id: window.id,
-          label: window.label,
-          resetsAt: window.resetsAt,
-          exhausted: window.usedPercent >= 100,
-          usedPercent: window.usedPercent,
-        })),
+        windows,
         raw: { subscriptionType: mapped.subscriptionType, costUsd: mapped.costUsd },
       });
+      return windows;
     } catch {
       // Best effort: stream events still carry live windows.
+      return [];
     }
   }
 
@@ -2425,7 +2411,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       ...this.sessionSettings(session),
       env,
       pathToClaudeCodeExecutable: resolveClaudeExecutable(this.settings.binaryPath, this.baseEnv),
-      canUseTool: this.handlePermissionRequest,
+      canUseTool: (toolName, input, callbackOptions) => this.onPermissionRequest(session, toolName, input, callbackOptions),
       hooks: this.sessionHooks(session),
       // Text streams token by token (`stream_event`), and thinking comes back
       // as readable summaries rather than the default, which can be none.
@@ -2440,7 +2426,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       // The refusal-fallback choice ("retry on the fallback model, or edit
       // the prompt"): without it declared, a flagged request just ends the
       // turn with a refusal whenever the user turned automatic switching off.
-      onUserDialog: this.handleUserDialog,
+      onUserDialog: (request, dialogOptions) => this.onUserDialog(session, request, dialogOptions),
       supportedDialogKinds: [REFUSAL_FALLBACK_DIALOG],
     };
   }

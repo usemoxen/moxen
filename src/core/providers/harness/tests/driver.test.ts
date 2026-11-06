@@ -4,11 +4,12 @@ import path from "node:path";
 
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "../../../threads/requestactivity.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
-import { HarnessDriver } from "../driver.js";
+import { HarnessDriver, type HarnessDriverOptions } from "../driver.js";
+import type { McpClient } from "../mcpclient.js";
 import type { ChatRequest } from "../transport/chat.js";
 import type { ModelEvent } from "../types.js";
 
@@ -364,5 +365,126 @@ describe("HarnessDriver", () => {
     await start(other.driver);
     const { turnId } = await run(other.driver.sendTurn({ threadId: "t1", prompt: "/compact" }));
     await expect(other.driver.awaitTurn("t1", turnId)).resolves.toMatchObject({ status: "failed", error: expect.stringMatching(/too short to compact/) });
+  });
+});
+
+describe("HarnessDriver stops racing a start", () => {
+  const gatedServer = { name: "gated", type: "stdio", command: "gated-mcp", args: [], env: {} } as const;
+
+  function gatedDriver(connectMcp: HarnessDriverOptions["connectMcp"], transport?: HarnessDriverOptions["transport"]) {
+    return new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      ...(transport ? { transport } : {}),
+      ...(connectMcp ? { connectMcp } : {}),
+    });
+  }
+
+  it("does not leave a starting session live when stopAll wins the race", async () => {
+    // A start whose MCP servers are still connecting lives in `starting`,
+    // not `sessions`: a stop that only reads `sessions` used to return while
+    // the start resolved live afterwards, with a pool nobody closes.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let connectCalls = 0;
+    let closed = 0;
+    const driver = gatedDriver(async () => {
+      connectCalls += 1;
+      await gate;
+      return {
+        tools: [],
+        dropped: 0,
+        alive: true,
+        call: async () => ({ text: "", isError: false }),
+        close: async () => { closed += 1; },
+      } as unknown as McpClient;
+    });
+    const starting = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: [{ ...gatedServer }] }),
+    );
+    const deadline = Date.now() + 3000;
+    while (connectCalls === 0) {
+      if (Date.now() > deadline) throw new Error("the start never reached the MCP connect");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const stopping = run(driver.stopAll());
+    release();
+    await stopping;
+    await starting;
+    expect(await run(driver.hasSession("t1"))).toBe(false);
+    expect(await run(driver.listSessions())).toEqual([]);
+    expect(closed).toBe(1);
+  });
+
+  it("stopSession waits for the MCP pool to close before it resolves", async () => {
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const order: string[] = [];
+    const driver = gatedDriver(async () => ({
+      tools: [],
+      dropped: 0,
+      alive: true,
+      call: async () => ({ text: "", isError: false }),
+      close: async () => {
+        await closeGate;
+        order.push("mcp-closed");
+      },
+    }) as unknown as McpClient);
+    await run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: [{ ...gatedServer }] }),
+    );
+    const stopping = run(driver.stopSession("t1")).then(() => void order.push("stop-resolved"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The close is still gated: a stop that resolves here left children running.
+    expect(order).toEqual([]);
+    releaseClose();
+    await stopping;
+    expect(order).toEqual(["mcp-closed", "stop-resolved"]);
+  });
+
+  it("stopSession still resolves when the MCP close never settles", async () => {
+    // A hung close must not hang the stop: the bound below is faked, the
+    // real one is a few seconds.
+    vi.useFakeTimers();
+    try {
+      let closeCalls = 0;
+      const driver = gatedDriver(async () => ({
+        tools: [],
+        dropped: 0,
+        alive: true,
+        call: async () => ({ text: "", isError: false }),
+        close: () => {
+          closeCalls += 1;
+          return new Promise<void>(() => {});
+        },
+      }) as unknown as McpClient);
+      await run(
+        driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: [{ ...gatedServer }] }),
+      );
+      const stopping = run(driver.stopSession("t1"));
+      await vi.advanceTimersByTimeAsync(30_000);
+      await stopping;
+      expect(closeCalls).toBe(1);
+      expect(await run(driver.hasSession("t1"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborting one awaitTurn waiter leaves the other waiter to settle", async () => {
+    const calls: ModelEvent[] = [{ type: "tool.call", call: { id: "c1", name: "bash", arguments: JSON.stringify({ command: "sleep 30" }) } }, { type: "finish", reason: "tool-calls" }];
+    const { driver } = driverWith([calls]);
+    await start(driver);
+    const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "wait" }));
+    const first = new AbortController();
+    const second = new AbortController();
+    const waitingFirst = driver.awaitTurn("t1", turnId, first.signal);
+    const waitingSecond = driver.awaitTurn("t1", turnId, second.signal);
+    first.abort();
+    await expect(waitingFirst).rejects.toMatchObject({ code: "TURN_ABORTED" });
+    await run(driver.interruptTurn("t1"));
+    await expect(waitingSecond).resolves.toMatchObject({ status: "interrupted" });
   });
 });

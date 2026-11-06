@@ -548,6 +548,12 @@ describe("formatTokenCount", () => {
     expect(formatTokenCount(1_400_000)).toBe("1.4m");
     expect(formatTokenCount(842)).toBe("842");
   });
+
+  it("reads a rounded-up thousand thousands as millions, not 1000k", () => {
+    expect(formatTokenCount(999_999)).toBe("1m");
+    expect(formatTokenCount(999_500)).toBe("1m");
+    expect(formatTokenCount(999_499)).toBe("999k");
+  });
 });
 
 describe("formatContextUsage", () => {

@@ -18,7 +18,7 @@
 import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor } from "./idle.js";
 import * as Effect from "effect/Effect";
-import { mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -36,6 +36,7 @@ import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
+import { renameReplacing, writeAtomic } from "../infra/atomic.js";
 import {
   ensureStoredProject,
   listStoredProjects,
@@ -75,6 +76,7 @@ import {
   delegationForChild,
   failTurn,
   reconcileOrphanedTurn,
+  holdStrandedPromotions,
   inspectThread,
   interruptTurn,
   listThreads,
@@ -91,11 +93,11 @@ import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhaust
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
-import { reportHeadline, taskNotificationText, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -411,55 +413,77 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
 /** The caller has claimed `turn` (`claimRun`); every way out here settles or frees it. */
 async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<void> {
   const { store } = ctx;
-  const thread = await store.readThreadRecord(threadId);
-  if (!thread) { store.untrackRunning(turn.id); return; }
-  // One message, or several queued ones batched into this turn at promotion.
-  const message = turnPrompt(await store.readMessages(threadId), turn);
-  if (message === null) {
-    await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
-    return;
-  }
-  const selection = turn.modelSelection ?? thread.modelSelection;
-  const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
-  let driver: TurnDriver;
-  let setup: Awaited<ReturnType<typeof sessionSetup>>;
   try {
-    driver = ctx.driverFor(selection.instanceId);
-    // Codex and Harness fix MCP definitions at session creation. Resume the
-    // same provider conversation with the request-scoped submission tool.
-    if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
-    setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
-    await driver.updateMcpServers?.(threadId, setup.mcpServers);
-  } catch (cause) {
-    const error = cause instanceof Error ? cause.message : String(cause);
-    await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
-    return;
-  }
-  const images = await imagesOf(message.attachments);
-  const steps = deliveredSteps(setup);
-  void executeTurn({
-    store,
-    driver,
-    threadId,
-    storeTurnId: turn.id,
-    prompt: promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup),
-    ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
-    ...(setup.fresh ? { freshConversation: true } : {}),
-    interactionMode: turn.interactionMode,
-    ...(images.length > 0 ? { images } : {}),
-    modelSelection: selection,
-    workingDirectory: thread.env.path,
-    ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
-    ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
-  })
-    // A delegated task resumed after a usage limit (or recovered after a crash)
-    // still owes its parent the report when it finally ends.
-    .then(async () => {
-      await syncResearchRun(ctx, threadId);
-      await notifyParentOfResumedTask(ctx, threadId);
+    const thread = await store.readThreadRecord(threadId);
+    if (!thread) { store.untrackRunning(turn.id); return; }
+    // Turns queued behind this one if it settles below with no runner to take
+    // a promotion: settled without promoting, held for admission instead.
+    const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
+    // One message, or several queued ones batched into this turn at promotion.
+    const message = turnPrompt(await store.readMessages(threadId), turn);
+    if (message === null) {
+      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
+    const selection = turn.modelSelection ?? thread.modelSelection;
+    const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
+    let driver: TurnDriver;
+    let setup: Awaited<ReturnType<typeof sessionSetup>>;
+    try {
+      driver = ctx.driverFor(selection.instanceId);
+      // Codex and Harness fix MCP definitions at session creation. Resume the
+      // same provider conversation with the request-scoped submission tool.
+      if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
+      setup = await sessionSetup(ctx, turnThread, selection.instanceId);
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+      await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
+      // Config or rule files changed while the session sat idle: a live session
+      // takes them now, like a fresh send does — never a reason to fail the resume.
+      await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      // The failed start settled nothing that runs: a promotion it made has no
+      // runner to take it, so hand those turns back to the admission path.
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
+    // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
+    const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const images = await imagesOf(message.attachments);
+    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    void executeTurn({
+      store,
+      driver,
+      threadId,
+      storeTurnId: turn.id,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
+      ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+      ...(setup.fresh ? { freshConversation: true } : {}),
+      interactionMode: turn.interactionMode,
+      ...(images.length > 0 ? { images } : {}),
+      modelSelection: selection,
+      workingDirectory: thread.env.path,
+      ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
+      ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
     })
-    .catch(() => undefined);
+      // A delegated task resumed after a usage limit (or recovered after a crash)
+      // still owes its parent the report when it finally ends.
+      .then(async () => {
+        await syncResearchRun(ctx, threadId);
+        await notifyParentOfResumedTask(ctx, threadId);
+      })
+      .catch(() => undefined);
+  } catch (cause) {
+    // A ledger read (or prompt build) failed before any runner took the turn:
+    // free the admission claim — the turn stays running for orphan recovery
+    // to reap later — and let the caller see the failure.
+    store.untrackRunning(turn.id);
+    throw cause;
+  }
 }
 
 // -- scheduled turns --------------------------------------------------------------
@@ -1043,13 +1067,17 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   const title = continuedTitle(source.title);
   const destinationId = request.destinationThreadId ?? source.usagePause?.continuedThreadId;
   const existing = destinationId ? await store.readThreadRecord(destinationId) : null;
+  // Review never stays on a thread: a continued review child, or a carried
+  // one-off review turn, starts the new thread in Build instead.
+  const carriedMode = request.interactionMode ?? source.interactionMode;
+  const interactionMode = carriedMode === "review" ? "default" : carriedMode;
   const created = existing ?? await createThread(store, {
     ...(destinationId ? { id: destinationId } : {}),
     projectId: source.projectId,
     title,
     modelSelection: request.modelSelection ?? source.modelSelection,
     runtimeMode: request.runtimeMode ?? source.runtimeMode,
-    interactionMode: request.interactionMode ?? source.interactionMode,
+    interactionMode,
     env: source.env,
     continuedFrom: source.id,
   });
@@ -1077,7 +1105,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
   }
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
-  const adopted = await adoptRunningTasks(store, source.id, created.id);
+  const adopted = await adoptTasks(store, source.id, created.id);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
@@ -1095,7 +1123,7 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
     threadId: source.id,
     turnId: null,
     kind: "thread.continued",
-    summary: `Continued in "${title}"`,
+    summary: carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`,
     payload: { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null, automatic: request.automatic === true },
     createdAt: store.nowIso(),
   });
@@ -1110,8 +1138,8 @@ export async function continueThread(ctx: OperationContext, request: ContinueThr
  * on, and two threads must not act on the same news. A turn still open on it
  * is left to finish (stopping the session would cut it off), so only the
  * tasks the provider lets us name are stopped then. Nothing here touches the
- * delegations: running children were re-pointed (`adoptRunningTasks`) and
- * finished ones stay reachable. A thread that merely finished a turn never
+ * delegations: delegated children were re-pointed (`adoptTasks`), running
+ * and idle alike. A thread that merely finished a turn never
  * comes through here, so its wake-ups stay.
  */
 async function endContinuedSession(ctx: OperationContext, source: StoredThread): Promise<void> {
@@ -1150,6 +1178,9 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
     status: "running",
     ...(row.baseBranch !== undefined ? { baseBranch: row.baseBranch } : {}),
     ...(row.notify ? { notify: true } : {}),
+    // The continuation is the same task lineage: it inherits who the
+    // reviewer shared a model with, but pins its own verdict when it settles.
+    ...(row.modelSnapshot ? { modelSnapshot: row.modelSnapshot } : {}),
     continuesTaskId: row.continuesTaskId ?? row.childThreadId,
     createdAt: now,
     updatedAt: now,
@@ -1159,45 +1190,50 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
 }
 
 /**
- * An orchestrator that carries on in a new thread takes its running tasks
- * with it: their delegations name the continuation as parent, so their
- * notifications reach the conversation that is still working.
+ * An orchestrator that carries on in a new thread hands over every task it
+ * delegated — running, idle, finished, cancelled, and ones that themselves
+ * continued: their delegations name the continuation as parent, so
+ * `task_send`, `task_ask`, `message_queue`, `task_cancel`, `task_status` and
+ * completion notifications from then on resolve against the conversation
+ * that is still working. The old thread owns nothing afterwards: every one
+ * of those reads as `TASK_NOT_FOUND` there. A task keeps its own provider,
+ * model and modes; only the parent link moves, so this grants the new
+ * thread no extra access. Research roles stay out: the run owns their
+ * traffic, and the lead still reaches them through it.
+ *
+ * The re-pointing is one atomic file rewrite, so a notification deciding
+ * mid-transfer sees every row before or every row after it, never a mixture
+ * that would tell the old parent about a task that already reports to the
+ * new one. A notification queued and fully delivered just before the
+ * transfer still reaches the old thread; the task's next report — and
+ * `task_status` on the new parent at any time — cover it.
  */
-async function adoptRunningTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
+async function adoptTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
   const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
-    (row) => row.parentThreadId === sourceId && row.status === "running" && row.continuedIn === undefined,
+    (row) => row.parentThreadId === sourceId,
   );
-  const adopted: { taskId: string; title: string }[] = [];
+  const moved: { taskId: string; title: string }[] = [];
+  const patches: { id: string; patch: { parentThreadId: string } }[] = [];
   for (const row of rows) {
-    // A row's `running` is not kept up to date when a task finishes: ask the task itself.
-    if (!(await taskUnfinished(store, row.childThreadId))) continue;
-    await store.updateDelegation(row.id, { parentThreadId: destinationId });
+    // A research role's messages go through its run, never through the
+    // delegation row: re-pointing it would only list run traffic as the new
+    // thread's tasks.
     const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
-    adopted.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
+    if (child?.researchRole !== undefined) continue;
+    patches.push({ id: row.id, patch: { parentThreadId: destinationId } });
+    moved.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
   }
-  return adopted;
+  await store.updateDelegations(patches);
+  return moved;
 }
 
-/**
- * Whether a delegated task still owes its parent a result: a turn running or
- * queued, or its last run stopped by a usage limit with no resume left waiting.
- */
-async function taskUnfinished(store: ThreadStore, childThreadId: string): Promise<boolean> {
-  const turns = await store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
-  if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return true;
-  const lastRan = turns.findLast((turn) => turn.status === "completed");
-  if (!lastRan) return false;
-  const activities = await store.readActivities(childThreadId).catch(() => [] as StoredActivity[]);
-  return activities.some((activity) => (activity.kind === "usage.limit" || activity.kind === "usage.wrap-up") && activity.createdAt >= lastRan.createdAt);
-}
-
-/** The handoff's note of tasks still running, which now report to the new thread. */
+/** The handoff's note of delegated tasks that moved with it, which now report to the new thread. */
 export function runningTasksNote(tasks: readonly { taskId: string; title: string }[]): string {
   if (tasks.length === 0) return "";
   return [
     "",
     "",
-    "## Delegated tasks still running",
+    "## Delegated tasks that moved with this thread",
     "These tasks were delegated from the previous thread and now report here; a task-notification arrives as each settles.",
     ...tasks.map((task) => `- "${task.title}" (taskId ${task.taskId})`),
   ].join("\n");
@@ -1213,6 +1249,26 @@ async function delegationOf(
   if (!row) return null;
   const parent = await store.readThreadRecord(row.parentThreadId).catch(() => null);
   return { parentTitle: parent?.title ?? row.parentThreadId, baseBranch: row.baseBranch ?? null };
+}
+
+/**
+ * The live thread this one continued in, following the continuation chain
+ * to its end. Null when the thread never continued, or nothing of the chain
+ * is left (a deleted continuation owns nothing, so there is nothing to
+ * split with). A continued thread starts no new delegations: they would
+ * answer to a dormant thread while its continuation steers beside them.
+ */
+async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
+  let current: string | undefined = threadId;
+  let latest: string | null = null;
+  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+    const notes = await store.readActivities(current).catch(() => []);
+    const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
+    if (next === undefined) break;
+    latest = next;
+    current = (await store.readThreadRecord(next).catch(() => null)) === null ? undefined : next;
+  }
+  return latest !== null && current !== undefined ? latest : null;
 }
 
 async function projectById(storeRoot: string, projectId: string): Promise<StoredProject | null> {
@@ -1284,7 +1340,21 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
   }
   const fresh = (sent.delivery === "started" || sent.delivery === "restarted") && sent.turn.status === "running";
-  if (!fresh) return { ...sent, run: null };
+  if (!fresh) {
+    // A send that queued behind an older held turn: start the older now when
+    // it is admissible, so it goes first without waiting for the next tick.
+    // Anything still blocked simply stays queued.
+    if (sent.turn.status === "queued" && sent.turn.heldAtSettle === true && sent.delivery === "queued" && !input.queue && input.scheduledFor === undefined) {
+      await runDueScheduledTurn(ctx, thread.id).catch(() => undefined);
+    }
+    return { ...sent, run: null };
+  }
+  // The turn is live in this process from here until `executeTurn` takes it:
+  // a stop landing while the session starts still promotes the turn queued
+  // behind it, and this claim is what tells that stop a runner is coming.
+  // Every exit below either hands the turn to `executeTurn` (which replaces
+  // the claim with its abort) or releases it.
+  const claimed = store.claimRun(sent.turn.id);
 
   const turnModel = sent.turn.modelSelection ?? sent.thread.modelSelection;
   // The turn's own mode: a one-off (`/research`) differs from the thread's, which stays as it was.
@@ -1304,7 +1374,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
+    const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
+    if (claimed) store.untrackRunning(sent.turn.id);
     await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    // The failed start settled nothing that runs: a promotion it made has no
+    // runner to take it, so hand those turns back to the admission path.
+    await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   // A stop that landed while the session was starting already settled the
@@ -1340,6 +1415,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
     });
+    if (claimed) store.untrackRunning(sent.turn.id);
     return { ...sent, run: Promise.resolve() };
   }
   const images = providerImages(uploads);
@@ -1350,24 +1426,32 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
-  const run = executeTurn({
-    store,
-    driver,
-    threadId: thread.id,
-    storeTurnId: sent.turn.id,
-    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
-    ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
-    ...(setup.fresh ? { freshConversation: true } : {}),
-    ...(images.length > 0 ? { images } : {}),
-    // Always the turn's own model, so a live session switches when the
-    // thread's model changed since it started.
-    modelSelection: turnModel,
-    interactionMode: sent.turn.interactionMode,
-    workingDirectory: sent.thread.env.path,
-    ...(onEvent ? { onEvent } : {}),
-    ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
-    ...longThreadHook(ctx, thread.id),
-  }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  let run: Promise<void>;
+  try {
+    run = executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: sent.turn.id,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+      ...(setup.fresh ? { freshConversation: true } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      // Always the turn's own model, so a live session switches when the
+      // thread's model changed since it started.
+      modelSelection: turnModel,
+      interactionMode: sent.turn.interactionMode,
+      workingDirectory: sent.thread.env.path,
+      ...(onEvent ? { onEvent } : {}),
+      ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
+      ...longThreadHook(ctx, thread.id),
+    }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+  } catch (cause) {
+    // The prompt never reached a runner (a ledger read failed while building
+    // it): release the claim rather than leaving the turn tracked forever.
+    if (claimed) store.untrackRunning(sent.turn.id);
+    throw cause;
+  }
   return { ...sent, run };
 }
 
@@ -2096,7 +2180,7 @@ export interface DelegateRequest extends ModelRequest {
    * empty one: same provider, the parent's checkout (`shared`).
    */
   readonly fork?: boolean;
-  /** The mode the task runs in: Build (the default) or Research. Orchestrate is for the one delegating, so it is refused. */
+  /** The mode the task runs in: Build (the default), Research or Review. Orchestrate is for the one delegating, so it is refused. */
   readonly interactionMode?: InteractionMode;
 }
 
@@ -2145,15 +2229,97 @@ export const TASK_NOTIFICATION_BATCH_MS = 2_000;
 
 const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; taskIds: string[] }>();
 
+/** Pending notification batches beside the thread store, so a server restart inside the batch window loses nothing. */
+const TASK_NOTIFICATION_BATCHES_FILE = "task-notification-batches.json";
+
+function taskNotificationBatchesFile(storeRoot: string): string {
+  return path.join(storeRoot, TASK_NOTIFICATION_BATCHES_FILE);
+}
+
+async function readTaskNotificationBatches(storeRoot: string): Promise<Record<string, string[]>> {
+  const file = taskNotificationBatchesFile(storeRoot);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    // Missing (or unreadable for now): no batches pending.
+    return {};
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not a batch map");
+  } catch {
+    // Never silently drop every pending batch: move the corrupt file aside
+    // and leave a warning where the server's own warnings go.
+    await quarantineTaskNotificationBatches(storeRoot, file, text).catch(() => undefined);
+    return {};
+  }
+  const batches: Record<string, string[]> = {};
+  for (const [parent, taskIds] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof parent === "string" && Array.isArray(taskIds) && taskIds.every((id): id is string => typeof id === "string" && id.length > 0)) batches[parent] = [...new Set(taskIds)];
+  }
+  return batches;
+}
+
+/** A corrupt batch file is moved aside (never deleted) with a server.log warning, so its batches are visibly dropped, not silently lost. */
+async function quarantineTaskNotificationBatches(storeRoot: string, file: string, text: string): Promise<void> {
+  const quarantined = `${file}.corrupt-${process.pid}-${Date.now()}`;
+  try {
+    await renameReplacing(file, quarantined);
+  } catch {
+    await writeAtomic(quarantined, text);
+  }
+  const line = `${new Date().toISOString()} task notifications: ${path.basename(file)} was corrupt; moved to ${path.basename(quarantined)} and its pending batches were dropped. The tasks must settle again to be reported.\n`;
+  await appendFile(path.join(storeRoot, "server.log"), line, "utf8");
+}
+
+/** File writes chain behind each other, so batches queued on different parents cannot drop each other's entries. */
+let batchFileChain: Promise<unknown> = Promise.resolve();
+
+async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, string[]>) => void): Promise<void> {
+  const run = batchFileChain.then(async () => {
+    const batches = await readTaskNotificationBatches(storeRoot);
+    update(batches);
+    await writeAtomic(taskNotificationBatchesFile(storeRoot), `${JSON.stringify(batches)}\n`);
+  });
+  batchFileChain = run.catch(() => undefined);
+  await run.catch(() => undefined);
+}
+
 /** Move an in-flight notification batch onto a newly protected thread's durable queue. */
 export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
     const pending = pendingNotifications.get(parentThreadId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    pendingNotifications.delete(parentThreadId);
-    await deliverTaskNotifications(ctx, parentThreadId, pending.taskIds);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingNotifications.delete(parentThreadId);
+    }
+    // Delivered before it is forgotten: a crash between the two replays the
+    // batch on restart (at-least-once), while forgetting first could lose it
+    // with the dying process. The union below keeps one flush to one message.
+    let replay: string[] = [];
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      replay = batches[parentThreadId] ?? [];
+    });
+    await deliverTaskNotifications(ctx, parentThreadId, [...new Set([...(pending?.taskIds ?? []), ...replay])]);
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      delete batches[parentThreadId];
+    });
   });
+}
+
+/**
+ * Deliver notification batches a restarted server inherited: tasks that
+ * settled inside the batch window before the previous process died. Called
+ * once at startup; each batch is forgotten once delivered, so replaying
+ * finds nothing left and delivers nothing twice.
+ */
+export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
+  const batches = await readTaskNotificationBatches(ctx.storeRoot);
+  for (const parentThreadId of Object.keys(batches)) {
+    await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
+  }
 }
 
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
@@ -2168,6 +2334,11 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
       const pending = pendingNotifications.get(parentThreadId);
       if (pending) clearTimeout(pending.timer);
       const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
+      // Persisted before the timer is armed: a restart inside the batch
+      // window replays the file, and the replay unions what is on disk.
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        batches[parentThreadId] = [...new Set([...(batches[parentThreadId] ?? []), ...taskIds])];
+      });
       const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
       timer.unref?.();
       pendingNotifications.set(parentThreadId, { timer, taskIds });
@@ -2212,6 +2383,68 @@ async function taskHasSettledForGood(ctx: OperationContext, childThreadId: strin
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
 }
 
+/**
+ * A review child's facts for its parent, pinned at settle. The pin lives on
+ * the delegation row — the verdict and report of the newest settled turn
+ * whose final message carries a `VERDICT` line — so a conversational
+ * follow-up turn cannot rewrite the settled verdict, while a follow-up
+ * that settles with its own verdict re-pins. The same-model comparison
+ * reads the delegation-time snapshot, never the live records. While the
+ * task runs, the facts are computed live and nothing is pinned.
+ */
+async function reviewFactsForTask(
+  ctx: OperationContext,
+  child: ThreadEnvelope,
+  parent: { modelSelection?: { instanceId: string; model: string } } | null,
+  row: StoredDelegation | undefined | null,
+  task: TaskView,
+): Promise<(ReviewFacts & { report: string | null }) | null> {
+  if (child.interactionMode !== "review") return null;
+  const modelOf = (selection: { instanceId: string; model: string } | undefined | null) =>
+    selection ? `${selection.instanceId}/${selection.model}` : null;
+  const snapshot = row?.modelSnapshot;
+  const childModel = snapshot?.child ?? modelOf(child.modelSelection);
+  const parentModel = snapshot?.parent ?? (parent === null ? null : modelOf(parent.modelSelection));
+  if (task.status === "running") {
+    return { ...reviewFactsOf({ finished: false, interactionMode: "review", report: null, childModel, parentModel })!, report: null };
+  }
+  const pinned = await settledReviewPin(ctx, child);
+  const report = pinned?.report ?? task.summary;
+  const facts = reviewFactsOf({ finished: true, interactionMode: "review", report, childModel, parentModel })!;
+  const owned = row ?? null;
+  if (owned !== null && (owned.review?.verdict !== facts.verdict || owned.review?.report !== report)) {
+    await ctx.store.updateDelegation(owned.id, { review: { verdict: facts.verdict, report } }).catch(() => undefined);
+  }
+  return { ...facts, report };
+}
+
+/**
+ * The newest settled turn whose final message carries a verdict, newest
+ * first. A conversational follow-up settles without one, so the search
+ * walks past it to the settled review; a follow-up that is itself a
+ * review re-pins with its own verdict. Null when no settled turn carries
+ * one — the missing-verdict path then says so visibly.
+ */
+async function settledReviewPin(
+  ctx: OperationContext,
+  child: ThreadEnvelope,
+): Promise<{ verdict: ReviewVerdict; report: string } | null> {
+  const [turns, messages] = await Promise.all([
+    ctx.store.readTurns(child.id).catch(() => [] as StoredTurn[]),
+    ctx.store.readMessages(child.id).catch(() => [] as StoredMessage[]),
+  ]);
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]!;
+    if (turn.status !== "completed") continue;
+    // The completion text lands last, so the first match walking back is
+    // the turn's final message rather than a mid-turn progress note.
+    const text = [...messages].reverse().find((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0)?.text ?? null;
+    const verdict = reviewVerdictOf(text);
+    if (verdict !== null && text !== null) return { verdict, report: text };
+  }
+  return null;
+}
+
 /** One task's settled facts: status, time, model, branch, headline, and what it changed. */
 export async function taskNotificationOf(ctx: OperationContext, childThreadId: string): Promise<TaskNotification | null> {
   const child = await threadWithLedger(ctx.store, childThreadId).catch(() => null);
@@ -2237,6 +2470,15 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  // A review task's verdict and findings ride in the notification itself, and a
+  // missing verdict (or a reviewer on the parent's own model) is said visibly.
+  // The facts are pinned at settle on the delegation row, so a follow-up
+  // turn cannot rewrite the settled verdict.
+  const rows = child.interactionMode === "review" ? await ctx.store.readDelegations().catch(() => []) : [];
+  const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined) ??
+    rows.find((candidate) => candidate.childThreadId === childThreadId);
+  const parent = row ? await ctx.store.readThreadRecord(row.parentThreadId).catch(() => null) : null;
+  const facts = await reviewFactsForTask(ctx, child, parent, row, task);
   return {
     taskId: childThreadId,
     title: child.title,
@@ -2248,6 +2490,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     filesChanged: changes?.files ?? null,
     additions: changes?.additions ?? null,
     deletions: changes?.deletions ?? null,
+    ...(facts === null ? {} : { review: facts }),
   };
 }
 
@@ -2293,6 +2536,16 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   if (tasks.length === 0) return;
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return;
+  if (parent.deletedAt != null) {
+    // Dropped, not queued and not thrown: the conversation is gone. One
+    // line in the server log; nothing more (MXN-290 review).
+    await appendFile(
+      path.join(ctx.storeRoot, "server.log"),
+      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${tasks.length} task(s)\n`,
+      "utf8",
+    ).catch(() => undefined);
+    return;
+  }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
   await startTurn(ctx, {
@@ -2448,6 +2701,19 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       details: { threadId: parentThreadId, archivedAt: parent.archivedAt },
     });
   }
+  // A thread that continued in a new one starts no new tasks: the row would
+  // answer to a dormant thread while its continuation steers beside it.
+  // Research roles start through the run, not through here, so the run's
+  // own machinery is exempt.
+  if (options.researchRole === undefined) {
+    const live = await continuedLiveThread(ctx.store, parentThreadId);
+    if (live !== null) {
+      throw new CliError("THREAD_CONTINUED", `Thread ${parentThreadId} was continued in ${live}; delegate from ${live} instead.`, {
+        exitCode: 4,
+        details: { threadId: parentThreadId, continuedIn: live },
+      });
+    }
+  }
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
@@ -2455,9 +2721,9 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
   const { runtimeMode } = requireParentModes(parent);
-  // A task's mode is the delegating model's choice, Build unless it asks for Research. Orchestrate delegates, and a task never does.
+  // A task's mode is the delegating model's choice, Build unless it asks for Research or Review. Orchestrate delegates, and a task never does.
   if (request.interactionMode === "orchestrate") {
-    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build or Research, never Orchestrate: only the thread that delegates orchestrates.", {
+    throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build, Research or Review, never Orchestrate: only the thread that delegates orchestrates.", {
       exitCode: 2,
       details: { interactionMode: request.interactionMode },
     });
@@ -2465,10 +2731,11 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const interactionMode: InteractionMode = request.interactionMode ?? "default";
   const parentEnv = (await inspectThread(ctx.store, parentThreadId)).env;
   const isolated = request.isolation === "worktree";
-  // A thread created without a branch (and a continuation that copied it) can
-  // still run in a checkout on a real branch: ask the checkout instead of
-  // trusting the record.
-  const parentBranch = isolated && !parentEnv.branch
+  // When isolated, the branch always comes from the checkout, never the
+  // record: the record can name a branch the checkout has left (detached
+  // HEAD, or moved to another branch since), or none at all (threads the
+  // TUI creates record none).
+  const parentBranch = isolated
     ? ((await readStatus(parentEnv.path))?.branch ?? null)
     : parentEnv.branch;
   if (isolated && !parentBranch) {
@@ -2527,11 +2794,33 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   const idempotencyKey = request.idempotencyKey?.trim() || undefined;
   if (idempotencyKey !== undefined) {
-    const prior = [...(await ctx.store.readDelegations())].reverse().find(
-      (row) => row.parentThreadId === parentThreadId && row.idempotencyKey === idempotencyKey && row.continuedIn === undefined,
+    const rows = await ctx.store.readDelegations();
+    // The caller's own lineage, as in `ownedDelegation`: a continuation
+    // retries under its own name, but never into another home.
+    const lineage = await threadLineage(ctx, parentThreadId);
+    const initial = [...rows].reverse().find(
+      (row) => lineage.has(row.parentThreadId) && row.idempotencyKey === idempotencyKey,
     );
-    // A retry whose original child is gone (deleted thread) falls through and delegates anew.
-    if (prior && (await ctx.store.readThreadRecord(prior.childThreadId))) return await describeDelegation(prior.childThreadId, prior);
+    if (initial) {
+      // A retry after the task handed off finds the original row (which now
+      // carries `continuedIn`) and follows it to the current incarnation,
+      // whose continuation row holds no key (MXN-290).
+      let row = initial;
+      let current = true;
+      for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+        const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
+        if (!next) {
+          current = false;
+          break;
+        }
+        row = next;
+      }
+      // A broken chain, the hop cap, or a gone child falls through to a
+      // fresh delegate rather than returning a superseded row.
+      if (current && row.continuedIn === undefined && (await ctx.store.readThreadRecord(row.childThreadId))) {
+        return await describeDelegation(row.childThreadId, row);
+      }
+    }
   }
 
   // A fork starts from a copy of the parent's own conversation, made before
@@ -2554,11 +2843,18 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   let created: StoredThread;
   const now = ctx.store.nowIso();
   const recordDelegation = async (): Promise<void> => {
+    const modelOf = (selection: { instanceId: string; model: string } | undefined) =>
+      selection ? `${selection.instanceId}/${selection.model}` : null;
+    const parentModel = modelOf(parent.modelSelection);
+    const childModel = modelOf(modelSelection);
     await ctx.store.appendDelegation({
       id: randomUUID(), parentThreadId, childThreadId, prompt: task, status: "running",
       ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
       ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      // Both sides' models as they stand now: the review same-model check
+      // reads this snapshot, never the live records.
+      ...(parentModel !== null && childModel !== null ? { modelSnapshot: { parent: parentModel, child: childModel } } : {}),
       createdAt: now, updatedAt: now,
     }).catch((cause: unknown) => {
       if (options.fullResearchRun || options.researchRole !== undefined) throw cause;
@@ -2869,6 +3165,13 @@ export interface DescribedTask {
   readonly parent: ThreadEnvelope;
   readonly child: ThreadEnvelope;
   readonly task: TaskView;
+  /**
+   * A review child's verdict, warnings and finished state; null for any
+   * other task. `task_status` and the task notification read this rather
+   * than recomputing it, so a finished review with no `VERDICT` line is
+   * said visibly everywhere instead of passed on as finished.
+   */
+  readonly review: ReviewFacts | null;
 }
 
 /** A delegated task by parent + task id; the task id is the child thread id. */
@@ -2877,6 +3180,12 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   const taskId = requireThreadId(rawTaskId);
   const parent = await threadWithLedger(ctx.store, parentThreadId);
   const delegation = await delegationForChild(ctx.store, parentThreadId, taskId);
+  if (!delegation && !(await isTaskVisibleToParent(ctx, parentThreadId, taskId))) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
+      exitCode: 3,
+      details: { taskId, parentThreadId },
+    });
+  }
   const child = await threadWithLedger(ctx.store, delegation?.childThreadId ?? taskId).catch(() => null);
   if (!child || child.projectId !== parent.projectId) {
     throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
@@ -2884,12 +3193,45 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
+  // The live thread, following the same continuedIn chain task control
+  // resolves: asking about a task that carried on reads the continuation,
+  // the thread a send would steer — never the dormant source.
+  const live = await ownedDelegation(ctx, parentThreadId, taskId).catch(() => null);
+  const target = live !== null ? await threadWithLedger(ctx.store, live.childThreadId).catch(() => null) : null;
+  const seen = target ?? child;
+  const task = taskOf(seen, taskId);
+  // A review child's verdict, warnings and finished state ride with the
+  // status. The settled verdict is pinned on the (live) delegation row, so a
+  // follow-up turn cannot rewrite it; `task_status` and the task
+  // notification read the same pinned facts.
+  const facts = await reviewFactsForTask(ctx, seen, parent, live ?? delegation ?? undefined, task);
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
-    child,
-    task: taskOf(child, taskId),
+    child: seen,
+    task,
+    review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
+}
+
+/**
+ * Whether `parentThreadId` may ask after `taskId` without a direct
+ * delegation row: a task delegated from an earlier thread in its lineage
+ * (a continuation inherits what was delegated to it), or a research role
+ * of a run this thread leads (roles are published to the run, and older
+ * delegations may predate the row).
+ */
+async function isTaskVisibleToParent(ctx: OperationContext, parentThreadId: string, taskId: string): Promise<boolean> {
+  const rows = await ctx.store.readDelegations();
+  const lineage = await threadLineage(ctx, parentThreadId);
+  let current: string | undefined = taskId;
+  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+    if (rows.some((row) => row.childThreadId === current && lineage.has(row.parentThreadId))) return true;
+    current = rows.find((row) => row.childThreadId === current)?.continuedIn;
+  }
+  const lead = await ctx.store.readThreadRecord(parentThreadId);
+  const runs = lead?.researchRun === undefined ? [] : [lead.researchRun, ...(lead.pastResearchRuns ?? [])];
+  return runs.some((run) => run.roles.some((role) => role.threadId === taskId));
 }
 
 /** A thread and the threads it continued, nearest first: one conversation, carried on. */
@@ -2905,10 +3247,8 @@ async function threadLineage(ctx: OperationContext, threadId: string): Promise<R
 
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
- * the task carried on in (`continuedIn`). A task that finished before the
- * orchestrator continued stays listed under the older thread, and is still the
- * continuation's to reach. Refuses with `TASK_NOT_FOUND`, the same for a real
- * id and a fake one, when that thread did not delegate it.
+ * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
+ * same for a real id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
   const rows = await ctx.store.readDelegations();
@@ -2939,7 +3279,7 @@ export interface CancelledTask extends Omit<DescribedTask, "task"> {
 
 /**
  * Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended.
- * Only the thread that delegated the task (or the continuation its running tasks were re-pointed to) may.
+ * Only the thread that owns the task may: the one that delegated it, or the continuation a continue handed it to.
  */
 export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<CancelledTask> {
   const parentThreadId = requireThreadId(rawParentThreadId);
@@ -3050,11 +3390,11 @@ export interface AskedTask {
 }
 
 /**
- * A message from the thread that delegated a task, into that task. Only the
- * delegating thread (or the thread an orchestrator continued in, which the
- * running delegations were re-pointed to) reaches it, and never a research
- * run's role or lead: their messages are scoped and capped (`research*`), and
- * a free message would be a way round both.
+ * A message from the thread that owns a task, into that task. Only the
+ * delegating thread (or the continuation a continue handed the task to)
+ * reaches it, and never a research run's role or lead: their messages are
+ * scoped and capped (`research*`), and a free message would be a way round
+ * both.
  *
  * It takes the same path as every send (`startTurn`), then reports from what
  * that returned, not from what the provider is known for: a steer counts only
@@ -3097,7 +3437,9 @@ export async function sendTaskMessage(
     started.delivery === "steered" || started.delivery === "injected"
       ? started.steerDelivered === true ? "steered" : "not_delivered"
       : started.turn.status === "queued" ? "queued" : "started";
-  // A task an older thread left behind is back in work: it reports to the thread that sent this, not the older one.
+  // A task delegated from the old thread in the race between the transfer's
+  // row snapshot and a refusal that landed too late is back in work: it
+  // reports to the thread that sent this, not the older one.
   if (outcome !== "not_delivered" && row.parentThreadId !== parentThreadId) await ctx.store.updateDelegation(row.id, { parentThreadId });
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
   if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);

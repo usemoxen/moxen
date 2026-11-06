@@ -2,12 +2,14 @@ import * as Effect from "effect/Effect";
 import { CliError } from "../errors.js";
 import { readStatus } from "../git/history.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
+import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
-import { QUEUE_RESET_GRACE_MS, parseQueuePolicy } from "../threads/queue.js";
+import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
-import { usageCost, UsageForecaster, type UsageForecast } from "./forecast.js";
+import { UsageForecaster, type UsageForecast } from "./forecast.js";
+import { modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
 export const WRAP_UP_PROMPT = wrapUpPrompt("The provider's shared usage allowance is nearly exhausted.", "You will resume in this same conversation automatically.");
@@ -85,6 +87,10 @@ export class UsageProtection {
         const thread = await ctx.store.readThreadRecord(threadId);
         if (!thread || thread.deletedAt) throw new CliError("THREAD_NOT_FOUND", "The thread does not exist.");
         if (thread.archivedAt) throw new CliError("THREAD_ARCHIVED", "An archived thread cannot be protected.");
+        // A forced hold ends on a message, but settled threads refuse messages
+        // and the queue cannot cancel a forced hold: accepting this would
+        // leave a hold that sticks forever (released again on the next tick).
+        if (thread.settledAt) throw new CliError("THREAD_SETTLED", "A settled thread cannot be protected. Unsettle it first.");
         if (thread.usagePause?.forced) return;
         const running = openTurn(await ctx.store.readTurns(threadId));
         const provider = usageKeyForInstance((running?.modelSelection ?? thread.modelSelection).instanceId);
@@ -139,7 +145,7 @@ export class UsageProtection {
     });
   }
 
-  private account(row: UsageRow): void {
+  private account(ctx: OperationContext, row: UsageRow): void {
     const previous = new Map<string, number>();
     for (const turn of row.turns) {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
@@ -156,7 +162,7 @@ export class UsageProtection {
         previous.set(provider, reported);
       } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
         // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
-        cost = usageCost(selection.model, turn.usage, fast)?.usd ?? 0;
+        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), turn.usage, fast)?.usd ?? 0;
       }
       if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
       if (this.counted.has(key)) continue;
@@ -196,12 +202,20 @@ export class UsageProtection {
           });
           thread = (await ctx.store.readThreadRecord(id))!;
         }
+        if (!thread.archivedAt && thread.settledAt && thread.usagePause?.forced) {
+          // A forced hold cannot survive its thread settling: settling ends
+          // it now, and a message can never release it afterwards, so without
+          // this a hold left by an older version would stick forever.
+          // Released here — on the next tick — for those already stuck.
+          await this.pause(ctx, id, null, now);
+          thread = (await ctx.store.readThreadRecord(id))!;
+        }
         if (!thread.archivedAt && thread.usagePause) {
           await recoverOrphanedTurn(ctx, id);
           thread = (await ctx.store.readThreadRecord(id))!;
         }
         const row = { thread, turns: await ctx.store.readTurns(id) };
-        if (!thread.archivedAt) this.account(row);
+        if (!thread.archivedAt) this.account(ctx, row);
         if (row.turns.some((turn) => turn.status === "running" || turn.status === "queued")
           || thread.usagePause || thread.usageProtectionOverride || this.nativeWrap.has(id)) {
           this.candidates.set(id, row);
@@ -287,6 +301,29 @@ export class UsageProtection {
     if (!openTurn(await ctx.store.readTurns(row.thread.id)) && driver.stopSession) {
       await Effect.runPromise(driver.stopSession(row.thread.id));
     }
+  }
+
+  /**
+   * The reset a waiting pause without one should name: the reset of the
+   * window its recovery entry's condition asked about — not the latest reset
+   * across every window running hot. Without a recovery entry yet, the window
+   * `ensureRecovery` is about to ask about. Null while that window's reset is
+   * still unknown: the work stays held until the provider supplies one.
+   */
+  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number): Promise<string | null> {
+    let window: "session" | "weekly" | "all" | null = null;
+    if (pause.recoveryTurnId) {
+      const turns = await ctx.store.readTurns(threadId).catch(() => []);
+      const recovery = turns.find((turn) => turn.id === pause.recoveryTurnId);
+      const reset = recovery?.queue?.conditions.find((condition) => condition.type === "reset");
+      if (reset) window = reset.window;
+      else {
+        const at = recovery?.queue?.conditions.find((condition) => condition.type === "at");
+        if (at) return at.at;
+      }
+    }
+    window ??= windows.some((candidate) => candidate.kind === "session") ? "session" : windows.some((candidate) => candidate.kind === "weekly") ? "weekly" : "all";
+    return nextReset(pause.provider, window, now);
   }
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
@@ -400,7 +437,7 @@ export class UsageProtection {
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
-          if (live) inFlight = usageCost(selection.model, live, fast)?.usd ?? 0;
+          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), live, fast)?.usd ?? 0;
         }
         const key = `${thread.id}:${turn.id}`;
         inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);
@@ -410,7 +447,7 @@ export class UsageProtection {
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
         // One wrap-up request per open thread: its context input plus a short
         // output, not the cumulative spend of its previous turns.
-        const estimate = used === null ? null : usageCost(selection.model, { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
+        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
       }
@@ -494,9 +531,9 @@ export class UsageProtection {
       if (pause.phase !== "waiting" || pause.error) continue;
       let waiting = pause;
       if (!pause.forced && pause.resetsAt === null) {
-        const resets = windows.filter((window) => window.usedPercent >= 90).map((window) => window.resetsAt);
-        if (resets.length && resets.every((reset) => reset !== null)) {
-          waiting = { ...waiting, resetsAt: resets.sort().at(-1)! };
+        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now);
+        if (resetsAt !== null) {
+          waiting = { ...waiting, resetsAt };
           await this.pause(ctx, row.thread.id, waiting);
         }
       }

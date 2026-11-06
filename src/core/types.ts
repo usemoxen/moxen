@@ -8,9 +8,11 @@ export type EffectiveThreadEnvMode = Exclude<ThreadEnvMode, "auto">;
 export type RuntimeMode = "approval-required" | "auto" | "auto-accept-edits" | "full-access";
 /**
  * A thread's mode: `"default"` is Build; Research and Orchestrate add their procedure to the conversation
- * (`threads/modes.ts`). Plan mode was removed; `core/interactionmode.ts` reads an old `plan` as Build.
+ * (`threads/modes.ts`), and Review adds the code-review procedure — but only to a delegated task or to one
+ * prompt (`/review`), never as a thread's own staying mode. Plan mode was removed; `core/interactionmode.ts`
+ * reads an old `plan` as Build.
  */
-export type InteractionMode = "default" | "research" | "orchestrate";
+export type InteractionMode = "default" | "research" | "orchestrate" | "review";
 export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {
@@ -171,7 +173,7 @@ export interface ProvidersConfig {
 }
 
 /** Moxen Harness: our own agent loop against endpoints the user configures. */
-export interface HarnessProviderConfig {
+export interface HarnessProviderConfig extends ModelPriceMaps {
   memory?: boolean;
   /** Whether the Harness compacts on its own. Unset: `autoCompact`, else on. */
   compaction?: "ask" | "auto" | "off";
@@ -307,6 +309,23 @@ export interface HarnessProbedConfig {
 /** The wire format an endpoint speaks: OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. */
 export type HarnessApiFormat = "chat" | "responses" | "anthropic";
 
+/**
+ * Per-model token prices in USD per million tokens, as model slug to price,
+ * on one provider (`providers.<kind>.model{Input,Output,CacheRead,CacheWrite}Prices`).
+ * A model priced here beats Moxen's shipped list for those fields on this
+ * provider; a model priced nowhere stays unpriced.
+ */
+export interface ModelPriceMaps {
+  /** What one million input tokens of a model cost, as model slug to USD. */
+  modelInputPrices?: Record<string, number>;
+  /** What one million output tokens of a model cost, as model slug to USD. */
+  modelOutputPrices?: Record<string, number>;
+  /** What one million cache-read tokens of a model cost, as model slug to USD. */
+  modelCacheReadPrices?: Record<string, number>;
+  /** What one million cache-write tokens of a model cost, as model slug to USD. */
+  modelCacheWritePrices?: Record<string, number>;
+}
+
 export interface HarnessProfileConfig {
   /** Becomes the instance id `harness/<id>`. */
   id: string;
@@ -339,7 +358,7 @@ export interface HarnessProfileConfig {
 }
 
 /** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
-export interface OpencodeProviderConfig {
+export interface OpencodeProviderConfig extends ModelPriceMaps {
   memory?: boolean;
   /** Who compacts: OpenCode itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact` (off when false), else OpenCode. */
   compaction?: "provider" | "ask" | "auto" | "off";
@@ -404,7 +423,7 @@ export interface OpencodeProviderConfig {
   compactBuffer?: number;
 }
 
-export interface ClaudeProviderConfig {
+export interface ClaudeProviderConfig extends ModelPriceMaps {
   /** Prefer Claude's automatic allowance instead of proactive Moxen wrap-up. */
   usageWrapUp?: "moxen" | "provider";
   memory?: boolean;
@@ -599,9 +618,10 @@ export interface ThreadEnvelope {
    */
   turnModelSelections?: Record<string, ModelSelection>;
   /**
-   * The mode each turn ran in, by turn id, for turns that ran in Research or
-   * Orchestrate (MXN-236). `oneOff` marks a mode asked for that one message
-   * (`/research`, `--interaction-mode`) rather than the thread's own. Absent
+   * The mode each turn ran in, by turn id, for turns that ran in Research,
+   * Orchestrate or Review (MXN-236; Review since MXN-286). `oneOff` marks a
+   * mode asked for that one message (`/research`, `/review`,
+   * `--interaction-mode`) rather than the thread's own. Absent
    * when no turn qualifies, and for a turn that ran in Build or has not
    * started (a queued message takes the thread's mode when it starts).
    */

@@ -1,9 +1,11 @@
 import * as Effect from "effect/Effect";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
+import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, flushTaskNotifications, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
 
 afterEach(() => vi.useRealTimers());
@@ -68,10 +70,28 @@ describe("a delegated task continued in a new thread", () => {
     await continueThread(w.ctx, { threadId: thread.id });
     expect(await w.store.readDelegations()).toEqual([]);
   });
+
+  /** MXN-290: a task notification never starts a turn on a deleted parent, like archived. */
+  it("drops a task notification for a deleted parent instead of starting a turn", async () => {
+    const w = await world();
+    const parent = await w.make("parent");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+    await deleteThread(w.store, parent.id);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await w.store.readTurns(parent.id)).toHaveLength(0);
+    // Dropped with one line in the server log; nothing more (MXN-290 review).
+    const log = await readFile(path.join(w.root, "server.log"), "utf8").catch(() => "");
+    expect(log).toContain(`parent ${parent.id} is deleted`);
+  });
 });
 
 describe("an orchestrator continued in a new thread", () => {
-  it("takes its running tasks along: listed in the handoff, reporting to the new thread", async () => {
+  it("takes its running and idle tasks along: listed in the handoff, reporting to the new thread", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
     const running = await w.make("still running");
@@ -93,13 +113,14 @@ describe("an orchestrator continued in a new thread", () => {
 
     const continued = await continueThread(w.ctx, { threadId: parent.id });
     const rows = await w.store.readDelegations();
+    // Running, idle and limit-stopped alike: the new thread owns every delegation row now.
     expect(rows.find((row) => row.id === "r")?.parentThreadId).toBe(continued.threadId);
-    expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(parent.id);
+    expect(rows.find((row) => row.id === "d")?.parentThreadId).toBe(continued.threadId);
     expect(rows.find((row) => row.id === "l")?.parentThreadId).toBe(continued.threadId);
     const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
     expect(prompt).toContain(`"still running" (taskId ${running.id})`);
     expect(prompt).toContain(`"stopped by a limit" (taskId ${limited.id})`);
-    expect(prompt).not.toContain(done.id);
+    expect(prompt).toContain(`"already done" (taskId ${done.id})`);
     await flushTurnRunners();
 
     // A notification batched for the old parent before the move still reaches the new one.

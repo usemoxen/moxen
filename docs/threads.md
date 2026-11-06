@@ -52,6 +52,15 @@ active again and the provider has room — an unsnooze, or the snooze or
 the limit lapsing, is enough; no message needs to be sent. A message left
 queued any other way still waits for the next message or settle.
 
+A send on an idle thread never jumps ahead of an older held turn: the new
+message queues behind it, held for admission in turn, and the send reports
+it queued (it waits in the Work queue, it is not lost). The older turn goes
+first once nothing blocks it. A held turn that genuinely cannot run yet — a
+snoozed thread, a provider with no room — still holds its place, so the new
+message waits behind it rather than running first; unsnoozing, or the limit
+lapsing, releases both in order. Sending an immediate user message to end
+usage protection is the exception: it releases that hold and runs first.
+
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
 both. Each turn records the model it actually ran on.
@@ -83,11 +92,29 @@ each using `provider`, `model` and `thinkingEffort`. The suggestion alone create
 no lead or role thread. Only a user answer starts a full run. Without someone
 to answer, the task runs as one researcher.
 
+Review delegation is a single reviewer: `mode: "review"` with the PR or
+branch named in the task. The reviewer checks the target out in a scratch
+worktree, changes nothing in it, proves each finding with a throwaway test
+(or marks it read from code) and ends with `VERDICT: MERGE` or
+`VERDICT: FIX FIRST` on the report's last line — only a trailing verdict
+counts. Pass target-specific questions to attack in the task;
+the report answers each one first-class. The task notification and
+`task_status` carry the verdict and the review; a finished review with no
+trailing `VERDICT` line is said visibly instead of passed on as finished.
+When the reviewer runs on the same model as the delegating thread, both say so: a
+warning, not a refusal. The comparison reads the models recorded when the
+task was delegated, so a parent that moves on cannot rewrite it. The
+settled verdict is pinned on the delegation: a conversational follow-up
+turn cannot rewrite it, while a follow-up that settles with its own verdict
+re-pins. Continuing a review child starts the new thread in Build, with a
+ledger note saying Review was reset.
+
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and
 starts a full run without a proposal. `--research-models` accepts the model
 entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
+`--mode review` starts a reviewer for the PR or branch in the prompt.
 Existing calls and CLI JSON envelopes are unchanged.
 
 ### Research run view
@@ -297,8 +324,12 @@ automatic protection also placed pauses it until the next reset, as it does for
 any automatic hold. Protecting a thread during an automatic wrap-up lets that
 wrap-up finish rather than starting a second one. A turn the user's protection
 interrupts carries `StoredTurn.usagePause.forced`.
-Archived threads cannot be protected. Settled threads can be protected but remain
-settled; automatic input never unsettles them while held.
+Archived threads cannot be protected, and neither can settled ones: a forced
+hold ends on a message, but settled threads refuse messages and the queue
+cannot cancel a forced hold, so a hold that outlived its thread would stick
+forever. Settling a thread ends its manual protection; a forced hold found on
+a settled thread from before is released instead — on the next tick. Automatic
+input never unsettles a settled thread while held.
 
 While held, automatic deliveries become durable conditional queue entries rather
 than new turns or steers: delegated-task reports (including their structured
@@ -369,10 +400,12 @@ are excluded. It budgets cached reads, cache writes and 4,096 output tokens for
 each model's wrap-up, with a 50%
 margin and between two and ten percentage points of reserve. The ten-point cap
 prevents delayed cost reports from stopping work before 87% usage. Before
-calibration or for unknown model prices, it reserves two points per running
-thread, capped at ten. Claude's reported
+calibration, or where a running model's wrap-up has no price, it reserves two
+points per running thread, capped at ten. Claude's reported
 cumulative cost is counted by gains (native child costs are not added again);
-Codex tokens use a dated API-equivalent price table. `usage status --json` labels
+turns that report no cost are valued at the model's current prices: the
+provider's Model prices rows over Moxen's shipped list, and a model with no
+price anywhere counts as zero here. `usage status --json` labels
 the cost source. These are estimates, not subscription charges or an invoice.
 
 Recovery waits for the reset of the window that triggered protection or ran out,
@@ -411,8 +444,31 @@ identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
-that continues while tasks it delegated are still running takes them along:
-the handoff lists them, and their notifications go to the new thread.
+that continues hands every task it delegated to the new thread — running,
+idle, finished and cancelled alike, including tasks that themselves carried
+on (research roles stay with the run): the handoff lists them, and from then
+on steering, `task_status` and completion notifications resolve against the
+new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
+atomic write, so a notification deciding mid-transfer sees every row before
+or every row after it; a report queued and fully delivered just before the
+transfer still reaches the old thread — the task's next report, and
+`task_status` on the new parent at any time, cover it. A continued thread
+starts no new delegations (`THREAD_CONTINUED` names the live thread):
+otherwise the row would answer to a dormant thread while its continuation
+steers beside it. A
+continuation can also change the model: continuing in a new thread keeps the
+project, the checkout and the handoff, and takes an optional target
+model/provider — the palette's second continue row, or `moxen threads
+continue --provider/--model` (with `--thinking-effort`/`--speed-mode` for the
+effort; without them a model switch re-resolves effort from the settings, as
+for a new thread, while the TUI picker keeps the compatible knobs). The new
+thread keeps the source's model unless the request overrides it; a provider
+switch names its model. The command takes either a full `modelSelection` or
+`provider`/`model`, never both at once. The tasks keep
+their own provider and model either way, so the handoff works across
+providers and grants no extra access. No extra guard applies when the new
+thread runs a more restricted runtime mode: the mode governs only that
+thread's own turns, and steering a task is a message, not execution.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
@@ -550,9 +606,13 @@ One rule, most specific first, the same for `moxen handover`, `moxen threads cre
 - **Permissions:** the request, the provider tab's Permissions, then the global one.
 - **Checkout or worktree:** the request, the project's stored default, its `moxen.json`, then the global Thread environment. `auto`, which always meant the checkout, still loads and reads as `local`.
 
-A follow-up, and a delegated task, keeps its parent thread's selection unless the request overrides it, and never falls back to the settings or the installation default.
+A follow-up, a delegated task, and a thread continued in a new one keeps its
+source thread's selection unless the request overrides it, and never falls
+back to the settings or the installation default. The continuation's model
+request is how a handoff changes models; anything it does not name stays the
+source's.
 
-## Modes: Build, Research and Orchestrate
+## Modes: Build, Research, Orchestrate and Review
 
 A thread is in one mode until the user changes it: **Build** (the default),
 **Research** or **Orchestrate**. Research and Orchestrate are procedures
@@ -561,11 +621,18 @@ the user's thread as lead, or one researcher when no full run is approved.
 Full-run leads use role tools, never `delegate`; the server enforces the chosen
 size and review gates. Orchestrate splits the work into tasks, each on the
 model that fits it, checking budget, memory and isolation before delegating.
+Budget means calling the `usage_status` tool before fanning out: every set-up
+provider's windows, fresh rather than the hours-old figures `models` carries,
+so work routes around providers at or near 100%.
+**Review** is the fourth procedure but not a fourth thread mode: it runs a
+delegated review task (`delegate` with `mode: "review"`), or one prompt
+(`/review`), and never stays on a thread.
 
-- **Switching:** Shift+Tab cycles the thread's mode and it stays until
+- **Switching:** Shift+Tab cycles the thread's mode (Build, Research,
+  Orchestrate) and it stays until
   changed (also `--mode research|orchestrate` on `moxen handover` /
   `threads create`, or the `thread.interaction-mode.set` command).
-  `/research` or `/orchestrate` in the composer are for one prompt: with
+  `/research`, `/orchestrate` or `/review` in the composer are for one prompt: with
   text after them, that prompt runs in the mode; alone, the mode is armed
   for the next prompt (the same command again disarms it). Either way the
   thread's own mode is untouched, and the next prompt is told the mode is
@@ -576,14 +643,14 @@ model that fits it, checking budget, memory and isolation before delegating.
   sent with its own mode.
 - **In the transcript:** the command stays hidden, and each message shows
   the mode it ran in: its rail (and its reply's) takes the mode's colour,
-  and Research or Orchestrate is named beside the time, with "once" when
+  and Research, Orchestrate or Review is named beside the time, with "once" when
   the mode was for that message only. Build looks as it always did. The
   envelope's `turnInteractionModes` (by turn id) carries it, only for turns
-  that ran in Research or Orchestrate. A queued or scheduled message shows
+  that ran outside Build. A queued or scheduled message shows
   nothing until it starts, because it takes the thread's mode then (unless
   it was sent with its own).
 - **Fixed while a turn runs:** the mode cannot change while a turn is
-  running, by Shift+Tab, `/research`, `/orchestrate` or
+  running, by Shift+Tab, `/research`, `/orchestrate`, `/review` or
   `thread.interaction-mode.set`, and a steer, an inject or a queued send
   carries no mode (`MODE_LOCKED_WHILE_RUNNING`). In the TUI a mode command
   typed during a turn stays in the draft and the composer says why. Once the
@@ -594,7 +661,7 @@ model that fits it, checking budget, memory and isolation before delegating.
   off" note the same way. Which mode each provider's conversation was told
   is kept on the thread (`modeState`), and forgotten after a compaction or
   a revert so the procedure is sent again. On OpenCode it is an instruction
-  entry (`moxen-research` / `moxen-orchestrate`), removed in Build.
+  entry (`moxen-research`, `moxen-orchestrate`, `moxen-review`), removed in Build.
 - **Told once the provider answers:** a mode block, and a runtime instruction
   update, count as delivered when the provider has produced output for the
   prompt that carried them, not when it accepts the prompt. A first turn on a
@@ -604,10 +671,11 @@ model that fits it, checking budget, memory and isolation before delegating.
   (a handoff document, say) ahead of it, up to the last turn the provider
   answered, along with the mode block.
 - A new thread starts in Build unless a mode is picked while drafting it,
-  and a delegated task runs in Build unless the model that delegates asks for Research (`delegate`'s `mode`); a task is never in Orchestrate. A thread
+  and a delegated task runs in Build unless the model that delegates asks for
+  Research or Review (`delegate`'s `mode`); a task is never in Orchestrate. A thread
   drafted in Research mode asks for the run size on its first prompt.
 - The TUI shows the mode as the composer's left-edge colour (Build sky,
-  Research violet, Orchestrate fuchsia), its running pulse, and in the
+  Research violet, Orchestrate fuchsia, Review orange), its running pulse, and in the
   footer.
 
 ## Memory
@@ -756,16 +824,22 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-Only the delegating thread reaches a task, and the threads that continued it: one that finished before the orchestrator continued stays listed under the older thread, and waking it from the continuation moves it there, so it reports to the conversation still working. When an orchestrator continues in a
-new thread, the tasks still running move with it and it can message them; the
-earlier thread and an unrelated thread (same project or not) cannot. Threads
-continued before this link existed can't reach what their source left behind.
-A research run's lead and roles are
-never reachable (`TASK_SEND_RESEARCH`): their messages are scoped and capped by
-the run, and a free message would be a way round both. A delegated task, a
-research lead and a research role are not offered `task_send` or `task_ask` at
-all. An empty message is refused as in `threads send`; there is no length cap,
-as there is none there.
+Only the thread that owns a task steers it: the one that delegated it, or the
+continuation that took it over. Continuing hands every delegation row to the
+new thread — running, idle, finished, cancelled, and carried-on alike — so from then on `task_send`,
+`task_ask`, `message_queue`, `task_cancel` and `task_status` resolve against
+the new parent and read as `TASK_NOT_FOUND` on the old one, stranger or not.
+Reading the task's thread itself stays project-scoped (`thread_read`), so
+the old thread can still look at what its former task did. A task keeps its
+own provider, model and modes; only the parent link moves, across providers
+and models alike, so the handoff grants the new thread no extra access. A `fork: true`
+task moves the same way: its conversation was copied at delegate time, and
+the continuation shares the checkout, so one owner stays unambiguous.
+A research run's lead and roles are never reachable (`TASK_SEND_RESEARCH`):
+their messages are scoped and capped by the run, and a free message would be
+a way round both. A delegated task, a research lead and a research role are
+not offered `task_send` or `task_ask` at all. An empty message is refused as
+in `threads send`; there is no length cap, as there is none there.
 
 ### Asking a delegated task a side question (`task_ask`)
 
@@ -778,12 +852,59 @@ so, so a limit in the answer is not read as a fault in the task. A finished
 task answers from its recorded session; a task with no session yet answers
 without its context, and the result says that too.
 
-The ownership rule is `task_send`'s, continuations included, and a research
-run's lead and roles are refused (`TASK_ASK_RESEARCH`). A provider that cannot
+The ownership rule is `task_send`'s: the thread that owns the task asks, and
+any other thread reads `TASK_NOT_FOUND`. A research run's lead and roles are
+refused (`TASK_ASK_RESEARCH`). A provider that cannot
 copy a session returns `SIDE_QUESTION_UNSUPPORTED` as a plain result rather
 than an error, so the orchestrator can fall back to `thread_read`. The call
 waits at most 45 seconds, then returns a `timedOut` result; the task is
 unchanged either way.
+
+### Where a delegated task works
+
+`delegate` defaults to a worktree: the child gets its own checkout on a new
+branch cut from the parent's, so two agents never edit the same files at
+once. The branch is read from the parent's checkout, even when the parent
+thread's record names none (threads the TUI creates record none). A
+`fork: true` task always shares the parent's checkout, since its copied
+conversation belongs to the directory it runs in, and an explicit
+`isolation: "shared"` is for read-only work, or when nothing else writes at
+the same time. Where there is no branch to cut from — a detached HEAD, or a
+project that is not a git repository at all — there is no worktree to give,
+so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
+`isolation: "shared"`. It never quietly shares your checkout.
+
+### Starting several tasks in one call (`delegate`)
+
+One `delegate` call takes shared settings (`provider`, `model`, `effort`,
+`isolation`, plus `rules`: instructions appended to every task's prompt
+under "Common rules for this task") beside a `tasks` list of at most 20
+entries. Each entry has its own `title` and `task` text and may override
+`provider`, `model`, `effort` or `isolation`; an entry takes no other field.
+An entry on another provider does not inherit the shared `model` or
+`effort`: it names its own model, or its start fails. `mode` and `fork` are
+shared by the whole call. The single-task form (`task` plus `title`) keeps
+working unchanged, and `researchProposal` cannot be combined with `tasks`.
+
+What is bad on its face — a malformed entry or list, a forked task in a
+worktree, a provider with no model anywhere — fails the whole call with
+nothing started. Once starting, each task is on its own: one that fails to
+start is reported as that entry's `error` while the rest still start, so the
+others are neither lost nor silently doubled. A top-level `idempotencyKey`
+is derived per entry from the key plus the entry's own title and task, so
+retrying the whole call — in any order, with entries added or removed —
+returns each original task instead of starting duplicates; a task's own
+`idempotencyKey` wins for that entry. The result lists every task's `taskId`
+and `isolation`, with one `warning` when any task shares your checkout.
+
+### Stopping several tasks at once (`task_cancel`)
+
+`task_cancel` takes `taskId` for one task or `taskIds` for several; its
+thread and worktree are kept either way. Each task's outcome
+(`cancelRequested`, `status`) is reported separately, and one bad id is that
+entry's `error` rather than a failed call, so it never stops the others. A
+repeated id stops once, in order. When the parent itself is missing, the
+call fails as the single form does instead of reporting one error per id.
 
 ### Queueing a message from an agent (`message_queue`)
 
@@ -887,6 +1008,13 @@ compaction comes back marked not current, with its time, rather than passed off
 as the figure now. An agent told to hand off at a size can therefore measure
 instead of guessing.
 
+**Shared usage.** An agent sees every set-up provider's allowance with the
+`usage_status` tool (on the `moxen` server, a delegated task included): each
+window's percent used, reset time and label, when that reading was taken, and
+whether it is stale. It tries a cheap fresh reading first and falls back to
+the stored one with its age, and what usage protection holds or has queued.
+A provider with no windows has no data, which is not the same as unlimited.
+
 **Hand off.** `ask` (the default) draws a card over the composer with **Hand
 off** and **Not now**; `auto` has the server continue the thread itself (the
 same handoff document as "Continue in a new thread", and a `thread.continued`
@@ -974,8 +1102,10 @@ over the thread's previous turn, and the thread's total as its final value, so
 threads stored before this read the same way; a total that drops (a resumed
 process starts counting again) counts as new spend. Where the provider reports a cost
 (`costUsd`: Claude's `total_cost_usd`, OpenCode's per-step `cost`) the turn
-records it too, an estimate and not a bill; without one the field is absent
-and the turn reads as unpriced.
+records it too, an estimate and not a bill; without one the field is absent.
+A turn that recorded no cost keeps none on the ledger: Stats and usage
+protection price it at the model's current prices instead (below), and only a
+model with no price anywhere reads as unpriced.
 
 ### Stats
 
@@ -985,8 +1115,25 @@ shareable PNG for a range. Both read every thread that is not deleted, a turn
 counting on the day it started in the machine's local time, and a turn still
 queued counting for nothing. Sessions are the threads with a turn in the
 range, messages are the user's and the assistant's (not notes Moxen wrote),
-and a streak is consecutive days with a turn. Cost adds the costs providers
-reported and stays unset, never zero, where none did; a reported zero (a free
-model) is free. A Claude turn's spend is the gain over the previous turn, as
+and a streak is consecutive days with a turn. Cost adds what the providers
+reported, and estimates the rest at the model's current prices: the
+per-provider Model prices rows over Moxen's shipped price list, which also
+drive usage protection's estimates (see below). A turn's recorded cost is
+never rewritten: a past turn with a reported cost keeps it, and one without is
+priced at today's values. Cost stays unset, never zero, where no turn was
+priced; a reported or priced zero (a free model) is free. A model with no price
+anywhere stays unpriced. A Claude turn's spend is the gain over the previous turn, as
 above, so the instances stored as running totals are the Claude ones
 (`core/usage/statsstore.ts`).
+
+### Model prices
+
+Each provider's settings page, under Model prices, values that provider's
+models in USD per million tokens: an input, output, cache-read and
+cache-write price per model, as `model=price` pairs
+(`moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'`).
+A row you set beats Moxen's shipped price for those fields on that provider,
+so the same model can cost differently on two providers; clearing a row, or a
+model from it, returns to the shipped price. A price with only some fields
+values what it names and counts the rest as zero. Models match by the string
+Stats buckets them under, slash included.

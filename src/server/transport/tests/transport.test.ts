@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfigPath } from "../../../core/config.js";
 import { CliError } from "../../../core/errors.js";
 import { testHarness, type TestHarness } from "../../../core/testing/harness.js";
-import type { ShellFrame } from "../../api.js";
+import type { ClientApi, ShellFrame } from "../../api.js";
 import { openClient } from "../../client.js";
 import { DirectConnection } from "../../connection.js";
 import { probe } from "../endpoint.js";
@@ -114,6 +114,41 @@ describe("transport", () => {
     const harness = await testHarness();
     const handle = await served(harness);
     await expect(served(harness, handle.endpoint)).rejects.toMatchObject({ code: "SERVER_RUNNING" });
+  });
+
+  it("stops an in-flight query when its socket goes away", async () => {
+    let entered!: () => void;
+    const enteredQuery = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let stopped = false;
+    // A wait that only ends when its socket does: the point is the server
+    // passing the socket's lifetime in, not what the wait does.
+    const api = {
+      query: async (_query: unknown, options?: { signal?: AbortSignal }) => {
+        entered();
+        await new Promise<void>((resolve) => {
+          options?.signal?.addEventListener("abort", () => {
+            stopped = true;
+            resolve();
+          }, { once: true });
+        });
+        return null;
+      },
+    } as unknown as ClientApi;
+    const handle = await serve({ endpoint: testEndpoint(), api });
+    teardown.push(() => handle.close());
+    const socket = net.connect(handle.endpoint);
+    socket.setEncoding("utf8");
+    await new Promise((resolve) => socket.once("connect", resolve));
+    socket.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } } as never));
+    socket.write(encode({ id: 2, method: "query", params: { type: "projects.list" } } as never));
+    await enteredQuery;
+    socket.destroy();
+    const deadline = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("the in-flight query survived the disconnect")), 5000),
+    );
+    await Promise.race([waitFor("the server-side wait to stop", () => stopped), deadline]);
   });
 
   it("resumes subscriptions after the server restarts, from a fresh snapshot", async () => {

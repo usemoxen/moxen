@@ -1,5 +1,5 @@
 import { t } from "../../i18n/index.js";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "../../hooks/useClipboard.js";
 import type { useToasts } from "../../hooks/useToasts.js";
@@ -70,6 +70,12 @@ export function useComposer(
   const draftKey = openThreadId ?? "__creating__";
   const draft = drafts[draftKey] ?? "";
   const pending = pendings[draftKey] ?? [];
+  // Async completions (a clipboard read, a dialog) land after `await`: a
+  // thread switch behind them must not strand the result on the old thread.
+  const draftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    draftKeyRef.current = draftKey;
+  }, [draftKey]);
 
   /** The draft with its pasted images: pasting it back into moxen attaches them again (see `model/copystash.ts`). */
   const copyDraft = () => {
@@ -149,7 +155,7 @@ export function useComposer(
   };
 
   const setPending = (next: ImageAttachmentUpload[] | ((current: ImageAttachmentUpload[]) => ImageAttachmentUpload[])) => {
-    const id = draftKey;
+    const id = draftKeyRef.current;
     if (typeof next === "function") {
       setPendings((current) => {
         const resolved = (next as (current: ImageAttachmentUpload[]) => ImageAttachmentUpload[])(current[id] ?? []);

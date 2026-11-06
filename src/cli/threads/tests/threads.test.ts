@@ -787,6 +787,8 @@ describe("delegated tasks", () => {
       waitTimedOut: false,
     });
     expect(status.task.summary).toBe("Completed: Research the retry policy.");
+    // An ordinary task carries no review key, so its envelope is unchanged.
+    expect("review" in status.task).toBe(false);
 
     await expect(taskStatus(harness.config, "thread-parent", "task-missing")).rejects.toMatchObject({
       code: "TASK_NOT_FOUND",
@@ -809,6 +811,41 @@ describe("delegated tasks", () => {
     await expect(taskStatus(harness.config, "thread-parent", "thread-foreign")).rejects.toMatchObject({
       code: "TASK_NOT_FOUND",
     });
+  });
+
+  it("delegates a review in Review mode, and says visibly when its report holds no verdict", async () => {
+    const harness = await parentHarness();
+    const store = await openThreadStore(harness.root);
+
+    const delegated = await delegateTask(harness.config, {
+      parentThreadId: "thread-parent",
+      task: "Review the login change.",
+      openMode: "none",
+      drivers: harness.drivers,
+      interactionMode: "review",
+    });
+    expect((await store.readThreadRecord(delegated.child.id))?.interactionMode).toBe("review");
+    expect(delegated.createCommand.interactionMode).toBe("review");
+    expect(delegated.turnCommand.interactionMode).toBe("review");
+
+    // The scripted driver finishes with a plain summary, no VERDICT line.
+    const status = await taskStatus(harness.config, "thread-parent", delegated.child.id);
+    expect(status.task).toMatchObject({ review: { verdict: null, sameModel: true } });
+    expect(status.task.review!.note).toContain("no VERDICT");
+  });
+
+  it("refuses a full research run in Review mode", async () => {
+    const harness = await parentHarness();
+    await expect(
+      delegateTask(harness.config, {
+        parentThreadId: "thread-parent",
+        task: "Check claims",
+        openMode: "none",
+        drivers: harness.drivers,
+        interactionMode: "review",
+        researchSize: "2,1",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_THREAD_OPTION" });
   });
 
   it("cancels a running task with a real interrupt", async () => {

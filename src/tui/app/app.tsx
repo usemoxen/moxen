@@ -121,7 +121,7 @@ import {
   TOAST_STEP,
   SCHEDULE_PANEL_HEIGHT,
 } from "./constants.js";
-import { clock, launchTarget, scrollPane } from "./utils.js";
+import { clock, compactNoticeKey, launchTarget, scrollPane } from "./utils.js";
 import { useTasksPanel } from "../features/taskspanel/useTasksPanel.js";
 import { useProviderUpdates } from "./hooks/useProviderUpdates.js";
 import { useQuitConfirm } from "./hooks/useQuitConfirm.js";
@@ -323,6 +323,13 @@ export function App({
   const [paletteReturnFocus, setPaletteReturnFocus] = useState<"chat" | "composer" | "diff">("chat");
   /** Delete-thread two-step confirm: first pick arms, second pick dispatches. */
   const [deleteArmed, setDeleteArmed] = useState(false);
+  /**
+   * The thread a "continue on another model" pick continues: set when the
+   * palette row opens the model picker, read when a model is picked. While
+   * set, the model picker lists every provider (a handoff can cross
+   * providers) instead of locking to the open thread's one.
+   */
+  const [continueOnModel, setContinueOnModel] = useState<string | null>(null);
   /**
    * Whether the server accepts a general `thread.delete`. Starts assumed and
    * flips permanently off for the session on the first rejection — the row
@@ -652,6 +659,7 @@ export function App({
     setPickerFilter("");
     setDeleteArmed(false);
     setRevertArmed(false);
+    setContinueOnModel(null);
     markModalDismissed();
     setFocus(returnFocus);
   };
@@ -814,7 +822,8 @@ export function App({
     setPickerFilter("");
     if (diffPanel.expandedTurn !== turnCount) diffPanel.openDiff(turnCount);
     else setFocus("diff");
-    setTimeout(() => diffPanel.scrollTimelineToTurn(turnCount), 60);
+    // Owned (and cancelled on thread switch) by the diff panel.
+    diffPanel.deferScrollToTurn(turnCount);
   };
 
   /**
@@ -1144,11 +1153,13 @@ export function App({
       // the window opens the close menu; a 3rd (in the menu) quits via the
       // confirm branch above. An empty prompt jumps straight to the menu.
       const shouldOpenMenu = registerCtrlCPress();
-      if (openThreadId !== null) {
-        resetDraft(openThreadId);
-        // The prompt's pasted images are part of it: clearing the text left the chips behind.
-        writePending(openThreadId, []);
-      }
+      // The live key, not the open thread: while drafting with no open
+      // thread the prompt lives under "__creating__", and gating on a
+      // non-null thread would leave it (and its pending images) behind.
+      const liveKey = openThreadId ?? "__creating__";
+      resetDraft(liveKey);
+      // The prompt's pasted images are part of it: clearing the text left the chips behind.
+      writePending(liveKey, []);
       if (draft.trim().length === 0 || shouldOpenMenu) {
         toasts.dismiss("ctrl-c");
         openQuitConfirm();
@@ -1366,6 +1377,7 @@ export function App({
     permissionChoices,
     modelColor,
     labelFor,
+    buildModelSelection,
     openModelPicker,
     openEffortPicker,
     openPermissionPicker,
@@ -1654,7 +1666,7 @@ export function App({
           queuedMessages: 0,
         });
   const compactReady = compactState !== null && compactState.blockers.length === 0;
-  const compactKey = openThreadId === null || threadState.contextUsage === null ? null : `compact:${openThreadId}:${threadState.contextUsage.usedTokens}`;
+  const compactKey = compactNoticeKey(openThreadId, threadState.contextUsage?.usedTokens ?? null);
   const [dismissedCompactKey, setDismissedCompactKey] = useState<string | null>(null);
   const handoffKey = openThreadId === null ? null : `handoff:${openThreadId}`;
   const [dismissedHandoffKey, setDismissedHandoffKey] = useState<string | null>(null);
@@ -1796,12 +1808,31 @@ export function App({
   const noticePager = useNoticePager(notices.map((notice) => notice.key));
 
   /**
+   * A model picked for "continue on another model": the handoff goes to a
+   * new thread on that model (effort options included), which then opens.
+   * The delegation rows move with it, so the new thread owns the tasks.
+   */
+  const continueThreadOnModel = (choice: { instanceId: string; model: string }) => {
+    const sourceId = continueOnModel;
+    if (sourceId === null) return;
+    setContinueOnModel(null);
+    void client
+      .dispatch({ type: "thread.continue", threadId: sourceId, modelSelection: buildModelSelection(choice) })
+      .then((result) => {
+        closePicker("chat");
+        setOpenThreadId(result.threadId);
+      })
+      .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+  };
+
+  /**
    * Modal bodies: the model list across providers plus a provider shortcut
    * section, one section per effort descriptor of the current model, every
    * turn that produced file changes for the diff-turn picker, or the
    * command palette's copy/thread/export/jump sections.
    */
   const threadSearch = useThreadSearch(client, picker === "search", pickerFilter);
+
   const pickerBody: PickerBody = useMemo(() => {
     if (picker === null) return { kind: "list", sections: [] };
     // Thread search: what the server found, active threads above settled ones.
@@ -2213,6 +2244,24 @@ export function App({
                       },
                     }),
               },
+              {
+                key: "thread:continue-model",
+                label: t("app.continue_on_another_model_7d2e"),
+                // Same project and checkout, but the model is picked first: a
+                // handoff to another provider when this one's allowance is out.
+                // Nothing to hand over until the assistant has replied.
+                ...(lastAssistantMessage === null
+                  ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
+                  : {
+                      meta: t("app.pick_the_model_first_3c8b"),
+                      onPick: () => {
+                        setContinueOnModel(selected?.id ?? openThreadId);
+                        setPickerFilter("");
+                        setPicker("model");
+                        setFocus("chat");
+                      },
+                    }),
+              },
             ],
           },
           {
@@ -2409,11 +2458,13 @@ export function App({
     const current = effectiveModelSelection;
     // A thread that hasn't started yet has no provider to lock to — offer
     // every *enabled* provider, grouped into sections so browsing them stays
-    // sane. Disabled instances still report their models over getConfig, but
-    // selecting them fails, so they are hidden (same as the desktop picker).
-    // Hidden models (`providerModelPreferences`) are skipped except the
-    // current one, which stays marked so a since-hidden selection still reads.
-    if (creating) {
+    // sane. A "continue on another model" pick lists them all too: a handoff
+    // can cross providers. Disabled instances still report their models over
+    // getConfig, but selecting them fails, so they are hidden (same as the
+    // desktop picker). Hidden models (`providerModelPreferences`) are skipped
+    // except the current one, which stays marked so a since-hidden selection
+    // still reads.
+    if (creating || continueOnModel !== null) {
       return {
         kind: "list",
         sections: offerableProviders(providers)
@@ -2438,7 +2489,10 @@ export function App({
               label: model.name,
               ...modelRowDetail(model, pinned === undefined ? model.isDefault === true : model.slug === pinned),
               selected: current?.instanceId === provider.instanceId && current?.model === model.slug,
-              onPick: () => pickModel({ instanceId: provider.instanceId, model: model.slug }),
+              onPick: () =>
+                continueOnModel !== null
+                  ? continueThreadOnModel({ instanceId: provider.instanceId, model: model.slug })
+                  : pickModel({ instanceId: provider.instanceId, model: model.slug }),
             })),
           })),
       };
@@ -2464,7 +2518,7 @@ export function App({
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, continueOnModel, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**

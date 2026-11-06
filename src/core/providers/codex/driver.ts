@@ -44,6 +44,7 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   ThreadId,
   TokenUsageDelta,
   TurnId,
@@ -55,7 +56,7 @@ import { buildCodexSystemPrompt } from "./prompt.js";
 import { resolveStoreRoot } from "../../threads/store.js";
 import { codexAsyncQuestions } from "./questions.js";
 import { conversationContextBreakdown } from "../context.js";
-import { isCompactCommand } from "../spi.js";
+import { dropTurnWaiter, isCompactCommand } from "../spi.js";
 import { outOfProcess, type McpServerSpec } from "../../mcp.js";
 import {
   codexAccountTypeOf,
@@ -172,7 +173,6 @@ interface CodexSession {
   lastWindows: ReturnType<typeof codexWindowsOf>;
   lastResetsAt: string | null;
   lastActiveAt: number;
-  lastActiveThreadId: ThreadId | null;
   startedAt: string;
 }
 
@@ -395,7 +395,6 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         lastWindows: [],
         lastResetsAt: null,
         lastActiveAt: Date.now(),
-        lastActiveThreadId: null,
         startedAt: new Date().toISOString(),
       };
       peer.onRequest((method, params) => this.onServerRequest(session, method, params));
@@ -479,6 +478,19 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
 
+  /**
+   * Explicit freshness ask: re-read the limits on an already-open session,
+   * never start one. The read publishes through the normal event path too;
+   * the returned windows let the caller record them without waiting for
+   * the pump.
+   */
+  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
+    if (!session) return null;
+    const windows = await this.probeRateLimits(session);
+    return windows.length > 0 ? { key: "codex", windows } : null;
+  };
+
   readonly contextBreakdown = async (threadId: string): Promise<ContextBreakdown | null> => {
     const session = this.sessions.get(threadId);
     if (!session?.context || !session.codexThreadId) return null;
@@ -545,20 +557,21 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     };
   }
 
-  private async probeRateLimits(session: CodexSession): Promise<void> {
+  private async probeRateLimits(session: CodexSession): Promise<RateLimitWindow[]> {
     try {
       const snapshot = await session.peer.request(
         CODEX_METHODS.rateLimitsRead,
         {},
         this.rateLimitsTimeoutMs,
       );
-      this.applyRateSnapshot(session, snapshot);
+      return this.applyRateSnapshot(session, snapshot);
     } catch {
       // Degrade to a message: live updates still arrive mid-turn.
+      return [];
     }
   }
 
-  private applyRateSnapshot(session: CodexSession, snapshot: unknown): void {
+  private applyRateSnapshot(session: CodexSession, snapshot: unknown): RateLimitWindow[] {
     const record = asRecord(snapshot) ?? {};
     const inner = asRecord(record["rateLimits"]) ?? record;
     const windows = codexWindowsOf({
@@ -577,6 +590,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       windows,
       raw: { planType: inner["planType"] ?? null },
     });
+    return windows;
   }
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
@@ -662,7 +676,6 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       session.transcript.push(turn);
       session.harness.beginTurn(turn.id);
       session.lastActiveAt = Date.now();
-      session.lastActiveThreadId = session.threadId;
       try {
         const compact = isCompactCommand(input.prompt);
         const notes = session.harness.takeNotes();
@@ -728,21 +741,19 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       });
     }
     return await new Promise<CodexTurnOutcome>((resolve, reject) => {
+      const waiter = { resolve, reject };
       const list = session.waiters.get(turnId) ?? [];
-      list.push({ resolve, reject });
+      list.push(waiter);
       session.waiters.set(turnId, list);
       signal?.addEventListener(
         "abort",
         () => {
-          const pending = session.waiters.get(turnId) ?? [];
-          session.waiters.delete(turnId);
-          for (const waiter of pending) {
-            waiter.reject(
-              new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-                details: { threadId, turnId },
-              }),
-            );
-          }
+          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
+          reject(
+            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+              details: { threadId, turnId },
+            }),
+          );
         },
         { once: true },
       );
@@ -797,14 +808,13 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     const record = asRecord(params);
     const threadId =
       asString(record?.["threadId"]) ?? asString(record?.["conversationId"]) ?? null;
-    if (threadId) {
-      for (const session of this.sessions.values()) {
-        if (session.codexThreadId === threadId) return session;
-      }
-    }
-    if (this.sessions.size === 1) return [...this.sessions.values()][0]!;
+    // An explicit id ties the callback to that live session. Anything else —
+    // a missing id, or one no live session has (a closed thread's leftover) —
+    // belongs to the session whose peer delivered it, which the caller falls
+    // back to. Never a guess at another session.
+    if (!threadId) return null;
     for (const session of this.sessions.values()) {
-      if (session.lastActiveThreadId === session.threadId) return session;
+      if (session.codexThreadId === threadId) return session;
     }
     return null;
   }
@@ -817,6 +827,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     const kind = approvalKindForMethod(method);
     if (!kind) throw new Error(`Method not found: ${method}`);
     const target = this.sessionForPayload(params) ?? session;
+    // A closed thread's leftover callback can still arrive on its peer: deny
+    // it rather than parking on a session nobody will answer for.
+    if (target.closed) return this.cancelResponse(kind, "Session ended.");
     if (kind === "dynamic_tool_call") return { success: false, contentItems: [{ type: "inputText", text: "This client does not provide dynamic tools. Use the attached MCP tools." }] };
     if (target.isolation && rawInputViolation(target.isolation, params, target.workingDirectory)) return this.cancelResponse(kind, "The main checkout is outside this worktree.");
     if (target.delegated) return this.cancelResponse(kind, "No user is available for this delegated task.");

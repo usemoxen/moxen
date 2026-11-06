@@ -38,11 +38,38 @@ export function promptWithPaths(prompt: string, items: readonly PathAttachment[]
   let out = prompt;
   // Longest label first: ` 📄 a.py ` is the start of ` 📄 a.py (2) `.
   for (const item of [...items].sort((a, b) => b.label.length - a.label.length)) {
-    const link = () => `[${item.label.trim()}](${linkDestination(item.path)})`;
-    // The padding is the chip's own, but a draft is trimmed before it is sent: a chip first or last in it has lost its outer space.
-    out = out.includes(item.label) ? out.replace(item.label, link) : out.replace(item.label.trim(), link);
+    const bare = item.label.trim();
+    const at = lastChipOccurrence(out, bare);
+    if (at === -1) continue;
+    // The padding is the chip's own: a fully padded chip gives one space
+    // each side back (as before), while a chip first or last in the draft
+    // lost its outer space to the trim before sending and keeps what is there.
+    const padded = at > 0 && out[at - 1] === " " && at + bare.length < out.length && out[at + bare.length] === " ";
+    const start = padded ? at - 1 : at;
+    const end = padded ? at + bare.length + 1 : at + bare.length;
+    out = `${out.slice(0, start)}[${bare}](${linkDestination(item.path)})${out.slice(end)}`;
   }
   return out;
+}
+
+/**
+ * Where the chip stands: the last `bare` occurrence with a word edge each
+ * side (the draft's start or end, or a space) — text the person typed
+ * earlier that merely looks like the chip reads as an earlier occurrence,
+ * so from the end the chip wins. An already-placed link never qualifies:
+ * its text opens with `[`, not an edge.
+ */
+function lastChipOccurrence(out: string, bare: string): number {
+  let at = out.length;
+  for (;;) {
+    const found = out.lastIndexOf(bare, at);
+    if (found === -1) return -1;
+    const before = found === 0 ? "" : out[found - 1];
+    const after = found + bare.length >= out.length ? "" : out[found + bare.length];
+    if ((before === "" || before === " ") && (after === "" || after === " ")) return found;
+    if (found === 0) return -1;
+    at = found - 1;
+  }
 }
 
 export function pathIcon(kind: PathKind): string {

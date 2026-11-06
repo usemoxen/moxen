@@ -9,7 +9,7 @@
  */
 import type { ImageAttachmentUpload } from "../attachments.js";
 import type { ModelRequest } from "../catalog/selection.js";
-import type { TaskNotification } from "./notify.js";
+import type { ReviewVerdict, TaskNotification } from "./notify.js";
 import type { QueuePolicy } from "./queue.js";
 import type { UsageProtectionOverride } from "../usage/limits.js";
 import type {
@@ -360,6 +360,21 @@ export interface StoredDelegation {
   readonly continuesTaskId?: string;
   /** The client's idempotency key for this delegation, when it passed one: a retry with the same key returns this row's task. */
   readonly idempotencyKey?: string;
+  /**
+   * `instance/model` on each side when the task started. The review
+   * same-model check reads this, not the live records, so a parent that
+   * moves on or changes model cannot rewrite who the reviewer shared a
+   * model with. Absent on rows written before it existed.
+   */
+  readonly modelSnapshot?: { readonly parent?: string; readonly child?: string };
+  /**
+   * A settled review task's pinned outcome: the verdict and report of its
+   * last settled turn. A follow-up turn that settles re-pins. Read paths
+   * prefer this over the latest assistant text, so a conversational
+   * follow-up cannot rewrite the settled verdict. Absent until the task
+   * settles, and on rows written before it existed.
+   */
+  readonly review?: { readonly verdict: ReviewVerdict | null; readonly report: string | null };
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
