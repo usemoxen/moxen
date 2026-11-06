@@ -17,6 +17,18 @@ async function projectFor(config: CliConfig, cwd: string | undefined): Promise<s
   return resolved.project?.id ?? null;
 }
 
+/**
+ * Refuse before dispatching when the server has memory off: reads stay
+ * allowed, but a write agents could never read back is refused rather than
+ * silently kept. The server's own config decides, never this machine's.
+ */
+async function requireMemoryWritable(config: CliConfig): Promise<void> {
+  const { config: serverConfig } = await (await cliClient(config)).query({ type: "config.read" });
+  if (serverConfig.memory === false) {
+    throw new CliError("MEMORY_DISABLED", "Memory is turned off.");
+  }
+}
+
 function normalizeScope(raw: string | undefined, fallback?: MemoryScope): MemoryScope | undefined {
   if (raw === undefined) return fallback;
   if (raw === "project" || raw === "global") return raw;
@@ -49,6 +61,7 @@ export async function saveMemory(
   name: string,
   options: { cwd?: string; scope?: string; description: string; memoryType: string; body: string },
 ) {
+  await requireMemoryWritable(config);
   const projectId = await projectFor(config, options.cwd);
   const scope = normalizeScope(options.scope, "project")!;
   return await (await cliClient(config)).dispatch({
@@ -67,6 +80,7 @@ export async function editMemory(
   name: string,
   options: { cwd?: string; scope?: string; oldText: string; newText: string; description?: string },
 ) {
+  await requireMemoryWritable(config);
   const projectId = await projectFor(config, options.cwd);
   const scope = normalizeScope(options.scope, "project")!;
   return await (await cliClient(config)).dispatch({
@@ -85,6 +99,7 @@ export async function deleteMemory(
   name: string,
   options: { cwd?: string; scope?: string; confirm?: (name: string, scope: MemoryScope) => Promise<boolean> },
 ) {
+  await requireMemoryWritable(config);
   const projectId = await projectFor(config, options.cwd);
   const scope = normalizeScope(options.scope, "project")!;
   if (options.confirm) {
@@ -115,6 +130,7 @@ export async function searchMemory(config: CliConfig, query: string, options: { 
 }
 
 export async function importClaudeMemory(config: CliConfig, options: { cwd?: string }) {
+  await requireMemoryWritable(config);
   const projectId = await projectFor(config, options.cwd);
   return await (await cliClient(config)).dispatch({ type: "memory.import-claude", ...(projectId === null ? {} : { projectId }) });
 }

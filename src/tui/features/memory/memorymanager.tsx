@@ -15,8 +15,11 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { TextField } from "../settings/textfield.js";
 import {
+  checkRenameTarget,
+  commitRename,
+  errorCodeOf,
   memoryChanged,
-  renameMemory,
+  verifyTargetSave,
   type MemoryAddress,
   type MemoryBody,
   type MemoryKey,
@@ -43,7 +46,7 @@ type Screen =
   | { readonly kind: "form"; readonly editing: MemoryKey | null }
   | { readonly kind: "deleteConfirm"; readonly key: MemoryKey }
   | { readonly kind: "replaceConfirm" }
-  | { readonly kind: "conflict"; readonly fresh: StoredMemory };
+  | { readonly kind: "conflict"; readonly fresh: StoredMemory; readonly forTarget: boolean };
 
 /** The memory types a form offers, in the order the server documents them. */
 const MEMORY_TYPES: readonly MemoryType[] = ["user", "feedback", "project", "reference"];
@@ -84,7 +87,6 @@ export function MemoryManagerModal({
   height: number;
   onClose: () => void;
 }) {
-  const address: MemoryAddress = useMemo(() => (threadId === null ? {} : { threadId }), [threadId]);
   const inner = Math.max(20, width - 4);
   const rowWidth = Math.max(10, inner - 2);
 
@@ -105,6 +107,8 @@ export function MemoryManagerModal({
   const [draft, setDraft] = useState<MemoryBody | null>(null);
   /** The memory the form edits: null for a new one. Kept while confirms come and go. */
   const [formKey, setFormKey] = useState<MemoryKey | null>(null);
+  /** The target key a replace confirm was given for: consent never carries to another name. A ref, not state: confirms set it in the same tick they save. */
+  const replaceConsentedKey = useRef<MemoryKey | null>(null);
   const [fieldIndex, setFieldIndex] = useState(0);
   const [editingField, setEditingField] = useState<"name" | "description" | "body" | null>(null);
   const [replaceConfirmed, setReplaceConfirmed] = useState(false);
@@ -114,18 +118,29 @@ export function MemoryManagerModal({
   const [confirmIndex, setConfirmIndex] = useState(0);
   /** What the last delete removed: shown on the list until the next action. */
   const [notice, setNotice] = useState<string | null>(null);
+  /** The thread the open detail or form belongs to: mutations use this, never the live prop. */
+  const [opAddress, setOpAddress] = useState<MemoryAddress>({});
+  /** The project the list answers for: null until it loads, or when there is none. */
+  const [listProjectId, setListProjectId] = useState<string | null>(null);
 
-  const via = threadId === null ? {} : { threadId };
+  const addressOf = (id: string | null): MemoryAddress => (id === null ? {} : { threadId: id });
+  const via = addressOf(threadId);
+  /** Writes are allowed while memory is on; viewing works either way. */
+  const canWrite = !memoryOff;
+  const hasProject = listProjectId !== null;
 
-  // The list, and whether memory is off (viewing still works then).
+  // The list, the project it answers for, and whether memory is off (viewing still works then).
   useEffect(() => {
     let cancelled = false;
     setListed(null);
+    setListProjectId(null);
     setListError(null);
     void client
       .query({ type: "memory.list", ...via })
       .then((result) => {
-        if (!cancelled) setListed(result.memories);
+        if (cancelled) return;
+        setListed(result.memories);
+        setListProjectId(result.projectId);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setListError(messageOf(cause));
@@ -141,6 +156,19 @@ export function MemoryManagerModal({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, threadId, reloadToken]);
+
+  // A thread switch mid-modal would otherwise write into the new thread's
+  // project: fall back to the list, which follows the live thread.
+  useEffect(() => {
+    setScreen({ kind: "list" });
+    setQuery("");
+    setOpened(null);
+    setDraft(null);
+    setFormKey(null);
+    replaceConsentedKey.current = null;
+    setOpAddress(addressOf(threadId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
 
   // Searching goes through the same server search agents use (keyword, or semantic when set up).
   useEffect(() => {
@@ -184,19 +212,22 @@ export function MemoryManagerModal({
 
   const openDetail = (key: MemoryKey) => {
     setNotice(null);
+    setOpAddress(addressOf(threadId));
     setScreen({ kind: "detail", key });
     setOpened(null);
     setDetailError(null);
     void client
-      .query({ type: "memory.read", name: key.name, scope: key.scope, ...via })
+      .query({ type: "memory.read", name: key.name, scope: key.scope, ...addressOf(threadId) })
       .then(setOpened)
       .catch((cause: unknown) => setDetailError(messageOf(cause)));
   };
 
   const openCreate = () => {
     setNotice(null);
-    setDraft({ name: "", description: "", type: "project", body: "", scope: threadId === null ? "global" : "project" });
+    setOpAddress(addressOf(threadId));
+    setDraft({ name: "", description: "", type: "project", body: "", scope: hasProject ? "project" : "global" });
     setFormKey(null);
+    replaceConsentedKey.current = null;
     setFieldIndex(0);
     setEditingField(null);
     setReplaceConfirmed(false);
@@ -206,8 +237,10 @@ export function MemoryManagerModal({
   };
 
   const openEdit = (memory: StoredMemory) => {
+    setOpAddress(addressOf(threadId));
     setDraft({ name: memory.name, description: memory.description, type: memory.type, body: memory.body, scope: memory.scope });
     setFormKey({ name: memory.name, scope: memory.scope });
+    replaceConsentedKey.current = null;
     setFieldIndex(0);
     setEditingField(null);
     setReplaceConfirmed(false);
@@ -216,32 +249,66 @@ export function MemoryManagerModal({
     setScreen({ kind: "form", editing: { name: memory.name, scope: memory.scope } });
   };
 
+  /** One memory, or null when the scope holds no such name. Anything else propagates. */
+  const readTarget = async (key: MemoryKey): Promise<StoredMemory | null> => {
+    try {
+      return await client.query({ type: "memory.read", name: key.name, scope: key.scope, ...opAddress });
+    } catch (cause) {
+      if (errorCodeOf(cause) === "MEMORY_NOT_FOUND") return null;
+      throw cause;
+    }
+  };
+
   const saveForm = (editing: MemoryKey | null, flags: { replace: boolean; overwrite: boolean }) => {
     if (draft === null || saving) return;
     setSaving(true);
     setFormError(null);
     const attempt = async (): Promise<void> => {
+      const snapshot = { ...draft };
       const from = editing;
-      // Never silently overwrite: what changed underneath is shown first.
+      const targetKey = { name: snapshot.name, scope: snapshot.scope };
+      const renamed = from === null || snapshot.name !== from.name || snapshot.scope !== from.scope;
+      // Never silently overwrite the source: what changed underneath is shown first.
       if (from !== null && !flags.overwrite && opened !== null && opened.name === from.name && opened.scope === from.scope) {
-        const fresh = await client.query({ type: "memory.read", name: from.name, scope: from.scope, ...via });
+        const fresh = await client.query({ type: "memory.read", name: from.name, scope: from.scope, ...opAddress });
         if (memoryChanged(opened, fresh)) {
           setConfirmIndex(0);
-          setScreen({ kind: "conflict", fresh });
+          setScreen({ kind: "conflict", fresh, forTarget: false });
           return;
         }
       }
-      const snapshot = { ...draft };
-      const result = await renameMemory(client, address, from ?? { name: snapshot.name, scope: snapshot.scope }, snapshot, { replaceConfirmed: flags.replace });
-      if ("needsReplaceConfirm" in result) {
+      // Consent for the target, then a last-instant re-read against what was agreed.
+      const chk = await checkRenameTarget(client, opAddress, from, snapshot, { replaceConfirmed: flags.replace });
+      if ("needsReplaceConfirm" in chk) {
         setConfirmIndex(0);
         setScreen({ kind: "replaceConfirm" });
         return;
       }
+      if (renamed) {
+        const now = await readTarget(targetKey);
+        const agreed = flags.replace && chk.existing !== null && chk.existing.name === targetKey.name && chk.existing.scope === targetKey.scope
+          ? chk.existing
+          : null;
+        const consentedKey = replaceConsentedKey.current;
+        const consented = flags.replace && consentedKey !== null && consentedKey.name === targetKey.name && consentedKey.scope === targetKey.scope;
+        const decision = verifyTargetSave({ isCreate: from === null, replaceEffective: consented, basis: agreed, now });
+        if (decision === "replaceConfirm") {
+          setConfirmIndex(0);
+          setScreen({ kind: "replaceConfirm" });
+          return;
+        }
+        if (decision === "conflict") {
+          setConfirmIndex(0);
+          setScreen({ kind: "conflict", fresh: now!, forTarget: true });
+          return;
+        }
+      }
+      await commitRename(client, opAddress, from, snapshot);
       setReplaceConfirmed(false);
       setOverwriteConfirmed(false);
+      replaceConsentedKey.current = null;
       setReloadToken((token) => token + 1);
-      openDetail({ name: snapshot.name, scope: snapshot.scope });
+      openDetail(targetKey);
     };
     void attempt()
       .catch((cause: unknown) => setFormError(messageOf(cause)))
@@ -251,7 +318,7 @@ export function MemoryManagerModal({
   const deleteOpened = (key: MemoryKey) => {
     setDetailError(null);
     void client
-      .dispatch({ type: "memory.delete", name: key.name, scope: key.scope, ...via })
+      .dispatch({ type: "memory.delete", name: key.name, scope: key.scope, ...opAddress })
       .then(() => {
         setReloadToken((token) => token + 1);
         setNotice(t("mem.deleted", { name: key.name }));
@@ -293,7 +360,11 @@ export function MemoryManagerModal({
         return;
       }
       if (screen.kind === "conflict") {
-        setScreen({ kind: "form", editing: formKey });
+        if (screen.forTarget) setScreen({ kind: "form", editing: formKey });
+        else {
+          setOpened(screen.fresh);
+          setScreen({ kind: "detail", key: { name: screen.fresh.name, scope: screen.fresh.scope } });
+        }
         return;
       }
       return;
@@ -315,7 +386,7 @@ export function MemoryManagerModal({
         return;
       }
       if (key.name === "n" && key.ctrl === true && key.meta !== true) {
-        openCreate();
+        if (canWrite) openCreate();
         return;
       }
       if (key.name === "backspace") {
@@ -338,6 +409,7 @@ export function MemoryManagerModal({
         setScreen({ kind: "list" });
         return;
       }
+      if (!canWrite) return;
       if (key.sequence === "e" && !key.ctrl && !key.meta && opened !== null) {
         openEdit(opened);
         return;
@@ -363,7 +435,7 @@ export function MemoryManagerModal({
           if (activeField === "type") {
             const at = MEMORY_TYPES.indexOf(draft.type);
             setDraft({ ...draft, type: MEMORY_TYPES[(at + delta + MEMORY_TYPES.length) % MEMORY_TYPES.length]! });
-          } else if (threadId !== null) {
+          } else if (hasProject) {
             const at = MEMORY_SCOPES.indexOf(draft.scope);
             setDraft({ ...draft, scope: MEMORY_SCOPES[(at + delta + MEMORY_SCOPES.length) % MEMORY_SCOPES.length]! });
           }
@@ -372,8 +444,9 @@ export function MemoryManagerModal({
       }
       if (key.name === "return" || key.name === "kpenter" || key.name === "space") {
         if (activeField === "name" || activeField === "description" || activeField === "body") setEditingField(activeField);
-        else if (activeField === "save") saveForm(formKey, { replace: replaceConfirmed, overwrite: overwriteConfirmed });
-        else if (activeField === "cancel") setScreen(formKey === null ? { kind: "list" } : opened === null ? { kind: "list" } : { kind: "detail", key: { name: opened.name, scope: opened.scope } });
+        else if (activeField === "save") {
+          if (canWrite) saveForm(formKey, { replace: replaceConfirmed, overwrite: overwriteConfirmed });
+        } else if (activeField === "cancel") setScreen(formKey === null ? { kind: "list" } : opened === null ? { kind: "list" } : { kind: "detail", key: { name: opened.name, scope: opened.scope } });
       }
       return;
     }
@@ -388,10 +461,20 @@ export function MemoryManagerModal({
           else setScreen({ kind: "detail", key: screen.key });
         } else if (screen.kind === "replaceConfirm") {
           if (confirmIndex === 0) {
+            if (draft !== null) replaceConsentedKey.current = { name: draft.name, scope: draft.scope };
             setReplaceConfirmed(true);
             setConfirmIndex(0);
             setScreen({ kind: "form", editing: formKey });
             saveForm(formKey, { replace: true, overwrite: overwriteConfirmed });
+          } else setScreen({ kind: "form", editing: formKey });
+        } else if (screen.forTarget) {
+          if (confirmIndex === 0) {
+            if (draft !== null) replaceConsentedKey.current = { name: draft.name, scope: draft.scope };
+            setOverwriteConfirmed(true);
+            setReplaceConfirmed(true);
+            setConfirmIndex(0);
+            setScreen({ kind: "form", editing: formKey });
+            saveForm(formKey, { replace: true, overwrite: true });
           } else setScreen({ kind: "form", editing: formKey });
         } else {
           if (confirmIndex === 0) {
@@ -450,7 +533,7 @@ export function MemoryManagerModal({
             ) : ordered.length === 0 ? (
               <box style={{ flexDirection: "column", flexGrow: 1, justifyContent: "center", alignItems: "center", width: inner }} backgroundColor={SURFACE.raised}>
                 <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{searchingView ? t("mem.noMatch") : t("mem.empty")}</text>
-                {!searchingView && threadId === null ? <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("mem.noProject")}</text> : null}
+                {!searchingView && listed !== null && !hasProject ? <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{threadId === null ? t("mem.noProject") : t("mem.noProjectThread")}</text> : null}
               </box>
             ) : searchingView ? (
               ordered.map((row, rowIndex) => (
@@ -476,13 +559,13 @@ export function MemoryManagerModal({
                     })}
                   </Fragment>
                 )}
-                {threadId === null ? <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("mem.noProject")}</text> : null}
+                {listed === null || hasProject ? null : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{threadId === null ? t("mem.noProject") : t("mem.noProjectThread")}</text>}
               </Fragment>
             )}
           </scrollbox>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between", width: inner }} backgroundColor={SURFACE.raised}>
             <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 8)}>{hint}</OverflowText>
-            <HoverButton label={t("mem.new")} fg={COLOR.accent} hoverFg={COLOR.bright} onClick={openCreate} />
+            {canWrite ? <HoverButton label={t("mem.new")} fg={COLOR.accent} hoverFg={COLOR.bright} onClick={openCreate} /> : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{t("mem.new")}</text>}
           </box>
         </>
       ) : screen.kind === "detail" ? (
@@ -509,8 +592,8 @@ export function MemoryManagerModal({
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between", width: inner }} backgroundColor={SURFACE.raised}>
               <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 20)}>{hint}</OverflowText>
               <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.raised}>
-                <HoverButton label={` ${t("mem.edit")} `} fg={COLOR.accent} hoverFg={COLOR.bright} onClick={() => openEdit(opened)} />
-                <HoverButton label={` ${t("mem.delete")} `} fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => { setConfirmIndex(0); setScreen({ kind: "deleteConfirm", key: { name: opened.name, scope: opened.scope } }); }} />
+                {canWrite ? <HoverButton label={` ${t("mem.edit")} `} fg={COLOR.accent} hoverFg={COLOR.bright} onClick={() => openEdit(opened)} /> : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{` ${t("mem.edit")} `}</text>}
+                {canWrite ? <HoverButton label={` ${t("mem.delete")} `} fg={COLOR.danger} hoverFg={COLOR.bright} onClick={() => { setConfirmIndex(0); setScreen({ kind: "deleteConfirm", key: { name: opened.name, scope: opened.scope } }); }} /> : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{` ${t("mem.delete")} `}</text>}
               </box>
             </box>
           </>
@@ -546,7 +629,7 @@ export function MemoryManagerModal({
                 onSubmit={(text) => { setDraft({ ...draft, body: text }); setEditingField(null); }} />
             ) : null}
             <box style={{ flexDirection: "row", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
-              <HoverButton label={saving ? ` ${t("mem.saving")} ` : ` ${t("mem.save")} `} fg={SURFACE.base} hoverBg={COLOR.bright} bg={COLOR.accent} onClick={() => saveForm(formKey, { replace: replaceConfirmed, overwrite: overwriteConfirmed })} />
+              {canWrite ? <HoverButton label={saving ? ` ${t("mem.saving")} ` : ` ${t("mem.save")} `} fg={SURFACE.base} hoverBg={COLOR.bright} bg={COLOR.accent} onClick={() => saveForm(formKey, { replace: replaceConfirmed, overwrite: overwriteConfirmed })} /> : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{` ${t("mem.save")} `}</text>}
               <HoverButton label={` ${t("mem.cancel")} `} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => setScreen(formKey === null ? { kind: "list" } : opened === null ? { kind: "list" } : { kind: "detail", key: { name: opened.name, scope: opened.scope } })} />
             </box>
           </scrollbox>
@@ -561,13 +644,33 @@ export function MemoryManagerModal({
       ) : screen.kind === "replaceConfirm" && draft !== null ? (
         <ConfirmBody title={t("mem.replaceTitle")} detail={t("mem.replaceBody", { name: draft.name, scope: scopeLabel(draft.scope) })} confirmLabel={t("mem.replace")} danger={false} index={confirmIndex} width={inner}
           onHover={setConfirmIndex}
-          onConfirm={() => { setReplaceConfirmed(true); setConfirmIndex(0); setScreen({ kind: "form", editing: formKey }); saveForm(formKey, { replace: true, overwrite: overwriteConfirmed }); }}
+          onConfirm={() => { replaceConsentedKey.current = { name: draft.name, scope: draft.scope }; setReplaceConfirmed(true); setConfirmIndex(0); setScreen({ kind: "form", editing: formKey }); saveForm(formKey, { replace: true, overwrite: overwriteConfirmed }); }}
           onBack={() => setScreen({ kind: "form", editing: formKey })} />
       ) : screen.kind === "conflict" ? (
-        <ConfirmBody title={t("mem.conflictTitle")} detail={t("mem.conflictBody")} confirmLabel={t("mem.overwrite")} danger index={confirmIndex} width={inner}
+        <ConfirmBody title={t("mem.conflictTitle")} detail={screen.forTarget && draft !== null ? t("mem.conflictBodyTarget", { name: draft.name }) : t("mem.conflictBody")} confirmLabel={t("mem.overwrite")} danger index={confirmIndex} width={inner}
           onHover={setConfirmIndex}
-          onConfirm={() => { setOverwriteConfirmed(true); setConfirmIndex(0); setScreen({ kind: "form", editing: formKey }); saveForm(formKey, { replace: replaceConfirmed, overwrite: true }); }}
-          onBack={() => { setOpened(screen.fresh); setScreen({ kind: "detail", key: { name: screen.fresh.name, scope: screen.fresh.scope } }); }} />
+          onConfirm={() => {
+            if (screen.forTarget && draft !== null) {
+              replaceConsentedKey.current = { name: draft.name, scope: draft.scope };
+              setOverwriteConfirmed(true);
+              setReplaceConfirmed(true);
+              setConfirmIndex(0);
+              setScreen({ kind: "form", editing: formKey });
+              saveForm(formKey, { replace: true, overwrite: true });
+            } else {
+              setOverwriteConfirmed(true);
+              setConfirmIndex(0);
+              setScreen({ kind: "form", editing: formKey });
+              saveForm(formKey, { replace: replaceConfirmed, overwrite: true });
+            }
+          }}
+          onBack={() => {
+            if (screen.forTarget) setScreen({ kind: "form", editing: formKey });
+            else {
+              setOpened(screen.fresh);
+              setScreen({ kind: "detail", key: { name: screen.fresh.name, scope: screen.fresh.scope } });
+            }
+          }} />
       ) : null}
     </ModalShell>
   );

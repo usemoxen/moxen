@@ -155,3 +155,22 @@ describe("memory search", () => {
     });
   });
 });
+
+describe("memory writes while memory is off", () => {
+  it("refuses saves, edits and deletes early, and still reads", async () => {
+    const { harness, cwd } = await seededCwd();
+    // In-process the server runs on this config, so this is the config it refuses by.
+    const off = { ...harness.config, memory: false as const };
+    await expect(
+      saveMemory(off, "deploy-notes", { cwd, scope: "project", description: "How deploys go out", memoryType: "project", body: "Ship on Fridays." }),
+    ).rejects.toMatchObject({ code: "MEMORY_DISABLED" });
+    await expect(
+      editMemory(off, "deploy-notes", { cwd, scope: "project", oldText: "Fridays", newText: "Thursdays" }),
+    ).rejects.toMatchObject({ code: "MEMORY_DISABLED" });
+    await expect(deleteMemory(off, "deploy-notes", { cwd, scope: "project" })).rejects.toMatchObject({ code: "MEMORY_DISABLED" });
+    // Nothing was written, and reads stay allowed either way.
+    await expect(readMemory(off, "deploy-notes", { cwd, scope: "project" })).rejects.toMatchObject({ code: "MEMORY_NOT_FOUND" });
+    const found = await searchMemory(off, "deploys", { cwd });
+    expect(found.total).toBe(0);
+  });
+});

@@ -458,7 +458,8 @@ reads one in full; `save`, `edit` and `delete` write through the server (`--scop
 `--cwd` like `list`). A save takes `--description`, `--type` and a body from `--body` or stdin; an
 edit replaces one piece of the body (`--old-text` with `--new-text`, `--body` or stdin) and can also
 replace the description; a delete asks first unless `--yes` (outside a terminal `--yes` is required).
-`moxen memory search <query>` searches the same way agents search, with `--limit` (1–50). Agents
+`moxen memory search <query>` searches the same way agents search, with `--limit` (1–50). While
+memory is off the writes refuse with `MEMORY_DISABLED`; reads and search keep working. Agents
 can also use the read-only `memory_search` MCP tool to search names,
 descriptions and bodies by keyword, including entries omitted from the
 capped index. It returns up to 10 excerpts by default (`limit`: 1–50), with

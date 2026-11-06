@@ -387,6 +387,26 @@ export class DirectConnection implements ClientApi {
     return (await projectMemorySetting(root, "memoryEmbeddings") ?? config.memoryEmbeddings) === true;
   }
 
+  /**
+   * Whether memory writes are allowed here. The global switch and the
+   * project's own `moxen.json` gate agents, so they gate user writes too —
+   * a write agents can never read back is refused rather than silently kept.
+   * Reads stay allowed either way.
+   */
+  private async memoryWritable(location: MemoryLocation): Promise<boolean> {
+    const config = await this.loadConfig();
+    if (config.memory === false) return false;
+    if (location.projectId === null) return true;
+    const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
+    return (await projectMemorySetting(project?.workspaceRoot ?? null)) !== false;
+  }
+
+  private async requireMemoryWritable(location: MemoryLocation): Promise<void> {
+    if (!(await this.memoryWritable(location))) {
+      throw new CliError("MEMORY_DISABLED", "Memory is turned off.");
+    }
+  }
+
   private async applyEmbeddingPolicy(): Promise<void> {
     const config = await this.loadConfig();
     if (this.closed) return;
@@ -1295,22 +1315,35 @@ export class DirectConnection implements ClientApi {
       }
       case "model.visibility.set":
         return { hidden: await setModelHidden(this.storeRoot, command.instanceId, command.model, command.hidden) };
-      case "memory.save":
-        return await saveMemory(await this.memoryLocation(command), {
+      case "memory.save": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await saveMemory(location, {
           name: command.name,
           description: command.description,
           type: command.memoryType,
           body: command.body,
           scope: command.scope,
         });
-      case "memory.edit":
-        return await editMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, oldText: command.oldText, newText: command.newText, description: command.description });
-      case "memory.append":
-        return await appendMemory(await this.memoryLocation(command), { name: command.name, scope: command.scope, text: command.text });
-      case "memory.delete":
-        return await deleteMemory(await this.memoryLocation(command), command.name, command.scope);
+      }
+      case "memory.edit": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await editMemory(location, { name: command.name, scope: command.scope, oldText: command.oldText, newText: command.newText, description: command.description });
+      }
+      case "memory.append": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await appendMemory(location, { name: command.name, scope: command.scope, text: command.text });
+      }
+      case "memory.delete": {
+        const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
+        return await deleteMemory(location, command.name, command.scope);
+      }
       case "memory.import-claude": {
         const location = await this.memoryLocation(command);
+        await this.requireMemoryWritable(location);
         const project = location.projectId === null ? undefined : (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === location.projectId);
         if (project === undefined || project.scratch === true) {
           throw new CliError("MEMORY_PROJECT_REQUIRED", "Importing Claude Code's memory needs a project: its memory is kept per folder.", { exitCode: 2 });

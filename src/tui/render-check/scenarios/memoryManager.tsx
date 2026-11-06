@@ -23,7 +23,7 @@ const SEEDS: Seed[] = [
 ];
 
 /** The manager's server: an in-memory store behind the memory queries and writes it makes. */
-function memoryClient(seeds: Seed[] = SEEDS): { api: ClientApi; dispatched: string[] } {
+function memoryClient(seeds: Seed[] = SEEDS): { api: ClientApi; dispatched: string[]; store: Map<string, Seed> } {
   const store = new Map(seeds.map((memory) => [`${memory.scope}:${memory.name}`, { ...memory }]));
   const dispatched: string[] = [];
   const api = {
@@ -73,7 +73,7 @@ function memoryClient(seeds: Seed[] = SEEDS): { api: ClientApi; dispatched: stri
       return (client.query as (query: unknown) => Promise<unknown>)(query);
     }) as ClientApi["query"],
   } as ClientApi;
-  return { api, dispatched };
+  return { api, dispatched, store };
 }
 
 async function clickText(setup: TestRendererSetup, text: string): Promise<void> {
@@ -138,7 +138,7 @@ async function openFromPalette(setup: TestRendererSetup): Promise<void> {
 
 /** The memory manager: list grouped by scope, search, an open memory, edit, delete confirm, and a narrow window. */
 export async function runMemoryManager(): Promise<void> {
-  const { api, dispatched } = memoryClient();
+  const { api, dispatched, store } = memoryClient();
   const setup = await testRender(<App client={api} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
   try {
     await setup.flush();
@@ -233,6 +233,80 @@ export async function runMemoryManager(): Promise<void> {
     if (afterDelete.includes("Ship on Fridays.")) fail("the deleted memory is still listed");
     if (!dispatched.includes("memory.delete")) fail("confirming did not dispatch a delete");
 
+    // Creating over a taken name asks first instead of overwriting.
+    await act(async () => setup.mockInput.pressKey("n", { ctrl: true }));
+    await setup.flush();
+    await waitFor(setup, "New memory", "the create form");
+    await clickText(setup, "Name:");
+    await act(async () => setup.mockInput.typeText("canary-watch"));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Name: canary-watch", "the typed name");
+    await clickText(setup, "Description:");
+    await act(async () => setup.mockInput.typeText("A replacement hook"));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Description: A replacement hook", "the typed description");
+    await clickText(setup, "Body:");
+    await act(async () => setup.mockInput.typeText("Replacement body text."));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Body: Replacement body text.", "the typed body");
+    await clickText(setup, " Save ");
+    await waitFor(setup, "Replace this memory?", "the replace confirm");
+    await settle(setup);
+    const replace = setup.captureCharFrame();
+    console.log("--- memory manager: replace confirm ---");
+    console.log(replace);
+    for (const expected of ["Replace this memory?", "canary-watch", "Replace", "Go back"]) {
+      if (!replace.includes(expected)) fail(`the replace confirm is missing "${expected}"`);
+    }
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Replacement body text.", "the replaced memory");
+    await act(async () => setup.mockInput.pressKey("x"));
+    await setup.flush();
+    await waitFor(setup, "Delete this memory?", "the second delete confirm");
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Deleted canary-watch.", "the list after the second delete");
+
+    // Another agent saving mid-edit is shown, never silently overwritten.
+    await clickText(setup, "editor-font");
+    await waitFor(setup, "JetBrains Mono.", "the second open memory");
+    store.set("global:editor-font", { name: "editor-font", description: "Preferred font", type: "user", body: "Changed by another agent.", scope: "global" });
+    await act(async () => setup.mockInput.pressKey("e"));
+    await setup.flush();
+    await waitFor(setup, "Body:", "the second edit form");
+    for (let step = 0; step < 4; step += 1) {
+      await act(async () => setup.mockInput.pressArrow("down"));
+      await setup.flush();
+    }
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await act(async () => setup.mockInput.typeText(" plus my edit."));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await act(async () => setup.mockInput.pressArrow("down"));
+    await setup.flush();
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "Changed while you had it open", "the conflict screen");
+    await settle(setup);
+    const conflict = setup.captureCharFrame();
+    console.log("--- memory manager: conflict ---");
+    console.log(conflict);
+    for (const expected of ["Changed while you had it open", "Save anyway", "Go back"]) {
+      if (!conflict.includes(expected)) fail(`the conflict screen is missing "${expected}"`);
+    }
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    await waitFor(setup, "plus my edit.", "the overwritten memory");
+
     await act(async () => setup.mockInput.pressEscape());
     await setup.flush();
   } finally {
@@ -258,10 +332,12 @@ export async function runMemoryManager(): Promise<void> {
   }
 
   // From Settings > Memory: the Manage memories button opens the same list.
+  // Its own store: the walkthrough above renamed and deleted the shared one.
+  const settingsClient = memoryClient();
   function SettingsHarness() {
     return (
       <SettingsModal
-        client={api}
+        client={settingsClient.api}
         threadId={null}
         initialSection="memory"
         snapshot={{ path: "config.json", exists: true, settings: describeSettings(DEFAULTS_FOR_RENDER_CHECK) }}
