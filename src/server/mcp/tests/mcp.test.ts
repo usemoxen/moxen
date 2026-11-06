@@ -179,6 +179,36 @@ describe("moxen MCP server", () => {
     }
   });
 
+  it("starts every batch entry in the shared review mode, and refuses a per-entry mode", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        mode: "review",
+        tasks: [
+          { task: "Review the login change", title: "review login" },
+          { task: "Review the billing change", title: "review billing" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<{ taskId: string; title: string }> };
+      expect(batch.tasks).toHaveLength(2);
+      const store = await openThreadStore(harness.root);
+      for (const entry of batch.tasks) {
+        expect((await store.readThreadRecord(entry.taskId))?.interactionMode).toBe("review");
+      }
+      const refused = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        mode: "review",
+        tasks: [{ task: "Review it", title: "review", mode: "review" } as unknown as Record<string, string>],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain('unknown field "mode"');
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("starts the tasks that can start when one fails, and says the failed one plainly", async () => {
     const harness = await testHarness({});
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
