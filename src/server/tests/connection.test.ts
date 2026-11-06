@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ThreadStore } from "../../core/threads/store.js";
 
 import type { CommandOf } from "../protocol.js";
+import { decodeCommand } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
 import { OpenCodeDriver } from "../../core/providers/opencode/driver.js";
@@ -2139,6 +2140,53 @@ describe("DirectConnection continue in a new thread", () => {
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
     try {
       await expect(connection.dispatch({ type: "thread.continue", threadId: "ghost" })).rejects.toThrow("No thread ghost.");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a model request naming both a selection and provider/model", () => {
+    expect(() =>
+      decodeCommand({
+        type: "thread.continue",
+        threadId: "t1",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+        provider: "codex",
+        model: "gpt-6.1-sol",
+      }),
+    ).toThrow("either modelSelection or provider/model, not both");
+  });
+
+  it("hands the new thread to the requested model, keeping the project and checkout", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await connection.dispatch({
+        type: "thread.create",
+        threadId: "old-thread",
+        projectId: ensured.project.id,
+        title: "Auth audit",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+        runtimeMode: "auto-accept-edits",
+      });
+      const result = await connection.dispatch({
+        type: "thread.continue",
+        threadId: "old-thread",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol", options: [{ id: "effort", value: "xhigh" }] },
+      });
+      const fresh = await connection.query({ type: "thread.inspect", threadId: result.threadId });
+      const inspected = fresh.thread as unknown as {
+        projectId: string;
+        modelSelection: { instanceId: string; model: string; options?: Array<{ id: string; value: unknown }> };
+        runtimeMode: string;
+      };
+      expect(inspected.projectId).toBe(ensured.project.id);
+      expect(inspected.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6.1-sol" });
+      expect(inspected.modelSelection.options).toContainEqual({ id: "effort", value: "xhigh" });
+      // Only the model moves: the modes stay the source's, on the same project and checkout.
+      expect(inspected.runtimeMode).toBe("auto-accept-edits");
     } finally {
       await connection.close();
     }

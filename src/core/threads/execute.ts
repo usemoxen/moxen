@@ -121,15 +121,23 @@ export interface TurnDriver extends ProviderSessionTitles {
    */
   updateMcpServers?(threadId: string, servers: readonly McpServerSpec[]): Promise<void>;
   /**
-   * Re-register this thread's own MCP servers after a session sharing its
-   * provider server replaced the entry out from under it. OpenCode keys
-   * servers by name per directory, and `mcp.add` restarts the server on
-   * every call, so a delegated task's session start flips the directory's
-   * single `moxen` entry to the child and the in-flight call dies with
-   * `Connection closed`. Absent where a session's servers cannot change
-   * after it starts. Best-effort: never throws.
+   * The thread whose live native session this is, for routing one shared
+   * `moxen` MCP entry's calls to the session that made them: OpenCode sends
+   * its session id in `CallToolRequest.params._meta["ai.opencode/sessionID"]`.
+   * Follows OpenCode's own child sessions to the thread whose session started
+   * them. Null when no live session matches — the caller must fail safe,
+   * never serve another thread. Absent where a provider sends no session id
+   * with its tool calls.
    */
-  restoreMcpServers?(threadId: string): Promise<void>;
+  threadForNativeSession?(nativeSessionId: string): string | null;
+  /**
+   * How many live sessions could place calls on this thread's entry: more
+   * than one makes a tool call without session identity ambiguous, so it
+   * fails instead of running as the entry owner's thread. One at most (an
+   * entry that serves only its own thread) keeps the owner's fallback.
+   * Absent where entries are never shared: one.
+   */
+  entrySessionCount?(threadId: string): number;
   /**
    * The provider tools to leave off, as the setting says now, for a session already running. OpenCode's are part of
    * its server's config, so it restarts the server once nothing runs on it. Absent where a live session cannot
