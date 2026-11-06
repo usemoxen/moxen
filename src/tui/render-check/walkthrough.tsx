@@ -17,6 +17,7 @@ import { runSidebarStability } from "./scenarios/sidebarStability.js";
 import { runPermissions } from "./scenarios/permissions.js";
 import { runDiffPanel } from "./scenarios/diffPanel.js";
 import { runCommandPalette } from "./scenarios/commandPalette.js";
+import { runContinueModal, runContinueModalSpanish } from "./scenarios/continueModal.js";
 import { runThreadSearch } from "./scenarios/threadSearch.js";
 import { runMessageActions } from "./scenarios/messageActions.js";
 import { runTimelineAndAnswers } from "./scenarios/timelineAndAnswers.js";
@@ -116,6 +117,8 @@ export async function runWalkthrough(): Promise<void> {
   await runLifecycleRows(setup);
   await runBackgroundWork(setup);
   await runProviderInterruptions(setup);
+  await runContinueModal();
+  await runContinueModalSpanish();
   // Independent render with its own deferred client (not part of the shared
   // walkthrough above): runs last so its extra renderer cannot perturb the
   // timing-sensitive assertions of the shared scenarios.

@@ -458,10 +458,13 @@ otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A
 continuation can also change the model: continuing in a new thread keeps the
 project, the checkout and the handoff, and takes an optional target
-model/provider — the palette's second continue row, or `moxen threads
+model/provider — the palette's Continue in a new thread row opens a modal
+with the provider, model and effort, preselected to the thread's own, so
+enter continues unchanged (waiting for the reset while a usage limit stands
+on the same provider, starting at once on another), or `moxen threads
 continue --provider/--model` (with `--thinking-effort`/`--speed-mode` for the
 effort; without them a model switch re-resolves effort from the settings, as
-for a new thread, while the TUI picker keeps the compatible knobs). The new
+for a new thread, while the TUI modal keeps the compatible knobs). The new
 thread keeps the source's model unless the request overrides it; a provider
 switch names its model. The command takes either a full `modelSelection` or
 `provider`/`model`, never both at once. The tasks keep

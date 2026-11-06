@@ -28,6 +28,7 @@ import { PermissionPanel } from "../../features/permissionpanel/permissionpanel.
 import { QueuedPanel } from "../../features/queuedpanel/queuedpanel.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../../features/remote/codemodal.js";
 import { ResearchPickerModal } from "../../features/researchrun/researchpicker.js";
+import { ContinueModal } from "../../features/continue/continuemodal.js";
 import { ResearchRunView } from "../../features/researchrun/researchrunview.js";
 import { RunBackBar } from "../../features/researchrun/runbackbar.js";
 import { useResearchRunView } from "../../features/researchrun/useResearchRunView.js";
@@ -39,7 +40,7 @@ import type { UsageStats } from "../../model/stats.js";
 import { PickerModal, type PickerBody } from "../../features/pickers/pickermodal.js";
 import { SkillPicker } from "../../features/composer/skillpicker.js";
 import { MinSizeGate } from "../../ui/terminalgate.js";
-import type { SkillSummary } from "../../../core/catalog/summary.js";
+import type { ProviderSummary, SkillSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { BackgroundTaskRow } from "../../model/thread.js";
 import { TasksPanel } from "../../features/taskspanel/taskspanel.js";
@@ -386,6 +387,70 @@ const side = (overrides: Partial<SideQuestion>): SideQuestion => ({
   ...overrides,
 });
 
+const CONTINUE_PROVIDERS: ProviderSummary[] = [
+  {
+    instanceId: "claude",
+    driver: "claudeAgent",
+    displayName: "Claude",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    authStatus: "authenticated",
+    models: [
+      {
+        slug: "opus",
+        name: "Claude Opus 5",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [{
+          id: "effort",
+          label: "Effort",
+          currentValue: null,
+          choices: [
+            { id: "low", label: "Low", isDefault: false },
+            { id: "medium", label: "Medium", isDefault: true },
+            { id: "high", label: "High", isDefault: false },
+          ],
+        }],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
+  {
+    instanceId: "opencode",
+    driver: "opencode",
+    displayName: "OpenCode",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    authStatus: "authenticated",
+    models: [
+      {
+        slug: "oc-model",
+        name: "OC Model",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [{
+          id: "reasoningEffort",
+          label: "Effort",
+          currentValue: null,
+          choices: [
+            { id: "low", label: "Low", isDefault: true },
+            { id: "high", label: "High", isDefault: false },
+          ],
+        }],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
+];
+
 const composer = (width: number, mode: InteractionMode, draft: string, running: boolean) => (
   <Composer
     draft={draft}
@@ -579,6 +644,19 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         <RunBackBar title="Critic 2 · Risks" state="working" width={100} onBack={noop} />
         <Caption text="narrow" />
         <RunBackBar title="Critic 2 · Risks" state="working" width={50} onBack={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "continue-modal",
+    group: "continue",
+    title: "ContinueModal",
+    width: 100,
+    height: 28,
+    settleMs: 250,
+    element: () => (
+      <Stage width={100} height={28}>
+        <ContinueModal providers={CONTINUE_PROVIDERS} initial={{ instanceId: "claude", model: "opus" }} waiting={false} screenWidth={100} screenHeight={28} onConfirm={noop} onClose={noop} />
       </Stage>
     ),
   },
