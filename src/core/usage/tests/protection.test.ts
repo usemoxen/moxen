@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settleRuns } from "../../testing/turns.js";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as Effect from "effect/Effect";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn } from "../../threads/threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, settleThread, updateThreadMeta } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, editWorkQueue, queueTaskNotification, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
+import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -183,8 +183,131 @@ describe("usage protection", () => {
     } finally { w.guard.close(); }
   });
 
-  it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {
+  it("delivers a task notification batch held in the batch window across restart, exactly once", async () => {
     const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const child = await w.make("child report");
+    await completeTurn(w.store, child, openTurn(await w.store.readTurns(child))!.id, { text: "Delivered the exact task report" });
+    try {
+      await queueTaskNotification(w.ctx, parent, child);
+      // Durable before the timer fires: the sidecar names the batch.
+      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, string[]>;
+      expect(persisted[parent]).toEqual([child]);
+      // A restart before the timer fires replays the batch...
+      const store = await openThreadStore(w.root);
+      const ctx = { ...w.ctx, store };
+      await recoverTaskNotifications(ctx);
+      await settleRuns();
+      const messages = (await store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks.map((task) => task.taskId)).toEqual([child]);
+      // ...and replaying finds nothing left: still exactly one.
+      await recoverTaskNotifications(ctx);
+      await settleRuns();
+      expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(1);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+    } finally { w.guard.close(); }
+  });
+
+  it("keeps a batch whose delivery fails for a later retry", async () => {
+    const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const child = await w.make("child report");
+    await completeTurn(w.store, child, openTurn(await w.store.readTurns(child))!.id, { text: "Delivered the exact task report" });
+    try {
+      // No driver owns this provider, so delivery fails after reading the batch.
+      await updateThreadMeta(w.store, parent, { modelSelection: { instanceId: "no-such-provider", model: "x" } });
+      await queueTaskNotification(w.ctx, parent, child);
+      await expect(flushTaskNotifications(w.ctx, parent)).rejects.toThrow();
+      // At-least-once: the batch is still on disk for the retry, and nothing went out.
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [child] });
+      expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
+      await updateThreadMeta(w.store, parent, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
+      await flushTaskNotifications(w.ctx, parent);
+      await settleRuns();
+      const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks.map((task) => task.taskId)).toEqual([child]);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+    } finally { w.guard.close(); }
+  });
+
+  it("quarantines a corrupt batch file with a warning instead of silently dropping it", async () => {
+    const w = await world();
+    try {
+      await writeFile(path.join(w.root, "task-notification-batches.json"), "{not json", "utf8");
+      const store = await openThreadStore(w.root);
+      await recoverTaskNotifications({ ...w.ctx, store });
+      await settleRuns();
+      // Nothing delivered, and the garbage is moved aside — not reset in place —
+      // with a warning where the server's own warnings go.
+      const files = await readdir(w.root);
+      expect(files.includes("task-notification-batches.json")).toBe(false);
+      const quarantined = files.filter((file) => file.startsWith("task-notification-batches.json.corrupt-"));
+      expect(quarantined).toHaveLength(1);
+      expect(await readFile(path.join(w.root, quarantined[0]!), "utf8")).toBe("{not json");
+      const log = await readFile(path.join(w.root, "server.log"), "utf8");
+      expect(log).toContain("task-notification-batches.json");
+      expect(log).toContain(quarantined[0]!);
+    } finally { w.guard.close(); }
+  });
+
+  it("batches tasks settling inside the window into one notification, and only once", async () => {
+    const w = await world();
+    const parent = await w.make("parent");
+    await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
+    const first = await w.make("first report");
+    await completeTurn(w.store, first, openTurn(await w.store.readTurns(first))!.id, { text: "one" });
+    const second = await w.make("second report");
+    await completeTurn(w.store, second, openTurn(await w.store.readTurns(second))!.id, { text: "two" });
+    try {
+      await queueTaskNotification(w.ctx, parent, first);
+      await queueTaskNotification(w.ctx, parent, second);
+      // The timer batches what settles inside the window: one message for
+      // both tasks, and nothing more afterwards.
+      await expect.poll(async () => (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification"), { timeout: 10_000, interval: 50 }).toHaveLength(1);
+      await settleRuns();
+      const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.notification?.tasks.map((task) => task.taskId).sort()).toEqual([first, second].sort());
+      await settleRuns();
+      expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(1);
+    } finally { w.guard.close(); }
+  });
+
+  it("refuses to protect a settled thread instead of holding it forever", async () => {
+    const w = await world();
+    const id = await w.make("put away");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    await settleThread(w.store, id);
+    try {
+      // A forced hold ends on a message, but settled threads refuse messages
+      // and the queue cannot cancel a forced hold: accepting this would leave
+      // a hold nothing can ever release.
+      await expect(w.guard.protect(id)).rejects.toMatchObject({ code: "THREAD_SETTLED" });
+      expect((await w.store.readThreadRecord(id))?.usagePause ?? null).toBeNull();
+    } finally { w.guard.close(); }
+  });
+
+  it("releases a forced hold left on a settled thread", async () => {
+    const w = await world();
+    const id = await w.make("put away");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false, forced: true }, settledAt: w.store.nowIso(), settledOverride: null, snoozedUntil: null });
+    try {
+      // No message can ever release it (settled threads refuse messages, and
+      // the queue cannot cancel a forced hold), so the next tick does.
+      await w.guard.tick();
+      const record = (await w.store.readThreadRecord(id))!;
+      expect(record.settledAt).not.toBeNull();
+      expect(record.usagePause).toBeNull();
+    } finally { w.guard.close(); }
+  });
+
+  it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {    const w = await world();
     const id = await w.make("put away");
     await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
     try {
@@ -771,6 +894,28 @@ describe("usage protection", () => {
     await w.guard.tick(reset + 6000);
     await settleRuns();
     expect(w.sent).toHaveLength(2);
+  });
+
+  it("fills a missing reset time from the recovery entry's window while no window runs hot", async () => {
+    const w = await world();
+    const id = await w.make("held");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const now = Date.now();
+    const soon = new Date(now + 60_000).toISOString();
+    const recovery = await sendTurn(w.store, id, {
+      prompt: "resume", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "session" }], order: 1, sequential: true, continuation: "same-thread" }), automatic: true, requestId: "usage:1" },
+    });
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(id))!, usagePause: { provider: "codex", windows: [{ id: "session", kind: "session", label: "Session", resetsAt: null }], resetsAt: null, order: 1, phase: "waiting", handoff: false, recoveryTurnId: recovery.turn.id } });
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 50, exhausted: false, resetsAt: soon },
+    ]);
+    try {
+      await w.guard.tick(now);
+      // The recovery entry waits for the session reset, so the pause names it
+      // too — even though no window runs hot enough for the old heuristic.
+      expect((await w.store.readThreadRecord(id))?.usagePause?.resetsAt).toBe(soon);
+    } finally { w.guard.close(); }
   });
 
   it("still recovers the other held threads when closing one thread's session fails", async () => {

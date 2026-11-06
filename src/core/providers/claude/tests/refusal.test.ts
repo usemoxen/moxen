@@ -147,7 +147,7 @@ describe("claude refusal fallback", () => {
     await sleep(20);
     expect(transport.created[0]!.options.supportedDialogKinds).toEqual(["refusal_fallback_prompt"]);
 
-    const answer = driver.handleUserDialog(
+    const answer = transport.created[0]!.options.onUserDialog!(
       {
         dialogKind: "refusal_fallback_prompt",
         payload: { originalModel: "claude-fable-5-1", fallbackModel: "claude-opus-5", apiRefusalCategory: "cyber" },
@@ -174,9 +174,9 @@ describe("claude refusal fallback", () => {
     await Effect.runPromise(driver.startSession(START));
     await sleep(20);
     const signal = new AbortController().signal;
-    expect(await driver.handleUserDialog({ dialogKind: "something_new", payload: {} }, { signal, requestId: "d" })).toEqual({ behavior: "cancelled" });
+    expect(await transport.created[0]!.options.onUserDialog!({ dialogKind: "something_new", payload: {} }, { signal, requestId: "d" })).toEqual({ behavior: "cancelled" });
 
-    const answer = driver.handleUserDialog(
+    const answer = transport.created[0]!.options.onUserDialog!(
       { dialogKind: "refusal_fallback_prompt", payload: { originalModel: "claude-fable-5-1", fallbackModel: "claude-opus-5" } },
       { signal, requestId: "d2" },
     );

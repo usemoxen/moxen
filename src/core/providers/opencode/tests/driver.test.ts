@@ -364,6 +364,20 @@ describe("opencode driver", () => {
     await expect(waiting).rejects.toMatchObject({ code: "TURN_ABORTED" });
   });
 
+  it("aborting one awaitTurn waiter leaves the other waiter to settle", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    const first = new AbortController();
+    const second = new AbortController();
+    const waitingFirst = driver.awaitTurn("thread-1", sent.turnId, first.signal);
+    const waitingSecond = driver.awaitTurn("thread-1", sent.turnId, second.signal);
+    first.abort();
+    await expect(waitingFirst).rejects.toMatchObject({ code: "TURN_ABORTED" });
+    await transport.servers[0]?.push({ type: "session.idle", properties: { sessionID: "opencode-session-1" } });
+    await expect(waitingSecond).resolves.toMatchObject({ status: "completed" });
+  });
+
   it("reads threads and rolls back by forking", async () => {
     const { transport, driver } = start({ messages: assistantMessages() });
     await startSession(driver);
@@ -794,6 +808,7 @@ describe("opencode driver", () => {
       { args: { sessionID: "ses_old", key: "moxen", value: null } },
       { args: { sessionID: "ses_old", key: "moxen-research", value: null } },
       { args: { sessionID: "ses_old", key: "moxen-orchestrate", value: null } },
+      { args: { sessionID: "ses_old", key: "moxen-review", value: null } },
     ]);
   });
 

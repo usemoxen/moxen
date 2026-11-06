@@ -121,7 +121,7 @@ import {
   TOAST_STEP,
   SCHEDULE_PANEL_HEIGHT,
 } from "./constants.js";
-import { clock, launchTarget, scrollPane } from "./utils.js";
+import { clock, compactNoticeKey, launchTarget, scrollPane } from "./utils.js";
 import { useTasksPanel } from "../features/taskspanel/useTasksPanel.js";
 import { useProviderUpdates } from "./hooks/useProviderUpdates.js";
 import { useQuitConfirm } from "./hooks/useQuitConfirm.js";
@@ -814,7 +814,8 @@ export function App({
     setPickerFilter("");
     if (diffPanel.expandedTurn !== turnCount) diffPanel.openDiff(turnCount);
     else setFocus("diff");
-    setTimeout(() => diffPanel.scrollTimelineToTurn(turnCount), 60);
+    // Owned (and cancelled on thread switch) by the diff panel.
+    diffPanel.deferScrollToTurn(turnCount);
   };
 
   /**
@@ -1144,11 +1145,13 @@ export function App({
       // the window opens the close menu; a 3rd (in the menu) quits via the
       // confirm branch above. An empty prompt jumps straight to the menu.
       const shouldOpenMenu = registerCtrlCPress();
-      if (openThreadId !== null) {
-        resetDraft(openThreadId);
-        // The prompt's pasted images are part of it: clearing the text left the chips behind.
-        writePending(openThreadId, []);
-      }
+      // The live key, not the open thread: while drafting with no open
+      // thread the prompt lives under "__creating__", and gating on a
+      // non-null thread would leave it (and its pending images) behind.
+      const liveKey = openThreadId ?? "__creating__";
+      resetDraft(liveKey);
+      // The prompt's pasted images are part of it: clearing the text left the chips behind.
+      writePending(liveKey, []);
       if (draft.trim().length === 0 || shouldOpenMenu) {
         toasts.dismiss("ctrl-c");
         openQuitConfirm();
@@ -1654,7 +1657,7 @@ export function App({
           queuedMessages: 0,
         });
   const compactReady = compactState !== null && compactState.blockers.length === 0;
-  const compactKey = openThreadId === null || threadState.contextUsage === null ? null : `compact:${openThreadId}:${threadState.contextUsage.usedTokens}`;
+  const compactKey = compactNoticeKey(openThreadId, threadState.contextUsage?.usedTokens ?? null);
   const [dismissedCompactKey, setDismissedCompactKey] = useState<string | null>(null);
   const handoffKey = openThreadId === null ? null : `handoff:${openThreadId}`;
   const [dismissedHandoffKey, setDismissedHandoffKey] = useState<string | null>(null);
