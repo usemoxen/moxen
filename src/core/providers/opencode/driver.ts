@@ -31,7 +31,7 @@ import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalo
 import { excludedSkills } from "../../skills/discovery.js";
 import type { InteractionMode, ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../types.js";
 import { CONTINUE_AFTER_OVERFLOW } from "../../compaction/summaryprompt.js";
-import { isCompactCommand } from "../spi.js";
+import { dropTurnWaiter, isCompactCommand } from "../spi.js";
 import type {
   ApprovalRequestId,
   ContextBreakdown,
@@ -1335,21 +1335,19 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       });
     }
     return await new Promise<OpenCodeTurnOutcome>((resolve, reject) => {
+      const waiter = { resolve, reject };
       const list = session.waiters.get(turnId) ?? [];
-      list.push({ resolve, reject });
+      list.push(waiter);
       session.waiters.set(turnId, list);
       signal?.addEventListener(
         "abort",
         () => {
-          const pending = session.waiters.get(turnId) ?? [];
-          session.waiters.delete(turnId);
-          for (const waiter of pending) {
-            waiter.reject(
-              new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-                details: { threadId, turnId },
-              }),
-            );
-          }
+          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
+          reject(
+            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+              details: { threadId, turnId },
+            }),
+          );
         },
         { once: true },
       );
@@ -1531,7 +1529,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
   /**
    * The one event pump per server, demuxed by session. Resolves once the
    * subscription is live (v2 replays nothing, so nothing may be sent before
-   * that), never rejects. A pump that ends without being stopped fails the
+   * that); a pump whose start fails (no first frame, lost stream) fails the
    * turns open on its server — their answers can no longer arrive — and the
    * next call to the server starts a fresh one.
    */

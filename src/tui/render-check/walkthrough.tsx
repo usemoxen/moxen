@@ -58,6 +58,7 @@ import { runSidebarTree } from "./scenarios/sidebarTree.js";
 import { runSidebarSearch } from "./scenarios/sidebarSearch.js";
 import { runRemoteAccess } from "./scenarios/remoteAccess.js";
 import { runProtectThread } from "./scenarios/protectThread.js";
+import { runThreadAffinity } from "./scenarios/threadAffinity.js";
 import { runServerLink } from "./scenarios/serverLink.js";
 import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
@@ -168,5 +169,6 @@ export async function runWalkthrough(): Promise<void> {
   await runNewThreadResearch();
   await runSendGate();
   await runProtectThread();
+  await runThreadAffinity();
 
 }
