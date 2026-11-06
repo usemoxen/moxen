@@ -159,6 +159,7 @@ import { toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
+import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
@@ -1498,6 +1499,19 @@ export class DirectConnection implements ClientApi {
         branch: scratch ? null : (command.branch ?? null),
       },
     });
+    // A thread born in Research mode has not been offered a run size yet, so
+    // its first prompt asks — the same mark a switch into Research mode
+    // leaves, claimed by the same first prompt. Only `thread.create` marks:
+    // delegated children, research role threads and handoffs never come
+    // through here, so they stay unmarked and never ask.
+    if (created.interactionMode === "research") {
+      await store.withThreadLock(created.id, async () => {
+        const current = await store.readThreadRecord(created.id);
+        if (current && current.researchPicker !== true) {
+          await store.writeThreadRecord({ ...current, researchPicker: true });
+        }
+      });
+    }
     return { threadId: created.id, accepted: true };
   }
 
@@ -1509,7 +1523,12 @@ export class DirectConnection implements ClientApi {
     const pending = (await (await this.store()).readTurns(threadId)).some((turn) => turn.status === "running" || turn.status === "queued");
     // The picker shows for `/research` (a prompt-only Research mode) and for the first
     // prompt after the user switched the thread into Research mode, not for every message in it.
-    const asksSize = command.interactionMode === "research" || (thread?.researchPicker === true && mode === "research");
+    // Maintenance sends never ask and never spend the mark — a bare `/compact`
+    // (palette or typed), a usage-limit continue, and a held work-queue entry
+    // run as they are — so the first real prompt still asks afterwards. No
+    // client can opt out this way: the exemption is recognised here, never passed in.
+    const maintenance = isCompactCommand(message.text) || command.scheduleReason === "usage-reset" || command.queue?.held === true;
+    const asksSize = !maintenance && (command.interactionMode === "research" || (thread?.researchPicker === true && mode === "research"));
     // Asked unless a run is already active (or the thread cannot lead one).
     // Never spent without asking: while the thread is busy, or no client is
     // listening for the question yet, the flag survives this send and the
