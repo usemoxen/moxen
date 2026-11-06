@@ -411,15 +411,27 @@ identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
-that continues hands every task it delegated to the new thread, running and
-idle alike: the handoff lists them, and from then on steering, `task_status`
-and completion notifications resolve against the new parent while the old one
-reads `TASK_NOT_FOUND`. A
+that continues hands every task it delegated to the new thread — running,
+idle, finished and cancelled alike, including tasks that themselves carried
+on (research roles stay with the run): the handoff lists them, and from then
+on steering, `task_status` and completion notifications resolve against the
+new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
+atomic write, so a notification deciding mid-transfer sees every row before
+or every row after it; a report queued and fully delivered just before the
+transfer still reaches the old thread — the task's next report, and
+`task_status` on the new parent at any time, cover it. A continued thread
+starts no new delegations (`THREAD_CONTINUED` names the live thread):
+otherwise the row would answer to a dormant thread while its continuation
+steers beside it. A
 continuation can also change the model: continuing in a new thread keeps the
 project, the checkout and the handoff, and takes an optional target
 model/provider — the palette's second continue row, or `moxen threads
-continue --provider/--model`. The new thread keeps the source's model unless
-the request overrides it; a provider switch names its model. The tasks keep
+continue --provider/--model` (with `--thinking-effort`/`--speed-mode` for the
+effort; without them a model switch re-resolves effort from the settings, as
+for a new thread, while the TUI picker keeps the compatible knobs). The new
+thread keeps the source's model unless the request overrides it; a provider
+switch names its model. The command takes either a full `modelSelection` or
+`provider`/`model`, never both at once. The tasks keep
 their own provider and model either way, so the handoff works across
 providers and grants no extra access. No extra guard applies when the new
 thread runs a more restricted runtime mode: the mode governs only that
@@ -773,7 +785,7 @@ run: the notification is not one-shot, and covers a queued message's turn too.
 
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the
-new thread — running and idle alike — so from then on `task_send`,
+new thread — running, idle, finished, cancelled, and carried-on alike — so from then on `task_send`,
 `task_ask`, `message_queue`, `task_cancel` and `task_status` resolve against
 the new parent and read as `TASK_NOT_FOUND` on the old one, stranger or not.
 Reading the task's thread itself stays project-scoped (`thread_read`), so

@@ -1355,6 +1355,11 @@ export function decodeCommand(value: unknown): Command {
       };
     case "thread.continue": {
       const selection = asModelSelection(record.modelSelection);
+      const namesModel = asString(record.provider) !== null || asString(record.model) !== null
+        || asString(record.speedMode) !== null || asString(record.thinkingEffort) !== null;
+      if (selection && namesModel) {
+        throw new CliError("INVALID_THREAD_OPTION", "thread.continue takes either modelSelection or provider/model, not both.", { exitCode: 2 });
+      }
       return {
         ...meta,
         type,

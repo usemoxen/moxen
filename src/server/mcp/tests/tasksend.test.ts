@@ -255,12 +255,18 @@ describe("task handoff on continue (MXN-300)", () => {
       expect(asked.isError).toBe(false);
       expect(JSON.parse(asked.text)).toMatchObject({ taskId: idle });
 
-      // The old parent lost the task entirely: steering, reads, questions
-      // and queueing all read as TASK_NOT_FOUND there now.
+      // The old parent lost the task entirely: steering, reads, questions,
+      // queueing and cancelling all read as TASK_NOT_FOUND there now.
       expect((await t.send(t.orchestrator, running, "Old thread")).text).toContain("TASK_NOT_FOUND");
       expect((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId: idle })).text).toContain("TASK_NOT_FOUND");
       expect((await callMoxenTool(t.connection, t.orchestrator, "task_ask", { taskId: idle, question: "x" })).text).toContain("TASK_NOT_FOUND");
       expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue", { message: "x", threadId: idle })).text).toContain("TASK_NOT_FOUND");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: running })).text).toContain("TASK_NOT_FOUND");
+      // Cancelling from the new parent works, and on the already-finished
+      // idle task is a no-op report, not an interrupt.
+      expect(JSON.parse((await callMoxenTool(t.connection, continued.threadId, "task_cancel", { taskId: idle })).text)).toMatchObject(
+        { taskId: idle, cancelRequested: false, status: "completed" },
+      );
 
       // Each task settling afterwards notifies the new parent only. A send
       // from the new parent arms that watch (a queued or started outcome);
@@ -316,6 +322,23 @@ describe("task handoff on continue (MXN-300)", () => {
       expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(continued.threadId);
       expect((await t.send(continued.threadId, taskId, "Carry on")).json).toMatchObject({ taskId });
       expect((await t.send(t.orchestrator, taskId, "Old thread")).text).toContain("TASK_NOT_FOUND");
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("refuses a delegation from a thread that already continued, naming the live thread", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      await t.delegate();
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      const refused = await callMoxenTool(t.connection, t.orchestrator, "delegate", { task: "More work", title: "late", isolation: "shared" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("THREAD_CONTINUED");
+      expect(refused.text).toContain(continued.threadId);
+      // From the live thread it still works.
+      const again = await callMoxenTool(t.connection, continued.threadId, "delegate", { task: "More work", title: "live", isolation: "shared" });
+      expect(again.isError).toBe(false);
     } finally {
       await t.connection.close();
     }

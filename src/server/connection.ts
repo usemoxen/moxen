@@ -1554,10 +1554,12 @@ export class DirectConnection implements ClientApi {
     // A model handoff resolves like a follow-up: the old thread's model
     // unless the request overrides it, never the settings default. Its tasks
     // keep their own provider and model either way.
+    const modelRequested = command.modelSelection !== undefined || command.provider !== undefined
+      || command.model !== undefined || command.speedMode !== undefined || command.thinkingEffort !== undefined;
     const modelSelection = command.modelSelection ?? followUpSelection(source.modelSelection, ctx.config, command, "") ?? source.modelSelection;
     const continued = await continueThread(ctx, {
       threadId: command.threadId,
-      ...(modelSelection !== source.modelSelection ? { modelSelection } : {}),
+      ...(modelRequested ? { modelSelection } : {}),
       ...(command.scheduledFor !== undefined ? { scheduledFor: command.scheduledFor } : {}),
     });
     return { ...continued, accepted: true };

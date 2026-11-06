@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ThreadStore } from "../../core/threads/store.js";
 
 import type { CommandOf } from "../protocol.js";
+import { decodeCommand } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
 import { OpenCodeDriver } from "../../core/providers/opencode/driver.js";
@@ -2084,6 +2085,18 @@ describe("DirectConnection continue in a new thread", () => {
     } finally {
       await connection.close();
     }
+  });
+
+  it("refuses a model request naming both a selection and provider/model", () => {
+    expect(() =>
+      decodeCommand({
+        type: "thread.continue",
+        threadId: "t1",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+        provider: "codex",
+        model: "gpt-6.1-sol",
+      }),
+    ).toThrow("either modelSelection or provider/model, not both");
   });
 
   it("hands the new thread to the requested model, keeping the project and checkout", async () => {

@@ -1152,25 +1152,41 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
 }
 
 /**
- * An orchestrator that carries on in a new thread takes its delegated tasks
- * with it — running and idle alike: their delegations name the continuation
- * as parent, so `task_send`, `task_ask`, `message_queue` and completion
- * notifications from then on resolve against the conversation that is still
- * working. The old thread keeps none of it: every one of those reads as
- * `TASK_NOT_FOUND` there. A task keeps its own provider, model and modes;
- * only the parent link moves, so this grants the new thread no extra access.
+ * An orchestrator that carries on in a new thread hands over every task it
+ * delegated — running, idle, finished, cancelled, and ones that themselves
+ * continued: their delegations name the continuation as parent, so
+ * `task_send`, `task_ask`, `message_queue`, `task_cancel`, `task_status` and
+ * completion notifications from then on resolve against the conversation
+ * that is still working. The old thread owns nothing afterwards: every one
+ * of those reads as `TASK_NOT_FOUND` there. A task keeps its own provider,
+ * model and modes; only the parent link moves, so this grants the new
+ * thread no extra access. Research roles stay out: the run owns their
+ * traffic, and the lead still reaches them through it.
+ *
+ * The re-pointing is one atomic file rewrite, so a notification deciding
+ * mid-transfer sees every row before or every row after it, never a mixture
+ * that would tell the old parent about a task that already reports to the
+ * new one. A notification queued and fully delivered just before the
+ * transfer still reaches the old thread; the task's next report — and
+ * `task_status` on the new parent at any time — cover it.
  */
 async function adoptTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
   const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
-    (row) => row.parentThreadId === sourceId && row.status === "running" && row.continuedIn === undefined,
+    (row) => row.parentThreadId === sourceId,
   );
-  const adopted: { taskId: string; title: string }[] = [];
+  const moved: { taskId: string; title: string }[] = [];
+  const patches: { id: string; patch: { parentThreadId: string } }[] = [];
   for (const row of rows) {
-    await store.updateDelegation(row.id, { parentThreadId: destinationId });
+    // A research role's messages go through its run, never through the
+    // delegation row: re-pointing it would only list run traffic as the new
+    // thread's tasks.
     const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
-    adopted.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
+    if (child?.researchRole !== undefined) continue;
+    patches.push({ id: row.id, patch: { parentThreadId: destinationId } });
+    moved.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
   }
-  return adopted;
+  await store.updateDelegations(patches);
+  return moved;
 }
 
 /** The handoff's note of delegated tasks that moved with it, which now report to the new thread. */
@@ -1195,6 +1211,26 @@ async function delegationOf(
   if (!row) return null;
   const parent = await store.readThreadRecord(row.parentThreadId).catch(() => null);
   return { parentTitle: parent?.title ?? row.parentThreadId, baseBranch: row.baseBranch ?? null };
+}
+
+/**
+ * The live thread this one continued in, following the continuation chain
+ * to its end. Null when the thread never continued, or nothing of the chain
+ * is left (a deleted continuation owns nothing, so there is nothing to
+ * split with). A continued thread starts no new delegations: they would
+ * answer to a dormant thread while its continuation steers beside them.
+ */
+async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
+  let current: string | undefined = threadId;
+  let latest: string | null = null;
+  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+    const notes = await store.readActivities(current).catch(() => []);
+    const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
+    if (next === undefined) break;
+    latest = next;
+    current = (await store.readThreadRecord(next).catch(() => null)) === null ? undefined : next;
+  }
+  return latest !== null && current !== undefined ? latest : null;
 }
 
 async function projectById(storeRoot: string, projectId: string): Promise<StoredProject | null> {
@@ -2430,6 +2466,19 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       details: { threadId: parentThreadId, archivedAt: parent.archivedAt },
     });
   }
+  // A thread that continued in a new one starts no new tasks: the row would
+  // answer to a dormant thread while its continuation steers beside it.
+  // Research roles start through the run, not through here, so the run's
+  // own machinery is exempt.
+  if (options.researchRole === undefined) {
+    const live = await continuedLiveThread(ctx.store, parentThreadId);
+    if (live !== null) {
+      throw new CliError("THREAD_CONTINUED", `Thread ${parentThreadId} was continued in ${live}; delegate from ${live} instead.`, {
+        exitCode: 4,
+        details: { threadId: parentThreadId, continuedIn: live },
+      });
+    }
+  }
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
@@ -2873,11 +2922,16 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
+  // The live thread, following the same continuedIn chain task control
+  // resolves: asking about a task that carried on reads the continuation,
+  // the thread a send would steer — never the dormant source.
+  const live = await ownedDelegation(ctx, parentThreadId, taskId).catch(() => null);
+  const target = live !== null ? await threadWithLedger(ctx.store, live.childThreadId).catch(() => null) : null;
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
-    child,
-    task: taskOf(child, taskId),
+    child: target ?? child,
+    task: taskOf(target ?? child, taskId),
   };
 }
 
@@ -2914,10 +2968,8 @@ async function threadLineage(ctx: OperationContext, threadId: string): Promise<R
 
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
- * the task carried on in (`continuedIn`). A task that finished before the
- * orchestrator continued stays listed under the older thread, and is still the
- * continuation's to reach. Refuses with `TASK_NOT_FOUND`, the same for a real
- * id and a fake one, when that thread did not delegate it.
+ * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
+ * same for a real id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
   const rows = await ctx.store.readDelegations();
@@ -2948,7 +3000,7 @@ export interface CancelledTask extends Omit<DescribedTask, "task"> {
 
 /**
  * Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended.
- * Only the thread that delegated the task (or the continuation its running tasks were re-pointed to) may.
+ * Only the thread that owns the task may: the one that delegated it, or the continuation a continue handed it to.
  */
 export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<CancelledTask> {
   const parentThreadId = requireThreadId(rawParentThreadId);
@@ -3059,11 +3111,11 @@ export interface AskedTask {
 }
 
 /**
- * A message from the thread that delegated a task, into that task. Only the
- * delegating thread (or the thread an orchestrator continued in, which the
- * running delegations were re-pointed to) reaches it, and never a research
- * run's role or lead: their messages are scoped and capped (`research*`), and
- * a free message would be a way round both.
+ * A message from the thread that owns a task, into that task. Only the
+ * delegating thread (or the continuation a continue handed the task to)
+ * reaches it, and never a research run's role or lead: their messages are
+ * scoped and capped (`research*`), and a free message would be a way round
+ * both.
  *
  * It takes the same path as every send (`startTurn`), then reports from what
  * that returned, not from what the provider is known for: a steer counts only
@@ -3106,9 +3158,9 @@ export async function sendTaskMessage(
     started.delivery === "steered" || started.delivery === "injected"
       ? started.steerDelivered === true ? "steered" : "not_delivered"
       : started.turn.status === "queued" ? "queued" : "started";
-  // A task an older thread left behind is back in work: it reports to the thread that sent this, not the older one.
-  // (A continuation adopts every delegation row up front; this only covers a
-  // delegate that landed after the continue read the rows.)
+  // A task delegated from the old thread in the race between the transfer's
+  // row snapshot and a refusal that landed too late is back in work: it
+  // reports to the thread that sent this, not the older one.
   if (outcome !== "not_delivered" && row.parentThreadId !== parentThreadId) await ctx.store.updateDelegation(row.id, { parentThreadId });
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
   if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);

@@ -1125,7 +1125,12 @@ threads
   .option("--at <time>", "Hold the handoff until then (e.g. just after a usage limit resets): an ISO date-time, or HH:MM.")
   .option("--provider <instance-id>", "Hand off to another provider (for example opencode/openai or claudeAgent). Names --model with it when switching providers.")
   .option("--model <slug>", "Hand off to another model on the same provider, or the model on --provider.")
-  .action((options: { thread: string; at?: string; provider?: string; model?: string }) =>
+  .addOption(
+    new Option("--speed, --speed-mode <mode>", "Model speed mode for the handoff. Without it the effort re-resolves from the settings, as for a new thread.")
+      .choices(["standard", "fast"]),
+  )
+  .option("--thinking-effort <effort>", "Model-specific reasoning/thinking effort for the handoff.")
+  .action((options: { thread: string; at?: string; provider?: string; model?: string; speedMode?: SpeedMode; thinkingEffort?: string }) =>
     action(async () => {
       const context = await commandContext();
       const client = await cliClient(context.config);
@@ -1135,6 +1140,8 @@ threads
         ...(options.at ? { scheduledFor: parseScheduledTime(options.at) } : {}),
         ...(options.provider ? { provider: options.provider } : {}),
         ...(options.model ? { model: options.model } : {}),
+        ...(options.speedMode ? { speedMode: options.speedMode } : {}),
+        ...(options.thinkingEffort ? { thinkingEffort: options.thinkingEffort } : {}),
       });
       const { accepted: _accepted, ...envelope } = result;
       writeSuccess(
