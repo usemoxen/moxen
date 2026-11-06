@@ -1,7 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
-
 import { ensureStoredProject } from "../../../core/projects/projects.js";
 import {
   archiveThread,
@@ -864,6 +864,25 @@ describe("delegated tasks", () => {
       drivers: harness.drivers,
     });
     expect((await harness.store.readThreadRecord(narrowed.child.id))?.runtimeMode).toBe("auto");
+  });
+
+  it("returns the stored mode when an idempotent retry names a different allowed mode", async () => {
+    const harness = await parentHarness();
+    const key = randomUUID();
+    const base = {
+      parentThreadId: "thread-parent",
+      task: "Work with the same key twice.",
+      openMode: "none" as const,
+      drivers: harness.drivers,
+      idempotencyKey: key,
+    };
+    const first = await delegateTask(harness.config, { ...base, runtimeMode: "auto" });
+    expect(first.createCommand.runtimeMode).toBe("auto");
+    const retry = await delegateTask(harness.config, { ...base, runtimeMode: "approval-required" });
+    expect(retry.child.id).toBe(first.child.id);
+    expect(retry.createCommand.runtimeMode).toBe("auto");
+    expect(retry.turnCommand.runtimeMode).toBe("auto");
+    expect((await harness.store.readThreadRecord(first.child.id))?.runtimeMode).toBe("auto");
   });
 
   it("reads task status and rejects foreign tasks", async () => {

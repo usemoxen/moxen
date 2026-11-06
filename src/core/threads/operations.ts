@@ -2625,9 +2625,11 @@ export interface DelegateRequest extends ModelRequest {
    */
   readonly fork?: boolean;
   /**
-   * The permission mode the child runs in: a lower-or-equal mode than the
-   * parent's, or the parent's own when omitted. Asking for more access is
-   * refused (`RUNTIME_MODE_ESCALATION`), never quietly lowered.
+   * The permission mode the child runs in: one at most the parent's, or the
+   * parent's own when omitted. `auto` and `full-access` count as equal, so
+   * an Auto parent may delegate a Full-access child that runs with real
+   * Full access (intended). Asking for more access is refused
+   * (`RUNTIME_MODE_ESCALATION`), never quietly lowered.
    */
   readonly runtimeMode?: RuntimeMode;
   /** The mode the task runs in: Build (the default), Research or Review. Orchestrate is for the one delegating, so it is refused. */
@@ -3318,12 +3320,15 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   // An idempotent retry's answer: the original task as it stands now, without
   // starting anything new. The first attempt's reply carried the child's
-  // first message; a retry only needs where the task stands.
+  // first message; a retry only needs where the task stands. The stored
+  // child's mode wins over a retry's requested one: a retry naming a
+  // different allowed mode still describes the original task.
   const describeDelegation = async (childId: string, row: StoredDelegation): Promise<Delegation> => {
     const existing = await threadWithLedger(ctx.store, childId);
     const status = delegatedStatusOf(existing);
     return {
       ...shape,
+      runtimeMode: existing.runtimeMode ?? shape.runtimeMode,
       child: { id: existing.id, projectId: existing.projectId, title: existing.title },
       task: { ...taskOf(existing), waitTimedOut: status === "running" },
       messageId: null,

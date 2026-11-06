@@ -112,7 +112,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "What is bad on its face — a malformed entry, a forked task in a worktree, a provider with no model anywhere — fails the whole call with nothing started. " +
       "Once starting, each task is on its own: one that fails to start is reported as that entry's error while the rest still start. " +
       "A top-level idempotencyKey is derived per entry from the key plus the entry's own title and task, so retrying the whole call — in any order, with entries added or removed — returns each original task instead of starting duplicates; a task's own idempotencyKey wins. " +
-      "The child runs in your own permission mode unless runtimeMode names a lower one (approval-required, auto-accept-edits, auto and full-access with auto and full-access counting as equal): asking for more than your own is refused, never quietly lowered. " +
+      "The child runs in your own permission mode unless runtimeMode names one at most your own (approval-required, auto-accept-edits, auto, full-access; auto and full-access count as equal for the ceiling, so an Auto parent may delegate a child that runs with real Full access, without the checks Auto would apply — that is intended): asking for more than your own is refused, never quietly lowered. " +
       "Each task starts on its own: one that fails to start is reported as that entry's error while the rest still start. " +
       "The result lists every task's taskId and isolation, with one warning when any task shares your checkout. " +
       "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
@@ -147,7 +147,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
               model: { type: "string", description: "Model slug on that provider for this task; defaults to the shared model." },
               effort: { type: "string", description: "Reasoning effort for this task; defaults to the shared effort." },
               isolation: { type: "string", enum: ["worktree", "shared"], description: "Isolation for this task; defaults to the shared isolation." },
-              runtimeMode: { type: "string", enum: ["approval-required", "auto-accept-edits", "auto", "full-access"], description: "Permission mode for this task; at most your own (auto and full-access count as equal). Defaults to the shared mode, else your own." },
+              runtimeMode: { type: "string", enum: ["approval-required", "auto-accept-edits", "auto", "full-access"], description: "Permission mode for this task; at most your own (auto and full-access count as equal for the ceiling, so a Full-access child of an Auto parent runs with real Full access — intended). Defaults to the shared mode, else your own." },
               idempotencyKey: { type: "string", description: "A UUID you generate for this task (one per new task). Wins over a call-level idempotencyKey for this entry." },
             },
             required: ["task", "title"],
@@ -167,7 +167,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         runtimeMode: {
           type: "string",
           enum: ["approval-required", "auto-accept-edits", "auto", "full-access"],
-          description: "Permission mode the subagent runs in; at most your own (auto and full-access count as equal). Asking for more is refused, never lowered. Defaults to yours.",
+          description: "Permission mode the subagent runs in; at most your own (auto and full-access count as equal for the ceiling, so a Full-access child of an Auto parent runs with real Full access, without Auto's checks — intended). Asking for more is refused, never lowered. Defaults to yours.",
         },
         isolation: {
           type: "string",

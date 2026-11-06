@@ -74,10 +74,13 @@ export function displayRuntimeMode(mode: string): string {
 }
 
 /**
- * How much a mode may do without asking: supervised (`approval-required`)
- * is least, `auto-accept-edits` next, and `auto` and `full-access` share
- * the top — a provider judging each call is no restriction next to never
- * asking at all for the ceiling's purpose.
+ * How much a mode may do without asking, for the delegation ceiling only:
+ * supervised (`approval-required`) is least, `auto-accept-edits` next, and
+ * `auto` and `full-access` share the top. The two top modes do not behave
+ * the same — real Full access drops checks Auto would apply — but they
+ * count as equal here by intent: some providers don't ship a reliable Auto
+ * mode, so an Auto parent may delegate a Full-access child that runs with
+ * real Full access.
  */
 export function runtimeModeAccessLevel(mode: RuntimeMode): number {
   switch (mode) {
