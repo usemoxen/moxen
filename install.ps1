@@ -61,13 +61,13 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
 }
 
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('moxen-install-' + [System.Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $Tmp | Out-Null
 try {
+  New-Item -ItemType Directory -Path $Tmp | Out-Null
   $ArchivePath = Join-Path $Tmp $Archive
   $ChecksumPath = Join-Path $Tmp $Checksum
   Write-Host "Downloading $Tag ($Archive)..."
-  Invoke-WebRequest -Uri $ArchiveUrl -OutFile $ArchivePath
-  Invoke-WebRequest -Uri $ChecksumUrl -OutFile $ChecksumPath
+  Invoke-WebRequest -UseBasicParsing -Uri $ArchiveUrl -OutFile $ArchivePath
+  Invoke-WebRequest -UseBasicParsing -Uri $ChecksumUrl -OutFile $ChecksumPath
 
   Write-Host 'Checking the download...'
   $Expected = ((Get-Content -Path $ChecksumPath -TotalCount 1) -split '\s+')[0].ToUpperInvariant()
@@ -78,12 +78,20 @@ try {
 
   Write-Host 'Unpacking...'
   & tar -xf "$ArchivePath" -C "$Tmp"
+  if ($LASTEXITCODE -ne 0) {
+    Fail "could not unpack $Archive."
+  }
 
   Write-Host 'Installing...'
   $Entry = Join-Path (Join-Path $Tmp $Base) 'dist\cli\index.js'
   & bun "$Entry" self-update --install
+  if ($LASTEXITCODE -ne 0) {
+    Fail 'self-update --install failed.'
+  }
 } finally {
-  Remove-Item -Recurse -Force $Tmp
+  if ($Tmp -and (Test-Path $Tmp)) {
+    Remove-Item -Recurse -Force $Tmp
+  }
 }
 
 Write-Host ''

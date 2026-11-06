@@ -25,7 +25,9 @@ irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 Either script fetches the latest release's archive, installs Bun first when it
 is missing, checks the archive against its `.sha256` and refuses a mismatch,
 then runs `self-update --install` and says how to put Moxen on your PATH.
-Linux and Intel Macs have no build yet.
+Linux and Intel Macs have no build yet. The one-liners download the scripts
+from the release itself, so they work from the next release on; until then,
+follow the by-hand steps below.
 
 Each tagged release on [GitHub Releases](https://github.com/usemoxen/moxen/releases)
 carries the same steps in its notes, and holds an archive per
