@@ -1,7 +1,7 @@
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
-import { markModalDismissed } from "../../model/modalDismiss.js";
+import { markModalDismissed, wasModalJustDismissed } from "../../model/modalDismiss.js";
 import { fail, replyHeader } from "../helpers.js";
 import { emitLiveRef, userInputRequestedFrame } from "../fixtures.js";
 
@@ -28,28 +28,50 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   console.log(setup.captureCharFrame());
 
   // Clicking the assistant's closing reply opens the same modal (Copy plus
-  // Revert, resolved through its turn).
-  await act(async () => {
-    const header = replyHeader(setup);
-    await setup.mockMouse.click(header.x, header.y);
-  });
-  await setup.flush();
-  // ModalShell fades in; look once it is up, not after a fixed delay a
-  // loaded renderer overruns (mid-fade the panel composites transcript
-  // borders into its title, so wait for a row, not the title).
-  const waitForFrame = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<string> => {
+  // Revert, resolved through its turn). The rail cell is part of the card and
+  // hit-tests; the padding beside it does not, and a well-right-of-the-text
+  // cell can land in the side panel whenever the pane narrows — so click the
+  // rail, found fresh by the reply's label, and only once it is up.
+  const frame = () => setup.captureCharFrame();
+  const waitFor = async (label: string, predicate: () => boolean, timeoutMs = 5000): Promise<boolean> => {
     const deadline = Date.now() + timeoutMs;
     do {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         await setup.flush();
       });
-      if (predicate()) return setup.captureCharFrame();
+      if (predicate()) return true;
     } while (Date.now() < deadline);
-    fail(`${label}:\n${setup.captureCharFrame()}`);
+    return false;
   };
-  const assistantActions = await waitForFrame("assistant message actions did not open", () =>
-    setup.captureCharFrame().includes("Copy"));
+  const clickReply = async (): Promise<void> => {
+    const rows = frame().split("\n");
+    const y = rows.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
+    if (y === -1) fail("closing reply header not visible");
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") - 3, y));
+    await setup.flush();
+  };
+  // A stale modal would swallow the click into its backdrop instead of
+  // opening message actions: close it first, then wait out its dismiss mark
+  // so the open is not swallowed as a backdrop gesture in turn.
+  if (frame().includes("Message actions")) {
+    await act(async () => setup.mockMouse.click(138, 0));
+    await setup.flush();
+  }
+  if (wasModalJustDismissed()) {
+    await waitFor("an earlier dismiss window never expired", () => !wasModalJustDismissed());
+  }
+  await clickReply();
+  // A toast expiring mid-gesture can shift the rows under a click: if the
+  // first click missed, resolve the header again on a live frame and click
+  // once more rather than failing outright.
+  if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy"), 2000))) {
+    await clickReply();
+    if (!(await waitFor("assistant message actions did not open", () => frame().includes("Copy")))) {
+      fail(`assistant message actions did not open:\n${frame()}`);
+    }
+  }
+  const assistantActions = setup.captureCharFrame();
   console.log("--- assistant message actions (open) ---");
   console.log(assistantActions);
   // Only a user prompt is a revert point; an agent reply offers Copy alone.
