@@ -290,7 +290,12 @@ export function PickerModal({
                     key={row.key}
                     style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}
                     backgroundColor={rowBg}
-                    {...(disabled ? {} : { onMouseDown: row.onPick })}
+                    // Never hand the handler the mouse event itself: the contract
+                    // is zero-arg (the keyboard path calls it bare), and a
+                    // row like Compact takes an optional callback that the
+                    // event object would impersonate, erroring instead of
+                    // closing.
+                    {...(disabled ? {} : { onMouseDown: () => row.onPick() })}
                     onMouseOver={() => setIndex(visible.findIndex((entry) => entry.key === row.key))}
                   >
                     <OverflowText fg={labelFg} bg={rowBg} selectable={false} width={columns.label} prefix={row.selected === true ? "● " : "  "} active={active}>{row.label}</OverflowText>
