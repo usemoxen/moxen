@@ -720,6 +720,48 @@ describe("delegating into a worktree from a thread with no saved branch (MXN-270
     }
   });
 
+  it("refuses a detached checkout even when the record still names its old branch", async () => {
+    const { harness, connection } = await connected();
+    const git = (args: string[]) => runProcess("git", args, { cwd: harness.work });
+    try {
+      // Handover records the branch it started on; detaching after must not let a worktree be cut from the stale record.
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      await git(["checkout", "--detach"]);
+      await expect(
+        connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Sub task", isolation: "worktree" }),
+      ).rejects.toMatchObject({ code: "WORKTREE_UNAVAILABLE" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cuts from the checkout's branch when the record names a different real branch", async () => {
+    const { harness, connection } = await connected();
+    const git = (args: string[]) => runProcess("git", args, { cwd: harness.work });
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local" });
+      await git(["checkout", "-b", "feature"]);
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Sub task", isolation: "worktree" });
+      expect(delegated.branch).toBe("feature");
+      expect(delegated.worktree?.baseBranch).toBe("feature");
+      expect(existsSync(delegated.worktree!.path!)).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("still delegates from a parent that really lives in its own worktree", async () => {
+    const { harness, connection } = await connected();
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "worktree" });
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Sub task", isolation: "worktree" });
+      expect(delegated.worktree?.baseBranch).toBe(parent.worktree?.branch);
+      expect(existsSync(delegated.worktree!.path!)).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("still refuses worktree isolation in a folder that is not a git repository", async () => {
     const { harness, connection } = await connected();
     try {

@@ -124,7 +124,9 @@ describe("message_queue: when it runs", () => {
     const t = await setup();
     try {
       const taskId = await t.delegate();
-      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true));
+      // A full turn round-trip, not a ledger write: allow it longer than
+      // waitFor's one-second default (Windows runners are slower).
+      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 10_000 });
       const held = await t.queue(t.orchestrator, { threadId: taskId, message: "Tomorrow", at: new Date(Date.now() + 3_600_000).toISOString() });
       expect(held.json).toMatchObject({ threadId: taskId, status: "queued", self: false });
       const now = await t.queue(t.orchestrator, { threadId: taskId, message: "Now" });
