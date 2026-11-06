@@ -301,8 +301,13 @@ automatic protection also placed pauses it until the next reset, as it does for
 any automatic hold. Protecting a thread during an automatic wrap-up lets that
 wrap-up finish rather than starting a second one. A turn the user's protection
 interrupts carries `StoredTurn.usagePause.forced`.
-Archived threads cannot be protected. Settled threads can be protected but remain
-settled; automatic input never unsettles them while held.
+Archived threads cannot be protected. Settling a thread ends its manual
+protection, and a settled thread cannot stay protected: a forced hold ends on
+a message, but settled threads refuse messages and the queue cannot cancel a
+forced hold, so a hold that outlived its thread would stick forever. One found
+on a settled thread is released instead — when it settles, or on the next tick
+for holds left behind earlier. Automatic input never unsettles a settled
+thread while held.
 
 While held, automatic deliveries become durable conditional queue entries rather
 than new turns or steers: delegated-task reports (including their structured

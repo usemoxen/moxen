@@ -1165,7 +1165,12 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
     let result: StoredThread | null = null;
     for (const thread of members) {
       if (thread.id !== threadId && thread.settledAt != null) continue;
-      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, updatedAt: now };
+      // A forced hold ends on a message, settled threads refuse messages, and
+      // the queue cannot cancel a forced hold — so one left behind would stick
+      // forever. Settling ends it. An automatic hold stays: its recovery entry
+      // is managed through the Work queue, and automatic input never unsettles
+      // a settled thread while held.
+      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, updatedAt: now, ...(thread.usagePause?.forced ? { usagePause: null } : {}) };
       await store.writeThreadRecord(next);
       store.emit(thread.id, "settled");
       if (thread.id === threadId) result = next;

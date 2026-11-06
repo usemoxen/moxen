@@ -231,6 +231,22 @@ describe("usage protection", () => {
     } finally { w.guard.close(); }
   });
 
+  it("releases a forced hold left on a settled thread", async () => {
+    const w = await world();
+    const id = await w.make("put away");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false, forced: true }, settledAt: w.store.nowIso(), settledOverride: null, snoozedUntil: null });
+    try {
+      // No message can ever release it (settled threads refuse messages, and
+      // the queue cannot cancel a forced hold), so the next tick does.
+      await w.guard.tick();
+      const record = (await w.store.readThreadRecord(id))!;
+      expect(record.settledAt).not.toBeNull();
+      expect(record.usagePause).toBeNull();
+    } finally { w.guard.close(); }
+  });
+
   it.each(["settled", "snoozed", "archived"] as const)("does not run held wake-ups on a %s thread", async (state) => {    const w = await world();
     const id = await w.make("put away");
     await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });

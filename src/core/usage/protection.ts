@@ -185,6 +185,14 @@ export class UsageProtection {
           });
           thread = (await ctx.store.readThreadRecord(id))!;
         }
+        if (!thread.archivedAt && thread.settledAt && thread.usagePause?.forced) {
+          // A forced hold cannot survive its thread settling: settling ends
+          // it now, and a message can never release it afterwards, so without
+          // this a hold left by an older version would stick forever.
+          // Released here — on the next tick — for those already stuck.
+          await this.pause(ctx, id, null, now);
+          thread = (await ctx.store.readThreadRecord(id))!;
+        }
         if (!thread.archivedAt && thread.usagePause) {
           await recoverOrphanedTurn(ctx, id);
           thread = (await ctx.store.readThreadRecord(id))!;
