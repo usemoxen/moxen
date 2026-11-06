@@ -10,6 +10,7 @@ import { testHarness, type TestHarnessOptions } from "../../../core/testing/harn
 import { TASK_NOTIFICATION_BATCH_MS } from "../../../core/threads/operations.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { completeTurn } from "../../../core/threads/threads.js";
+import type { ClientApi } from "../../api.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
 
@@ -331,6 +332,37 @@ describe("task_cancel: whose task it is", () => {
       expect((await call({})).text).toContain("taskId");
       expect((await call({ taskIds: [] })).text).toContain("non-empty array");
       for (const reply of [await call({}), await call({ taskIds: [] })]) expect(reply.isError).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("stops a repeated id once, in order", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const result = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskIds: [taskId, taskId] });
+      expect(result.isError).toBe(false);
+      expect(JSON.parse(result.text)).toMatchObject({ tasks: [{ taskId, cancelRequested: true }] });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("codes a failure no CliError names, and fails a missing parent as the single form does", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const failing = {
+        dispatch: async () => { throw new Error("boom"); },
+        query: async () => ({ thread: {} }),
+      } as unknown as ClientApi;
+      const coded = await callMoxenTool(failing, "parent", "task_cancel", { taskIds: ["a"] });
+      expect(coded.isError).toBe(false);
+      expect(JSON.parse(coded.text)).toEqual({ tasks: [{ taskId: "a", error: "TASK_START_FAILED: boom" }] });
+
+      const missing = await callMoxenTool(t.connection, "thread-missing", "task_cancel", { taskIds: ["a", "b"] });
+      expect(missing.isError).toBe(true);
+      expect(missing.text).toContain("TASK_NOT_FOUND");
     } finally {
       await t.connection.close();
     }

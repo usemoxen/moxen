@@ -11,6 +11,7 @@
  */
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { CliError } from "../../core/errors.js";
 import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js";
@@ -90,8 +91,12 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "The default is always a worktree (except fork: true, which shares your checkout): even when your thread's record names no branch, the worktree is cut from the branch your checkout is on. " +
       "Where there is no branch to cut from, the call fails and tells you to pass isolation shared instead of quietly sharing your checkout. " +
-      "One call can start several tasks: pass tasks (each with title and task, overriding provider, model, effort or isolation where it differs) beside the shared settings, plus rules for instructions every task gets. " +
-      "A top-level idempotencyKey is namespaced per task (key#1, key#2, …), so retrying the whole call returns each original task; a task's own idempotencyKey wins. " +
+      "One call can start several tasks (at most 20): pass tasks (each with title and task, overriding provider, model, effort or isolation where it differs) beside the shared settings, plus rules for instructions every task gets. " +
+      "A task entry takes only task, title, provider, model, effort, isolation and idempotencyKey; anything else is refused. " +
+      "An entry on another provider does not inherit the shared model or effort: it names its own model, or its start fails. " +
+      "What is bad on its face — a malformed entry, a forked task in a worktree, a provider with no model anywhere — fails the whole call with nothing started. " +
+      "Once starting, each task is on its own: one that fails to start is reported as that entry's error while the rest still start. " +
+      "A top-level idempotencyKey is derived per entry from the key plus the entry's own title and task, so retrying the whole call — in any order, with entries added or removed — returns each original task instead of starting duplicates; a task's own idempotencyKey wins. " +
       "Each task starts on its own: one that fails to start is reported as that entry's error while the rest still start. " +
       "The result lists every task's taskId and isolation, with one warning when any task shares your checkout. " +
       "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
@@ -777,14 +782,17 @@ export async function callMoxenTool(
           return ok({ taskId: ids[0], cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
         }
         const tasks: Array<Record<string, unknown>> = [];
+        let firstFailure: unknown;
         for (const taskId of ids) {
           try {
             const cancelled = await cancelOne(api, parentThreadId, taskId);
             tasks.push({ taskId, cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
           } catch (cause) {
+            firstFailure ??= cause;
             tasks.push({ taskId, error: toolErrorText(cause) });
           }
         }
+        await throwIfParentMissing(api, parentThreadId, tasks, firstFailure);
         return ok({ tasks });
       }
       case "task_send": {
@@ -1047,13 +1055,22 @@ async function delegateManyTool(
   if (!Array.isArray(args.tasks) || args.tasks.length === 0) {
     throw new CliError("INVALID_TOOL_INPUT", "tasks must be a non-empty array of {task, title}.");
   }
+  if (args.tasks.length > MAX_BATCH_TASKS) {
+    throw new CliError("INVALID_TOOL_INPUT", `tasks holds at most ${MAX_BATCH_TASKS} entries: split the work across calls.`);
+  }
   const entries = args.tasks.map((entry, index) => readBatchEntry(entry, index));
   // A worktree whenever the caller did not ask, except a fork: the server
   // cuts it from the checkout's branch, or refuses plainly where there is none.
   const sharedIsolation = shared.isolationArg ?? (shared.fork ? "shared" : "worktree");
+  preflightBatch(entries, shared, sharedIsolation);
   const started: Array<Record<string, unknown>> = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index]!;
+  let firstFailure: unknown;
+  for (const entry of entries) {
+    const crossProvider = entry.provider !== undefined && entry.provider !== shared.provider;
+    // A shared model or effort belongs to the shared provider: an entry on
+    // another provider takes its own, or the provider's default rules apply.
+    const model = crossProvider ? entry.model : (entry.model ?? shared.model);
+    const effort = crossProvider ? entry.effort : (entry.effort ?? shared.effort);
     const isolation = entry.isolation ?? sharedIsolation;
     try {
       started.push(await startDelegation(api, parentThreadId, {
@@ -1061,18 +1078,20 @@ async function delegateManyTool(
         title: entry.title,
         isolation,
         ...((entry.provider ?? shared.provider) ? { provider: (entry.provider ?? shared.provider)! } : {}),
-        ...((entry.model ?? shared.model) ? { model: (entry.model ?? shared.model)! } : {}),
-        ...((entry.effort ?? shared.effort) ? { effort: (entry.effort ?? shared.effort)! } : {}),
-        ...((entry.idempotencyKey ?? (shared.idempotencyKey ? `${shared.idempotencyKey}#${index + 1}` : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? `${shared.idempotencyKey}#${index + 1}`)! } : {}),
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        ...((entry.idempotencyKey ?? (shared.idempotencyKey ? batchEntryKey(shared.idempotencyKey, entry.title, entry.task) : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? batchEntryKey(shared.idempotencyKey!, entry.title, entry.task))! } : {}),
         ...(shared.fork ? { fork: true } : {}),
         ...(shared.modeArg === "research" ? { mode: "research" as const } : {}),
       }));
     } catch (cause) {
       // One task failing to start never loses the others: its error is that
       // entry's report, and the rest still start on their own keys.
+      firstFailure ??= cause;
       started.push({ title: entry.title, error: toolErrorText(cause) });
     }
   }
+  await throwIfParentMissing(api, parentThreadId, started, firstFailure);
   const checkout = started.filter((entry) => entry["isolation"] === "shared");
   return {
     tasks: started,
@@ -1092,6 +1111,59 @@ interface BatchEntry {
   readonly idempotencyKey?: string;
 }
 
+/**
+ * One entry's idempotency key: the call's key plus a hash of the entry's own
+ * title and task. A retry in any order meets its original entry, a removed
+ * entry is simply not met, and a new entry starts — none of which a
+ * positional suffix survives.
+ */
+function batchEntryKey(key: string, title: string, task: string): string {
+  const digest = createHash("sha256").update(`moxen-delegate-v1\n${title}\n${task}`, "utf8").digest("hex").slice(0, 16);
+  return `${key}#${digest}`;
+}
+
+/** One `delegate` call starts this many tasks at most: ten at once is normal use, past this split the work. */
+const MAX_BATCH_TASKS = 20;
+
+/** The fields one `tasks` entry takes: anything else is refused, naming the key, with nothing started. */
+const BATCH_ENTRY_FIELDS: ReadonlySet<string> = new Set(["task", "title", "provider", "model", "effort", "isolation", "idempotencyKey"]);
+
+/**
+ * What is cheap and pure to check before starting any entry: a forked task in
+ * a worktree, or a provider with no model anywhere in the call. Either fails
+ * the whole call with nothing started. Everything that needs the run itself
+ * stays per-entry: partial start is the contract once starting begins.
+ */
+function preflightBatch(
+  entries: readonly BatchEntry[],
+  shared: { fork: boolean; provider: string | undefined; model: string | undefined },
+  sharedIsolation: "worktree" | "shared",
+): void {
+  entries.forEach((entry, index) => {
+    const nth = `tasks[${index + 1}]`;
+    if (shared.fork && (entry.isolation ?? sharedIsolation) === "worktree") {
+      throw new CliError("FORK_NEEDS_SHARED", `${nth} asks for a worktree fork: a forked task runs in its parent's checkout — delegate it with isolation "shared".`, {
+        exitCode: 2,
+        details: { title: entry.title },
+      });
+    }
+    if (entry.provider !== undefined && entry.model === undefined && shared.model === undefined) {
+      throw new CliError("INVALID_TOOL_INPUT", `${nth} names provider "${entry.provider}" but no model: name its model too — the call shares none.`);
+    }
+  });
+}
+
+/**
+ * Every entry failed: when the parent itself is missing, fail the call with
+ * the first entry's error — exactly what the single form answers — rather
+ * than N identical entry reports.
+ */
+async function throwIfParentMissing(api: ClientApi, parentThreadId: string, started: ReadonlyArray<Record<string, unknown>>, firstFailure: unknown): Promise<void> {
+  if (firstFailure === undefined || !started.every((entry) => "error" in entry)) return;
+  const parent = await api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null);
+  if (parent === null) throw firstFailure;
+}
+
 /** One entry of a `tasks` list: its own title and task, able to override a shared setting. */
 function readBatchEntry(entry: unknown, index: number): BatchEntry {
   const nth = `tasks[${index + 1}]`;
@@ -1099,6 +1171,11 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
     throw new CliError("INVALID_TOOL_INPUT", `${nth} must be an object with task and title.`);
   }
   const record = entry as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!BATCH_ENTRY_FIELDS.has(key)) {
+      throw new CliError("INVALID_TOOL_INPUT", `${nth}: unknown field "${key}". A task entry takes task, title, provider, model, effort, isolation and idempotencyKey.`);
+    }
+  }
   const field = (key: string): string | undefined => {
     const value = record[key];
     if (value === undefined || value === null) return undefined;
@@ -1168,10 +1245,12 @@ function cancelIds(args: Record<string, unknown>): string[] {
   }
   if (many !== undefined) {
     if (!Array.isArray(many) || many.length === 0) throw new CliError("INVALID_TOOL_INPUT", "taskIds must be a non-empty array of task ids.");
-    return many.map((id, index) => {
+    const ids = many.map((id, index) => {
       if (typeof id !== "string" || !id.trim()) throw new CliError("INVALID_TOOL_INPUT", `taskIds[${index + 1}] must be a non-empty string.`);
       return id.trim();
     });
+    // A repeated id stops once, in order.
+    return [...new Set(ids)];
   }
   if (single === undefined) throw new CliError("INVALID_TOOL_INPUT", "Pass taskId for one task, or taskIds for several.");
   return [single];
@@ -1184,7 +1263,8 @@ async function cancelOne(api: ClientApi, parentThreadId: string, taskId: string)
 /** A failure as a batch entry carries it: the code the handler would have answered with, never a protocol error. */
 function toolErrorText(cause: unknown): string {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return cause instanceof CliError ? `${cause.code}: ${message}` : message;
+  if (cause instanceof CliError) return `${cause.code}: ${message}`;
+  return `TASK_START_FAILED: ${message}`;
 }
 
 async function statusTool(

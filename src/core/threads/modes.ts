@@ -62,7 +62,8 @@ const SHARED_STEPS = [
   "- Your provider's own subagents are for quick same-model side work inside your turn; `delegate` is for another provider or model, " +
     "a specific effort, its own branch, or a thread the user should be able to open and steer.",
   "- Several tasks at once: one `delegate` call takes `tasks` (each with `title` and `task`, overriding `provider`, `model`, `effort` or `isolation` where it differs) " +
-    "beside the shared settings, plus `rules` for instructions every task gets. A failure to start one task never stops or duplicates the others; " +
+    "beside the shared settings, plus `rules` for instructions every task gets. What is bad on its face fails the whole call before anything starts; " +
+    "once starting, a failure to start one task never stops or duplicates the others; " +
     "the result lists each task's id and isolation, with one warning when any task shares your checkout.",
   "",
   "## Verify, then trust",

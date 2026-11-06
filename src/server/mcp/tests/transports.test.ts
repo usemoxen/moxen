@@ -135,6 +135,9 @@ describe("in-process tools for Claude", () => {
     // the handler still requires task and title for the single-task form.
     expect(shape.task!.safeParse(undefined).success).toBe(true);
     expect(shape.title!.safeParse("fix login").success).toBe(true);
+    // A task list passes through Zod untouched (arrays are unknown to it);
+    // the handler validates each entry and refuses unknown fields.
+    expect(shape.tasks!.safeParse([{ task: "x", title: "y", mode: "research" }]).success).toBe(true);
     expect(shape.isolation!.safeParse("worktree").success).toBe(true);
     expect(shape.isolation!.safeParse("elsewhere").success).toBe(false);
     const proposal = { size: { researchers: 2, critics: 1 }, models: { critic: { provider: "codex", model: "gpt-5.4", thinkingEffort: "high" } } };

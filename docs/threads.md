@@ -803,16 +803,21 @@ so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
 
 One `delegate` call takes shared settings (`provider`, `model`, `effort`,
 `isolation`, plus `rules`: instructions appended to every task's prompt
-under "Common rules for this task") beside a `tasks` list. Each entry has
-its own `title` and `task` text and may override `provider`, `model`,
-`effort` or `isolation`; `mode` and `fork` are shared by the whole call. The
-single-task form (`task` plus `title`) keeps working unchanged, and
-`researchProposal` cannot be combined with `tasks`.
+under "Common rules for this task") beside a `tasks` list of at most 20
+entries. Each entry has its own `title` and `task` text and may override
+`provider`, `model`, `effort` or `isolation`; an entry takes no other field.
+An entry on another provider does not inherit the shared `model` or
+`effort`: it names its own model, or its start fails. `mode` and `fork` are
+shared by the whole call. The single-task form (`task` plus `title`) keeps
+working unchanged, and `researchProposal` cannot be combined with `tasks`.
 
-Each task starts on its own: one that fails to start is reported as that
-entry's `error` while the rest still start, so the others are neither lost
-nor silently doubled. A top-level `idempotencyKey` is namespaced per task
-(`key#1`, `key#2`, …), so retrying the whole call after a transport error
+What is bad on its face — a malformed entry or list, a forked task in a
+worktree, a provider with no model anywhere — fails the whole call with
+nothing started. Once starting, each task is on its own: one that fails to
+start is reported as that entry's `error` while the rest still start, so the
+others are neither lost nor silently doubled. A top-level `idempotencyKey`
+is derived per entry from the key plus the entry's own title and task, so
+retrying the whole call — in any order, with entries added or removed —
 returns each original task instead of starting duplicates; a task's own
 `idempotencyKey` wins for that entry. The result lists every task's `taskId`
 and `isolation`, with one `warning` when any task shares your checkout.
@@ -822,7 +827,9 @@ and `isolation`, with one `warning` when any task shares your checkout.
 `task_cancel` takes `taskId` for one task or `taskIds` for several; its
 thread and worktree are kept either way. Each task's outcome
 (`cancelRequested`, `status`) is reported separately, and one bad id is that
-entry's `error` rather than a failed call, so it never stops the others.
+entry's `error` rather than a failed call, so it never stops the others. A
+repeated id stops once, in order. When the parent itself is missing, the
+call fails as the single form does instead of reporting one error per id.
 
 ### Queueing a message from an agent (`message_queue`)
 

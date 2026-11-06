@@ -231,6 +231,139 @@ describe("moxen MCP server", () => {
     }
   });
 
+  it("returns the right original task when a batch delegate is retried in a different order", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const key = randomUUID();
+      const call = async (tasks: Array<{ task: string; title: string }>) => {
+        const result = await callMoxenTool(connection, parentThreadId, "delegate", { isolation: "shared", idempotencyKey: key, tasks });
+        expect(result.isError).toBe(false);
+        return JSON.parse(result.text) as { tasks: Array<{ taskId: string; title: string }> };
+      };
+      const first = await call([{ task: "Alpha job", title: "alpha" }, { task: "Beta job", title: "beta" }]);
+      const idOf = Object.fromEntries(first.tasks.map((entry) => [entry.title, entry.taskId]));
+      // Same entries in a new order meet their own originals, not their positions'.
+      const again = await call([{ task: "Beta job", title: "beta" }, { task: "Alpha job", title: "alpha" }]);
+      expect(again.tasks.map((entry) => entry.taskId)).toEqual([idOf["beta"], idOf["alpha"]]);
+      // A removed entry is simply not returned, and a new one starts.
+      const partial = await call([{ task: "Alpha job", title: "alpha" }, { task: "Gamma job", title: "gamma" }]);
+      expect(partial.tasks.map((entry) => entry.taskId)).toEqual([idOf["alpha"], expect.any(String)]);
+      expect(partial.tasks[1]!.taskId).not.toBe(idOf["beta"]);
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(3);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("does not carry a shared model across a provider override", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        model: "gpt-5.4",
+        tasks: [
+          { task: "Same provider", title: "same" },
+          { task: "Other provider", title: "other", provider: "codex" },
+          { task: "Other provider with model", title: "own", provider: "codex", model: "gpt-5.4" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>> };
+      const modelOf = async (taskId: string) => (await harness.store.readThreadRecord(taskId as string))?.modelSelection;
+      // The plain entry inherits the shared model on the parent's provider.
+      expect(batch.tasks[0]).toMatchObject({ title: "same", isolation: "shared" });
+      expect(await modelOf(batch.tasks[0]!["taskId"] as string)).toMatchObject({ instanceId: "opencode", model: "gpt-5.4" });
+      // The override without a model does not start codex/gpt-5.4: it fails for want of a model.
+      expect(batch.tasks[1]).toMatchObject({ title: "other", error: expect.stringContaining("MODEL_REQUIRED_FOR_PROVIDER") });
+      // The override with its own model starts on exactly that.
+      expect(batch.tasks[2]).toMatchObject({ title: "own", isolation: "shared" });
+      expect(await modelOf(batch.tasks[2]!["taskId"] as string)).toMatchObject({ instanceId: "codex", model: "gpt-5.4" });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses more than 20 tasks in one call with nothing started", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const tasks = Array.from({ length: 21 }, (_, index) => ({ task: `Job ${index + 1}`, title: `job-${index + 1}` }));
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", { isolation: "shared", tasks });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("at most 20");
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(0);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses an entry field it does not know, naming it, with nothing started", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        tasks: [{ task: "Sneaky job", title: "sneaky", mode: "research" }],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('"mode"');
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(0);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("fails a forked batch with a worktree entry before starting anything", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        fork: true,
+        tasks: [
+          { task: "Shared question", title: "shared" },
+          { task: "Worktree question", title: "branched", isolation: "worktree" },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("FORK_NEEDS_SHARED");
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(0);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("fails a batch with a model-less provider override before starting anything", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        tasks: [
+          { task: "Good job", title: "good" },
+          { task: "Provider with no model", title: "modelless", provider: "codex" },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("no model");
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(0);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("fails a batch delegate for a missing parent as the single form does", async () => {
+    const { connection } = await setup();
+    try {
+      const result = await callMoxenTool(connection, "thread-missing", "delegate", {
+        isolation: "shared",
+        tasks: [
+          { task: "First job", title: "first" },
+          { task: "Second job", title: "second" },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("THREAD_NOT_FOUND");
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("refuses a batch delegate that mixes the forms or misuses research and rules", async () => {
     const { connection, parentThreadId } = await setup();
     try {
