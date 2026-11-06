@@ -10,6 +10,7 @@ import { runWorkQueue, type OperationContext } from "../../../core/threads/opera
 import { interruptTurn } from "../../../core/threads/threads.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { DirectConnection } from "../../connection.js";
+import { decodeCommand } from "../../protocol.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
 
 async function setup(options: TestHarnessOptions = {}) {
@@ -82,6 +83,38 @@ describe("thread_continue: continuing your own thread", () => {
       await t.connection.close();
     }
   }, 20_000);
+
+  it("runs the new thread on the requested model while tasks keep their own", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const delegated = await callMoxenTool(t.connection, t.orchestrator, "delegate", { task: "Do the work", title: "task", isolation: "shared", provider: "codex", model: "gpt-5.4" });
+      expect(delegated.isError).toBe(false);
+      const taskId = JSON.parse(delegated.text).taskId as string;
+      const continued = await t.keep(t.orchestrator, { summary: "Half done.", provider: "codex", model: "gpt-5.4" });
+      expect(continued.isError).toBe(false);
+      const threadId = continued.json!.threadId as string;
+      expect((await (await t.served()).readThreadRecord(threadId))?.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-5.4" });
+      // The task kept its own selection and moved with the thread; the
+      // new thread reaches it through the ownership chain.
+      expect((await (await t.served()).readThreadRecord(taskId))?.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-5.4" });
+      expect((await (await t.served()).readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(threadId);
+      const fromContinuation = await callMoxenTool(t.connection, threadId, "task_send", { taskId, message: "Carry on" });
+      expect(fromContinuation.isError).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("refuses modelSelection together with provider/model", async () => {
+    expect(() =>
+      decodeCommand({ type: "thread.continue-agent", threadId: "t", summary: "s", modelSelection: { instanceId: "codex", model: "m" }, provider: "codex" }),
+    ).toThrow(/takes either modelSelection or provider\/model/);
+    expect(decodeCommand({ type: "thread.continue-agent", threadId: "t", summary: "s", provider: "codex", model: "m" })).toMatchObject({
+      type: "thread.continue-agent",
+      provider: "codex",
+      model: "m",
+    });
+  });
 
   it("starts at once on an idle thread", async () => {
     const t = await setup();

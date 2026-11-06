@@ -53,6 +53,7 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   ThreadId,
   TurnId,
   SideAnswer,
@@ -599,6 +600,18 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     await this.refreshCost(session);
     const mapped = claudeContextUsageOf(await session.query.getContextUsage({ detail: "summary" }));
     return mapped === null ? null : { ...mapped, costUsd: session.usage.costUsd };
+  };
+
+  /**
+   * Explicit freshness ask: probe an already-open session, never start one.
+   * The probe publishes through the normal event path too; the returned
+   * windows let the caller record them without waiting for the pump.
+   */
+  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
+    if (!session) return null;
+    const windows = await this.probeUsage(session);
+    return windows.length > 0 ? { key: "claude", windows } : null;
   };
 
   /**
@@ -2220,19 +2233,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     await Promise.race([this.probeUsage(session), new Promise((resolve) => setTimeout(resolve, COST_REFRESH_WAIT_MS))]);
   }
 
-  private async probeUsage(session: ClaudeSession): Promise<void> {
+  private async probeUsage(session: ClaudeSession): Promise<RateLimitWindow[]> {
     session.usageProbedAt = Date.now();
     try {
       // Method call (not detached): control methods may rely on `this`.
       const query = session.query;
-      if (typeof query.usageExperimental !== "function") return;
+      if (typeof query.usageExperimental !== "function") return [];
       const response = (await Promise.race([
         query.usageExperimental({ skipBehaviors: true }),
         new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error("usage probe timed out")), this.usageProbeTimeoutMs);
         }),
       ])) as Parameters<typeof mapUsageProbe>[0];
-      if (session.closed) return;
+      if (session.closed) return [];
       // The session's running cost, counted per request — unlike a turn's
       // `result`, which only arrives when the turn ends (and never during a
       // long one). A resumed session's restored spend arrives here too.
@@ -2240,22 +2253,25 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         session.usage = { ...session.usage, costUsd: Math.max(session.usage.costUsd, response.session.total_cost_usd) };
       }
       const mapped = mapUsageProbe(response);
-      if (!mapped.available) return;
+      if (!mapped.available) return [];
+      const windows: RateLimitWindow[] = mapped.windows.map((window) => ({
+        id: window.id,
+        label: window.label,
+        resetsAt: window.resetsAt,
+        exhausted: window.usedPercent >= 100,
+        usedPercent: window.usedPercent,
+      }));
       this.publish({
         type: "rate-limits.updated",
         provider: "claude",
         threadId: session.threadId,
-        windows: mapped.windows.map((window) => ({
-          id: window.id,
-          label: window.label,
-          resetsAt: window.resetsAt,
-          exhausted: window.usedPercent >= 100,
-          usedPercent: window.usedPercent,
-        })),
+        windows,
         raw: { subscriptionType: mapped.subscriptionType, costUsd: mapped.costUsd },
       });
+      return windows;
     } catch {
       // Best effort: stream events still carry live windows.
+      return [];
     }
   }
 

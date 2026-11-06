@@ -177,8 +177,8 @@ describe("task_send: whose task it is", () => {
   }, 20_000);
 });
 
-describe("task_send: a task that finished before the orchestrator continued", () => {
-  it("stays reachable from the continuation, reports there once woken, and never reaches a stranger", async () => {
+describe("task_send: a task that is idle when the orchestrator continues", () => {
+  it("moves with the continuation, reports there once woken, and never reaches a stranger or the old parent", async () => {
     const t = await setup();
     try {
       const taskId = await t.delegate();
@@ -186,23 +186,163 @@ describe("task_send: a task that finished before the orchestrator continued", ()
       // that takes longer than vitest's default 1s `waitFor` timeout, so the
       // wait states its bound (like the one below) instead of flaking there.
       await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 8_000 });
+      // The task's first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
+      await vi.waitFor(async () => expect(await t.notifications()).toHaveLength(1), { timeout: 8_000 });
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
       const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
       expect((await t.send(stranger.threadId, taskId, "Take over", true)).text).toContain("TASK_NOT_FOUND");
 
-      // Two continuations on, it still needs wake, and the finished task stays listed under the first thread until then.
+      // Each continuation takes the delegation rows with it, so the idle task
+      // is the latest continuation's from the start: both older threads read
+      // as strangers now, not just unrelated ones.
+      expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(again.threadId);
+      expect((await t.send(t.orchestrator, taskId, "Old thread", true)).text).toContain("TASK_NOT_FOUND");
+      expect((await t.send(continued.threadId, taskId, "Middle thread", true)).text).toContain("TASK_NOT_FOUND");
+      // It still needs wake: idleness is the task's own state, not the row's.
       expect((await t.send(again.threadId, taskId, "One more thing")).text).toContain("TASK_SETTLED");
-      expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(t.orchestrator);
 
       const woken = await t.send(again.threadId, taskId, "One more thing", true);
       expect(woken.json).toMatchObject({ taskId, outcome: "started" });
       expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(again.threadId);
+      // The old parents keep whatever they already had (the task's first
+      // report went to the orchestrator before the handoff); the new report
+      // from the woken turn reaches only the thread that owns the task now.
+      const beforeOld = await t.notifications(t.orchestrator);
+      const beforeMid = await t.notifications(continued.threadId);
       await vi.waitFor(async () => expect(await t.notifications(again.threadId)).toHaveLength(1), { timeout: 8_000 });
+      expect(await t.notifications(t.orchestrator)).toEqual(beforeOld);
+      expect(await t.notifications(continued.threadId)).toEqual(beforeMid);
     } finally {
       await t.connection.close();
     }
   }, 20_000);
+});
+
+describe("task handoff on continue (MXN-300)", () => {
+  it("moves running and idle tasks to the new parent, which steers and is notified, while the old parent reads TASK_NOT_FOUND", async () => {
+    const t = await setup({
+      leaveTurnsRunning: true,
+      steering: { opencode: "delivers" },
+      sideQuestions: { opencode: async () => ({ text: "On it.", withContext: true }) },
+    });
+    try {
+      const running = await t.delegate(undefined, "running");
+      const idle = await t.delegate(undefined, "idle");
+      // The server's own store: its events are what the parent's watch hears (a second store has a bus of its own).
+      const served = await (t.connection as unknown as { store(): Promise<ThreadStore> }).store();
+      const idleTurn = (await served.readTurns(idle)).find((turn) => turn.status === "running")!;
+      await completeTurn(served, idle, idleTurn.id, { text: "Idle task done." });
+      // Its first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
+      await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
+
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      const rows = await t.store.readDelegations();
+      expect(rows.find((row) => row.childThreadId === running)?.parentThreadId).toBe(continued.threadId);
+      expect(rows.find((row) => row.childThreadId === idle)?.parentThreadId).toBe(continued.threadId);
+      // The handoff turn never settles on its own here, and a notification
+      // addressed to a busy thread queues behind it: settle it, as a real
+      // handoff turn settles once the new agent has read it.
+      const handoffTurn = (await served.readTurns(continued.threadId)).find((turn) => turn.status === "running")!;
+      await completeTurn(served, continued.threadId, handoffTurn.id, { text: "Handoff read." });
+
+      // The new parent steers the running task and reads the idle one.
+      expect((await t.send(continued.threadId, running, "Pick up the pace")).json).toMatchObject({ taskId: running, outcome: "steered" });
+      expect(JSON.parse((await callMoxenTool(t.connection, continued.threadId, "task_status", { taskId: idle })).text)).toMatchObject(
+        { taskId: idle, status: "completed", finished: true },
+      );
+      const asked = await callMoxenTool(t.connection, continued.threadId, "task_ask", { taskId: idle, question: "How did it go?" });
+      expect(asked.isError).toBe(false);
+      expect(JSON.parse(asked.text)).toMatchObject({ taskId: idle });
+
+      // The old parent lost the task entirely: steering, reads, questions,
+      // queueing and cancelling all read as TASK_NOT_FOUND there now.
+      expect((await t.send(t.orchestrator, running, "Old thread")).text).toContain("TASK_NOT_FOUND");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId: idle })).text).toContain("TASK_NOT_FOUND");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_ask", { taskId: idle, question: "x" })).text).toContain("TASK_NOT_FOUND");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue", { message: "x", threadId: idle })).text).toContain("TASK_NOT_FOUND");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: running })).text).toContain("TASK_NOT_FOUND");
+      // Cancelling from the new parent works, and on the already-finished
+      // idle task is a no-op report, not an interrupt.
+      expect(JSON.parse((await callMoxenTool(t.connection, continued.threadId, "task_cancel", { taskId: idle })).text)).toMatchObject(
+        { taskId: idle, cancelRequested: false, status: "completed" },
+      );
+
+      // Each task settling afterwards notifies the new parent only. A send
+      // from the new parent arms that watch (a queued or started outcome);
+      // the delegate-time run never settles on a parked driver, so it cannot.
+      const runningTurn = (await served.readTurns(running)).find((turn) => turn.status === "running")!;
+      await completeTurn(served, running, runningTurn.id, { text: "Running task done." });
+      const followUp = await t.send(continued.threadId, running, "Now do it differently", true);
+      expect(followUp.json).toMatchObject({ taskId: running, outcome: "started", woke: true });
+      const followUpTurn = (await served.readTurns(running)).find((turn) => turn.status === "running")!;
+      await completeTurn(served, running, followUpTurn.id, { text: "Running task, second run done." });
+      await expect.poll(async () => (await t.notifications(continued.threadId)).length, WAIT).toBe(1);
+      const woken = await t.send(continued.threadId, idle, "One more thing", true);
+      expect(woken.json).toMatchObject({ taskId: idle, outcome: "started" });
+      const wokenTurn = (await served.readTurns(idle)).find((turn) => turn.status === "running")!;
+      await completeTurn(served, idle, wokenTurn.id, { text: "Idle task, second run done." });
+      await expect.poll(async () => (await t.notifications(continued.threadId)).length, WAIT).toBe(2);
+      expect(await t.notifications()).toHaveLength(1);
+
+      // Queueing resolves against the new parent too — last, so the held
+      // entry cannot keep the woken task from settling above.
+      const queued = await callMoxenTool(t.connection, continued.threadId, "message_queue", {
+        message: "For later",
+        threadId: idle,
+        at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+      expect(queued.isError).toBe(false);
+      expect(JSON.parse(queued.text)).toMatchObject({ threadId: idle, status: "queued" });
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("hands the new thread to another provider and model, leaving the tasks' own selection alone", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const before = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId, waitMs: 0 })).text);
+      expect(before.status).toBe("running");
+
+      const continued = await t.connection.dispatch({
+        type: "thread.continue",
+        threadId: t.orchestrator,
+        provider: "codex",
+        model: "gpt-6.1-sol",
+      });
+      const read = await t.connection.query({ type: "thread.inspect", threadId: continued.threadId });
+      const selection = (read.thread as unknown as { modelSelection: { instanceId: string; model: string } }).modelSelection;
+      expect(selection).toMatchObject({ instanceId: "codex", model: "gpt-6.1-sol" });
+      // The task keeps its own provider and model; only the parent link moved.
+      const child = await t.connection.query({ type: "thread.inspect", threadId: taskId });
+      const childSelection = (child.thread as unknown as { modelSelection: { instanceId: string; model: string } }).modelSelection;
+      expect(childSelection).toMatchObject({ instanceId: "opencode", model: "gpt-5.4" });
+      expect((await t.store.readDelegations()).find((row) => row.childThreadId === taskId)?.parentThreadId).toBe(continued.threadId);
+      expect((await t.send(continued.threadId, taskId, "Carry on")).json).toMatchObject({ taskId });
+      expect((await t.send(t.orchestrator, taskId, "Old thread")).text).toContain("TASK_NOT_FOUND");
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("refuses a delegation from a thread that already continued, naming the live thread", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      await t.delegate();
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      const refused = await callMoxenTool(t.connection, t.orchestrator, "delegate", { task: "More work", title: "late", isolation: "shared" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("THREAD_CONTINUED");
+      expect(refused.text).toContain(continued.threadId);
+      // From the live thread it still works.
+      const again = await callMoxenTool(t.connection, continued.threadId, "delegate", { task: "More work", title: "live", isolation: "shared" });
+      expect(again.isError).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
 });
 
 describe("task_send: research runs and delegated tasks", () => {

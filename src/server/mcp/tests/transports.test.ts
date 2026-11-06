@@ -30,9 +30,12 @@ function provider(instanceId: string, overrides: Partial<ProviderSummary> = {}, 
   };
 }
 
-/** Just enough of `ClientApi` for the tools that read the catalog. */
+/** Just enough of `ClientApi` for the tools that read the catalog: one live session, so calls without session identity fall back to the entry's thread. */
 function catalogApi(providers: ProviderSummary[]): ClientApi {
-  return { query: async (query: { type: string }) => query.type === "research.run" ? null : ({ providers }) } as unknown as ClientApi;
+  return {
+    query: async (query: { type: string }) =>
+      query.type === "research.run" ? null : query.type === "thread.entry-sessions" ? { count: 1 } : ({ providers }),
+  } as unknown as ClientApi;
 }
 
 it.each([false, true])("tells the model about keyword fallback even when results are empty (%s)", async (empty) => {

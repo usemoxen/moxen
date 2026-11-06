@@ -10,6 +10,7 @@ import { openThreadStore, ThreadStore } from "../store.js";
 import {
   completeTurn,
   createThread,
+  deleteThread,
   failTurn,
   inspectThread,
   interruptTurn,
@@ -18,6 +19,7 @@ import {
   sendTurn,
   settleThread,
   snoozeThread,
+  startBackgroundTurn,
   threadStatus,
   unsettleThread,
   unsnoozeThread,
@@ -409,6 +411,68 @@ describe("archived threads", () => {
       "THREAD_ARCHIVED",
     );
     expect(await codeOf(() => interruptTurn(store, thread.id))).toBe("THREAD_ARCHIVED");
+  });
+});
+
+/** MXN-290: a background provider turn that cannot be recorded is refused, never stored as a second running turn. */
+describe("background turns (MXN-290)", () => {
+  it("refuses a second concurrent background start while one runs", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const outcomes = await Promise.allSettled([
+      startBackgroundTurn(store, thread.id, { modelSelection: null }),
+      startBackgroundTurn(store, thread.id, { modelSelection: null }),
+    ]);
+    const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+    const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(((rejected[0] as PromiseRejectedResult).reason as CliError).code).toBe("THREAD_BUSY");
+    expect((await store.readTurns(thread.id)).filter((turn) => turn.status === "running")).toHaveLength(1);
+  });
+
+  it("refuses a background start while a send's turn runs", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    await sendTurn(store, thread.id, { prompt: "user work" });
+    expect(await codeOf(() => startBackgroundTurn(store, thread.id, { modelSelection: null }))).toBe(
+      "THREAD_BUSY",
+    );
+  });
+
+  it("does not start a background turn on a settled thread, and leaves it settled", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    await settleThread(store, thread.id);
+    expect(await codeOf(() => startBackgroundTurn(store, thread.id, { modelSelection: null }))).toBe(
+      "SETTLED_THREAD_CONFIRMATION_REQUIRED",
+    );
+    expect(await store.readTurns(thread.id)).toHaveLength(0);
+    expect(threadStatus(await inspectThread(store, thread.id))).toBe("settled");
+  });
+
+  it("does not start a background turn on an archived thread", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    await store.writeThreadRecord({ ...thread, archivedAt: store.nowIso() });
+    expect(await codeOf(() => startBackgroundTurn(store, thread.id, { modelSelection: null }))).toBe(
+      "THREAD_ARCHIVED",
+    );
+    expect(await store.readTurns(thread.id)).toHaveLength(0);
+  });
+});
+
+/** MXN-290: direct sends refuse deleted threads, like the queue ("Thread is not active") does. */
+describe("deleted threads (MXN-290)", () => {
+  it("refuses sends and background starts once deleted", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    await deleteThread(store, thread.id);
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "hi" }))).toBe("THREAD_NOT_FOUND");
+    expect(await codeOf(() => startBackgroundTurn(store, thread.id, { modelSelection: null }))).toBe(
+      "THREAD_NOT_FOUND",
+    );
+    expect(await store.readTurns(thread.id)).toHaveLength(0);
   });
 });
 

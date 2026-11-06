@@ -9,7 +9,7 @@ import type { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 
 import type { ClientApi } from "../api.js";
-import { callMoxenTool, availableMoxenTools, type MemoryAccess } from "./tools.js";
+import { callMoxenTool, availableMoxenTools, routeMcpSession, type MemoryAccess, type MoxenToolOptions } from "./tools.js";
 
 /** Newest first; an unknown client version is answered with the newest. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -26,11 +26,12 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
+  "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +
   "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +
   "web_fetch reads a web page as text; it is not part of delegating.";
 
 /** What a delegated task is told: it has no delegation tools, so only what is left is described. */
-export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full your own context window is, from the latest reading Moxen recorded. web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
+export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full your own context window is, from the latest reading Moxen recorded. usage_status reports the user's current shared provider usage. web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
 export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_search, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
@@ -103,6 +104,14 @@ interface JsonRpcRequest {
  * The JSON-RPC answer to one request, or null for a notification (no id),
  * which needs none. Never throws: a tool failure is a tool error result, an
  * internal failure a JSON-RPC error.
+ *
+ * One entry serves every session on the provider server (OpenCode keys MCP
+ * servers by name per directory): each call runs as the session OpenCode
+ * names in `params._meta`, falling back to the entry's own thread when the
+ * field is missing and failing when it names no live session — so a call
+ * never lands on another thread's tools and identity. A `tools/call`
+ * without the field fails instead when the server hosts more than one live
+ * session, since running it as the owner would be silent misattribution.
  */
 export async function answerMcp(options: McpSessionOptions, raw: unknown): Promise<Record<string, unknown> | null> {
   const request = (raw !== null && typeof raw === "object" ? raw : {}) as JsonRpcRequest;
@@ -112,29 +121,45 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
   const fail = (code: number, message: string) => ({ jsonrpc: "2.0", id, error: { code, message } });
   const method = typeof request.method === "string" ? request.method : "";
   const params = request.params !== null && typeof request.params === "object" ? (request.params as Record<string, unknown>) : {};
+  const fallback: { threadId: string; options: MoxenToolOptions } = {
+    threadId: options.parentThreadId,
+    options: { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write" },
+  };
   try {
     switch (method) {
       case "initialize": {
         const asked = typeof params.protocolVersion === "string" ? params.protocolVersion : "";
         const protocolVersion = (MCP_PROTOCOL_VERSIONS as readonly string[]).includes(asked) ? asked : MCP_PROTOCOL_VERSIONS[0];
+        // Routed when the client names its session, so a session that will
+        // be refused delegation tools is not told the owner's instructions;
+        // the entry owner's otherwise.
+        const routed = await routeMcpSession(options.api, fallback, params, false);
+        const instructions = "error" in routed
+          ? moxenInstructions(options)
+          : moxenInstructions({ delegated: routed.options.delegated === true, webFetch: routed.options.webFetch !== false, memory: routed.options.memory ?? "write" });
         return reply({
           protocolVersion,
           capabilities: { tools: {} },
           serverInfo: { name: "moxen", version: options.version ?? "0.0.0" },
-          instructions: moxenInstructions(options),
+          instructions,
         });
       }
       case "ping":
         return reply({});
-      case "tools/list":
-        return reply({ tools: await availableMoxenTools(options.api, options.parentThreadId, { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write" }) });
+      case "tools/list": {
+        const routed = await routeMcpSession(options.api, fallback, params, false);
+        if ("error" in routed) return fail(-32602, routed.error);
+        return reply({ tools: await availableMoxenTools(options.api, routed.threadId, routed.options) });
+      }
       case "tools/call": {
         const name = typeof params.name === "string" ? params.name : "";
         const args =
           params.arguments !== null && typeof params.arguments === "object" && !Array.isArray(params.arguments)
             ? (params.arguments as Record<string, unknown>)
             : {};
-        const result = await callMoxenTool(options.api, options.parentThreadId, name, args, { delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write" });
+        const routed = await routeMcpSession(options.api, fallback, params, true);
+        if ("error" in routed) return fail(-32602, routed.error);
+        const result = await callMoxenTool(options.api, routed.threadId, name, args, routed.options);
         return reply({ content: [{ type: "text", text: result.text }], isError: result.isError });
       }
       default:

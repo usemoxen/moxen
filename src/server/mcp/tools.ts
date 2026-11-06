@@ -22,6 +22,7 @@ import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
+import { usageKeyForInstance } from "../../core/usage/limits.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
@@ -47,6 +48,18 @@ export interface McpTool {
 
 /** Models listed per provider before the rest are only counted: a catalog can run to hundreds. */
 export const MAX_MODELS_PER_PROVIDER = 40;
+/**
+ * How long `usage_status` waits for a cheap fresh usage reading before
+ * answering from the stored one instead. Covers the slowest cheap probe
+ * (OpenCode Go's five-second HTTP read); a slower probe keeps running and
+ * freshens the next call through the normal event path.
+ */
+export const USAGE_REFRESH_TIMEOUT_MS = 8_000;
+/**
+ * A stored usage reading older than this is flagged stale: older than any
+ * live session's reporting rhythm, so it may lag what the provider shows now.
+ */
+export const USAGE_STALE_AFTER_MS = 5 * 60_000;
 export const SUBMIT_HANDOFF_TOOL: McpTool = {
   name: "submit_handoff",
   description: "Submit the handoff summary requested by Moxen. Send only the summary here, using the requestId in the summary request. Acceptance stores it durably; no final-response summary is needed. Moxen owns scheduling and creating the new thread. Unrequested or stale submissions are refused.",
@@ -195,6 +208,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description:
       "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
       "here, and only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
+      "Those limits can be hours old: usage_status reads them fresh before you decide where there is headroom. " +
       "Pass provider to list just that one.",
     inputSchema: {
       type: "object",
@@ -212,6 +226,17 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "It is the same number the user's Moxen screen shows for this thread, taken from the latest reading Moxen recorded. " +
       "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
       "Use it before deciding to compact or hand off instead of guessing. It takes no argument: always your own thread.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "usage_status",
+    description:
+      "The user's current shared provider usage, for every set-up provider: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
+      "Also which provider your own thread runs on, and what usage protection holds or has queued (a delegated task sees its own held entry only). " +
+      "Call it before fanning work out (Orchestrate: after models, before delegate), and whenever you must decide where there is headroom: the usageLimits in models can be hours old, while this tries a cheap fresh reading first and falls back to the stored one with its age. " +
+      "A provider with no windows has no data, which is not the same as unlimited: key that off the empty windows list, not off stale. " +
+      "Read-only: it never spends provider usage.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
@@ -323,8 +348,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: "thread_continue",
     description:
-      "Continue your own thread in a new thread when it is getting long (check context_usage first): the new thread opens with the handoff summary you write, replacing the generated record, and runs your first message once this turn ends. " +
-      "Your running delegated tasks move to the new thread and report there. " +
+      "Continue your own thread in a new thread when it is getting long (check context_usage first): the new thread opens with the handoff summary you write, replacing the generated record, and runs your first message once this thread has nothing running or queued. " +
+      "Your delegated tasks move to the new thread and report there; pass provider/model/effort to run the new thread on another model (tasks keep their own). " +
       "Rules: only your own top-level thread (it takes no thread id, so a parent or any other thread is unreachable; a delegated task is refused: finish with a report and let the thread that delegated it decide); at most 3 continuations in a row with no user message between them (a repeat is refused: ask the user); not for research runs. " +
       "After it returns, end your turn promptly with a brief closing message and start no new work: the new thread waits until this thread has nothing running or queued.",
     inputSchema: {
@@ -338,6 +363,9 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
             "A UUID you generate for this continuation (one per new thread). If this call fails with a transport error, retry with the SAME key: " +
             "the retry returns the original thread instead of starting a duplicate.",
         },
+        provider: { type: "string", description: "Provider instance id for the new thread (claudeAgent, opencode/<provider>…); defaults to yours. The models tool lists them." },
+        model: { type: "string", description: "Model slug on that provider for the new thread; defaults to yours." },
+        effort: { type: "string", description: "Reasoning effort for that model (one of its efforts in the models tool); defaults to the model's own." },
       },
       required: ["summary"],
       additionalProperties: false,
@@ -569,13 +597,98 @@ export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
   return options.checklist === true ? [...tools, TODOS_TOOL] : tools;
 }
 
-export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+export async function moxenOptionsFor(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<MoxenToolOptions> {
   const run = await api.query({ type: "research.run", threadId }).catch(() => null);
   const active = isResearchRunActive(run);
   const researchLead = active && run?.leadThreadId === threadId;
   const imageGeneration = options.delegated !== true && await api.query({ type: "image-generation.availability", threadId }).then((result) => result.available === true, () => false);
   const handoff = await api.query({ type: "handoff.pending", threadId }).then((result) => result?.requestId != null, () => false);
-  return moxenToolsFor({ ...options, ...(run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {}), imageGeneration, handoff, researchLead, researchMember: active });
+  return { ...options, ...forceDelegated(run, threadId, active), imageGeneration, handoff, researchLead, researchMember: active };
+}
+
+/** A research run in progress takes the delegation tools away, like the list does. */
+function forceDelegated(
+  run: { readonly leadThreadId: string } | null,
+  threadId: string,
+  active: boolean,
+): { readonly delegated?: true } {
+  return run && (active || run.leadThreadId !== threadId) ? { delegated: true } : {};
+}
+
+export async function availableMoxenTools(api: ClientApi, threadId: string, options: MoxenToolOptions): Promise<readonly McpTool[]> {
+  return moxenToolsFor(await moxenOptionsFor(api, threadId, options));
+}
+
+/**
+ * Where OpenCode names the session a tool call runs for: request metadata,
+ * not a tool argument, so it is absent from the model-visible schema
+ * (`docs/external/opencode-v2/mcp-servers.md#context`). The id identifies
+ * the invoking OpenCode session, never the MCP transport session; a model
+ * cannot set it, so it selects which thread's tools and identity serve the
+ * call rather than authorizing anything.
+ */
+export const OPENCODE_SESSION_META_KEY = "ai.opencode/sessionID";
+
+/** The native OpenCode session a request runs for, from its MCP request metadata. */
+function sessionOf(params: Record<string, unknown>): string | null {
+  const meta = params._meta;
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const id = (meta as Record<string, unknown>)[OPENCODE_SESSION_META_KEY];
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/**
+ * Who a request runs for on the directory's shared `moxen` entry. A request
+ * carrying a known session id runs with that session's thread and gating; a
+ * request carrying an unknown session id fails rather than landing on
+ * another thread. A request without one falls back to the entry's own
+ * thread — except a `tools/call`, which would otherwise silently execute as
+ * the owner (a `delegate` creating the owner's task, a `memory_save` in the
+ * owner's scope): when sessions share the entry the call is ambiguous, so
+ * it fails naming the missing key, and with one session at most the
+ * fallback cannot land on another thread.
+ */
+export async function routeMcpSession(
+  api: ClientApi,
+  fallback: { readonly threadId: string; readonly options: MoxenToolOptions },
+  params: Record<string, unknown>,
+  requireSession: boolean,
+): Promise<{ readonly threadId: string; readonly options: MoxenToolOptions } | { readonly error: string }> {
+  const nativeSessionId = sessionOf(params);
+  if (nativeSessionId === null) {
+    if (!requireSession) return fallback;
+    // Sessions that could have placed this call on the entry: one at most
+    // and the fallback cannot land on another thread; more and the call is
+    // ambiguous, so it fails naming the missing key. Anything unparsable
+    // fails closed too.
+    let sessions = 2;
+    try {
+      const answer = await api.query({ type: "thread.entry-sessions", threadId: fallback.threadId });
+      if (typeof answer?.count === "number") sessions = answer.count;
+    } catch (cause) {
+      return { error: `Could not count the sessions sharing this entry: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
+    if (sessions <= 1) return fallback;
+    return {
+      error:
+        `Missing "${OPENCODE_SESSION_META_KEY}" in this tools/call: the shared moxen entry serves ${sessions} live sessions, ` +
+        `so the call cannot be attributed to one thread and is refused instead of running as another thread.`,
+    };
+  }
+  let routing;
+  try {
+    routing = await api.query({ type: "opencode.session-thread", nativeSessionId });
+  } catch (cause) {
+    return { error: `Could not resolve the OpenCode session behind this call: ${cause instanceof Error ? cause.message : String(cause)}` };
+  }
+  if (routing === null) {
+    return { error: `Unknown OpenCode session "${nativeSessionId}": the shared moxen entry serves only live sessions, never another thread.` };
+  }
+  const run = await api.query({ type: "research.run", threadId: routing.threadId }).catch(() => null);
+  return {
+    threadId: routing.threadId,
+    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
+  };
 }
 
 /**
@@ -688,7 +801,7 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
@@ -727,6 +840,8 @@ export async function callMoxenTool(
         return ok(await modelsTool(api, args));
       case "context_usage":
         return ok(await contextUsageTool(api, parentThreadId));
+      case "usage_status":
+        return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS, options.delegated === true));
       case "todos": {
         const todos = Array.isArray(args.todos) ? args.todos : null;
         if (todos === null) throw new CliError("INVALID_TOOL_INPUT", "todos must be an array of {content, status}.");
@@ -853,6 +968,9 @@ export async function callMoxenTool(
           summary: argString(args, "summary", true)!,
           ...(argString(args, "first") !== undefined ? { firstMessage: argString(args, "first")! } : {}),
           ...(argString(args, "idempotencyKey") !== undefined ? { idempotencyKey: argString(args, "idempotencyKey")! } : {}),
+          ...(argString(args, "provider") !== undefined ? { provider: argString(args, "provider")! } : {}),
+          ...(argString(args, "model") !== undefined ? { model: argString(args, "model")! } : {}),
+          ...(argString(args, "effort") !== undefined ? { thinkingEffort: argString(args, "effort")! } : {}),
         });
         return ok({
           threadId: continued.threadId,
@@ -1400,5 +1518,73 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string) {
     ...(reading.compactedSince
       ? { note: "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that." }
       : {}),
+  };
+}
+
+/**
+ * `usage_status`: the user's current shared provider usage, for an agent
+ * deciding where there is headroom. Every enabled, installed provider keeps
+ * one row: its windows (percent used, reset time, label), when that reading
+ * was taken, and whether it is stale (older than USAGE_STALE_AFTER_MS).
+ * A provider with no windows has no data, which is not unlimited. The
+ * protection snapshot is the same one `moxen usage status` shows: what
+ * usage protection holds or has queued.
+ */
+async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number, delegated: boolean) {
+  const [listed, stored, protection, inspected] = await Promise.all([
+    api.query({ type: "providers.list" }),
+    api.query({ type: "usage.limits" }),
+    api.query({ type: "usage.protection" }),
+    api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null),
+  ]);
+  // A cheap refresh where one exists, bounded: a slow probe costs the
+  // answer's freshness, never the answer. The probe keeps running behind
+  // the fallback and freshens the next call through the normal event path.
+  const refreshed = await withinDeadline(api.query({ type: "usage.refresh" }), timeoutMs).catch(() => "timeout" as const);
+  const snapshot = refreshed === "timeout" ? stored.providers : refreshed.providers;
+  const now = Date.now();
+  const providers = listed.providers
+    .filter((provider) => provider.enabled && provider.installed)
+    .map((provider) => {
+      const usage = snapshot[usageKeyForInstance(provider.instanceId)] ?? snapshot[provider.driver] ?? provider.usageLimits;
+      if (!usage || usage.windows.length === 0) {
+        return {
+          provider: provider.instanceId,
+          displayName: provider.displayName ?? provider.instanceId,
+          enabled: true,
+          checkedAt: usage?.checkedAt ?? null,
+          stale: false,
+          windows: [],
+          note: usage?.unavailable
+            ? `Usage cannot be read for this provider (${usage.unavailable.reason}). No data is not the same as unlimited: do not treat it as headroom.`
+            : "No usage reported for this provider. No data is not the same as unlimited: do not treat it as headroom.",
+        };
+      }
+      const taken = Date.parse(usage.checkedAt);
+      return {
+        provider: provider.instanceId,
+        displayName: provider.displayName ?? provider.instanceId,
+        enabled: true,
+        checkedAt: usage.checkedAt,
+        stale: !Number.isFinite(taken) || now - taken > USAGE_STALE_AFTER_MS,
+        windows: usage.windows.map((window) => ({
+          id: window.id,
+          kind: window.kind,
+          label: window.label,
+          usedPercent: window.usedPercent,
+          resetsAt: window.resetsAt,
+        })),
+        ...(usage.unavailable ? { note: `Usage cannot be read for this provider (${usage.unavailable.reason}).` } : {}),
+      };
+    });
+  return {
+    callerProvider: inspected?.thread.modelSelection?.instanceId ?? null,
+    providers,
+    // A delegated task is denied thread_search/thread_read, so it must not
+    // learn other threads' titles through here either: it keeps its own
+    // held entry, account-level forecasts, and nothing else.
+    protection: delegated
+      ? { ...protection, queue: protection.queue.filter((entry) => entry.threadId === parentThreadId) }
+      : protection,
   };
 }

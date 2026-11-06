@@ -168,6 +168,20 @@ describe("continueOwnThread: consecutive agent continuations", () => {
     expect(await w.store.readThreadRecord(orphanId)).not.toBeNull();
   });
 
+  it("runs the new thread on the requested model", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    await sendTurn(w.store, source.id, { prompt: "Work" });
+    const continued = await continueOwnThread(w.ctx, {
+      threadId: source.id,
+      summary: "Half done.",
+      modelSelection: { instanceId: "codex", model: "other-model" },
+    });
+    expect((await w.store.readThreadRecord(continued.threadId))?.modelSelection).toEqual({ instanceId: "codex", model: "other-model" });
+    // The source keeps its own.
+    expect((await w.store.readThreadRecord(source.id))?.modelSelection).toEqual({ instanceId: "codex", model: "gpt-6.1-sol" });
+  });
+
   it("a retry with the same idempotency key returns the first continuation", async () => {
     const w = await world();
     const source = await w.make("solo");
@@ -216,7 +230,7 @@ describe("continueOwnThread: consecutive agent continuations", () => {
 });
 
 describe("continueOwnThread: the shared continuation", () => {
-  it("opens the new thread with the agent's summary, its first task, and the running children", async () => {
+  it("opens the new thread with the agent's summary, its first task, and every delegated task", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
     const running = await w.make("still running");
@@ -235,10 +249,11 @@ describe("continueOwnThread: the shared continuation", () => {
       summary: "Goal: ship it. Done: scaffolding. Next: wire the handler.",
       firstMessage: "Wire the handler and run the tests.",
     });
-    expect(continued.adoptedTasks).toHaveLength(1);
-    expect(continued.adoptedTasks[0]).toMatchObject({ taskId: running.id });
-    // The finished task stays listed under the old thread.
-    expect((await w.store.readDelegations()).find((row) => row.id === "d")?.parentThreadId).toBe(parent.id);
+    expect(continued.adoptedTasks).toHaveLength(2);
+    expect(continued.adoptedTasks).toMatchObject([{ taskId: running.id }, { taskId: done.id }]);
+    // Every delegation moves to the new thread, finished ones included:
+    // the old thread owns nothing afterwards.
+    expect((await w.store.readDelegations()).find((row) => row.id === "d")?.parentThreadId).toBe(continued.threadId);
     expect((await w.store.readDelegations()).find((row) => row.id === "r")?.parentThreadId).toBe(continued.threadId);
 
     const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
@@ -247,6 +262,7 @@ describe("continueOwnThread: the shared continuation", () => {
     expect(prompt).toContain("## What to do first");
     expect(prompt).toContain("Wire the handler and run the tests.");
     expect(prompt).toContain(`"still running" (taskId ${running.id})`);
+    expect(prompt).toContain(`"already done" (taskId ${done.id})`);
     const note = (await w.store.readActivities(parent.id)).find((activity) => activity.kind === "thread.continued");
     expect(note?.payload?.byAgent).toBe(true);
     expect(note?.payload?.threadId).toBe(continued.threadId);
