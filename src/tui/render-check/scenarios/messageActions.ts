@@ -76,6 +76,13 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // click the prompt again.
   await act(async () => setup.mockMouse.click(138, 0));
   await setup.flush();
+  // If the backdrop click missed, the modal is still up and would swallow
+  // the sidebar click into its own backdrop instead of switching threads:
+  // close it first rather than failing fifteen seconds later at the header.
+  if (setup.captureCharFrame().includes("Message actions")) {
+    await act(async () => setup.mockMouse.click(138, 0));
+    await waitFor("stale message modal did not close", () => !setup.captureCharFrame().includes("Message actions"));
+  }
   // Found by its title: the sidebar's rows move whenever a row above them changes.
   const sidebarRows = setup.captureCharFrame().split("\n");
   const xash = sidebarRows.findIndex((line) => line.includes("Xash3D RT Streamline"));
