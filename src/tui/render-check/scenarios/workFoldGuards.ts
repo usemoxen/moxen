@@ -27,9 +27,11 @@ export async function runWorkFoldGuards(setup: TestRendererSetup): Promise<void>
   {
     const target = await foldTarget(setup, act);
     await act(async () => setup.mockMouse.click(target.x, target.y));
+    // The toggle marks synchronously: assert before the flush below, whose
+    // cost on a loaded machine would otherwise eat the 250ms window.
+    if (!wasModalJustDismissed()) fail("work toggle did not mark the dismiss window");
     await setup.flush();
   }
-  if (!wasModalJustDismissed()) fail("work toggle did not mark the dismiss window");
   console.log("--- work expanded (guard marked) ---");
   const workExpandedFrame = setup.captureCharFrame();
   console.log(workExpandedFrame);
@@ -77,9 +79,10 @@ export async function runWorkFoldGuards(setup: TestRendererSetup): Promise<void>
     const line = rows[summaryRow] ?? "";
     const glyph = line.indexOf("▸");
     await act(async () => setup.mockMouse.click(glyph === -1 ? 50 : glyph, summaryRow));
+    // Same synchronous mark as the fold toggle: assert before flushing.
+    if (!wasModalJustDismissed()) fail("summary toggle did not mark the dismiss window");
     await setup.flush();
   }
-  if (!wasModalJustDismissed()) fail("summary toggle did not mark the dismiss window");
   console.log("--- summary toggled (guard marked) ---");
   console.log(setup.captureCharFrame());
 

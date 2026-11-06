@@ -117,11 +117,12 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   const answerToastX = answerToastRows[answerToastRow]?.lastIndexOf("×") ?? -1;
   if (answerToastX === -1) fail("Answer submitted toast has no ×");
   await act(async () => setup.mockMouse.click(answerToastX, answerToastRow));
-  await setup.flush();
-  // The mark lives for 250ms: assert it while the dismissal it came with is
-  // still on screen, so a slow harness reads as a harness failure.
+  // The × marks synchronously on mouse-down: assert before flushing, whose
+  // cost on a loaded machine would otherwise eat the 250ms window. The
+  // dismissal itself is plain state, so one flush shows it.
   if (!wasModalJustDismissed()) fail("toast × did not mark the dismiss window");
-  await waitFor("toast × did not dismiss", () => !frame().includes("Answer submitted"));
+  await setup.flush();
+  if (frame().includes("Answer submitted")) fail("toast × did not dismiss");
   console.log("--- toast dismissed (manual ×) ---");
   const toastDismissedFrame = frame();
   console.log(toastDismissedFrame);
