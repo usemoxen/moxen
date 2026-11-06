@@ -204,7 +204,10 @@ one task id, one final report and one notification.
 
 A busy `/research` never opens a proposal. It follows the same send policy as
 the single-researcher fallback: existing mode locks, queue and delivery rules
-still apply, so a mode change during a running turn can be refused.
+still apply, so a mode change during a running turn can be refused. Maintenance
+turns never ask and never spend the question either: a bare `/compact`, a
+usage-limit continue, and a held work-queue entry run as they are, leaving the
+run-size mark for the first real prompt.
 
 A turn's answer is the provider's final message. Notes the provider writes
 between tool calls are kept as their own messages, so the transcript folds
