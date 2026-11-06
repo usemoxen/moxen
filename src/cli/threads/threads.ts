@@ -350,7 +350,7 @@ export interface ThreadDelegateOptions {
   dryRun?: boolean;
   isolation?: "shared" | "worktree";
   idempotencyKey?: string;
-  interactionMode?: "default" | "research";
+  interactionMode?: "default" | "research" | "review";
   researchSize?: string;
   researchModels?: string;
   drivers?: TurnDriverFactories;
@@ -370,8 +370,8 @@ export async function delegateTask(config: CliConfig, options: ThreadDelegateOpt
       throw new CliError("INVALID_THREAD_OPTION", "--research-models must be a JSON object.", { exitCode: 2 });
     }
     research = decodeResearchPlan({ size: { researchers, critics }, ...(models === undefined ? {} : { models }) });
-    if (options.interactionMode === "default") {
-      throw new CliError("INVALID_THREAD_OPTION", "--research-size cannot use Build mode.", { exitCode: 2 });
+    if (options.interactionMode === "default" || options.interactionMode === "review") {
+      throw new CliError("INVALID_THREAD_OPTION", "--research-size starts a full Research run in Research mode: it cannot use Build or Review mode.", { exitCode: 2 });
     }
   } else if (options.researchModels !== undefined) {
     throw new CliError("INVALID_THREAD_OPTION", "--research-models requires --research-size.", { exitCode: 2 });
@@ -453,7 +453,13 @@ export async function taskStatus(config: CliConfig, rawParentThreadId: string, r
     auth: directAuth(),
     project: described.project,
     parent: { id: described.parent.id, projectId: described.parent.projectId, title: described.parent.title },
-    task: { ...described.task, hasPendingChildRuns: false, waitTimedOut: false },
+    task: {
+      ...described.task,
+      hasPendingChildRuns: false,
+      waitTimedOut: false,
+      // A review child's verdict and warnings ride with the status; other tasks carry no review key.
+      ...(described.review === null ? {} : { review: described.review }),
+    },
   };
 }
 

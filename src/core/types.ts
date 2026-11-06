@@ -8,9 +8,11 @@ export type EffectiveThreadEnvMode = Exclude<ThreadEnvMode, "auto">;
 export type RuntimeMode = "approval-required" | "auto" | "auto-accept-edits" | "full-access";
 /**
  * A thread's mode: `"default"` is Build; Research and Orchestrate add their procedure to the conversation
- * (`threads/modes.ts`). Plan mode was removed; `core/interactionmode.ts` reads an old `plan` as Build.
+ * (`threads/modes.ts`), and Review adds the code-review procedure — but only to a delegated task or to one
+ * prompt (`/review`), never as a thread's own staying mode. Plan mode was removed; `core/interactionmode.ts`
+ * reads an old `plan` as Build.
  */
-export type InteractionMode = "default" | "research" | "orchestrate";
+export type InteractionMode = "default" | "research" | "orchestrate" | "review";
 export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {
@@ -601,9 +603,10 @@ export interface ThreadEnvelope {
    */
   turnModelSelections?: Record<string, ModelSelection>;
   /**
-   * The mode each turn ran in, by turn id, for turns that ran in Research or
-   * Orchestrate (MXN-236). `oneOff` marks a mode asked for that one message
-   * (`/research`, `--interaction-mode`) rather than the thread's own. Absent
+   * The mode each turn ran in, by turn id, for turns that ran in Research,
+   * Orchestrate or Review (MXN-236; Review since MXN-286). `oneOff` marks a
+   * mode asked for that one message (`/research`, `/review`,
+   * `--interaction-mode`) rather than the thread's own. Absent
    * when no turn qualifies, and for a turn that ran in Build or has not
    * started (a queued message takes the thread's mode when it starts).
    */

@@ -180,7 +180,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     turnModelSelections: Object.fromEntries(
       turns.flatMap((turn) => (turn.modelSelection ? [[turn.id, turn.modelSelection] as const] : [])),
     ),
-    // Only when a turn ran in Research or Orchestrate, so older envelopes stay byte-for-byte as they were.
+    // Only when a turn ran outside Build, so older envelopes stay byte-for-byte as they were.
     ...(Object.keys(turnModes).length > 0 ? { turnInteractionModes: turnModes } : {}),
     ...(Object.keys(turnUsagePauses).length > 0 ? { turnUsagePauses } : {}),
     ...(thread.usagePause && (thread.usagePause.forced || thread.usagePause.phase !== "resuming") ? { protection: {

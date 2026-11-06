@@ -74,6 +74,37 @@ export function useDiffPanel(params: {
   const [collapsedFiles, setCollapsedFiles] = useState<ReadonlySet<string>>(() => new Set());
   /** The Worked folds the user toggled, by turn group: open (true) or closed. Untoggled ones take the timeline's default. */
   const [expandedWork, setExpandedWork] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  /**
+   * Pending chat-pane jumps (the pick defer, the scroll re-assertions): a
+   * thread switch behind one must not scroll the new thread to the old
+   * turn's index. Tracked so the open-thread effect below can cancel them.
+   */
+  const scrollTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  const cancelScrolls = () => {
+    for (const timer of scrollTimers.current) clearTimeout(timer);
+    scrollTimers.current.clear();
+  };
+  const later = (ms: number, run: () => void): void => {
+    const timer = setTimeout(() => {
+      scrollTimers.current.delete(timer);
+      run();
+    }, ms);
+    scrollTimers.current.add(timer);
+  };
+
+  /**
+   * A switch lands on the new thread's own transcript: whatever the old
+   * thread had open closes rather than staying on screen, a late patch
+   * fetch for it is dropped by the `selectedIdRef` guards, and any jump
+   * still waiting out its delay is cancelled instead of scrolling the new
+   * thread. Also runs on unmount.
+   */
+  useEffect(() => {
+    setExpandedTurn(null);
+    setPatch(null);
+    cancelScrolls();
+    return cancelScrolls;
+  }, [openThreadId]);
 
   /** Clears every per-thread cache — called when the open thread changes. */
   const resetCaches = () => {
@@ -139,6 +170,9 @@ export function useDiffPanel(params: {
     void client
       .turnDiff(id, turnCount)
       .then((result) => {
+        // Dropped when a thread switch landed first: the panel was reset
+        // above and this patch belongs to the old thread.
+        if (selectedIdRef.current !== id) return;
         setPatch(result);
         // Warm the inline backfill cache with the same patch so rows for
         // this turn show hunks without a second fetch.
@@ -187,12 +221,12 @@ export function useDiffPanel(params: {
     if (pane === null || target === null) return;
     pane.scrollTo(target);
     if (attempt < 2) {
-      setTimeout(() => {
-        const later = chatScrollRef.current;
+      later(150, () => {
+        const laterPane = chatScrollRef.current;
         const fresh = getTarget();
-        if (later === null || fresh === null) return;
-        if (Math.abs(later.scrollTop - fresh) > 2) assertChatScroll(getTarget, attempt + 1);
-      }, 150);
+        if (laterPane === null || fresh === null) return;
+        if (Math.abs(laterPane.scrollTop - fresh) > 2) assertChatScroll(getTarget, attempt + 1);
+      });
     }
   };
 
@@ -210,6 +244,16 @@ export function useDiffPanel(params: {
     const index = timelineIndexForTurnCount(turnCount);
     if (index === null) return;
     scrollTimelineToIndex(index);
+  };
+
+  /**
+   * The pick defer (see `pickDiffTurn` in `app.tsx`): opening/resizing the
+   * panel reflows the chat pane under a sticky-bottom scrollbox, which
+   * swallows a same-tick scrollTo — landing the jump on the settled layout
+   * instead. Owned here so a thread switch cancels it with the rest.
+   */
+  const deferScrollToTurn = (turnCount: number): void => {
+    later(60, () => scrollTimelineToTurn(turnCount));
   };
 
   /**
@@ -361,6 +405,7 @@ export function useDiffPanel(params: {
     closeDiff,
     scrollTimelineToTurn,
     scrollTimelineToIndex,
+    deferScrollToTurn,
     toggleWork,
     toggleDiffFile,
     resetCaches,

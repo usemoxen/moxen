@@ -11,6 +11,7 @@
  * The message carries the facts twice: as text the model reads, and as
  * structured `notification` data the TUI draws as a card.
  */
+import type { InteractionMode } from "../types.js";
 import type { DelegatedTaskStatus } from "./views.js";
 
 export interface TaskNotification {
@@ -35,6 +36,21 @@ export interface TaskNotification {
   readonly background: readonly BackgroundWorkNote[];
   /** True when Moxen could not check for background work, so more may still be running. */
   readonly backgroundUnknown: boolean;
+  /**
+   * Review tasks only (a child in Review mode): the verdict the report ends
+   * with, whether the reviewer shares the parent's model, and the report
+   * itself. Absent for every other task, so their notifications read as
+   * they always did.
+   */
+  readonly review?: {
+    readonly verdict: ReviewVerdict | null;
+    /** True when the reviewer runs on the same model as the parent thread; null when either is unknown. */
+    readonly sameModel: boolean | null;
+    /** What is visibly wrong (no verdict on a finished review, a shared model): null when the review reads clean. */
+    readonly note: string | null;
+    /** The reviewer's final message, verbatim; null when it said nothing. */
+    readonly report: string | null;
+  };
 }
 
 /** One background task still running when a delegated task's turn ended. */
@@ -44,6 +60,72 @@ export interface BackgroundWorkNote {
   readonly command: string | null;
   /** When it started, ISO; null when the provider never said. */
   readonly startedAt: string | null;
+}
+
+/** The trailing verdict a review report must end with. */
+export type ReviewVerdict = "MERGE" | "FIX FIRST";
+
+/**
+ * The verdict a review report ends with: `VERDICT: MERGE` or
+ * `VERDICT: FIX FIRST` on the report's last non-empty line, and nothing
+ * else. A verdict line followed by more prose — or quoted target content
+ * landing after the reviewer's own verdict — is no verdict at all. Null
+ * when the final message holds none: the past failure was a report whose
+ * last word was "the full report is delivered above", so the report held
+ * nothing.
+ */
+export function reviewVerdictOf(report: string | null): ReviewVerdict | null {
+  if (report === null) return null;
+  const lines = report.split(/\r?\n/u);
+  for (let at = lines.length - 1; at >= 0; at -= 1) {
+    const line = lines[at]!.trim();
+    if (line === "") continue;
+    return line === "VERDICT: MERGE" ? "MERGE" : line === "VERDICT: FIX FIRST" ? "FIX FIRST" : null;
+  }
+  return null;
+}
+
+export interface ReviewFacts {
+  readonly verdict: ReviewVerdict | null;
+  readonly sameModel: boolean | null;
+  readonly note: string | null;
+}
+
+/**
+ * What the parent is told about a review task beyond the generic facts.
+ * Null for any task not in Review mode. `finished` matters: a running
+ * review owes no verdict yet, but a finished one without a `VERDICT` line
+ * is not a finished review, and the note says so visibly instead of
+ * passing it on as one. Models compare as `instance/model`; a shared one
+ * is a warning, never a refusal.
+ */
+export function reviewFactsOf(input: {
+  readonly finished: boolean;
+  readonly interactionMode: InteractionMode | undefined;
+  readonly report: string | null;
+  /** `instance/model` the reviewer ran on; null when unknown. */
+  readonly childModel: string | null;
+  /** `instance/model` the parent thread runs on; null when unknown. */
+  readonly parentModel: string | null;
+}): ReviewFacts | null {
+  if (input.interactionMode !== "review") return null;
+  const verdict = reviewVerdictOf(input.report);
+  const sameModel =
+    input.childModel !== null && input.parentModel !== null ? input.childModel === input.parentModel : null;
+  const notes: string[] = [];
+  if (input.finished && verdict === null) {
+    notes.push(
+      "the reviewer's final message has no VERDICT: MERGE or VERDICT: FIX FIRST line, so this is not a finished review. " +
+        "Read the report below and, when it holds nothing usable, delegate the review again with the target and the questions stated in full",
+    );
+  }
+  if (sameModel === true) {
+    notes.push(
+      `the reviewer runs on ${input.childModel}, the same model as this thread: it may share the author's blind spots, ` +
+        "so verify the load-bearing findings independently",
+    );
+  }
+  return { verdict, sameModel, note: notes.length > 0 ? notes.join("; ") : null };
 }
 
 /** The first line of a report, as its headline (markdown emphasis and heading marks dropped). */
@@ -88,6 +170,7 @@ export function taskNotificationText(tasks: readonly TaskNotification[], nowMs: 
       `- Task "${task.title}" (taskId ${task.taskId}${task.continuedFrom ? `, continued from taskId ${task.continuedFrom}` : ""}) ${VERB[task.status]}${facts.length > 0 ? ` · ${facts.join(" · ")}` : ""}.`,
       task.headline === null ? null : `  Headline: ${task.headline}`,
       ...backgroundLines(task, nowMs),
+      ...(task.review === undefined ? [] : reviewLines(task.review)),
     ]
       .filter((line): line is string => line !== null)
       .join("\n");
@@ -139,4 +222,23 @@ function backgroundLines(task: TaskNotification, nowMs: number): readonly (strin
       ? null
       : "  Moxen could not check for more background work, so more may still be running beyond what is named above.";
   return [running, unknown, unknownBeyond];
+}
+
+/** A review task's verdict, warnings and report, inline: the verdict and
+ * the findings must reach the parent here, not only behind `task_status`.
+ * A finished review with no `VERDICT` line is called out instead of being
+ * passed on as a finished review.
+ */
+function reviewLines(review: NonNullable<TaskNotification["review"]>): string[] {
+  const verdict =
+    review.verdict === null
+      ? review.note === null
+        ? "  Review verdict: pending"
+        : "  Review verdict: none — this is not a finished review"
+      : `  Review verdict: ${review.verdict}`;
+  return [
+    verdict,
+    review.note === null ? null : `  Review note: ${review.note}`,
+    review.report === null || review.report.trim() === "" ? null : `  Report:\n${review.report}`,
+  ].filter((line): line is string => line !== null);
 }
