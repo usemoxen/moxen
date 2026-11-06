@@ -142,11 +142,11 @@ function requireNotArchived(thread: StoredThread, action: string): void {
   }
 }
 
-function requireNotDeleted(thread: StoredThread, action: string): void {
+function requireNotDeleted(thread: StoredThread): void {
   if (thread.deletedAt != null) {
-    throw new CliError("THREAD_ARCHIVED", `Thread ${thread.id} is deleted and cannot ${action}.`, {
-      exitCode: 4,
-      details: { threadId: thread.id, deletedAt: thread.deletedAt },
+    throw new CliError("THREAD_NOT_FOUND", "The thread does not exist.", {
+      exitCode: 3,
+      details: { threadId: thread.id },
     });
   }
 }
@@ -300,8 +300,8 @@ export async function sendTurn(
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     let thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    requireNotDeleted(thread);
     requireNotArchived(thread, "receive a new turn");
-    requireNotDeleted(thread, "receive a new turn");
     if ((origin === "usage-protection" || origin === "usage-continue" && input.queue?.requestId?.startsWith("usage:")) && thread.usageProtectionOverride && usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, Date.parse(now))) {
       throw new CliError("USAGE_PROTECTION_OVERRIDDEN", "Usage protection is paused for this thread until the next allowance reset.");
     }
@@ -577,8 +577,8 @@ export async function startBackgroundTurn(
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    requireNotDeleted(thread);
     requireNotArchived(thread, "start a background turn");
-    requireNotDeleted(thread, "start a background turn");
     if (thread.usagePause && thread.usagePause.phase !== "resuming") {
       throw new CliError("USAGE_PROTECTED_BACKGROUND", "Usage protection is holding this thread's background work.");
     }

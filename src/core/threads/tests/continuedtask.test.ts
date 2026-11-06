@@ -1,4 +1,6 @@
 import * as Effect from "effect/Effect";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
@@ -82,6 +84,9 @@ describe("a delegated task continued in a new thread", () => {
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
     expect(await w.store.readTurns(parent.id)).toHaveLength(0);
+    // Dropped with one line in the server log; nothing more (MXN-290 review).
+    const log = await readFile(path.join(w.root, "server.log"), "utf8").catch(() => "");
+    expect(log).toContain(`parent ${parent.id} is deleted`);
   });
 });
 

@@ -811,6 +811,38 @@ describe("delegating with an idempotency key, and handing the shared entry back"
     }
   });
 
+  /** MXN-290 review: a retry never follows the chain into a home the caller cannot control. */
+  it("delegates anew when the idempotency chain was re-pointed to another thread", async () => {
+    const { harness, connection, parentThreadId } = await sharedWorld();
+    try {
+      const key = randomUUID();
+      const elsewhere = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Other home", wait: true, threadEnvMode: "local" });
+      const rehomed = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Re-homed task", wait: true, threadEnvMode: "local" });
+      const now = new Date().toISOString();
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId, childThreadId: randomUUID(), prompt: "Sub task",
+        status: "running", idempotencyKey: key, continuedIn: rehomed.threadId, createdAt: now, updatedAt: now,
+      });
+      await harness.store.appendDelegation({
+        id: randomUUID(), parentThreadId: elsewhere.threadId, childThreadId: rehomed.threadId, prompt: "Sub task",
+        status: "running", createdAt: now, updatedAt: now,
+      });
+      const retry = await connection.dispatch({
+        type: "thread.delegate",
+        parentThreadId,
+        task: "Sub task",
+        title: "Same work",
+        isolation: "shared",
+        idempotencyKey: key,
+      });
+      // Not the re-homed task: a fresh delegate under the caller.
+      expect(retry.child.id).not.toBe(rehomed.threadId);
+      expect((await harness.store.readDelegations()).filter((row) => row.idempotencyKey === key)).toHaveLength(2);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("hands the moxen entry back to the parent once a shared child settles", async () => {
     const { connection, restored, parentThreadId } = await sharedWorld();
     try {

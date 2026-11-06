@@ -11,17 +11,40 @@ import { OpenCodeDriver } from "../../providers/opencode/driver.js";
 import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import { CliError } from "../../errors.js";
-import { openThreadStore } from "../store.js";
+import { openThreadStore, type ThreadStore } from "../store.js";
 import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
+import type { StoredTurn } from "../types.js";
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { settleRuns } from "../../testing/turns.js";
 import { buildHandoff } from "../handoff.js";
 
+/**
+ * MXN-290 review: make the checkpoint capture hang on demand, so the
+ * bounded pre-outcome work can be pinned. Off unless a test opts in;
+ * every other test in this file keeps the real implementation.
+ */
+let hangCheckpointCapture = false;
+const pendingCheckpointCaptures: Array<(ref: string | null) => void> = [];
+vi.mock("../../checkpoints/git.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../../checkpoints/git.js")>();
+  return {
+    ...mod,
+    captureWorktree: (...args: Parameters<typeof mod.captureWorktree>) => {
+      if (!hangCheckpointCapture) return mod.captureWorktree(...args);
+      return new Promise<string | null>((resolve) => {
+        pendingCheckpointCaptures.push(resolve);
+      });
+    },
+  };
+});
+
 const cleanup: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  hangCheckpointCapture = false;
+  pendingCheckpointCaptures.length = 0;
   await Promise.all(cleanup.splice(0).map((run) => run()));
 });
 
@@ -522,6 +545,46 @@ describe("context usage", () => {
     expect(checkpoints).toHaveLength(1);
     expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(Date.parse(activities[interrupted]!.createdAt));
   });
+
+  /** MXN-290 review: the outcome is written on timeout when the checkpoint hangs, and a late checkpoint breaks nothing. */
+  it("writes the failure outcome even when the checkpoint never resolves", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-checkpoint-hang-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Checkpoint",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const reading = { usedTokens: 12_000, maxTokens: 200_000, cachedInputTokens: 11_000, autoCompactThreshold: null, compactsAutomatically: true };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => {
+        hangCheckpointCapture = true;
+        throw new Error("provider exploded");
+      },
+      streamEvents: Stream.never,
+      contextUsage: async () => reading,
+    };
+    const run = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go", workingDirectory: root });
+    // The 15s bound fires: the turn reads failed while the capture is still hanging.
+    await vi.waitFor(async () => {
+      expect((await store.readTurns(thread.id))[0]?.status).toBe("failed");
+    }, { timeout: 30_000 });
+    await run;
+    expect((await store.readTurns(thread.id))[0]).toMatchObject({ status: "failed", error: "provider exploded" });
+    // The capture landing late still writes its row, and the outcome stands.
+    for (const release of pendingCheckpointCaptures.splice(0)) release("late-post");
+    await vi.waitFor(async () => {
+      expect(await store.readCheckpoints(thread.id)).toHaveLength(1);
+    }, { timeout: 10_000 });
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("failed");
+  }, 90_000);
 });
 
 describe("live checklist", () => {
@@ -644,6 +707,113 @@ describe("provider-side interruptions", () => {
     expect(interrupt).toHaveBeenCalledWith(thread.id);
     expect(await store.readTurns(thread.id)).toHaveLength(0);
     expect((await store.readThreadRecord(thread.id))?.settledAt).not.toBeNull();
+  });
+
+  /** MXN-290 review: BUSY never kills — the winner keeps its session, the wake-up is queued. */
+  describe("a background start on a busy thread", () => {
+    /** A watcher driver that only records interrupt/stop calls. */
+    async function watchingDriver(threadId: string) {
+      const queue = await Effect.runPromise(Queue.unbounded<ProviderRuntimeEvent>());
+      cleanup.push(async () => { await Effect.runPromise(Queue.shutdown(queue)); });
+      const interrupt = vi.fn(() => Effect.void);
+      const close = vi.fn(() => Effect.void);
+      const driver: TurnDriver = {
+        hasSession: () => Effect.succeed(true),
+        startSession: () => Effect.succeed({}),
+        sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+        interruptTurn: interrupt,
+        awaitTurn: async () => ({ status: "completed" as const, text: "done", usage: null, error: null }),
+        streamEvents: Stream.fromQueue(queue),
+        stopSession: close,
+      };
+      return { driver, queue, interrupt, close };
+    }
+
+    async function backgroundStarted(queue: Queue.Queue<ProviderRuntimeEvent>, threadId: string, turnId: string, wakeUpPrompt?: string) {
+      await Effect.runPromise(Queue.offer(queue, {
+        type: "turn.started", provider: "claude", threadId, turnId, origin: "background",
+        ...(wakeUpPrompt !== undefined ? { wakeUpPrompt } : {}),
+      }));
+    }
+
+    async function queuedWakeUp(store: ThreadStore, threadId: string): Promise<StoredTurn> {
+      let wake: StoredTurn | undefined;
+      await vi.waitFor(async () => {
+        wake = (await store.readTurns(threadId)).find((turn) => turn.status === "queued" && turn.queue?.wakeUp === true);
+        expect(wake).toBeDefined();
+      }, { timeout: 30_000 });
+      return wake!;
+    }
+
+    it("leaves a live user turn running, with no interrupt or stop", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "moxen-busy-bg-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const store = await openThreadStore(root);
+      const thread = await createThread(store, { projectId: "p", title: "Busy", modelSelection: { instanceId: "claude", model: "m" }, env: { mode: "local", path: root, branch: null } });
+      const user = (await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "user work" })).turn;
+      const watching = await watchingDriver(thread.id);
+      watchDriverSession(store, watching.driver, thread.id, root);
+      await backgroundStarted(watching.queue, thread.id, "native-busy-1", "native news");
+      const wake = await queuedWakeUp(store, thread.id);
+      expect(wake.queue).toMatchObject({ wakeUp: true, requestId: "native-turn:native-busy-1" });
+      expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
+      // The winner was never touched: still running, session never interrupted or closed.
+      expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
+      expect(watching.interrupt).not.toHaveBeenCalled();
+      expect(watching.close).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it("lets a queued turn promoted at settle run, with no interrupt or stop", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "moxen-busy-promote-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const store = await openThreadStore(root);
+      const thread = await createThread(store, { projectId: "p", title: "Busy", modelSelection: { instanceId: "claude", model: "m" }, env: { mode: "local", path: root, branch: null } });
+      const first = (await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "one" })).turn;
+      const second = (await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "two", delivery: "queue" })).turn;
+      const watching = await watchingDriver(thread.id);
+      watchDriverSession(store, watching.driver, thread.id, root);
+      await backgroundStarted(watching.queue, thread.id, "native-busy-2");
+      await queuedWakeUp(store, thread.id);
+      await (await import("../threads.js")).completeTurn(store, thread.id, first.id, { text: "done one" });
+      await vi.waitFor(async () => {
+        expect((await store.readTurns(thread.id)).find((turn) => turn.id === second.id)?.status).toBe("running");
+      });
+      expect((await store.readTurns(thread.id)).find((turn) => turn.id === first.id)?.status).toBe("completed");
+      expect(watching.interrupt).not.toHaveBeenCalled();
+      expect(watching.close).not.toHaveBeenCalled();
+    }, 90_000);
+
+    it("records later events while a background run is still going", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "moxen-bg-offchain-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const store = await openThreadStore(root);
+      const thread = await createThread(store, { projectId: "p", title: "Background", modelSelection: { instanceId: "claude", model: "m" }, env: { mode: "local", path: root, branch: null } });
+      const queue = await Effect.runPromise(Queue.unbounded<ProviderRuntimeEvent>());
+      cleanup.push(async () => { await Effect.runPromise(Queue.shutdown(queue)); });
+      const driver: TurnDriver = {
+        hasSession: () => Effect.succeed(true),
+        startSession: () => Effect.succeed({}),
+        sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+        interruptTurn: () => Effect.void,
+        // The background run never ends: only the recording may hold the chain, never this.
+        awaitTurn: () => new Promise(() => {}),
+        streamEvents: Stream.fromQueue(queue),
+      };
+      watchDriverSession(store, driver, thread.id, root);
+      await backgroundStarted(queue, thread.id, "bg-long");
+      await vi.waitFor(async () => {
+        expect(openTurn(await store.readTurns(thread.id))).not.toBeNull();
+      }, { timeout: 10_000 });
+      await Effect.runPromise(Queue.offer(queue, {
+        type: "background.task", provider: "claude", threadId: thread.id, turnId: null,
+        taskId: "t-1", status: "started", description: "Long job", taskType: "local_bash", toolUseId: null, summary: null,
+      }));
+      // The task row lands while the run is still going: the run went off the chain.
+      await vi.waitFor(async () => {
+        expect((await store.readActivities(thread.id)).some((row) => row.kind === "background.started")).toBe(true);
+      }, { timeout: 10_000 });
+      expect(openTurn(await store.readTurns(thread.id))).not.toBeNull();
+    }, 60_000);
   });
 
   it("records a session-wide model fallback and moves the turn and the thread to the new model", async () => {

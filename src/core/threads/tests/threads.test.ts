@@ -438,9 +438,9 @@ describe("deleted threads (MXN-290)", () => {
     const store = await testStore();
     const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
     await deleteThread(store, thread.id);
-    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "hi" }))).toBe("THREAD_ARCHIVED");
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "hi" }))).toBe("THREAD_NOT_FOUND");
     expect(await codeOf(() => startBackgroundTurn(store, thread.id, { modelSelection: null }))).toBe(
-      "THREAD_ARCHIVED",
+      "THREAD_NOT_FOUND",
     );
     expect(await store.readTurns(thread.id)).toHaveLength(0);
   });

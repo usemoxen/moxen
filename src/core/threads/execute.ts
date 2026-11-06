@@ -61,7 +61,7 @@ import { forgetSession, touchSession, trackSession } from "./idle.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
-import type { StoredAttachment, StoredThread, TurnUsage } from "./types.js";
+import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./types.js";
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
 export interface TurnDriver extends ProviderSessionTitles {
@@ -744,12 +744,27 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       void forgetToldModes(store, threadId);
     }
     if (event.type === "turn.started" && event.origin === "background") {
-      // Chained, so concurrent background starts serialize instead of
-      // racing each other (and a send) into two running turns (MXN-290).
+      // Only the recording rides the chain, so a 15s idle wait or a long
+      // provider run no longer stalls later events (MXN-290 review). The
+      // recording still serializes concurrent starts: a second start sees
+      // the first's running turn and queues instead of recording a second.
       chain = chain.then(async () => {
         const captured = capturedWakeUp;
         capturedWakeUp = false;
-        await runBackgroundTurn(store, driver, threadId, event.turnId, cwd, afterSettle, captured, event.wakeUpPrompt);
+        const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt).catch(() => null);
+        if (turn !== null) {
+          void executeTurn({
+            store,
+            driver,
+            threadId,
+            storeTurnId: turn.id,
+            prompt: "",
+            driverTurnId: event.turnId,
+            ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
+            workingDirectory: cwd,
+            ...(afterSettle ? { afterSettle } : {}),
+          }).catch(() => undefined);
+        }
       }).catch(() => undefined);
       return;
     }
@@ -832,34 +847,29 @@ async function forgetToldModes(store: ThreadStore, threadId: string): Promise<vo
     .catch(() => undefined);
 }
 
-async function runBackgroundTurn(
+/**
+ * Record a turn the provider started on its own, or refuse it: the thread
+ * is busy, settled, archived, deleted, gone, or held by usage protection.
+ * Returns the recorded turn, or null when nothing was recorded. Refusals
+ * never touch a legitimate owner's run (see THREAD_BUSY below); only a
+ * thread with no owner left (settled, archived, deleted, gone) has its
+ * provider turn stopped and its session closed.
+ */
+async function claimBackgroundTurn(
   store: ThreadStore,
   driver: TurnDriver,
   threadId: string,
   driverTurnId: string,
-  cwd: string,
-  afterSettle?: () => Promise<void>,
   capturedWakeUp = false,
   wakeUpPrompt?: string,
-): Promise<void> {
+): Promise<StoredTurn | null> {
   try {
     const thread = await store.readThreadRecord(threadId);
-    if (!thread) return;
+    if (!thread) return null;
     if (thread.usagePause && thread.usagePause.phase !== "resuming") {
       throw new CliError("USAGE_PROTECTED_BACKGROUND", "Usage protection is holding this thread's background work.");
     }
-    const turn = await startBackgroundTurn(store, threadId, { modelSelection: null });
-    await executeTurn({
-      store,
-      driver,
-      threadId,
-      storeTurnId: turn.id,
-      prompt: "",
-      driverTurnId,
-      ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
-      workingDirectory: cwd,
-      ...(afterSettle ? { afterSettle } : {}),
-    });
+    return await startBackgroundTurn(store, threadId, { modelSelection: null });
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "USAGE_PROTECTED_BACKGROUND") {
       if (!capturedWakeUp) {
@@ -875,22 +885,40 @@ async function runBackgroundTurn(
       }
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
-      return;
+      return null;
     }
-    if (cause instanceof CliError && (cause.code === "THREAD_BUSY" || cause.code === "THREAD_ARCHIVED" || cause.code === "SETTLED_THREAD_CONFIRMATION_REQUIRED" || cause.code === "THREAD_NOT_FOUND")) {
-      // MXN-290: the provider already started this turn, but it cannot be
-      // recorded (busy, settled, archived, deleted, or gone). Stop it and
+    if (cause instanceof CliError && cause.code === "THREAD_BUSY") {
+      // BUSY means a legitimate owner holds the thread — a live user turn,
+      // or a turn just promoted at settle. Never interrupt or stop the
+      // session: all four drivers keep one session per thread and ignore
+      // the turn id, so that would kill the winner. Queue the wake-up
+      // durably instead, as the usage path does, so a live thread's wake-up
+      // is not lost; the unrecorded provider turn itself is left alone.
+      if (!capturedWakeUp) {
+        await persistResumeCursor(store, driver, threadId);
+        await sendTurn(store, threadId, {
+          prompt: `A provider-native background turn arrived while another turn was running. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
+          origin: "background-notification", delivery: "queue",
+          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
+        }).catch(() => undefined);
+      }
+      return null;
+    }
+    if (cause instanceof CliError && (cause.code === "THREAD_ARCHIVED" || cause.code === "SETTLED_THREAD_CONFIRMATION_REQUIRED" || cause.code === "THREAD_NOT_FOUND")) {
+      // MXN-290: the provider already started this turn, but the thread has
+      // no owner left (settled, archived, deleted, or gone). Stop it and
       // close the session rather than leaving real work running with no
       // turn. It never unsettles a settled thread, never unarchives, and
-      // never queues a retry — the first recorded turn wins. Usage
-      // protection above is the one exception: it queues a durable wake-up.
+      // never queues a retry — a settled thread must not be woken by its
+      // background tasks (MXN-259), and a deleted one is gone.
       await persistResumeCursor(store, driver, threadId);
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
-      return;
+      return null;
     }
     // Best effort: a background turn that cannot be recorded still runs in
     // the provider; only its transcript rows are missing.
+    return null;
   }
 }
 
@@ -1345,16 +1373,15 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       interrupted = true;
       // As in `settleTurn`: the checkpoint and the context reading land
-      // before the outcome, so whoever sees the turn stop sees both (MXN-290).
-      await recordContextUsage(store, driver, threadId, storeTurnId).catch(() => undefined);
-      await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
+      // before the outcome, so whoever sees the turn stop sees both — but
+      // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
+      await recordPreOutcome(store, driver, args, cwd, pre);
       await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
       return;
     }
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
-    await recordContextUsage(store, driver, threadId, storeTurnId).catch(() => undefined);
-    await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
+    await recordPreOutcome(store, driver, args, cwd, pre);
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
     } catch {
@@ -1428,6 +1455,36 @@ async function recordContextUsage(
     })
     .catch(() => undefined);
   onRecorded?.(usage);
+}
+
+/** How long a failed or aborted turn waits for its context reading and checkpoint before writing its outcome. */
+const EXCEPTION_PRE_OUTCOME_TIMEOUT_MS = 15_000;
+
+/**
+ * The context reading and checkpoint ahead of an exception outcome,
+ * bounded: while this runs the turn still reads running, so a hung git
+ * must not hold the outcome for minutes (MXN-290 review). The outcome is
+ * written on timeout either way. A late checkpoint landing after the
+ * outcome is harmless: it only appends a checkpoints-ledger row keyed by
+ * turn and never rewrites turn status.
+ */
+async function recordPreOutcome(
+  store: ThreadStore,
+  driver: TurnDriver,
+  args: ExecuteTurnArgs,
+  cwd: string | null,
+  pre: string | null,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    (async () => {
+      await recordContextUsage(store, driver, args.threadId, args.storeTurnId).catch(() => undefined);
+      await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
+    })(),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(() => resolve(), EXCEPTION_PRE_OUTCOME_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 async function settleTurn(
