@@ -476,8 +476,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // A delegated task resumed after a usage limit (or recovered after a crash)
       // still owes its parent the report when it finally ends.
       .then(async () => {
-        await syncResearchRun(ctx, threadId);
-        await notifyParentOfResumedTask(ctx, threadId);
+        await syncResearchRun(ctx, threadId).catch(() => undefined);
+        await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
         // This thread's own recovery may have released task notices queued
         // while it could not receive them: they go out now, together.
         await flushTaskNotifications(ctx, threadId).catch(() => undefined);
@@ -1987,7 +1987,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
-    }).then(() => syncResearchRun(ctx, thread.id)).then(() => clearCancelledOnSettle(ctx, thread.id)).catch(() => undefined);
+    }).then(() => syncResearchRun(ctx, thread.id).catch(() => undefined)).then(() => clearCancelledOnSettle(ctx, thread.id)).catch(() => undefined);
   } catch (cause) {
     // The prompt never reached a runner (a ledger read failed while building
     // it): release the claim rather than leaving the turn tracked forever.
@@ -2955,7 +2955,10 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
       const running = openTurn(turns) !== null;
       const spent = providerExhausted(usageKeyForInstance((openTurn(turns)?.modelSelection ?? held.modelSelection).instanceId));
-      if (parentNotificationsHeld(held) || (!running && spent)) {
+      // An archived or deleted parent can never receive again: drop the
+      // batch at once instead of keeping what no flush could deliver.
+      const receivable = held.archivedAt == null && held.deletedAt == null;
+      if (receivable && (parentNotificationsHeld(held) || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
         // startTurn resolves even when the session fails, and the batch would

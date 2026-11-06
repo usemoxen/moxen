@@ -286,6 +286,37 @@ describe("a parent that cannot receive task notices yet", () => {
     expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
   });
 
+  it("drops a spent parent's batch at once when the parent is archived or deleted", async () => {
+    const w = await world();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+    ]);
+    const archived = await w.make("archived parent");
+    const deleted = await w.make("deleted parent");
+    const archivedChild = await w.make("archived task");
+    const deletedChild = await w.make("deleted task");
+    await delegateNotifying(w, archived.id, archivedChild.id);
+    await delegateNotifying(w, deleted.id, deletedChild.id);
+    for (const child of [archivedChild, deletedChild]) {
+      const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+      await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+    }
+
+    await queueTaskNotification(w.ctx, archived.id, archivedChild.id);
+    await queueTaskNotification(w.ctx, deleted.id, deletedChild.id);
+    expect(await batchesOf(w)).toEqual({ [archived.id]: [{ child: archivedChild.id }], [deleted.id]: [{ child: deletedChild.id }] });
+    const now = w.store.nowIso();
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(archived.id))!, archivedAt: now, updatedAt: now });
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(deleted.id))!, deletedAt: now, updatedAt: now });
+
+    await flushTaskNotifications(w.ctx, archived.id);
+    await flushTaskNotifications(w.ctx, deleted.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, archived.id)).toEqual([]);
+    expect(await notificationsIn(w, deleted.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
   it("keeps a settled spent parent's batch for later activity instead of dropping it", async () => {
     const w = await world();
     recordUsageWindows("codex", [
