@@ -5,46 +5,12 @@ import { Schema } from "effect";
 // in its normal summary even when the latest exchange exceeds this allowance.
 const TOKEN_LIMIT = 12_000;
 const BYTE_LIMIT = 16 * 1024 * 1024;
-async function decode(messages, sample) {
+function decode(messages, sample) {
   // Message is a Schema.Class. Use the host's constructor and Effect runtime:
   // a second SDK's Media.Asset fails the host's instanceof validation. The JSON
   // codec also restores byte sources and provider metadata without guessing.
-  try {
-    return Schema.decodeUnknownSync(Schema.toCodecJson(Schema.Array(sample.constructor)))(messages);
-  } catch (primary) {
-    // The host provides `effect`, and these schemas are the host SDK's — one
-    // copy. But a schema built by one Effect copy cannot run on another
-    // copy's interpreter, and tests import this file into our own process,
-    // where `effect` resolves to our newer copy while the schemas stay on
-    // the SDK's own. When the host copy cannot run them, rebuild the codec
-    // and retry with the SDK's sibling copy on disk: present in a checkout,
-    // absent once installed (where the host copy stands alone). Anything else
-    // rethrows the first error, so a genuinely corrupt payload fails exactly
-    // as before.
-    const sibling = await siblingSchemas();
-    if (sibling === null) throw primary;
-    try {
-      return sibling.decodeUnknownSync(sibling.toCodecJson(sibling.Array(sample.constructor)))(messages);
-    } catch {
-      throw primary;
-    }
-  }
-}
-
-let sibling = null;
-let siblingAttempted = false;
-/** The SDK's own Effect copy, resolved beside it on disk. Null when absent. */
-async function siblingSchemas() {
-  if (!siblingAttempted) {
-    siblingAttempted = true;
-    try {
-      const effect = await import("../../node_modules/@opencode/ai/node_modules/effect/dist/index.js");
-      sibling = effect.Schema ?? effect.default?.Schema ?? null;
-    } catch {
-      sibling = null;
-    }
-  }
-  return sibling;
+  const codec = Schema.toCodecJson(Schema.Array(sample.constructor));
+  return Schema.decodeUnknownSync(codec)(messages);
 }
 
 function estimate(part) {
@@ -137,7 +103,7 @@ export function retention(ctx) {
         if (saved.checkpoint === first.id && saved.retained?.length) {
           const present = new Set(event.messages.slice(1).map(identity));
           const encoded = saved.retained.filter((message) => identity(message) === undefined || !present.has(identity(message)));
-          const restored = await decode(sameModel(saved.model, event.model) ? encoded : portable(encoded), first);
+          const restored = decode(sameModel(saved.model, event.model) ? encoded : portable(encoded), first);
           // Only remove the serialized recent section when all of its messages
           // are present intact. Otherwise keep that historical prefix too.
           if (saved.replaceRecent && typeof current.metadata?.recent === "string") {
