@@ -1268,6 +1268,40 @@ async function projectById(storeRoot: string, projectId: string): Promise<Stored
   return (await listStoredProjects(storeRoot)).find((candidate) => candidate.id === projectId) ?? null;
 }
 
+/** What one thread is offered from Moxen's own tools, for routing the directory's shared `moxen` entry to the session that made each call. */
+export interface MoxenSessionRouting {
+  readonly threadId: string;
+  /** No delegation tools: a delegated task, a research run, or orchestration switched off. */
+  readonly delegated: boolean;
+  readonly webFetch: boolean;
+  readonly memory: "write" | "read" | "off";
+  readonly checklist: boolean;
+}
+
+/**
+ * The gating one thread's calls run under: the same shape its session
+ * started with (`sessionSetup`). Null when the thread is gone — the call
+ * must then fail safe, never land on another thread.
+ */
+export async function moxenRoutingFor(ctx: OperationContext, threadId: string): Promise<MoxenSessionRouting | null> {
+  const thread = await ctx.store.readThreadRecord(threadId);
+  if (!thread) return null;
+  const delegation = await delegationOf(ctx.store, thread.id);
+  const kind = driverKindOfInstance(thread.modelSelection.instanceId);
+  const providerConfig = kind === null ? undefined : ctx.config.providers?.[kind];
+  const reach = moxenToolsOf(providerConfig);
+  const project = await projectById(ctx.storeRoot, thread.projectId);
+  const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
+  const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
+  return {
+    threadId,
+    delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
+    webFetch: reach.webFetch,
+    memory: !memoryOn ? "off" : delegation !== null ? "read" : "write",
+    checklist: providerConfig?.todos !== false,
+  };
+}
+
 function requireThreadId(value: string): string {
   const threadId = value.trim();
   if (!threadId) {
@@ -2342,26 +2376,6 @@ export async function queueTaskNotification(ctx: OperationContext, parentThreadI
 }
 
 /**
- * Hand the directory's `moxen` entry back to the parent once a shared child
- * is done. The child's session start registered the child's entry over the
- * parent's on their shared OpenCode server (`mcp.add` restarts the server
- * on every call), which also killed the in-flight delegate call with
- * `Connection closed`; without this, the parent's later calls keep landing
- * on the child's entry until the server turns over. A child with more work
- * queued keeps the entry until it is truly done. Best-effort: never throws.
- */
-async function restoreParentMcpEntry(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
-  try {
-    if (!(await taskHasSettledForGood(ctx, childThreadId))) return;
-    const parent = await ctx.store.readThreadRecord(parentThreadId);
-    if (!parent) return;
-    await ctx.driverFor(parent.modelSelection.instanceId).restoreMcpServers?.(parentThreadId);
-  } catch {
-    // Best effort: the entry heals on the next session start.
-  }
-}
-
-/**
  * A resumed turn of a delegated task ended: tell the parent, if it asked to be
  * told and the task is not simply waiting for another resume.
  */
@@ -2901,9 +2915,6 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // the child it is a delegated task (`core/threads/instructions.ts`).
   if (options.researchRole === undefined) await recordDelegation();
   const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
-    // The child's session start may have flipped the directory's `moxen`
-    // entry before failing: hand it back, since this child will never run.
-    if (worktree === null) void restoreParentMcpEntry(ctx, parentThreadId, created.id);
     throw new CliError(
       "THREAD_START_FAILED",
       `Created delegated thread ${created.id} but could not start its task turn. The child thread was left untouched.`,
@@ -2911,16 +2922,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     );
   });
 
-  // A shared child runs on the parent's OpenCode server, whose single
-  // `moxen` entry the child's session start flipped to the child (killing
-  // the in-flight call with `Connection closed` when it came over MCP).
-  // Hand the entry back once the child settles, so the parent's later calls
-  // land on the parent again. Worktree children have their own server, and
-  // a child with more work queued keeps the entry until it is truly done.
-  if (worktree === null) {
-    const settled = started.run ?? Promise.resolve();
-    void settled.then(() => restoreParentMcpEntry(ctx, parentThreadId, created.id));
-  }
+  // A shared child runs on the parent's OpenCode server, whose single `moxen`
+  // entry stays the parent's: the child's session start never replaces it,
+  // and each call is routed per call by the session id OpenCode sends in
+  // `CallToolRequest.params._meta` instead.
 
   // A delegation nobody waits on reports back by itself once the task
   // settles: the parent gets a message instead of having to poll for it.

@@ -533,6 +533,18 @@ export type Query =
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
   | { readonly type: "research.run"; readonly threadId: string }
+  /**
+   * The thread behind a live OpenCode session: which thread's tools and
+   * identity serve the session's calls on the directory's shared `moxen`
+   * entry, with the gating those calls run under. Null when no live session
+   * matches — the call then fails safe, never lands on another thread.
+   */
+  | {
+      readonly type: "opencode.session-thread";
+      readonly nativeSessionId: string;
+    }
+  /** How many live sessions could place calls on a thread's entry: more than one makes a call without session identity ambiguous. */
+  | { readonly type: "thread.entry-sessions"; readonly threadId: string }
   | { readonly type: "research.proposals"; readonly threadId: string }
   | { readonly type: "research.messages"; readonly threadId: string }
   | { readonly type: "research.role.report"; readonly leadThreadId: string; readonly taskId: string }
@@ -712,6 +724,14 @@ export interface QueryResults {
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
   "research.run": ResearchRunView | null;
+  "opencode.session-thread": {
+    readonly threadId: string;
+    readonly delegated: boolean;
+    readonly webFetch: boolean;
+    readonly memory: "write" | "read" | "off";
+    readonly checklist: boolean;
+  } | null;
+  "thread.entry-sessions": { readonly count: number };
   "research.proposals": readonly ResearchProposal[];
   "research.messages": { readonly leadThreadId: string; readonly messages: readonly ResearchMessage[] };
   "research.role.report": DescribedTask;
@@ -1622,6 +1642,10 @@ export function decodeQuery(value: unknown): Query {
     case "research.proposals":
     case "research.run":
     case "research.messages":
+      return { type, threadId: requireThreadId(record.threadId) };
+    case "opencode.session-thread":
+      return { type, nativeSessionId: requireField(record.nativeSessionId, type, "nativeSessionId") };
+    case "thread.entry-sessions":
       return { type, threadId: requireThreadId(record.threadId) };
     case "research.role.report":
       return { type, leadThreadId: requireThreadId(record.leadThreadId), taskId: requireThreadId(record.taskId) };

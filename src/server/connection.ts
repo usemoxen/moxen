@@ -129,6 +129,7 @@ import {
   delegate,
   beginResearchRun,
   isResearchRunActive,
+  moxenRoutingFor,
   resolveResearchPlan,
   startResearchRole,
   requireResearchRole,
@@ -1916,6 +1917,17 @@ export class DirectConnection implements ClientApi {
     // The shipped manual must still work when configuration cannot be loaded.
     if (query.type === "knowledge.search") return searchKnowledge(query.query);
     if (query.type === "knowledge.read") return readKnowledge(query.id, query.section);
+    // Routing a call without session identity needs no configuration either:
+    // the thread record names the driver, which counts the sessions sharing
+    // the entry — so an offline knowledge call never fails on config. A
+    // thread with no record (or no driver) keeps the entry owner's fallback:
+    // the entry serves it alone until anything proves otherwise.
+    if (query.type === "thread.entry-sessions") {
+      const record = await (await this.store()).readThreadRecord(query.threadId).catch(() => null);
+      const instanceId = record?.modelSelection.instanceId ?? null;
+      if (!record || !instanceId) return { count: 1 };
+      return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
+    }
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":
@@ -1973,6 +1985,18 @@ export class DirectConnection implements ClientApi {
         return await describeTask(ctx, query.parentThreadId, query.taskId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
+      case "opencode.session-thread": {
+        // The thread behind a live OpenCode session, for routing the
+        // directory's shared `moxen` entry to the session that made each
+        // call. The drivers that own live sessions answer; null fails the
+        // call safe rather than serving another thread.
+        for (const driver of this.ownedDrivers) {
+          const threadId = driver.threadForNativeSession?.(query.nativeSessionId) ?? null;
+          if (threadId === null) continue;
+          return await moxenRoutingFor(ctx, threadId);
+        }
+        return null;
+      }
       case "research.proposals":
         this.expireResearchProposals();
         return [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => proposal.threadId === query.threadId);
