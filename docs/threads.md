@@ -115,6 +115,10 @@ starts a full run without a proposal. `--research-models` accepts the model
 entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
 `--mode review` starts a reviewer for the PR or branch in the prompt.
+A delegated child runs in the parent's permission mode unless `--permission`
+names a lower one (`approval-required`, `auto-accept-edits`, `auto`,
+`full-access`, with `auto` and `full-access` counting as equal): asking for
+more than the parent's is refused, never quietly lowered.
 Existing calls and CLI JSON envelopes are unchanged.
 
 ### Research run view
@@ -610,7 +614,10 @@ A follow-up, a delegated task, and a thread continued in a new one keeps its
 source thread's selection unless the request overrides it, and never falls
 back to the settings or the installation default. The continuation's model
 request is how a handoff changes models; anything it does not name stays the
-source's.
+source's. A delegated child's permission mode is capped at its parent's:
+omitted it inherits the parent's, `auto` and `full-access` count as equal,
+and asking for more is refused (`RUNTIME_MODE_ESCALATION`), never lowered —
+so a child delegating further is capped by its own mode in turn.
 
 ## Modes: Build, Research, Orchestrate and Review
 

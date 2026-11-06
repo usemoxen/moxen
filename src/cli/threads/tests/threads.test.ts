@@ -768,6 +768,104 @@ describe("delegated tasks", () => {
     ).rejects.toMatchObject({ code: "INVALID_THREAD_OPTION" });
   });
 
+  it("inherits the parent permission mode when none is requested", async () => {
+    const harness = await testHarness();
+    const workspaceRoot = await realpath(harness.work);
+    await ensureStoredProject(storeRoot(), {
+      id: "project-1",
+      title: "Project One",
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+    });
+    await createThread(harness.store, {
+      id: "thread-parent",
+      projectId: "project-1",
+      title: "Parent thread",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+      runtimeMode: "auto-accept-edits",
+      interactionMode: "default",
+    });
+    const result = await delegateTask(harness.config, {
+      parentThreadId: "thread-parent",
+      task: "Work within the ceiling.",
+      openMode: "none",
+      drivers: harness.drivers,
+    });
+    expect(result.createCommand.runtimeMode).toBe("auto-accept-edits");
+    expect((await harness.store.readThreadRecord(result.child.id))?.runtimeMode).toBe("auto-accept-edits");
+  });
+
+  it("refuses a higher permission mode instead of lowering it", async () => {
+    const harness = await testHarness();
+    const workspaceRoot = await realpath(harness.work);
+    await ensureStoredProject(storeRoot(), {
+      id: "project-1",
+      title: "Project One",
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+    });
+    await createThread(harness.store, {
+      id: "thread-parent",
+      projectId: "project-1",
+      title: "Parent thread",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+    });
+    await expect(
+      delegateTask(harness.config, {
+        parentThreadId: "thread-parent",
+        task: "Work above the ceiling.",
+        runtimeMode: "auto-accept-edits",
+        openMode: "none",
+        drivers: harness.drivers,
+      }),
+    ).rejects.toMatchObject({ code: "RUNTIME_MODE_ESCALATION" });
+  });
+
+  it("counts auto and full-access as equal access", async () => {
+    const harness = await testHarness();
+    const workspaceRoot = await realpath(harness.work);
+    await ensureStoredProject(storeRoot(), {
+      id: "project-1",
+      title: "Project One",
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+    });
+    await createThread(harness.store, {
+      id: "thread-parent",
+      projectId: "project-1",
+      title: "Parent thread",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+      runtimeMode: "auto",
+      interactionMode: "default",
+    });
+    const widened = await delegateTask(harness.config, {
+      parentThreadId: "thread-parent",
+      task: "Work at the same ceiling.",
+      runtimeMode: "full-access",
+      openMode: "none",
+      drivers: harness.drivers,
+    });
+    expect((await harness.store.readThreadRecord(widened.child.id))?.runtimeMode).toBe("full-access");
+    await createThread(harness.store, {
+      id: "thread-full",
+      projectId: "project-1",
+      title: "Full parent",
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    const narrowed = await delegateTask(harness.config, {
+      parentThreadId: "thread-full",
+      task: "Work at the same ceiling.",
+      runtimeMode: "auto",
+      openMode: "none",
+      drivers: harness.drivers,
+    });
+    expect((await harness.store.readThreadRecord(narrowed.child.id))?.runtimeMode).toBe("auto");
+  });
+
   it("reads task status and rejects foreign tasks", async () => {
     const harness = await parentHarness();
     const delegated = await delegateTask(harness.config, {
