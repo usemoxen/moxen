@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
@@ -127,6 +127,124 @@ describe("moxen MCP server", () => {
       expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "web_fetch", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();
+      await connection.close();
+    }
+  });
+
+  it("does not fall back to the checkout when the parent record has no branch but its checkout is on one", async () => {
+    const harness = await testHarness({});
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      // The way the TUI creates one: `thread.create` sends no branch, so the record has none.
+      const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      const parent = await connection.dispatch({ type: "thread.create", projectId: project.project.id });
+      const result = await callMoxenTool(connection, parent.threadId, "delegate", { task: "Write the changelog", title: "Write changelog" });
+      expect(result.isError).toBe(false);
+      const delegated = JSON.parse(result.text) as { taskId: string; isolation: string; branch: string };
+      expect(delegated.isolation).toBe("worktree");
+      expect(delegated.branch).toBe("moxen/write-changelog");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("starts several tasks in one call with shared settings and per-task overrides", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        isolation: "shared",
+        rules: "Report in three bullets.",
+        tasks: [
+          { task: "First job", title: "first" },
+          { task: "Second job", title: "second", isolation: "worktree" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<{ taskId: string; title: string; isolation: string }>; warning?: string };
+      expect(batch.tasks).toHaveLength(2);
+      expect(batch.tasks[0]).toMatchObject({ title: "first", isolation: "shared" });
+      expect(batch.tasks[1]).toMatchObject({ title: "second", isolation: "worktree" });
+      expect(typeof batch.tasks[0]!.taskId).toBe("string");
+      expect(batch.tasks[0]!.taskId).not.toBe(batch.tasks[1]!.taskId);
+      // Warned once, naming the task that shares the checkout.
+      expect(batch.warning).toContain("first");
+      expect(batch.warning).not.toContain("second");
+      // The shared rules reached every child's prompt.
+      const rows = await harness.store.readDelegations();
+      for (const entry of batch.tasks) {
+        expect(rows.find((row) => row.childThreadId === entry.taskId)?.prompt).toContain("Common rules for this task:\nReport in three bullets.");
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("starts the tasks that can start when one fails, and says the failed one plainly", async () => {
+    const harness = await testHarness({});
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      // No git repository here, so no worktree to cut: that entry fails while the shared one still starts.
+      const plain = path.join(harness.root, "plain");
+      await mkdir(plain);
+      const project = await connection.dispatch({ type: "project.ensure", cwd: plain });
+      const parent = await connection.dispatch({ type: "thread.create", projectId: project.project.id });
+      const result = await callMoxenTool(connection, parent.threadId, "delegate", {
+        tasks: [
+          { task: "Needs a branch", title: "branchy", isolation: "worktree" },
+          { task: "Reads only", title: "reader", isolation: "shared" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>>; warning?: string };
+      expect(batch.tasks).toHaveLength(2);
+      expect(batch.tasks[0]).toMatchObject({ title: "branchy", error: expect.stringContaining("WORKTREE_UNAVAILABLE") });
+      expect(batch.tasks[1]).toMatchObject({ title: "reader", isolation: "shared" });
+      expect(typeof batch.tasks[1]!["taskId"]).toBe("string");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("returns each original task when a batch delegate is retried with the same idempotency key", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const key = randomUUID();
+      const call = async () => {
+        const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+          isolation: "shared",
+          idempotencyKey: key,
+          tasks: [
+            { task: "First job", title: "first" },
+            { task: "Second job", title: "second" },
+          ],
+        });
+        expect(result.isError).toBe(false);
+        return JSON.parse(result.text) as { tasks: Array<{ taskId: string }> };
+      };
+      const first = await call();
+      const again = await call();
+      expect(again.tasks.map((entry) => entry.taskId)).toEqual(first.tasks.map((entry) => entry.taskId));
+      // The retry started no duplicates: two delegation rows behind the parent.
+      expect((await harness.store.readDelegations()).filter((row) => row.parentThreadId === parentThreadId)).toHaveLength(2);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a batch delegate that mixes the forms or misuses research and rules", async () => {
+    const { connection, parentThreadId } = await setup();
+    try {
+      const call = (args: Record<string, unknown>) => callMoxenTool(connection, parentThreadId, "delegate", args);
+      expect((await call({ task: "x", title: "x", tasks: [{ task: "y", title: "y" }] })).text).toContain("not both");
+      expect((await call({ tasks: [] })).text).toContain("non-empty array");
+      expect((await call({ tasks: [{ title: "y" }] })).text).toContain("task is required");
+      expect((await call({ tasks: [{ task: "y", title: "y" }], researchProposal: { size: { researchers: 1, critics: 1 } } })).text).toContain("cannot be combined");
+      expect((await call({ task: "x", title: "x", rules: "Be brief." })).text).toContain("needs tasks");
+      for (const reply of [
+        await call({ task: "x", title: "x", tasks: [{ task: "y", title: "y" }] }),
+        await call({ tasks: [] }),
+      ]) expect(reply.isError).toBe(true);
+    } finally {
       await connection.close();
     }
   });

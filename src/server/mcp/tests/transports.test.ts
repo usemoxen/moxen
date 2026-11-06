@@ -126,13 +126,14 @@ describe("in-process tools for Claude", () => {
   it("turns the tools' JSON schemas into Zod shapes", () => {
     const delegate = MOXEN_TOOLS.find((tool) => tool.name === "delegate")!;
     const shape = zodShape(delegate.inputSchema);
-    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "idempotencyKey", "isolation", "mode", "model", "provider", "researchProposal", "task", "title"]);
+    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "idempotencyKey", "isolation", "mode", "model", "provider", "researchProposal", "rules", "task", "tasks", "title"]);
     expect(shape.fork!.safeParse(true).success).toBe(true);
     expect(shape.idempotencyKey!.safeParse("0198c8f4-...").success).toBe(true);
     expect(shape.idempotencyKey!.safeParse(undefined).success).toBe(true);
     expect(shape.task!.safeParse("do it").success).toBe(true);
-    expect(shape.task!.safeParse(undefined).success).toBe(false);
-    expect(shape.title!.safeParse(undefined).success).toBe(false);
+    // task and title are schema-optional so one call can carry tasks instead;
+    // the handler still requires task and title for the single-task form.
+    expect(shape.task!.safeParse(undefined).success).toBe(true);
     expect(shape.title!.safeParse("fix login").success).toBe(true);
     expect(shape.isolation!.safeParse("worktree").success).toBe(true);
     expect(shape.isolation!.safeParse("elsewhere").success).toBe(false);

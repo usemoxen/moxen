@@ -304,4 +304,35 @@ describe("task_cancel: whose task it is", () => {
       await t.connection.close();
     }
   }, 20_000);
+
+  it("cancels several tasks at once, reporting each outcome without stopping on a bad id", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const first = await t.delegate();
+      const second = await t.delegate(undefined, "second");
+      const result = await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskIds: [first, "task-missing", second] });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>> };
+      expect(batch.tasks).toHaveLength(3);
+      expect(batch.tasks[0]).toMatchObject({ taskId: first, cancelRequested: true });
+      expect(batch.tasks[1]).toMatchObject({ taskId: "task-missing", error: expect.stringContaining("TASK_NOT_FOUND") });
+      expect(batch.tasks[2]).toMatchObject({ taskId: second, cancelRequested: true });
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
+
+  it("refuses a task_cancel that mixes or omits the id forms", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const call = (args: Record<string, unknown>) => callMoxenTool(t.connection, t.orchestrator, "task_cancel", args);
+      expect((await call({ taskId, taskIds: [taskId] })).text).toContain("not both");
+      expect((await call({})).text).toContain("taskId");
+      expect((await call({ taskIds: [] })).text).toContain("non-empty array");
+      for (const reply of [await call({}), await call({ taskIds: [] })]) expect(reply.isError).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
 });

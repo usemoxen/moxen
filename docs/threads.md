@@ -779,6 +779,45 @@ than an error, so the orchestrator can fall back to `thread_read`. The call
 waits at most 45 seconds, then returns a `timedOut` result; the task is
 unchanged either way.
 
+### Where a delegated task works
+
+`delegate` defaults to a worktree: the child gets its own checkout on a new
+branch cut from the parent's, so two agents never edit the same files at
+once. The branch is read from the parent's checkout, even when the parent
+thread's record names none (threads the TUI creates record none). A
+`fork: true` task always shares the parent's checkout, since its copied
+conversation belongs to the directory it runs in, and an explicit
+`isolation: "shared"` is for read-only work, or when nothing else writes at
+the same time. Where there is no branch to cut from — a detached HEAD, or a
+project that is not a git repository at all — there is no worktree to give,
+so the call fails with `WORKTREE_UNAVAILABLE` and tells you to pass
+`isolation: "shared"`. It never quietly shares your checkout.
+
+### Starting several tasks in one call (`delegate`)
+
+One `delegate` call takes shared settings (`provider`, `model`, `effort`,
+`isolation`, plus `rules`: instructions appended to every task's prompt
+under "Common rules for this task") beside a `tasks` list. Each entry has
+its own `title` and `task` text and may override `provider`, `model`,
+`effort` or `isolation`; `mode` and `fork` are shared by the whole call. The
+single-task form (`task` plus `title`) keeps working unchanged, and
+`researchProposal` cannot be combined with `tasks`.
+
+Each task starts on its own: one that fails to start is reported as that
+entry's `error` while the rest still start, so the others are neither lost
+nor silently doubled. A top-level `idempotencyKey` is namespaced per task
+(`key#1`, `key#2`, …), so retrying the whole call after a transport error
+returns each original task instead of starting duplicates; a task's own
+`idempotencyKey` wins for that entry. The result lists every task's `taskId`
+and `isolation`, with one `warning` when any task shares your checkout.
+
+### Stopping several tasks at once (`task_cancel`)
+
+`task_cancel` takes `taskId` for one task or `taskIds` for several; its
+thread and worktree are kept either way. Each task's outcome
+(`cancelRequested`, `status`) is reported separately, and one bad id is that
+entry's `error` rather than a failed call, so it never stops the others.
+
 ### Queueing a message from an agent (`message_queue`)
 
 An agent can queue or schedule a message on a thread without a shell:
