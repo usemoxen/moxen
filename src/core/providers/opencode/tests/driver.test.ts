@@ -906,6 +906,106 @@ describe("opencode driver", () => {
     expect(await Effect.runPromise(driver.listSessions())).toEqual([]);
   });
 
+  it("an interrupt does not hang on parked replies the server never answers", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({
+      transport,
+      env: { ANTHROPIC_API_KEY: "k" },
+      abortWaitMs: 20,
+      interruptAckTimeoutMs: 50,
+    });
+    drivers.push(driver);
+    await Effect.runPromise(
+      driver.startSession({ threadId: "thread-1", workingDirectory: "/repo", runtimeMode: "approval-required" }),
+    );
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    await transport.servers[0]?.push({
+      type: "permission.asked",
+      properties: { id: "perm-1", sessionID: "opencode-session-1", permission: "edit" },
+    });
+    await transport.servers[0]?.push({
+      type: "question.asked",
+      properties: { id: "q-1", sessionID: "opencode-session-1", questions: [{ header: "Pick" }] },
+    });
+    const server = transport.servers[0]!;
+    server.replyToPermission = () => new Promise<void>(() => {});
+    server.rejectQuestion = () => new Promise<void>(() => {});
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    await Effect.runPromise(driver.interruptTurn("thread-1"));
+    await waitFor(
+      "parked resolved",
+      () =>
+        events.some((event) => event.type === "permission.request.resolved") &&
+        events.some((event) => event.type === "user-input.request.resolved"),
+    );
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  it("a start after an abandoned start does not hang on the zombie entry", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "k" }, stopWaitMs: 20 });
+    drivers.push(driver);
+    // Wedge the start after the shared connection is up.
+    let releaseCreate!: () => void;
+    let createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    let creates = 0;
+    const inner = transport.ensureServer.bind(transport);
+    transport.ensureServer = async (input) => {
+      const connection = await inner(input);
+      const innerCreate = connection.createSession.bind(connection);
+      connection.createSession = async (session) => {
+        creates += 1;
+        await createGate;
+        return innerCreate(session);
+      };
+      return connection;
+    };
+    const first = Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+    void first.catch(() => undefined);
+    await waitFor("start wedged", () => creates === 1);
+    await Effect.runPromise(driver.stopSession("thread-1"));
+    // The zombie entry is gone: a later start proceeds on the live connection
+    // instead of hanging on the zombie.
+    const second = Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+    void second.catch(() => undefined);
+    await waitFor("fresh start proceeds", () => creates === 2);
+    releaseCreate();
+    await expect(first).rejects.toThrow("abandoned");
+    await second;
+    expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
+  });
+
+  it("stopSession still stops the session when the abort throws", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "k" } });
+    drivers.push(driver);
+    await startSession(driver);
+    transport.servers[0]!.abortSession = () => {
+      throw new Error("gone");
+    };
+    await Effect.runPromise(driver.stopSession("thread-1"));
+    expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+  });
+
+  it("stopAll does not hang on disposes that never settle", async () => {
+    const transport = new FakeOpencodeTransport();
+    const driver = new OpenCodeDriver({ transport, env: { ANTHROPIC_API_KEY: "k" } });
+    drivers.push(driver);
+    for (const threadId of ["t1", "t2", "t3"]) {
+      await Effect.runPromise(driver.startSession({ threadId, workingDirectory: `/repo-${threadId}` }));
+    }
+    for (const server of transport.servers) server.dispose = () => new Promise<void>(() => {});
+    const t0 = Date.now();
+    await Effect.runPromise(driver.stopAll());
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect(await Effect.runPromise(driver.listSessions())).toEqual([]);
+  });
+
   it("awaitTurn removes its abort listener when the turn settles", async () => {
     const { transport, driver } = start();
     await startSession(driver);

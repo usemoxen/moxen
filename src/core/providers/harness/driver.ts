@@ -27,7 +27,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import type { Done } from "effect/Cause";
 
-import { TIMED_OUT, withinMs } from "../timeout.js";
+import { abortRace, withinMs } from "../timeout.js";
 
 import { CliError } from "../../errors.js";
 import { isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
@@ -105,9 +105,10 @@ const STOP_WAIT_MS = 1_000;
 /** An `openSession` still running: a stop waits for it, bounded, then abandons it. */
 interface PendingStart {
   readonly promise: Promise<ProviderSession>;
-  abandoned: boolean;
   /** A stop is waiting on this start: whatever it registers will be closed, so a joiner starts fresh instead. */
   stopping: boolean;
+  /** Fired on abandon so joiners on a wedged start go fresh at once instead of hanging on the zombie entry. */
+  readonly aborter: AbortController;
   /** The session this start registered, once it has: a stop closes only its own start's session. */
   session?: HarnessSession;
 }
@@ -338,11 +339,19 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         // thread waits for the first instead of opening a second session.
         const pending = this.starting.get(input.threadId);
         if (!pending) {
-          const started = this.openSession(input);
-          const entry: PendingStart = { promise: started, abandoned: false, stopping: false };
+          const aborter = new AbortController();
+          const started = this.openSession(input, aborter.signal);
+          const entry: PendingStart = {
+            promise: started.then((session) => {
+              entry.session = session;
+              return this.describe(session);
+            }),
+            stopping: false,
+            aborter,
+          };
           this.starting.set(input.threadId, entry);
           try {
-            return await started;
+            return await entry.promise;
           } finally {
             if (this.starting.get(input.threadId) === entry) this.starting.delete(input.threadId);
           }
@@ -352,7 +361,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         // start fresh instead of handing back a dead session — including when
         // the stop abandoned it and the join fails with that.
         try {
-          await pending.promise;
+          await abortRace(pending.promise, pending.aborter.signal);
         } catch (cause) {
           if (!pending.stopping) throw cause;
           fresh = true;
@@ -367,7 +376,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       }
     });
 
-  private async openSession(input: ProviderSessionStartInput): Promise<ProviderSession> {
+  private async openSession(input: ProviderSessionStartInput, signal: AbortSignal): Promise<HarnessSession> {
     const sessionId = input.resumeCursor && /^[A-Za-z0-9_-]+$/.test(input.resumeCursor) ? input.resumeCursor : `hs_${randomUUID()}`;
     const transcript = HarnessTranscript.open(HarnessTranscript.pathFor(this.sessionsDir, sessionId));
     const interactionMode = input.interactionMode ?? "default";
@@ -430,16 +439,14 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       }
       // A stop that gave up waiting abandons the start: fail instead of
       // registering a session nobody owns (the `catch` below closes the
-      // pool). The entry is still this start's (only its wrapper deletes it,
-      // after this settles), and the check is synchronous with the `set`, so
-      // no stop can slip between the check and the registration.
-      const entry = this.starting.get(input.threadId);
-      if (entry?.abandoned === true) {
+      // pool). Checked on the captured signal (not the map: an abandon
+      // deletes the entry, and a fresh start may have replaced it), and
+      // synchronous with the `set`, so no stop can slip between them.
+      if (signal.aborted) {
         throw new Error(`Start for thread ${input.threadId} was abandoned by a stop.`);
       }
-      if (entry) entry.session = session;
       this.sessions.set(input.threadId, session);
-      return this.describe(session);
+      return session;
     } catch (error) {
       await mcp.close();
       throw error;
@@ -1447,6 +1454,16 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   // -- stopping ------------------------------------------------------------------
 
   /**
+   * Give up on a wedged start: wake its joiners at once and delete the map
+   * entry so later starts go fresh instead of hanging on the zombie. The
+   * late start closes its own pool instead of registering (see `openSession`).
+   */
+  private abandonStart(threadId: ThreadId, entry: PendingStart): void {
+    entry.aborter.abort();
+    if (this.starting.get(threadId) === entry) this.starting.delete(threadId);
+  }
+
+  /**
    * Wait for in-flight starts, at most `stopWaitMs`: a wedged MCP connect
    * must not hang a stop. Unsettled entries stay registered, so the caller
    * can abandon exactly those.
@@ -1469,7 +1486,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         await this.awaitStarts([entry]);
         // Still registered means still unsettled (the wrapper deletes on
         // settle); a start that settled just in time is stopped below.
-        if (this.starting.get(threadId) === entry) entry.abandoned = true;
+        if (this.starting.get(threadId) === entry) this.abandonStart(threadId, entry);
       }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
@@ -1499,7 +1516,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         for (const [, entry] of entries) entry.stopping = true;
         await this.awaitStarts(entries.map(([, entry]) => entry));
         for (const [threadId, entry] of entries) {
-          if (this.starting.get(threadId) === entry) entry.abandoned = true;
+          if (this.starting.get(threadId) === entry) this.abandonStart(threadId, entry);
         }
       }
       // Closes run in parallel: sequential per-session closes would stack the

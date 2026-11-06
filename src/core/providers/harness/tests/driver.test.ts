@@ -278,6 +278,42 @@ describe("HarnessDriver", () => {
     for (const n of [1, 2, 3, 4, 5]) expect(await run(driver.hasSession(`t${n}`))).toBe(false);
   });
 
+  it("a start after an abandoned start does not hang on the zombie entry", async () => {
+    let release!: (cause: unknown) => void;
+    const gate = new Promise<never>((_, reject) => {
+      release = reject;
+    });
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    let connects = 0;
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      stopWaitMs: 20,
+      connectMcp: () => {
+        connects += 1;
+        return gate;
+      },
+    });
+    const starting = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void starting.catch(() => undefined);
+    await waitForConnect(() => connects > 0);
+    await run(driver.stopSession("t1"));
+    // The zombie entry is gone: a later start connects fresh instead of hanging on it.
+    const second = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void second.catch(() => undefined);
+    await waitForConnect(() => connects === 2);
+    release(new Error("wedged"));
+    await expect(starting).rejects.toThrow();
+    await second;
+    expect(await run(driver.hasSession("t1"))).toBe(true);
+  });
+
   it("publishes a tool call in the shape the activity ledger reads", async () => {
     const file = path.join(work, "a.txt");
     fs.writeFileSync(file, "x\n");
