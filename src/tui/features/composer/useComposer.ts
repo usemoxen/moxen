@@ -91,6 +91,23 @@ export function useComposer(
     setComposerResetCounter((count) => count + 1);
   };
 
+  /**
+   * Puts an unsent prompt back after Enter consumed the draft: anything typed
+   * while the send waited lands ahead of nothing — it was written first, so
+   * the restored text goes first and the newer typing stays after it. Reads
+   * fresh state in the update, since the waiter holding the text rendered
+   * before that typing happened.
+   */
+  const restoreUnsentDraft = (id: string, snapshot: string) => {
+    setDrafts((current) => {
+      const typed = (current[id] ?? "").trim();
+      const value = typed.length === 0 ? snapshot : `${snapshot}\n${typed}`;
+      if (current[id] === value) return current;
+      return { ...current, [id]: value };
+    });
+    setComposerResetCounter((count) => count + 1);
+  };
+
   const writePending = (id: string, next: ImageAttachmentUpload[]) => {
     setPendings((current) => {
       if (next.length === 0) {
@@ -187,6 +204,7 @@ export function useComposer(
     setDraft,
     resetDraft,
     restoreDraft,
+    restoreUnsentDraft,
     writePending,
     setPending,
     editDraftExternally,

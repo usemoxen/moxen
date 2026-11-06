@@ -62,6 +62,11 @@ export function useInteractionMode(params: {
   useEffect(() => {
     if (creating) setCreatingMode("default");
   }, [creating]);
+  // A switch belongs to the thread it was asked on: opening another thread
+  // leaves it behind rather than holding the next thread's sends.
+  useEffect(() => {
+    pendingMode.current = null;
+  }, [selected?.id, creating]);
 
   /**
    * A turn is running: the mode cannot change (not by Shift+Tab, a click on it or `/research`), and a steer
@@ -91,7 +96,9 @@ export function useInteractionMode(params: {
         await client.dispatch({ type: "thread.interaction-mode.set", threadId, interactionMode: next });
         return true;
       } catch (cause) {
-        setRequested(null);
+        // A newer switch has its own optimistic state: only this attempt's
+        // failure clears it, never a superseded one's.
+        setRequested((current) => (current !== null && current.threadId === threadId && current.mode === next ? null : current));
         setError(String(cause).slice(0, 120));
         return false;
       }
@@ -122,7 +129,7 @@ export function useInteractionMode(params: {
    * server has landed, so the prompt runs in the mode the composer shows.
    * See `sendAfterModeSwitch`.
    */
-  const gateSend = (send: () => void): Promise<boolean> => sendAfterModeSwitch(pendingMode.current, send);
+  const gateSend = (send: () => void): Promise<ModeGateResult> => sendAfterModeSwitch(() => pendingMode.current, send);
 
   return {
     mode,
@@ -138,14 +145,50 @@ export function useInteractionMode(params: {
 }
 
 /**
+ * How long a send waits for an in-flight mode switch before giving up: a
+ * switch is one server round trip, so longer means the server is gone and
+ * every send after it would wedge behind the same wait.
+ */
+export const MODE_SWITCH_WAIT_MS = 5_000;
+
+/** Whether a gated send ran, or why it stayed unsent. */
+export type ModeGateResult = "sent" | "switch-failed" | "switch-timed-out";
+
+/**
  * Runs a send once the mode switch still reaching the server has landed, so
  * the prompt runs in the mode the composer shows. With no switch in flight
- * the send runs at once. When the switch failed the send never runs — the
- * switch already said why — so nothing goes out silently in the old mode.
- * Returns whether the send ran.
+ * the send runs at once. A switch that arrives while waiting supersedes the
+ * one waited on: the latest attempt decides, never a stale one. When the
+ * latest switch failed — or no switch lands within `timeoutMs` — the send
+ * never runs, so nothing goes out silently in the old mode.
  */
-export async function sendAfterModeSwitch(pending: Promise<boolean> | null, send: () => void): Promise<boolean> {
-  if (pending !== null && !(await pending)) return false;
+export async function sendAfterModeSwitch(
+  getPending: () => Promise<boolean> | null,
+  send: () => void,
+  timeoutMs: number = MODE_SWITCH_WAIT_MS,
+): Promise<ModeGateResult> {
+  const startedAt = Date.now();
+  for (;;) {
+    const pending = getPending();
+    if (pending === null) break;
+    const remaining = timeoutMs - (Date.now() - startedAt);
+    if (remaining <= 0) return "switch-timed-out";
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const ok = await Promise.race([
+        pending,
+        new Promise<"timed-out">((resolve) => {
+          timer = setTimeout(() => resolve("timed-out"), remaining);
+        }),
+      ]);
+      if (ok === "timed-out") return "switch-timed-out";
+      // A newer switch arrived while waiting: it decides, not this one.
+      if (getPending() !== null && getPending() !== pending) continue;
+      if (!ok) return "switch-failed";
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
   send();
-  return true;
+  return "sent";
 }

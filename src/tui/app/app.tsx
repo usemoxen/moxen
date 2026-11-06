@@ -382,7 +382,6 @@ export function App({
     renderer?.setBackgroundColor(SURFACE.base);
   }, [renderer, themeName]);
   const {
-    drafts,
     pendings,
     draft,
     pending,
@@ -394,6 +393,7 @@ export function App({
     setDraft,
     resetDraft,
     restoreDraft,
+    restoreUnsentDraft,
     writePending,
     setPending,
     editDraftExternally,
@@ -859,8 +859,9 @@ export function App({
 
   /**
    * `@path/to/image.png` mentions become inline image attachments, combined
-   * with anything pasted off the clipboard. The draft stays put when a file
-   * cannot be read so the prompt is never eaten by a failed attach.
+   * with anything pasted off the clipboard. Enter consumes the draft at once,
+   * so a second Enter finds nothing to send; a failed attach or a dropped
+   * send puts the text back instead of eating the prompt.
    */
   const send = (text: string, busyDelivery: "steer" | "queue" = "steer", scheduledFor?: Date, queue?: QueuePolicy) => {
     const trimmed = text.trim();
@@ -895,18 +896,19 @@ export function App({
     const sourceId = selected.id;
     const parsed = extractMentions(trimmed);
     const attachedPaths = filePaths.items;
-    const finish = () => {
-      resetDraft(sourceId);
-      filePaths.clear(sourceId);
-    };
+    // Enter consumes the draft at once, so every Enter below is single-flight:
+    // a second Enter finds an empty draft. Anything typed while the send waits
+    // lands in a fresh draft and is kept after the restored text on a drop.
+    resetDraft(sourceId);
+    const restoreUnsent = () => restoreUnsentDraft(sourceId, trimmed);
     // A send started while the Shift+Tab switch is still reaching the server
-    // waits for it, so the prompt runs in the mode the composer shows. When
-    // the switch failed the send stays unsent (the switch already said why)
-    // instead of going out silently in the old mode; the draft is kept until
-    // the prompt really goes.
+    // waits for it, so the prompt runs in the mode the composer shows. A send
+    // the gate drops disarms its one-off and restores its text instead of
+    // going out silently in the old mode; the switch's own error already says
+    // why, except a hung switch, which names itself here.
     void interaction.gateSend(() => {
       if (parsed.paths.length === 0 && pending.length === 0) {
-        finish();
+        filePaths.clear(sourceId);
         dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue);
         return;
       }
@@ -915,19 +917,26 @@ export function App({
       ).then((built) => {
         if (built.error !== null) {
           setError(built.error.slice(0, 120));
+          restoreUnsent();
           return;
         }
         // Pasted and @-mentioned together: the server refuses the same, but
-        // here the draft is kept and nothing is sent.
+        // here the text is restored and nothing is sent.
         const imageError = imageSetError([...pending, ...built.attachments]);
         if (imageError !== null) {
           setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
+          restoreUnsent();
           return;
         }
-        finish();
+        filePaths.clear(sourceId);
         writePending(sourceId, []);
         dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor, queue);
       });
+    }).then((result) => {
+      if (result === "sent") return;
+      interaction.takeOneOff();
+      restoreUnsent();
+      if (result === "switch-timed-out") setError(t("send.modeSwitchTimeout"));
     });
   };
 
@@ -1022,6 +1031,8 @@ export function App({
       creatingRuntimeMode,
       creatingInteractionMode: interaction.stickyMode,
       takeOneOff: interaction.takeOneOff,
+      restoreUnsentDraft,
+      notifyResearchSizePending: () => toasts.push("research-size", "info", t("send.researchSizePending"), COPY_TOAST_MS),
       resetDraft,
       prepareImage: shrinkForAttach,
       writePending,
