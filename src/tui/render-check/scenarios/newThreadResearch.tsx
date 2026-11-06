@@ -65,7 +65,7 @@ interface DraftFixture {
  * the first turn until the proposal is answered (like the real server), and
  * serves the pending proposal to polling clients that opted in.
  */
-function draftFixture(options: { parkTurnStart?: boolean } = {}): DraftFixture {
+function draftFixture(options: { parkTurnStart?: boolean; rejectTurnStart?: unknown } = {}): DraftFixture {
   const events: OrderedEvent[] = [];
   const turnStarts: Extract<Command, { type: "thread.turn.start" }>[] = [];
   const answers: Extract<Command, { type: "research.proposal.answer" }>[] = [];
@@ -124,6 +124,7 @@ function draftFixture(options: { parkTurnStart?: boolean } = {}): DraftFixture {
       if (typed.type === "thread.turn.start") {
         turnStarts.push(typed as Extract<Command, { type: "thread.turn.start" }>);
         if (options.parkTurnStart === true) return { accepted: true, researchSizePending: true };
+        if (options.rejectTurnStart !== undefined) return Promise.reject(options.rejectTurnStart);
         turnStartHeld = new Promise<unknown>((resolve) => { resolveTurnStart = resolve as (value: unknown) => void; });
         return turnStartHeld as never;
       }
@@ -224,6 +225,30 @@ export async function runNewThreadResearch(): Promise<void> {
       await until(setup, () => fixture.turnStarts.length === 1, "the first prompt never started a turn");
       await visible(setup, "Run size still to choose");
       if (frame(setup).includes("Full research run")) fail("a parked question still opened the modal");
+    } finally {
+      await act(async () => setup.renderer.destroy());
+    }
+  }
+
+  // A start that fails puts the prompt back in the opened thread, not the old draft.
+  {
+    const fixture = draftFixture({ rejectTurnStart: new Error("turn start refused by test") });
+    const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="create" />, { width: 140, height: 40, exitOnCtrlC: false });
+    try {
+      await setup.flush();
+      await visible(setup, "Build");
+      await press(setup, "i");
+      await act(async () => setup.mockInput.pressTab({ shift: true }));
+      await setup.flush();
+      // Longer than a thread title: the sidebar truncates it, so the tail only
+      // shows when the composer's draft holds the restored text.
+      await typeText(setup, `First research question ${"tailmark ".repeat(12).trim()}`);
+      await press(setup, "enter");
+      await until(setup, () => fixture.turnStarts.length === 1, "the first prompt never started a turn");
+      await visible(setup, "turn start refused by test");
+      await visible(setup, "tailmark");
+      console.log("--- new thread: a failed start restores the prompt ---");
+      console.log(frame(setup));
     } finally {
       await act(async () => setup.renderer.destroy());
     }

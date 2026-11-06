@@ -394,6 +394,7 @@ export function App({
     resetDraft,
     restoreDraft,
     restoreUnsentDraft,
+    restoreUnsentAttachments,
     writePending,
     setPending,
     editDraftExternally,
@@ -819,42 +820,64 @@ export function App({
   /**
    * While a turn runs, a message either steers it (lands at its next step —
    * Claude's `next` priority) or queues behind it (runs once it ends — its
-   * `later`). Idle, it simply starts a turn.
+   * `later`). Idle, it simply starts a turn. Returns the dispatch, so the
+   * caller reports what really happened: toasts on acceptance, the unsent
+   * prompt and its images back on rejection.
    */
   const dispatchTurn = (prompt: string, attachments: ImageAttachmentUpload[], busyDelivery: "steer" | "queue", scheduledFor?: Date, queue?: QueuePolicy) => {
-    if (selected === null) return;
+    if (selected === null) return Promise.reject(new Error("no thread"));
     // A message sent while a turn runs is a steer or a queued send: it carries no mode, and an armed one waits for the next prompt.
     const oneOff = sessionRunningRef.current ? undefined : interaction.takeOneOff();
-    void client
-      .dispatch({
-        type: "thread.turn.start",
-        threadId: selected.id,
-        message: { text: prompt, attachments },
-        ...(queue ? { queue } : {}),
-        // `/research` for this prompt only: the thread's own mode is not touched.
-        ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
-        // A scheduled message waits in the queue for its time (it cannot steer).
-        ...(scheduledFor !== undefined
-          ? { scheduledFor: scheduledFor.toISOString() }
-          : sessionRunningRef.current
-            ? { delivery: busyDelivery }
-            : {}),
-      })
-      .then((result) => {
-        const continueAt = usageBanner.banner?.continueAt ?? null;
-        if (scheduledFor === undefined && result.status === "queued" && !sessionRunningRef.current && continueAt !== null) {
-          toasts.push("queued", "info", t("send.queuedAfterContinue", { at: clock(continueAt) }), COPY_TOAST_MS);
-        } else if (scheduledFor !== undefined) {
-          const when = describeScheduled(scheduledFor, new Date());
-          toasts.push("scheduled", "info", when === "now" ? t("app.scheduled_goes_out_now_58dc") : t("send.scheduledFor", { when }), COPY_TOAST_MS);
-        } else if (sessionRunningRef.current && busyDelivery === "queue") {
-          toasts.push("queued", "info", t("app.queued_sent_once_this_2b24"), COPY_TOAST_MS);
-        }
-        if (result.researchSizePending === true) {
-          toasts.push("research-size", "info", t("send.researchSizePending"), COPY_TOAST_MS);
-        }
-      })
-      .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+    return client.dispatch({
+      type: "thread.turn.start",
+      threadId: selected.id,
+      message: { text: prompt, attachments },
+      ...(queue ? { queue } : {}),
+      // `/research` for this prompt only: the thread's own mode is not touched.
+      ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
+      // A scheduled message waits in the queue for its time (it cannot steer).
+      ...(scheduledFor !== undefined
+        ? { scheduledFor: scheduledFor.toISOString() }
+        : sessionRunningRef.current
+          ? { delivery: busyDelivery }
+          : {}),
+    });
+  };
+
+  /**
+   * Reports a dispatched turn: toasts on acceptance, and on rejection the
+   * prompt it carried — text and images both — back in the draft. Chips and
+   * pending images are only cleared once the turn is accepted, so a rejection
+   * loses nothing.
+   */
+  const delivered = (
+    sent: ReturnType<typeof dispatchTurn>,
+    sourceId: string,
+    restoreUnsent: () => void,
+    attachments: readonly ImageAttachmentUpload[],
+    busyDelivery: "steer" | "queue",
+    scheduledFor?: Date,
+  ): void => {
+    void sent.then((result) => {
+      filePaths.clear(sourceId);
+      writePending(sourceId, []);
+      const continueAt = usageBanner.banner?.continueAt ?? null;
+      if (scheduledFor === undefined && result.status === "queued" && !sessionRunningRef.current && continueAt !== null) {
+        toasts.push("queued", "info", t("send.queuedAfterContinue", { at: clock(continueAt) }), COPY_TOAST_MS);
+      } else if (scheduledFor !== undefined) {
+        const when = describeScheduled(scheduledFor, new Date());
+        toasts.push("scheduled", "info", when === "now" ? t("app.scheduled_goes_out_now_58dc") : t("send.scheduledFor", { when }), COPY_TOAST_MS);
+      } else if (sessionRunningRef.current && busyDelivery === "queue") {
+        toasts.push("queued", "info", t("app.queued_sent_once_this_2b24"), COPY_TOAST_MS);
+      }
+      if (result.researchSizePending === true) {
+        toasts.push("research-size", "info", t("send.researchSizePending"), COPY_TOAST_MS);
+      }
+    }).catch((cause: unknown) => {
+      setError(String(cause).slice(0, 120));
+      restoreUnsent();
+      restoreUnsentAttachments(sourceId, attachments);
+    });
   };
 
   /**
@@ -905,11 +928,11 @@ export function App({
     // waits for it, so the prompt runs in the mode the composer shows. A send
     // the gate drops disarms its one-off and restores its text instead of
     // going out silently in the old mode; the switch's own error already says
-    // why, except a hung switch, which names itself here.
+    // why, except a hung switch, which names itself here. A dropped scheduled
+    // or queued send says its schedule went with it, so the retry is a choice.
     void interaction.gateSend(() => {
       if (parsed.paths.length === 0 && pending.length === 0) {
-        filePaths.clear(sourceId);
-        dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue);
+        delivered(dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, [], busyDelivery, scheduledFor);
         return;
       }
       void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
@@ -928,15 +951,17 @@ export function App({
           restoreUnsent();
           return;
         }
-        filePaths.clear(sourceId);
-        writePending(sourceId, []);
-        dispatchTurn(promptWithPaths(parsed.text, attachedPaths), [...pending, ...built.attachments], busyDelivery, scheduledFor, queue);
+        const attachments = [...pending, ...built.attachments];
+        delivered(dispatchTurn(promptWithPaths(parsed.text, attachedPaths), attachments, busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, attachments, busyDelivery, scheduledFor);
       });
     }).then((result) => {
       if (result === "sent") return;
       interaction.takeOneOff();
       restoreUnsent();
       if (result === "switch-timed-out") setError(t("send.modeSwitchTimeout"));
+      if (scheduledFor !== undefined || queue !== undefined) {
+        toasts.push("schedule-dropped", "warn", t("send.scheduleDropped"), COPY_TOAST_MS);
+      }
     });
   };
 
@@ -1032,6 +1057,7 @@ export function App({
       creatingInteractionMode: interaction.stickyMode,
       takeOneOff: interaction.takeOneOff,
       restoreUnsentDraft,
+      restoreUnsentAttachments,
       notifyResearchSizePending: () => toasts.push("research-size", "info", t("send.researchSizePending"), COPY_TOAST_MS),
       resetDraft,
       prepareImage: shrinkForAttach,

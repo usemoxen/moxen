@@ -16,6 +16,7 @@ async function until(setup: TestRendererSetup, check: (screen: string) => boolea
   }
 }
 const visible = (setup: TestRendererSetup, text: string) => until(setup, (screen) => screen.includes(text), `did not show ${text}`);
+const gone = (setup: TestRendererSetup, text: string) => until(setup, (screen) => !screen.includes(text), `still shows ${text}`);
 
 async function press(setup: TestRendererSetup, name: string, options: { shift?: boolean } = {}) {
   await act(async () => {
@@ -60,7 +61,7 @@ interface GateFixture {
 const STARTED = { accepted: true, turnId: "turn-1", messageId: "m-1", delivery: "started", status: "running" };
 
 /** A mock server that holds mode switches and turns until the scenario releases them. */
-function gateFixture(): GateFixture {
+function gateFixture(options: { rejectTurnStarts?: unknown } = {}): GateFixture {
   const modeSets: Gate[] = [];
   const turnStarts: Gate[] = [];
   const client: ClientApi = {
@@ -71,6 +72,10 @@ function gateFixture(): GateFixture {
         return new Promise<unknown>((resolve, reject) => { modeSets.push({ command: typed, resolve: resolve as (value: unknown) => void, reject }); });
       }
       if (typed.type === "thread.turn.start") {
+        if (options.rejectTurnStarts !== undefined) {
+          turnStarts.push({ command: typed, resolve: () => {}, reject: () => {} });
+          return Promise.reject(options.rejectTurnStarts);
+        }
         return new Promise<unknown>((resolve, reject) => { turnStarts.push({ command: typed, resolve: resolve as (value: unknown) => void, reject }); });
       }
       return await (baseClient.dispatch as (command: Record<string, unknown>) => Promise<never>)(command);
@@ -213,6 +218,60 @@ export async function runSendGate(): Promise<void> {
         fail(`the gated send carried ${JSON.stringify(turnTexts(fixture))}, not what Enter saw`);
       }
       await visible(setup, "world");
+    } finally {
+      await act(async () => setup.renderer.destroy());
+    }
+  }
+
+  // ── A rejected turn puts the prompt back and stays sendable ──────────────────
+  {
+    const fixture = gateFixture({ rejectTurnStarts: new Error("turn start refused by test") });
+    const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
+    try {
+      await setup.flush();
+      await focusComposer(setup);
+      await typeText(setup, "hello");
+      await press(setup, "enter");
+      await until(setup, () => fixture.turnStarts.length === 1, "the send never dispatched its turn");
+      await visible(setup, "hello");
+      await visible(setup, "turn start refused by test");
+      // The retry sends the same prompt again.
+      await press(setup, "enter");
+      await until(setup, () => fixture.turnStarts.length === 2, "the retry never dispatched its turn");
+      if (turnTexts(fixture).join("|") !== "hello|hello") fail(`the retry sent ${JSON.stringify(turnTexts(fixture))}, not "hello" twice`);
+      console.log("--- send gate: a rejected turn restores its prompt ---");
+      console.log(frame(setup));
+    } finally {
+      await act(async () => setup.renderer.destroy());
+    }
+  }
+
+  // ── A dropped scheduled send says its schedule went with it ─────────────────
+  {
+    const fixture = gateFixture();
+    const setup = await testRender(<App client={fixture.client} onQuit={() => {}} launchView="thread" />, { width: 140, height: 40, exitOnCtrlC: false });
+    try {
+      await setup.flush();
+      await focusComposer(setup);
+      await typeText(setup, "hello");
+      await act(async () => setup.mockInput.pressTab({ shift: true }));
+      await setup.flush();
+      await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+      await setup.flush();
+      await visible(setup, "Schedule work");
+      await click(setup, "Schedule work");
+      await visible(setup, "Queue this work");
+      await click(setup, "Queue this work");
+      // The submit consumed the draft into the gated send; the switch has not
+      // landed, so no turn goes out yet.
+      await gone(setup, "hello");
+      await act(async () => fixture.modeSets[0]!.reject(new Error("mode switch refused by test")));
+      await setup.flush();
+      await visible(setup, "The scheduled message was not sent");
+      await visible(setup, "hello");
+      if (fixture.turnStarts.length !== 0) fail("a dropped scheduled send still dispatched its turn");
+      console.log("--- send gate: a dropped scheduled send says its schedule went with it ---");
+      console.log(frame(setup));
     } finally {
       await act(async () => setup.renderer.destroy());
     }
