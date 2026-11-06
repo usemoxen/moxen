@@ -937,6 +937,7 @@ describe("moxen and subagent tool rows", () => {
     expect(call("mcp__moxen__delegate", "inProgress", input)).toEqual({
       kind: "agent",
       source: "moxen",
+      tool: "delegate",
       title: "delegate",
       subject: "Run bun check",
       state: "running",
@@ -963,6 +964,7 @@ describe("moxen and subagent tool rows", () => {
     expect(call("Agent", "inProgress", input)).toEqual({
       kind: "agent",
       source: "native",
+      tool: null,
       title: "Explore",
       subject: "List CLI commands",
       state: "starting",

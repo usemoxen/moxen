@@ -267,6 +267,8 @@ export interface UsageLimitView {
 export interface AgentView {
   kind: "agent";
   source: "moxen" | "native";
+  /** The moxen task tool behind the row (`delegate`, `task_send`, …); null for a native subagent. */
+  tool: string | null;
   /** Short, like other rows' tool names: "delegate", "task status", "Explore". */
   title: string;
   /** What the work is: the task's title or the subagent's description. */
@@ -870,6 +872,7 @@ function moxenToolView(
   const view = (name: string, state: string | null, facts: (string | null)[] = []): AgentView => ({
     kind: "agent",
     source: "moxen",
+    tool,
     title: name,
     subject: title,
     state: running ? "running" : state,
@@ -1202,6 +1205,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
         return {
           kind: "agent",
           source: "native",
+          tool: null,
           title: type ?? "subagent",
           subject: description ?? firstLine(asString(input.prompt)) ?? "",
           state: ended ?? (running ? "starting" : null),
