@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { createInterface } from "node:readline";
 import { RemoteConnection } from "../src/server/transport/remote.js";
 import { namedPipe, probe } from "../src/server/transport/endpoint.js";
+import { startEmbeddingsHeartbeat } from "../src/server/embeddingsHeartbeat.js";
 
 // `--dist <dir>` checks another bundle (an unpacked release archive's `dist/`) instead of the checkout's.
 const distFlag = process.argv.indexOf("--dist");
@@ -42,21 +43,13 @@ try {
     ["ssh", "SSH remote access uses an encrypted tunnel to the server. Pair devices explicitly."],
   ];
   for (const [name, body] of corpus) await client.dispatch({ type: "memory.save", name: name!, description: name!, body: body!, memoryType: "project", scope: "global" });
-  let beats = 0;
-  let maxHeartbeatMs = 0;
-  let lastProgress = "";
-  let polling = false;
-  const timer = setInterval(() => {
-    if (polling) return;
-    polling = true;
-    const started = performance.now();
-    void client!.query({ type: "memory.embeddings.status" }).then((status) => {
-      beats++;
-      maxHeartbeatMs = Math.max(maxHeartbeatMs, performance.now() - started);
-      const progress = status.file ?? status.state;
-      if (progress !== lastProgress) { console.log(JSON.stringify({ progress })); lastProgress = progress; }
-    }).finally(() => { polling = false; });
-  }, 50);
+  // A concurrent heartbeat watches a long embeddings run. A poll that fails —
+  // including one still parked when the client closes — is ignored by the
+  // heartbeat itself; the beats and latency asserts below stay strict.
+  const heartbeat = startEmbeddingsHeartbeat(
+    () => client!.query({ type: "memory.embeddings.status" }),
+    (progress) => console.log(JSON.stringify({ progress })),
+  );
   try {
     console.log(JSON.stringify({ setup: await client.dispatch({ type: "memory.embeddings.setup" }) }));
     await client.dispatch({ type: "settings.set", key: "memoryEmbeddings", value: "true" });
@@ -118,9 +111,9 @@ try {
       const exited = once(cpu, "exit");
       if (cpu.exitCode === null && cpu.signalCode === null) { cpu.kill(); await exited; }
     }
-  } finally { clearInterval(timer); }
-  assert.ok(beats > 0, "No concurrent server heartbeat completed");
-  assert.ok(maxHeartbeatMs < 1000, `Server heartbeat stalled for ${maxHeartbeatMs}ms`);
+  } finally { heartbeat.stop(); }
+  assert.ok(heartbeat.beats > 0, "No concurrent server heartbeat completed");
+  assert.ok(heartbeat.maxHeartbeatMs < 1000, `Server heartbeat stalled for ${heartbeat.maxHeartbeatMs}ms`);
   // The default residency policy warms a validated local install at startup,
   // before any search. Restart the real daemon to check the shipped behavior.
   await client.close();
@@ -143,7 +136,7 @@ try {
   }
   assert.equal(startup.validation?.correct, 6);
   console.log(JSON.stringify({ startupWarm: true, device: startup.device, validation: startup.validation }));
-  console.log(JSON.stringify({ beats, maxHeartbeatMs, passed: true }));
+  console.log(JSON.stringify({ beats: heartbeat.beats, maxHeartbeatMs: heartbeat.maxHeartbeatMs, passed: true }));
 } finally {
   await client?.close();
   if (server.exitCode === null && server.signalCode === null) {
