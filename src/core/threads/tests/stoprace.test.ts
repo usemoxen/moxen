@@ -14,8 +14,9 @@ import { driverKindOfInstance } from "../../types.js";
 import type { ProviderSessionStartInput, ProviderSendTurnInput } from "../../providers/spi.js";
 import { CliError } from "../../errors.js";
 import type { TurnDriver, TurnOutcome } from "../execute.js";
+import { executeTurn } from "../execute.js";
 import { startTurn, type OperationContext } from "../operations.js";
-import { createThread, interruptTurn } from "../threads.js";
+import { createThread, interruptTurn, sendTurn } from "../threads.js";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -142,5 +143,214 @@ describe("stopping a turn that has not started yet", () => {
     expect(interrupts).toBeGreaterThanOrEqual(2);
     const [turn] = await w.store.readTurns(w.thread.id);
     expect(turn?.status).toBe("interrupted");
+  });
+});
+
+describe("stopping a turn parked behind another", () => {
+  it("hands a turn promoted by the stop to a runner instead of stranding it", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const sent: string[] = [];
+    let started = false;
+    const w = await world((base) =>
+      Object.assign(Object.create(base) as TurnDriver, {
+        startSession: (input: ProviderSessionStartInput) =>
+          Effect.promise(async () => {
+            if (!started) {
+              started = true;
+              entered.resolve();
+              await gate.promise;
+            }
+            return {};
+          }),
+        sendTurn: (input: ProviderSendTurnInput) => {
+          sent.push(input.prompt);
+          return base.sendTurn(input);
+        },
+      }),
+    );
+    const run = startTurn(w.ctx, { threadId: w.thread.id, prompt: "first" });
+    await entered.promise;
+    // A second message queues behind the starting turn; the stop interrupts
+    // the first and promotes the second to running with a live owner.
+    await sendTurn(w.store, w.thread.id, { prompt: "second", delivery: "queue" });
+    await interruptTurn(w.store, w.thread.id);
+    gate.resolve();
+    await run;
+    await settleRuns();
+
+    // The promoted turn got a runner: it ran to completion, and the thread
+    // takes the next message instead of sitting wedged on a running turn.
+    expect(sent).toEqual(["second"]);
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+    await startTurn(w.ctx, { threadId: w.thread.id, prompt: "third" });
+    await settleRuns();
+    expect(sent).toEqual(["second", "third"]);
+  });
+
+  it("leaves a session a newer turn owns alone when an older stopped send checks late", async () => {
+    const entered = deferred();
+    const gateStart = deferred();
+    const sentSecond = deferred();
+    const releaseSecond = deferred();
+    const sessions = new Set<string>();
+    const stopped: string[] = [];
+    let started = false;
+    const w = await world((base) =>
+      Object.assign(Object.create(base) as TurnDriver, {
+        hasSession: (threadId: string) => Effect.succeed(sessions.has(threadId)),
+        startSession: (input: ProviderSessionStartInput) =>
+          Effect.promise(async () => {
+            if (!started) {
+              started = true;
+              entered.resolve();
+              await gateStart.promise;
+            }
+            sessions.add(input.threadId);
+            return {};
+          }),
+        stopSession: (threadId: string) =>
+          Effect.sync(() => {
+            sessions.delete(threadId);
+            stopped.push(threadId);
+          }),
+        sendTurn: (input: ProviderSendTurnInput) => {
+          if (input.prompt === "second") sentSecond.resolve();
+          return base.sendTurn(input);
+        },
+        awaitTurn: async (threadId: string, turnId: string, signal?: AbortSignal): Promise<TurnOutcome> => {
+          await releaseSecond.promise;
+          return await base.awaitTurn(threadId, turnId, signal);
+        },
+      }),
+    );
+    const first = startTurn(w.ctx, { threadId: w.thread.id, prompt: "first" });
+    await entered.promise;
+    await interruptTurn(w.store, w.thread.id);
+    // A newer turn starts on the session the stopped send opened, and is
+    // still on it when the stopped send finally checks.
+    const second = startTurn(w.ctx, { threadId: w.thread.id, prompt: "second" });
+    await sentSecond.promise;
+    gateStart.resolve();
+    await first;
+    releaseSecond.resolve();
+    await second;
+    await settleRuns();
+
+    // The late check saw the open turn and left its session alone.
+    expect(stopped).toEqual([]);
+    expect(sessions.has(w.thread.id)).toBe(true);
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+  });
+
+  it("stops at the runner when the stop lands after the send's final check", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const sent: string[] = [];
+    let updated = false;
+    const w = await world((base) =>
+      Object.assign(Object.create(base) as TurnDriver, {
+        updateMcpServers: async (threadId: string, servers: readonly { name: string }[]) => {
+          if (!updated) {
+            updated = true;
+            entered.resolve();
+            await gate.promise;
+          }
+          await base.updateMcpServers?.(threadId, servers as never);
+        },
+        sendTurn: (input: ProviderSendTurnInput) => {
+          sent.push(input.prompt);
+          return base.sendTurn(input);
+        },
+      }),
+    );
+    const run = startTurn(w.ctx, { threadId: w.thread.id, prompt: "first" });
+    // Parked past the send's own liveness check: only the runner's stands in the way.
+    await entered.promise;
+    await sendTurn(w.store, w.thread.id, { prompt: "second", delivery: "queue" });
+    await interruptTurn(w.store, w.thread.id);
+    gate.resolve();
+    await run;
+    await settleRuns();
+
+    // The stopped prompt never went out; the promoted turn still ran.
+    expect(sent).toEqual(["second"]);
+    const turns = await w.store.readTurns(w.thread.id);
+    expect(turns.map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+    // And the stopped turn is not owed again: it was stopped, not unanswered.
+    expect(turns[0]).not.toMatchObject({ unanswered: true });
+  });
+
+  it("does not interrupt a newer turn's run when re-interrupting after a mid-send stop", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const sentSecond = deferred();
+    const releaseSecond = deferred();
+    let interrupts = 0;
+    let first = true;
+    const w = await world((base) =>
+      Object.assign(Object.create(base) as TurnDriver, {
+        sendTurn: (input: ProviderSendTurnInput) =>
+          Effect.promise(async () => {
+            if (first) {
+              first = false;
+              entered.resolve();
+              await gate.promise;
+            } else if (input.prompt === "second") {
+              sentSecond.resolve();
+            }
+            return await Effect.runPromise(base.sendTurn(input));
+          }),
+        interruptTurn: (_threadId: string) => {
+          interrupts += 1;
+          return Effect.void;
+        },
+        awaitTurn: async (threadId: string, turnId: string, signal?: AbortSignal): Promise<TurnOutcome> => {
+          if (signal?.aborted === true) throw new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {});
+          await releaseSecond.promise;
+          return await base.awaitTurn(threadId, turnId, signal);
+        },
+      }),
+    );
+    const stopped = startTurn(w.ctx, { threadId: w.thread.id, prompt: "first" });
+    await entered.promise;
+    await interruptTurn(w.store, w.thread.id);
+    // A newer turn starts its own provider run before the stopped prompt goes out.
+    const second = startTurn(w.ctx, { threadId: w.thread.id, prompt: "second" });
+    await sentSecond.promise;
+    gate.resolve();
+    await stopped;
+    releaseSecond.resolve();
+    await second;
+    await settleRuns();
+
+    // Only the abort's own interrupt fired: the re-interrupt saw the newer
+    // running turn and left its run alone.
+    expect(interrupts).toBe(1);
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+  });
+
+  it("interrupts the provider run when a background turn was stopped before its runner started", async () => {
+    const w = await world((base) => {
+      let interrupts = 0;
+      const driver = Object.assign(Object.create(base) as TurnDriver, {
+        interruptTurn: (_threadId: string) => {
+          interrupts += 1;
+          return Effect.void;
+        },
+      });
+      (driver as { interrupts?: () => number }).interrupts = () => interrupts;
+      return driver;
+    });
+    const sent = await sendTurn(w.store, w.thread.id, { prompt: "background work" });
+    // Stopped after the provider started its own turn but before this
+    // process ran it: there is no prompt to withhold, only a live run.
+    await interruptTurn(w.store, w.thread.id, sent.turn.id);
+    const driver = w.ctx.driverFor("claudeAgent");
+    await executeTurn({ store: w.store, driver, threadId: w.thread.id, storeTurnId: sent.turn.id, prompt: "background work", driverTurnId: "native-1" });
+    await settleRuns();
+
+    expect(((driver as unknown as { interrupts?: () => number }).interrupts ?? (() => -1))()).toBe(1);
+    expect((await w.store.readTurns(w.thread.id))[0]?.status).toBe("interrupted");
   });
 });
