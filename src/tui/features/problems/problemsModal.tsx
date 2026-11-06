@@ -4,6 +4,7 @@ import { useKeyboard } from "@opentui/react";
 import { t } from "../../i18n/index.js";
 import { COLOR, SURFACE } from "../../theme.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
+import { middleTruncate, textWidth } from "../../model/textoverflow.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import type { ProblemRow } from "../../model/problems.js";
@@ -43,7 +44,12 @@ export function ProblemsModal({
     if (rows.length === 0) onClose();
   }, [rows.length, onClose]);
   const width = Math.min(100, Math.max(40, screenWidth - 4));
-  const height = Math.max(8, Math.min(10 + rows.length * 3, screenHeight - 2));
+  const inner = Math.max(10, width - 4);
+  // A row is its blank line, its message lines, its location and its
+  // buttons; the panel grows with wrapped messages instead of spilling past
+  // it. The header, the content's own margin and the shell's padding add 4.
+  const rowsHeight = rows.reduce((sum, row) => sum + 3 + Math.max(1, Math.ceil(textWidth(row.message) / inner)) + 1, 0);
+  const height = Math.max(8, Math.min(4 + rowsHeight, screenHeight - 2));
   const left = Math.max(0, Math.floor((screenWidth - width) / 2));
   const top = Math.max(0, Math.floor((screenHeight - height) / 2));
   return (
@@ -67,7 +73,7 @@ export function ProblemsModal({
           return (
             <box key={row.key} style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
               <text fg={COLOR.text} bg={SURFACE.raised} selectable={false}>{row.message}</text>
-              <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{row.location}</text>
+              <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{middleTruncate(row.location, inner)}</text>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
                 {fixes.map((fix, index) => (
                   <box key={index} style={{ flexDirection: "row", flexShrink: 0, ...(index === 0 ? {} : { marginLeft: 1 }) }}>

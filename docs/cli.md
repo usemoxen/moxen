@@ -174,6 +174,8 @@ moxen config set thinkingEffort xhigh
 
 **Bad entries.** One bad entry does not unload the whole file: it is skipped, reported with its location (`config show` and `moxen doctor` list it, and the TUI warns with a fix), and carried through saves until it is fixed or reset. A file that is not JSON at all still fails to load; the error names the previous save's backup (`config.json.bak.1`, kept beside the file on every save) and starting fresh.
 
+A bad thread record reads as missing, a bad ledger line is skipped with its file and line number, and a turn with a status no build writes shows as `unknown` and can be stopped but never starts, settles or promotes past. While a turns ledger hides rows, sends and promotions are refused (`TURNS_LEDGER_CORRUPT`) until the bad line is moved aside; moving a record aside never touches a live turn and never deletes. A torn trailing line is reported only once it survives a re-read.
+
 The settings page files every key under General, Defaults, Sessions, Long threads, Agent context, Interface, Git and forges, one tab per provider (each in the same order: Defaults, Tools, Long threads, Sessions, Model prices, Setup, then what is particular to it), and MCP servers. Where a setting lives on the page never changes its key.
 
 **Model prices.** `providers.<claude|codex|opencode|harness>.model{Input,Output,CacheRead,CacheWrite}Prices` value a model's tokens in USD per million, as `model=price` pairs, one per line or comma-separated:
