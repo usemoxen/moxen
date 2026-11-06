@@ -128,6 +128,8 @@ describe("task_send: a finished task", () => {
     }
   }, 20_000);
 
+  // Two fixed 2.5s waits plus polls and two real turns: about 10s green on
+  // Windows, so a loaded runner needs more than twenty seconds.
   it("tells the parent once the queued message's turn has ended too, not when the first turn does", async () => {
     // Turns never finish by themselves here; the test settles them in the ledger, first the running one, then the one it promotes.
     const t = await setup({ leaveTurnsRunning: true });
@@ -150,7 +152,7 @@ describe("task_send: a finished task", () => {
     } finally {
       await t.connection.close();
     }
-  }, 20_000);
+  }, 30_000);
 });
 
 describe("task_send: whose task it is", () => {
