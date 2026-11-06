@@ -808,15 +808,12 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   if (openTurn(turns)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
-  // Plain turns never pass through the admission path, so while the thread
-  // itself is snoozed or settled — states `queueAdmission` reports as
-  // "Thread is not active" — they wait for it to be active again instead of
-  // starting at settle. Admitted turns keep their own admission checks.
-  if (admittedId === undefined && threadStatus(thread, instant) !== "active") return;
+  const threadHeld = admittedId === undefined && threadStatus(thread, instant) !== "active";
   const next = turns.find((turn) => {
     if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
     if (admittedId) return turn.id === admittedId;
     if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
+    if (threadHeld) return false;
     // Plain turns never pass through the admission path, so their one
     // admission check lives here: `queueAdmission` — and the Work queue
     // display built on it — blocks any non-automatic turn on an exhausted
@@ -824,12 +821,26 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // blocked, failing it into a hold instead of letting it wait.
     return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
   });
+  if (!next && admittedId === undefined) {
+    // Settle starts nothing waiting here: hold every plain turn still queued
+    // for the admission path — a snoozed or settled thread, or an exhausted
+    // provider — so it can start them once nothing blocks them. Only turns
+    // settle held back are marked, never an ordinary queue: a turn queued
+    // behind a protection-interrupted turn keeps waiting for the next send
+    // or settle.
+    for (const turn of turns) {
+      if (turn.status === "queued" && !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold"
+        && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
+        await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
+      }
+    }
+  }
   if (!next) return;
   if (pause && pause.recoveryTurnId === next.id) {
     await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
   }
   await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode);
-  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now });
+  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle ? { heldAtSettle: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
     threadId,
