@@ -14,13 +14,13 @@
  *   worktree back to a capture — deleting files created since — after
  *   capturing the state it replaces, so a restore can itself be undone.
  */
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { APP_NAME } from "../config.js";
+import { runProcess } from "../infra/process.js";
 
 export const CHECKPOINT_REF_NAMESPACE = `refs/${APP_NAME}/checkpoints`;
 
@@ -36,30 +36,8 @@ function sanitizeRefComponent(value: string): string {
 const GIT_TIMEOUT_MS = 30_000;
 
 async function runGit(cwd: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv): Promise<{ stdout: string }> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn("git", [...args], { cwd, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`git ${args[0] ?? ""} timed out`));
-    }, GIT_TIMEOUT_MS);
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (cause) => {
-      clearTimeout(timer);
-      reject(cause);
-    });
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout });
-      else reject(new Error(`git ${args[0] ?? ""} exited ${code}: ${stderr.slice(0, 300)}`));
-    });
-  });
+  const result = await runProcess("git", args, { cwd, timeoutMs: GIT_TIMEOUT_MS, ...(env ? { env } : {}) });
+  return { stdout: result.stdout };
 }
 
 async function isGitRepository(cwd: string): Promise<boolean> {

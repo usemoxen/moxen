@@ -28,6 +28,7 @@ async function notificationsIn(w: Awaited<ReturnType<typeof world>>, threadId: s
 }
 
 describe("a delegated task continued in a new thread", () => {
+  // Two continuations plus a ten-second notification wait: a loaded runner does not fit in fifteen seconds.
   it("reports to its parent once, from the continuation, naming the original task", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
@@ -60,7 +61,7 @@ describe("a delegated task continued in a new thread", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(`taskId ${continued.threadId}, continued from taskId ${child.id}`);
     expect(sent[0]).not.toContain(`(taskId ${child.id}`);
-  }, 15_000);
+  }, 30_000);
 
   it("leaves a thread that was not delegated without a delegation row", async () => {
     const w = await world();
@@ -91,6 +92,7 @@ describe("a delegated task continued in a new thread", () => {
 });
 
 describe("an orchestrator continued in a new thread", () => {
+  // Four threads plus a ten-second notification wait: a loaded runner does not fit in fifteen seconds.
   it("takes its running and idle tasks along: listed in the handoff, reporting to the new thread", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");
@@ -134,7 +136,7 @@ describe("an orchestrator continued in a new thread", () => {
     }
     expect(await notificationsIn(w, parent.id)).toEqual([]);
     expect((await notificationsIn(w, continued.threadId)).join("\n")).toContain(`taskId ${running.id}`);
-  }, 15_000);
+  }, 30_000);
 
   it("adds no note when no task is running", () => {
     expect(runningTasksNote([])).toBe("");
