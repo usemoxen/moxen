@@ -44,11 +44,38 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // the card's padding cells do not hit-test in this renderer. A same-cell
   // down+up selects nothing, so no drag is ever read.
   const clickPrompt = async (): Promise<void> => {
-    const rows = frame().split("\n");
-    const y = rows.findIndex((line) => line.includes("Render markdown"));
-    if (y === -1) fail("timeline shows no user prompt to open");
-    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") + 2, y));
-    await setup.flush();
+    // After a thread switch the transcript resyncs under the click: settle
+    // first (two identical frames), or the resolved row is replaced right
+    // after the click lands and the modal never opens.
+    let settled = frame();
+    for (let i = 0; i < 20; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+      const next = frame();
+      if (next === settled) break;
+      settled = next;
+    }
+    const clickOnce = async (): Promise<void> => {
+      const rows = frame().split("\n");
+      const y = rows.findIndex((line) => line.includes("Render markdown"));
+      if (y === -1) fail("timeline shows no user prompt to open");
+      await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") + 2, y));
+      await setup.flush();
+    };
+    await clickOnce();
+    // A toast expiring mid-gesture can still shift the rows under the
+    // click: probe briefly for the modal, then re-resolve once on a live
+    // frame rather than failing outright.
+    const start = Date.now();
+    while (!frame().includes("Revert to before this turn") && Date.now() - start < 1500) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await setup.flush();
+      });
+    }
+    if (!frame().includes("Revert to before this turn")) await clickOnce();
   };
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
