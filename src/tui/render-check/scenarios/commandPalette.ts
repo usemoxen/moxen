@@ -23,15 +23,13 @@ export async function runCommandPalette(setup: TestRendererSetup): Promise<void>
     fail(`${label}:\n${frame()}`);
   };
   const pickRow = async (filter: string, label: string, waiting: string): Promise<void> => {
-    // A focused filter input swallows both esc and ctrl+p, so reopening over
-    // a stale filter would only append to it (once yielding "compactsettle"
-    // and no match): click the modal's own title bar first so the keypress
-    // reaches the palette and every filter starts empty.
-    const open = frame();
-    if (open.includes("Command palette")) {
-      const titleRow = open.split("\n").findIndex((line) => line.includes("Command palette"));
-      if (titleRow !== -1) await act(async () => setup.mockMouse.click(open.split("\n")[titleRow]!.indexOf("Command palette") + 2, titleRow));
-      await setup.flush();
+    // Start from a closed picker: a focused filter input swallows esc and
+    // ctrl+p alike, so reopening over a stale filter would only append to it
+    // (once yielding "compactsettle" and no match). A backdrop click always
+    // lands outside any centred modal, so it reliably closes one.
+    if (frame().includes("Command palette")) {
+      await act(async () => setup.mockMouse.click(138, 0));
+      await waitFor("stale command palette did not close", () => !frame().includes("Command palette"));
     }
     await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
     await setup.flush();

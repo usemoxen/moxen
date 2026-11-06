@@ -39,11 +39,20 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
     await act(async () => setup.mockMouse.click(rows[y]!.indexOf(label) + 2, y));
   };
   // Back to the top of the timeline, then click the user prompt: mouse-up on
-  // a PromptBlock (not a selection drag) opens message actions.
+  // a PromptBlock (not a selection drag) opens message actions. Found by its
+  // label with room to spare on the left: a fixed cell misses whenever the
+  // rows above it shift, and clicking text selects it (which the actions
+  // entry reads as a drag and swallows), so click the padding instead.
+  const clickPrompt = async (): Promise<void> => {
+    const rows = frame().split("\n");
+    const y = rows.findIndex((line) => line.includes("Render markdown"));
+    if (y === -1) fail("timeline shows no user prompt to open");
+    await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Render markdown") - 2, y));
+    await setup.flush();
+  };
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(60, 5));
-  await setup.flush();
+  await clickPrompt();
   console.log("--- message actions (open) ---");
   console.log(setup.captureCharFrame());
 
@@ -56,8 +65,7 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   // … reopen (past the 250ms dismiss-guard window, which swallows the
   // mouse-up half of a backdrop-dismiss gesture), arm the revert …
   await new Promise((resolve) => setTimeout(resolve, 350));
-  await act(async () => setup.mockMouse.click(60, 5));
-  await setup.flush();
+  await clickPrompt();
   await clickRow("Revert to before this turn");
   await setup.flush();
   console.log("--- revert armed ---");
@@ -107,7 +115,7 @@ export async function runMessageActions(setup: TestRendererSetup): Promise<void>
   await waitFor("sidebar did not open t-xash", () => /Neural|Radiance|viability/.test(threadHeader()), 15000);
   await act(async () => setup.mockInput.pressKey("HOME"));
   await setup.flush();
-  await act(async () => setup.mockMouse.click(60, 5));
+  await clickPrompt();
   // ModalShell fades in; wait for its rows to read cleanly instead of
   // capturing mid-fade, when the composite garbles label matches.
   await waitFor("message actions did not open on t-xash", () => frame().includes("Revert to before this turn"));
