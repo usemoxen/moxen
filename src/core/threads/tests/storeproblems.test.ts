@@ -346,4 +346,32 @@ describe("bad store records", () => {
     expect(await count()).toBe(1);
     expect(store.storeProblems()).toMatchObject([{ kind: "ledger-line", threadId: thread.id }]);
   });
+
+  it("matches id-less rows by their written form, not their in-memory form", async () => {
+    const { root, store } = await testStore();
+    const thread = await createThread(store, { projectId: "project-1", title: "Canonical", modelSelection: MODEL });
+    const file = path.join(root, "threads", thread.id, "messages.jsonl");
+    // Written by JSON.stringify, which drops undefined values.
+    await appendFile(file, '{"b":1}\n', "utf8");
+    await store.readMessages(thread.id);
+    // The caller row carries the dropped value in memory; on disk both are {"b":1}.
+    await store.rewriteLedger(thread.id, "messages", [{ b: 1, a: undefined }]);
+    expect((await readFile(file, "utf8")).split("\n").filter((line) => line === '{"b":1}')).toHaveLength(1);
+  });
+
+  it("quarantines an id-less turns line and unblocks sends", async () => {
+    const { root, store } = await testStore();
+    const thread = await createThread(store, { projectId: "project-1", title: "Loop", modelSelection: MODEL });
+    const file = path.join(root, "threads", thread.id, "turns.jsonl");
+    await appendFile(file, '{"noid":true}\n', "utf8");
+    await store.readTurns(thread.id);
+    await expect(sendTurn(store, thread.id, { prompt: "one" })).rejects.toMatchObject({ code: "TURNS_LEDGER_CORRUPT" });
+
+    const [problem] = store.storeProblems();
+    const { movedTo } = await store.quarantineProblem(problem!.id);
+    expect(movedTo).toContain("quarantine");
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    expect(sent.turn.status).toBe("running");
+    expect(store.storeProblems()).toEqual([]);
+  });
 });

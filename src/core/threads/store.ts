@@ -82,6 +82,19 @@ function ledgerProblem(kind: "ledger-line" | "delegation-line", file: string, li
   };
 }
 
+/** One verdict on a raw ledger line, shared by readers, rewrites and quarantine. */
+function classifyLedgerLine(line: string): "row" | "bad-json" | "bad-row" {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return "bad-json";
+  }
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && typeof (parsed as { id?: unknown }).id === "string"
+    ? "row"
+    : "bad-row";
+}
+
 /** Canonical JSON for comparing rows: object keys sorted, so key order never matters. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
@@ -92,6 +105,19 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * A row's comparison key: canonical JSON of what `JSON.stringify` would
+ * write, so in-memory values JSON drops (`undefined`, functions, symbols)
+ * compare as their written form instead of doubling the line.
+ */
+function canonicalRowKey(row: unknown): string {
+  try {
+    return canonicalJson(JSON.parse(JSON.stringify(row) ?? "null") as unknown);
+  } catch {
+    return "";
+  }
 }
 
 export class ThreadStore {
@@ -285,13 +311,9 @@ export class ThreadStore {
       if (current === null) throw stale(`The file is already gone, so there is nothing to move aside.`);
       const bad = current[line - 1];
       if (bad === undefined || bad.trim().length === 0) throw stale(`Line ${line} is already gone, so there is nothing to move aside.`);
-      try {
-        JSON.parse(bad);
-        throw stale(`Line ${line} parses now, so there is nothing to move aside.`);
-      } catch (error) {
-        if (error instanceof CliError) throw error;
-        // Still bad: move it aside below.
-      }
+      // Stale only when the line left its reported bad state: it parses with
+      // a row id now. Anything else is still worth moving aside.
+      if (classifyLedgerLine(bad) === "row") throw stale(`Line ${line} parses now, so there is nothing to move aside.`);
       await mkdir(quarantineDir, { recursive: true });
       const movedTo = movedName(path.basename(problem.file));
       await writeFile(movedTo, `${current.join("\n")}\n`, "utf8");
@@ -488,35 +510,27 @@ export class ThreadStore {
       const report = (validJson: boolean): void => {
         this.noteProblem({ ...ledgerProblem(kind, file, lineNumber, validJson), ...(threadId !== undefined ? { threadId } : {}) });
       };
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        parsed = undefined;
-      }
-      if (parsed !== undefined && typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        if (typeof (parsed as { id?: unknown }).id !== "string") {
+      switch (classifyLedgerLine(line)) {
+        case "row":
+          break;
+        case "bad-row":
           // Complete JSON with no row id: from a hand edit, never a build.
           // Reported like corruption so it can be quarantined, never read.
           report(true);
           continue;
-        }
-      } else if (parsed === undefined) {
-        if (index === lines.length - 1 && !complete) {
-          const pending = this.pendingTorn.get(file);
-          if (!pending || pending.line !== lineNumber || pending.raw !== line) {
-            // First sight: a crash in flight, not corruption yet. Re-read once.
-            this.pendingTorn.set(file, { line: lineNumber, raw: line });
-            continue;
+        case "bad-json":
+          if (index === lines.length - 1 && !complete) {
+            const pending = this.pendingTorn.get(file);
+            if (!pending || pending.line !== lineNumber || pending.raw !== line) {
+              // First sight: a crash in flight, not corruption yet. Re-read once.
+              this.pendingTorn.set(file, { line: lineNumber, raw: line });
+              continue;
+            }
           }
-        }
-        report(false);
-        continue;
-      } else {
-        report(false);
-        continue;
+          report(false);
+          continue;
       }
-      rows.push(parsed as T);
+      rows.push(JSON.parse(line) as T);
       // Fixed by hand since, or complete now: the warning goes with the bad bytes.
       this.problems.delete(storeProblemId({ kind, file, line: lineNumber, ...(threadId !== undefined ? { threadId } : {}) }));
       if (this.pendingTorn.get(file)?.line === lineNumber) this.pendingTorn.delete(file);
@@ -579,13 +593,9 @@ export class ThreadStore {
     this.pendingTorn.delete(file);
     lines.forEach((line, index) => {
       if (line.trim().length === 0) return;
-      try {
-        const parsed: unknown = JSON.parse(line);
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && typeof (parsed as { id?: unknown }).id === "string") return;
-        this.noteProblem({ ...ledgerProblem(kind, file, index + 1, true), ...(threadId !== undefined ? { threadId } : {}) });
-      } catch {
-        this.noteProblem({ ...ledgerProblem(kind, file, index + 1, false), ...(threadId !== undefined ? { threadId } : {}) });
-      }
+      const classification = classifyLedgerLine(line);
+      if (classification === "row") return;
+      this.noteProblem({ ...ledgerProblem(kind, file, index + 1, classification !== "bad-json"), ...(threadId !== undefined ? { threadId } : {}) });
     });
   }
 
@@ -605,11 +615,9 @@ export class ThreadStore {
         wanted.set(id, row);
         continue;
       }
-      try {
-        idless.push({ row, key: canonicalJson(row) });
-      } catch {
-        idless.push({ row, key: "" });
-      }
+      const key = canonicalRowKey(row);
+      // An unserializable row cannot match a file line; it is appended below.
+      idless.push({ row, key });
     }
     const seen = new Set<string>();
     const next: string[] = [];
@@ -631,7 +639,7 @@ export class ThreadStore {
         next.push(JSON.stringify(wanted.get(id)));
         continue;
       }
-      const match = idless.findIndex((entry) => entry.key !== "" && entry.key === canonicalJson(parsed));
+      const match = idless.findIndex((entry) => entry.key !== "" && entry.key === canonicalRowKey(parsed));
       if (match >= 0) idless.splice(match, 1);
       next.push(raw);
     }
