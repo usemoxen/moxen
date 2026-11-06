@@ -289,8 +289,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description:
       "Continue your own thread in a new thread when it is getting long (check context_usage first): the new thread opens with the handoff summary you write, replacing the generated record, and runs your first message once this turn ends. " +
       "Your running delegated tasks move to the new thread and report there. " +
-      "Rules: only your own top-level thread (it takes no thread id, so a parent or any other thread is unreachable; a delegated task is refused: finish with a report and let the thread that delegated it decide); once per thread and never a second hop without the user (a repeat is refused); not for research runs. " +
-      "After it returns, end your turn promptly with a brief closing message and start no new work: the new thread must not start while this turn is still writing.",
+      "Rules: only your own top-level thread (it takes no thread id, so a parent or any other thread is unreachable; a delegated task is refused: finish with a report and let the thread that delegated it decide); at most 3 continuations in a row with no user message between them (a repeat is refused: ask the user); not for research runs. " +
+      "After it returns, end your turn promptly with a brief closing message and start no new work: the new thread waits until this thread has nothing running or queued.",
     inputSchema: {
       type: "object",
       properties: {
@@ -807,7 +807,8 @@ export async function callMoxenTool(
           threadId: continued.threadId,
           title: continued.title,
           adoptedTasks: continued.adoptedTasks,
-          note: "The new thread is ready but held until this turn ends (it starts at once when nothing is running). Finish your turn now with a brief closing message and start no new work; do not call thread_continue again. Its first turn runs your first message once this turn ends; tasks it adopted report there.",
+          ...(continued.note ? { note: continued.note } : {}),
+          next: "The new thread is ready but held until this thread has nothing running or queued (it starts at once when nothing is). Finish your turn now with a brief closing message and start no new work; do not call thread_continue again. Its first turn runs your first message once it starts; tasks it adopted report there.",
         });
       }
       default:

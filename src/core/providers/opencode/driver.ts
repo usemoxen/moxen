@@ -40,6 +40,7 @@ import type {
   ProviderAdapterCapabilities,
   ProviderApprovalDecision,
   ProviderRuntimeEvent,
+  BackgroundTaskSummary,
   ProviderImage,
   ProviderSendTurnInput,
   ProviderSession,
@@ -2027,9 +2028,10 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     this.publishBackgroundTasks(session);
   }
 
-  /** The full live set the side panel lists: background subagents and background commands. */
-  private publishBackgroundTasks(session: OpenCodeSession): void {
-    this.reconcileServers();
+  /** The live set the side panel lists: background subagents and background commands this session started. */
+  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return [];
     const agents = [...this.children]
       .filter(([, other]) => other.parent === session && other.background && !other.stopped)
       .map(([taskId, other]) => ({ taskId, taskType: "local_agent", description: other.description ?? other.agentType, toolName: "Agent" }));
@@ -2041,7 +2043,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       command: shell.command,
       startedAt: shell.startedAt,
     }));
-    this.publish({ type: "background.tasks.changed", provider: this.provider, threadId: session.threadId, tasks: [...agents, ...shells] });
+    return [...agents, ...shells];
+  };
+
+  /** The full live set the side panel lists: background subagents and background commands. */
+  private publishBackgroundTasks(session: OpenCodeSession): void {
+    this.reconcileServers();
+    this.publish({ type: "background.tasks.changed", provider: this.provider, threadId: session.threadId, tasks: this.backgroundTasks(session.threadId) });
   }
 
   /** A child session's conversation, for the subagent view. */

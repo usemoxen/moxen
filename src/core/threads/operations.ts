@@ -95,7 +95,7 @@ import { reportHeadline, taskNotificationText, type TaskNotification } from "./n
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -480,6 +480,28 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   if (thread && index >= 0) rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
+  // An entry or thread condition can name a thread whose owner died
+  // mid-turn: nothing there will ever settle it, so recover those threads
+  // too instead of holding the waiter forever. Cheap when there is nothing
+  // to do, like recovering the thread itself.
+  const depended = new Set<string>();
+  for (const turn of row.turns) {
+    if (turn.status !== "queued" || !turn.queue) continue;
+    for (const condition of turn.queue.conditions) {
+      if ((condition.type === "entry" || condition.type === "thread") && condition.threadId !== threadId) depended.add(condition.threadId);
+    }
+  }
+  for (const dependency of depended) await recoverOrphanedTurn(ctx, dependency);
+  for (const dependency of depended) {
+    // Recovery settles the dependency after the snapshot above was taken;
+    // refresh its row so admission reads the settled turn, not the orphan.
+    const thread = await ctx.store.readThreadRecord(dependency);
+    if (!thread || thread.deletedAt) continue;
+    const turns = await ctx.store.readTurns(dependency);
+    const at = rows.findIndex((r) => r.thread.id === dependency);
+    if (at >= 0) rows[at] = { thread, turns };
+    else rows.push({ thread, turns });
+  }
   const idle = !openTurn([...row.turns]);
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued") continue;
@@ -1227,19 +1249,71 @@ export interface ContinueOwnThreadRequest {
 
 export interface ContinuedOwnThread extends ContinuedThread {
   readonly adoptedTasks: readonly { readonly taskId: string; readonly title: string }[];
+  /** Present on an idempotent replay naming a different summary: the first handoff was kept. */
+  readonly note?: string;
+}
+
+/** At most this many agent continuations in a row with no user message between them. */
+export const MAX_CONSECUTIVE_AGENT_CONTINUATIONS = 3;
+
+/**
+ * Trailing agent hops ending at this thread: each hop the thread's own
+ * `thread.continued` note marked `byAgent`, stopping at a user-driven hop,
+ * at a thread carrying a real user message (the streak is only consecutive
+ * while the user stays out of it), or at the lineage root. A reservation
+ * whose destination was never created cannot appear here: the walk follows
+ * existing threads through `continuedFrom`.
+ */
+async function countConsecutiveAgentContinuations(store: ThreadStore, caller: StoredThread): Promise<number> {
+  if (await hasRealUserMessage(store, caller)) return 0;
+  let streak = 0;
+  let current: StoredThread = caller;
+  while (current.continuedFrom) {
+    const parentId: string = current.continuedFrom;
+    const childId: string = current.id;
+    const parent: StoredThread | null = await store.readThreadRecord(parentId).catch(() => null);
+    if (!parent) break;
+    const hop = (await store.readActivities(parent.id).catch(() => [] as StoredActivity[])).some(
+      (activity) => activity.kind === "thread.continued" && activity.payload?.threadId === childId && activity.payload?.byAgent === true,
+    );
+    if (!hop) break;
+    streak += 1;
+    current = parent;
+    if (await hasRealUserMessage(store, current)) break;
+  }
+  return streak;
+}
+
+/**
+ * Whether a real user message landed in this thread: role `user` with no
+ * origin (agent, notification and usage messages carry one). The thread's
+ * handoff prompt is skipped: on a continued thread that is what Moxen
+ * wrote to open it, not the user speaking — while a user steer into that
+ * same first turn still counts.
+ */
+async function hasRealUserMessage(store: ThreadStore, thread: StoredThread): Promise<boolean> {
+  const [turns, messages] = await Promise.all([
+    store.readTurns(thread.id).catch(() => [] as StoredTurn[]),
+    store.readMessages(thread.id).catch(() => [] as StoredMessage[]),
+  ]);
+  const firstMessageId = [...turns].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.messageId;
+  return messages.some((message) => message.role === "user" && message.origin == null && message.id !== firstMessageId);
 }
 
 /**
  * An agent continuing its own thread in a new one, through the same
  * `continueThread` the palette action uses: the agent's summary replaces
  * the generated handoff record, running delegated children move to the
- * new thread, and the new thread's first turn waits for the calling turn
- * to end (it shares the source's checkout, so the two must never run in
- * parallel). The caller must then end its turn promptly; once it settles
- * its provider session is closed so nothing wakes the old thread again.
+ * new thread, and the new thread's first turn waits until the source has
+ * nothing running or queued (it shares the source's checkout, so the two
+ * must not start side by side). A later plain send on the source is the
+ * user's own choice, as after the palette action, and is not refused. The
+ * caller must then end its turn promptly; once it settles its provider
+ * session is closed so nothing wakes the old thread again.
  *
  * Refuses what the palette path refuses (no thread, archived, settled),
- * plus what only applies to an agent: research runs, repeats, and anyone
+ * plus what only applies to an agent: a usage hold, research runs,
+ * delegated tasks, more than a few consecutive agent hops, and anyone
  * but the thread's own agent (the tool names no thread, so reaching
  * another thread — a parent included — is not expressible).
  */
@@ -1263,6 +1337,13 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
       details: { threadId: callerId, settledAt: caller.settledAt },
     });
   }
+  if (caller.usagePause) {
+    throw new CliError(
+      "THREAD_CONTINUE_PROTECTED",
+      `Thread ${callerId} is held by usage protection and cannot be continued now. Send a message to end the hold, or wait for its recovery, then continue it in a new thread.`,
+      { exitCode: 4, details: { threadId: callerId, phase: caller.usagePause.phase } },
+    );
+  }
   if (caller.researchRole || isResearchRunActive(caller.researchRun)) {
     throw new CliError(
       "THREAD_CONTINUE_RESEARCH",
@@ -1282,32 +1363,27 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
   if (key) {
     const replay = notes.find((activity) => activity.kind === "thread.continued" && activity.payload?.idempotencyKey === key);
     if (replay && typeof replay.payload?.threadId === "string") {
-      const destinationId = replay.payload.threadId;
-      const destination = await ctx.store.readThreadRecord(destinationId);
-      if (!destination) throw new CliError("THREAD_NOT_FOUND", `No thread exists with id ${destinationId}.`, { exitCode: 3 });
-      return { threadId: destination.id, title: destination.title, scheduledFor: null, adoptedTasks: await adoptedTasksOf(ctx, destination.id) };
+      const destination = await ctx.store.readThreadRecord(replay.payload.threadId);
+      if (destination) {
+        return {
+          threadId: destination.id,
+          title: destination.title,
+          scheduledFor: null,
+          adoptedTasks: await adoptedTasksOf(ctx, destination.id),
+          note: `Already continued as ${destination.id} for this key; the first summary was kept.`,
+        };
+      }
+      // A crash between reservation and creation names a thread that was
+      // never created: fall through and finish the job below.
     }
   }
-  const prior = notes.find((activity) => activity.kind === "thread.continued");
-  if (prior && typeof prior.payload?.threadId === "string") {
+  const streak = await countConsecutiveAgentContinuations(ctx.store, caller);
+  if (streak >= MAX_CONSECUTIVE_AGENT_CONTINUATIONS) {
     throw new CliError(
-      "THREAD_CONTINUE_REPEATED",
-      `Thread ${callerId} was already continued in ${prior.payload.threadId}. An agent continues its thread once; the next hop needs the user.`,
-      { exitCode: 4, details: { threadId: callerId, continuedIn: prior.payload.threadId } },
+      "THREAD_CONTINUE_LIMIT",
+      `Thread ${callerId} was already continued by its agent ${streak} times in a row with no user message since. Ask the user how to proceed (they can continue it in a new thread).`,
+      { exitCode: 4, details: { threadId: callerId, consecutiveAgentContinuations: streak } },
     );
-  }
-  if (caller.continuedFrom) {
-    const parentNotes = await ctx.store.readActivities(caller.continuedFrom).catch(() => []);
-    const born = parentNotes.some(
-      (activity) => activity.kind === "thread.continued" && activity.payload?.threadId === callerId && activity.payload?.byAgent === true,
-    );
-    if (born) {
-      throw new CliError(
-        "THREAD_CONTINUE_REPEATED",
-        `Thread ${callerId} was itself born of an agent's continuation. An agent continues its thread once; the next hop needs the user.`,
-        { exitCode: 4, details: { threadId: callerId, continuedFrom: caller.continuedFrom } },
-      );
-    }
   }
   const running = openTurn(await ctx.store.readTurns(callerId));
   const continued = await continueThread(ctx, {
@@ -1317,7 +1393,14 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
     ...(running
       ? {
           queue: {
-            conditions: [{ type: "entry", threadId: callerId, turnId: running.id }],
+            // The new thread shares the source checkout: it waits until the
+            // source has nothing running or queued, not just until this turn
+            // ends. A later plain send on the source is the user's own
+            // choice, as after the palette action, and is not refused.
+            conditions: [
+              { type: "entry", threadId: callerId, turnId: running.id },
+              { type: "thread", threadId: callerId },
+            ],
             held: false,
             order: Date.now(),
             sequential: false,
@@ -1328,7 +1411,7 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
     byAgent: true,
     ...(key ? { idempotencyKey: key } : {}),
   });
-  if (running) closeContinuedSessionWhenSettled(ctx, callerId);
+  if (running) closeContinuedSessionWhenSettled(ctx, callerId, continued.threadId);
   return { ...continued, adoptedTasks: await adoptedTasksOf(ctx, continued.threadId) };
 }
 
@@ -1343,19 +1426,28 @@ async function adoptedTasksOf(ctx: OperationContext, destinationId: string): Pro
 
 /**
  * Close the continued thread's provider session once its calling turn
- * settles — any terminal state, not only a clean finish. The session is
- * left alone while a turn runs (stopping it would cut the turn off), and a
- * newer running turn keeps it too: only an idle thread is closed, so a
+ * settles — any terminal state, not only a clean finish — watched from the
+ * settle path's own ledger events, not a session subscription. The session
+ * is left alone while a turn runs (stopping it would cut the turn off), and
+ * a newer running turn keeps it too: only an idle thread is closed, checked
+ * again under the thread lock so a turn that starts in between wins, so a
  * background task or late notification can no longer wake the old thread.
- * Best effort throughout: losing the race never fails the continuation.
+ * The watch also ends when the destination starts (the source is idle by
+ * admission then): after that the source is the user's revived thread and
+ * its session is left alone. After a restart there is nothing to close —
+ * sessions live in the process, so no live session means no wake-up, and
+ * orphan recovery owns the ledger. Best effort throughout: losing the race
+ * never fails the continuation.
  */
-function closeContinuedSessionWhenSettled(ctx: OperationContext, sourceId: string): void {
+function closeContinuedSessionWhenSettled(ctx: OperationContext, sourceId: string, destinationId: string): void {
   let done = false;
   let checking = false;
   let again = false;
   const stop = ctx.store.subscribe((event) => {
-    if (event.type !== "backend.thread.changed" || event.threadId !== sourceId) return;
-    if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
+    if (event.type !== "backend.thread.changed") return;
+    if (event.threadId === sourceId) {
+      if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
+    } else if (event.threadId !== destinationId) return;
     void check();
   });
   const check = async (): Promise<void> => {
@@ -1366,17 +1458,21 @@ function closeContinuedSessionWhenSettled(ctx: OperationContext, sourceId: strin
       do {
         again = false;
         if (done) continue;
-        const turns = await ctx.store.readTurns(sourceId).catch(() => []);
-        if (turns.some((turn) => turn.status === "running")) continue;
+        const closed = await ctx.store.withThreadLock(sourceId, async () => {
+          const turns = await ctx.store.readTurns(sourceId).catch(() => []);
+          if (turns.some((turn) => turn.status === "running")) return false;
+          try {
+            const source = await ctx.store.readThreadRecord(sourceId).catch(() => null);
+            const driver = source ? ctx.driverFor(source.modelSelection.instanceId) : null;
+            if (driver?.stopSession) await Effect.runPromise(driver.stopSession(sourceId)).catch(() => undefined);
+          } catch {
+            // Best effort: the continuation stands whether or not the old session could be ended.
+          }
+          return true;
+        }).catch(() => false);
+        if (!closed) continue;
         done = true;
         stop();
-        try {
-          const source = await ctx.store.readThreadRecord(sourceId).catch(() => null);
-          const driver = source ? ctx.driverFor(source.modelSelection.instanceId) : null;
-          if (driver?.stopSession) await Effect.runPromise(driver.stopSession(sourceId)).catch(() => undefined);
-        } catch {
-          // Best effort: the continuation stands whether or not the old session could be ended.
-        }
       } while (again);
     } finally {
       checking = false;

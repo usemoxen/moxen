@@ -1196,6 +1196,26 @@ describe("opencode driver", () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
     });
 
+    it("lists running background tasks through the backgroundTasks getter", async () => {
+      const SHELL = "sh_bg1";
+      const transport = new FakeOpencodeTransport({});
+      const driver = new OpenCodeDriver({ transport, env: { OPENCODE_API_KEY: "k" } });
+      drivers.push(driver);
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: "/repo" }));
+      await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      const server = transport.servers[0]!;
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+      expect(driver.backgroundTasks("nope")).toEqual([]);
+      await server.pushRaw(call("session.tool.input.started", { name: "shell", id: "call_sh" }));
+      await server.pushRaw(call("session.tool.called", { id: "call_sh", input: { command: "sleep 300", background: true } }));
+      await server.pushRaw(call("session.tool.progress", { id: "call_sh", metadata: { shellID: SHELL } }));
+      // The same list the side panel draws: what `endContinuedSession` and
+      // usage protection stop on continue and on hold.
+      expect(driver.backgroundTasks("thread-1")).toMatchObject([{ taskId: SHELL, taskType: "local_bash", command: "sleep 300" }]);
+      await Effect.runPromise(driver.stopBackgroundTask("thread-1", SHELL));
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+    });
+
     it("answers a subagent's own prompts itself: permissions allowed, questions dismissed", async () => {
       const { server, fiber, subagents } = await running({ parents: { ses_late: PARENT, ses_stranger: "ses_other_client" } });
       await server.pushRaw(call("session.tool.input.started", { name: "subagent" }));

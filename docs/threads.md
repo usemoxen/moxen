@@ -829,22 +829,29 @@ telling the agent to end its turn.
   anyway: its long work is compacted in place, and its report — not a
   forked continuation — decides what runs next.
 - The same conditions as the palette action apply: a missing, deleted,
-  archived or settled thread is refused with a clear error. A research run's
-  roles and lead are refused (`THREAD_CONTINUE_RESEARCH`); a delegated task,
-  which may use it, is offered it, while the run's lead and roles are not.
-- An agent continues its thread once: a thread that already has a
-  continuation, or was itself born of an agent's continuation, is refused
-  (`THREAD_CONTINUE_REPEATED`). The next hop needs the user. A retry with the
-  same `idempotencyKey` returns the first continuation.
-- Mid-turn ordering: the new thread's first turn waits for the calling turn
-  to end (an entry condition on it, admitted by the work queue), because the
-  two share a checkout and must never run in parallel. On an idle thread it
-  starts at once. The calling agent must end its turn promptly after the call
-  instead of starting new work.
-- Once the calling turn settles, the old thread's provider session is closed,
-  so a background task or late notification cannot wake it; task notifications
-  already route to the new thread with it. Queued work left on the old thread
-  stays there and runs there.
+  archived or settled thread is refused with a clear error, as is a thread
+  held by usage protection (its recovery runs first). A research run's
+  roles and lead are refused (`THREAD_CONTINUE_RESEARCH`).
+- An agent may continue its thread up to 3 times in a row
+  (`MAX_CONSECUTIVE_AGENT_CONTINUATIONS`); a 4th is refused until the user
+  speaks in the thread, which resets the count. A user's own palette
+  continue never counts. A call retried with the same `idempotencyKey`
+  returns the first continuation with a note, even when the new text
+  differs: the first summary is kept.
+- Mid-turn ordering: the new thread's first turn waits until the source
+  thread has nothing running or queued (an entry condition on the calling
+  turn plus a thread condition on the source, admitted by the work queue),
+  because the two share a checkout. On an idle source it starts at once. A
+  plain user send on the source after the destination has started is the
+  user's own choice, as after the palette action, and is not refused. The
+  calling agent must end its turn promptly instead of starting new work.
+- Once the calling turn settles, the old thread's provider session is
+  closed, so a background task or late notification cannot wake it; task
+  notifications already route to the new thread with it. Queued work left
+  on the old thread stays there and runs there.
+- While it waits, the new thread's entry shows in Work queue, blocked on
+  the old thread, where the user can hold or remove it. There is no CLI
+  surface for this: the palette and `threads continue` stay the user's.
 
 Some providers wake a session on their own — a finished background task,
 a monitor event. That output arrives as a turn like any other and is shown

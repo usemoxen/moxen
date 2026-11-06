@@ -58,7 +58,7 @@ const SHARED_STEPS = [
     "you then get a task notification when it settles again. You can only message your own tasks, and not a research run's roles.",
   "- To check on a long task without disturbing it, ask it a side question with `task_ask`: it answers on a copy of its thread, with no tools, and nothing is added to the task or its turn, when `task_status` is not due and `thread_read` would cost too much context.",
   "- `message_queue` queues or schedules a message on your own thread or on a task you delegated, to run later (after a usage reset, at a time, once another thread finishes); it never steers, shows in the user's Work queue, and `threadId` defaults to your own thread.",
-"- To hand your own thread over when its context fills: `thread_continue` with the handoff summary you wrote and what the new thread should do first. It continues your thread once (a second hop needs the user), moves your running tasks to the new thread, and starts it after your turn ends — so end your turn promptly after calling it. Not for research runs.",
+"- To hand your own thread over when its context fills: `thread_continue` with the handoff summary you wrote and what the new thread should do first. It continues your thread up to 3 times in a row with no user message between them (a repeat is refused: ask the user), moves your running tasks to the new thread, and starts it once your thread has nothing running or queued — so end your turn promptly after calling it. Not for delegated tasks or research runs.",
   "- Your provider's own subagents are for quick same-model side work inside your turn; `delegate` is for another provider or model, " +
     "a specific effort, its own branch, or a thread the user should be able to open and steer.",
   "",

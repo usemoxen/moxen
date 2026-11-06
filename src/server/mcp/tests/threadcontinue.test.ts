@@ -56,7 +56,7 @@ describe("thread_continue: continuing your own thread", () => {
       const threadId = continued.json!.threadId as string;
       expect(threadId).not.toBe(t.orchestrator);
       expect(continued.json).toMatchObject({ title: expect.stringContaining("(continued)") });
-      expect(continued.json!.note as string).toContain("Finish your turn now");
+      expect(continued.json!.next as string).toContain("Finish your turn now");
       // The agent's own text is the handoff; the task moved with it.
       expect(continued.json!.adoptedTasks).toMatchObject([{ taskId }]);
       const prompt = (await (await t.served()).readMessages(threadId)).find((message) => message.role === "user")!.text;
@@ -68,6 +68,9 @@ describe("thread_continue: continuing your own thread", () => {
       const ctx = await t.queueContext();
       await runWorkQueue(ctx);
       expect((await (await t.served()).readTurns(threadId)).map((turn) => turn.status)).toEqual(["queued"]);
+      // While it waits, the new thread shows in Work queue, blocked on the old thread.
+      const waiting = (await t.connection.query({ type: "queue.read" })).entries.find((entry) => entry.threadId === threadId);
+      expect(waiting?.blocked).not.toEqual([]);
 
       // Once the calling turn ends, the new thread starts with that prompt.
       const [running] = await (await t.served()).readTurns(t.orchestrator);

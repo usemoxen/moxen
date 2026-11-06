@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
+import os from "node:os";
 import * as Effect from "effect/Effect";
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
@@ -312,6 +314,55 @@ describe("explicit handoff submissions", () => {
     }, { timeout: 5000 });
     await runWorkQueue(w.ctx, now + 62_000); await settleRuns();
     expect(w.sent.at(-1)?.threadId).toBe(dependent.id);
+  });
+});
+
+/**
+ * An entry or thread condition can name a thread whose owner died mid-turn
+ * (a crashed server, a killed CLI): nothing there will ever settle it, so
+ * admitting only the waiter's own thread would hold the waiter forever.
+ * The admission path recovers the threads its queued entries depend on too.
+ */
+describe("admission recovers depended-on threads", () => {
+  /** A pid that has already exited, on this machine: a dead owner, same host. */
+  async function deadPid(): Promise<number> {
+    const child = spawn(process.execPath, ["-e", "0"]);
+    await new Promise((resolve) => child.once("exit", resolve));
+    return child.pid!;
+  }
+
+  it("orphans the dependency's running turn and admits the waiter", async () => {
+    const w = await world();
+    const dependency = await w.make();
+    const running = await sendTurn(w.store, dependency.id, { prompt: "dependency work" });
+    await w.store.updateTurn(dependency.id, running.turn.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    const waiter = await w.make();
+    await sendTurn(w.store, waiter.id, {
+      prompt: "after the dependency",
+      queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: dependency.id, turnId: running.turn.id }] }),
+    });
+    await runWorkQueue(w.ctx);
+    expect((await w.store.readTurns(waiter.id)).map((turn) => turn.status)).toEqual(["running"]);
+    await settleRuns();
+    expect((await w.store.readTurns(dependency.id)).map((turn) => turn.status)).toEqual(["interrupted"]);
+    expect((await w.store.readTurns(waiter.id)).map((turn) => turn.status)).toEqual(["completed"]);
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([waiter.id]);
+  });
+
+  it("does the same for a thread condition when the dependency goes quiet", async () => {
+    const w = await world();
+    const dependency = await w.make();
+    const running = await sendTurn(w.store, dependency.id, { prompt: "dependency work" });
+    await w.store.updateTurn(dependency.id, running.turn.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    const waiter = await w.make();
+    await sendTurn(w.store, waiter.id, {
+      prompt: "after the quiet thread",
+      queue: parseQueuePolicy({ conditions: [{ type: "thread", threadId: dependency.id }] }),
+    });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(dependency.id)).map((turn) => turn.status)).toEqual(["interrupted"]);
+    expect((await w.store.readTurns(waiter.id))).toEqual([expect.objectContaining({ status: "completed" })]);
   });
 });
 

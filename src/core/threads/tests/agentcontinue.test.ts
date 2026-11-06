@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vitest";
-import { testHarness } from "../../testing/harness.js";
+import { testHarness, type TestHarnessOptions } from "../../testing/harness.js";
 import { settleRuns } from "../../testing/turns.js";
 import { driverKindOfInstance } from "../../types.js";
 import { CliError } from "../../errors.js";
@@ -9,6 +9,7 @@ import {
   beginResearchRun,
   continueOwnThread,
   continueThread,
+  MAX_CONSECUTIVE_AGENT_CONTINUATIONS,
   runWorkQueue,
   type OperationContext,
 } from "../operations.js";
@@ -24,9 +25,9 @@ async function codeOf(run: () => Promise<unknown>): Promise<string> {
   return "<no error>";
 }
 
-async function world() {
+async function world(options: TestHarnessOptions = {}) {
   const sent: { threadId: string; prompt: string }[] = [];
-  const harness = await testHarness({ onSendTurn: (turn) => sent.push(turn) });
+  const harness = await testHarness({ onSendTurn: (turn) => sent.push(turn), ...options });
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = {
     store: harness.store,
@@ -110,22 +111,61 @@ describe("continueOwnThread: what the palette path refuses", () => {
   });
 });
 
-describe("continueOwnThread: one agent continuation per thread", () => {
-  it("continues once, then refuses a second hop and a chained hop", async () => {
+describe("continueOwnThread: consecutive agent continuations", () => {
+  it("allows three in a row, then refuses until the user speaks", async () => {
+    expect(MAX_CONSECUTIVE_AGENT_CONTINUATIONS).toBe(3);
+    const w = await world();
+    let id = (await w.make("solo")).id;
+    await sendTurn(w.store, id, { prompt: "Work" });
+    for (let hop = 1; hop <= MAX_CONSECUTIVE_AGENT_CONTINUATIONS; hop++) {
+      id = (await continueOwnThread(w.ctx, { threadId: id, summary: `Hop ${hop}.` })).threadId;
+      await settleRuns();
+    }
+    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: id, summary: "One too many." }))).toBe("THREAD_CONTINUE_LIMIT");
+
+    // The user speaking in the newest thread resets the count.
+    await sendTurn(w.store, id, { prompt: "Hold on, do it differently", delivery: "queue" });
+    const resumed = await continueOwnThread(w.ctx, { threadId: id, summary: "After the user stepped in." });
+    expect((await w.store.readThreadRecord(resumed.threadId))?.continuedFrom).toBe(id);
+  });
+
+  it("a user's palette continue in the middle never counts", async () => {
+    const w = await world();
+    let id = (await w.make("solo")).id;
+    await sendTurn(w.store, id, { prompt: "Work" });
+    for (let hop = 1; hop <= 2; hop++) {
+      id = (await continueOwnThread(w.ctx, { threadId: id, summary: `Hop ${hop}.` })).threadId;
+      await settleRuns();
+    }
+    // The user takes it over by hand: a fresh streak starts after this hop.
+    id = (await continueThread(w.ctx, { threadId: id })).threadId;
+    await settleRuns();
+    for (let hop = 1; hop <= MAX_CONSECUTIVE_AGENT_CONTINUATIONS; hop++) {
+      id = (await continueOwnThread(w.ctx, { threadId: id, summary: `Again ${hop}.` })).threadId;
+      await settleRuns();
+    }
+    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: id, summary: "One too many." }))).toBe("THREAD_CONTINUE_LIMIT");
+  });
+
+  it("an orphan reservation names no created thread and never trips the rule", async () => {
     const w = await world();
     const source = await w.make("solo");
     await sendTurn(w.store, source.id, { prompt: "Work" });
-    const first = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
-    expect((await w.store.readThreadRecord(first.threadId))?.continuedFrom).toBe(source.id);
-
-    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: source.id, summary: "Again." }))).toBe(
-      "THREAD_CONTINUE_REPEATED",
-    );
-
-    await sendTurn(w.store, first.threadId, { prompt: "Carry on" });
-    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: first.threadId, summary: "Chain." }))).toBe(
-      "THREAD_CONTINUE_REPEATED",
-    );
+    // A crash between reservation and creation leaves a note for a thread
+    // that was never created. A retry must finish the job, not refuse.
+    const orphanId = w.store.newId();
+    await w.store.appendLedger(source.id, "activity", {
+      id: w.store.newId(),
+      threadId: source.id,
+      turnId: null,
+      kind: "thread.continued",
+      summary: "Continued in a crash",
+      payload: { threadId: orphanId, title: "solo (continued)", scheduledFor: null, automatic: false, byAgent: true },
+      createdAt: w.store.nowIso(),
+    });
+    const continued = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
+    expect(continued.threadId).toBe(orphanId);
+    expect(await w.store.readThreadRecord(orphanId)).not.toBeNull();
   });
 
   it("a retry with the same idempotency key returns the first continuation", async () => {
@@ -137,9 +177,41 @@ describe("continueOwnThread: one agent continuation per thread", () => {
     expect(second.threadId).toBe(first.threadId);
     expect(second.adoptedTasks).toEqual(first.adoptedTasks);
     expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(1);
-    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: source.id, summary: "Other.", idempotencyKey: "k2" }))).toBe(
-      "THREAD_CONTINUE_REPEATED",
+    // A different key on the same already-continued thread rejoins it
+    // instead of forking a second destination (streak counts chains, and
+    // this thread starts none).
+    const rejoined = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Other.", idempotencyKey: "k2" });
+    expect(rejoined.threadId).toBe(first.threadId);
+  });
+
+  it("a retry with different text keeps the first summary and says so", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    await sendTurn(w.store, source.id, { prompt: "Work" });
+    const first = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done.", idempotencyKey: "k1" });
+    const replayed = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Completely rewritten.", idempotencyKey: "k1" });
+    expect(replayed.threadId).toBe(first.threadId);
+    expect(replayed.note).toContain("first summary was kept");
+    const prompt = (await w.store.readMessages(first.threadId)).find((message) => message.role === "user")!.text;
+    expect(prompt).toContain("Half done.");
+    expect(prompt).not.toContain("Completely rewritten.");
+  });
+
+  it("refuses a thread held by usage protection, and leaves the palette path alone", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    await sendTurn(w.store, source.id, { prompt: "Work" });
+    await w.store.withThreadLock(source.id, async () => {
+      const current = await w.store.readThreadRecord(source.id);
+      if (current) await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", phase: "waiting", resetsAt: null, order: 1, handoff: false } });
+    });
+    expect(await codeOf(() => continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." }))).toBe(
+      "THREAD_CONTINUE_PROTECTED",
     );
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+    // The user's own action is unchanged: it still continues a held thread.
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
   });
 });
 
@@ -225,6 +297,44 @@ describe("continueOwnThread: mid-turn ordering", () => {
     expect(w.sent[0]!.prompt).toContain("Do the rest.");
   });
 
+  it("waits while the source still has queued work, even after the calling turn ends", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Do the long task" })).turn;
+    await sendTurn(w.store, source.id, { prompt: "Queued behind", delivery: "queue" });
+    const continued = await continueOwnThread(w.ctx, {
+      threadId: source.id,
+      summary: "Goal: the long task. Done: half. Next: the rest.",
+      firstMessage: "Do the rest.",
+    });
+    await completeTurn(w.store, source.id, running.id, { text: "Wrapping up." });
+    // The queued turn was promoted: the source is still busy, so the new thread waits.
+    expect(openTurn(await w.store.readTurns(source.id))).not.toBeNull();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(continued.threadId)).map((turn) => turn.status)).toEqual(["queued"]);
+    expect(w.sent).toEqual([]);
+
+    await interruptTurn(w.store, source.id);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(continued.threadId)).map((turn) => turn.status)).toEqual(["completed"]);
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([continued.threadId]);
+  });
+
+  it("lets a later plain send on the source run alongside the started destination", async () => {
+    const w = await world({ leaveTurnsRunning: true });
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Do the long task" })).turn;
+    const continued = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
+    await interruptTurn(w.store, source.id, running.id);
+    await runWorkQueue(w.ctx);
+    expect((await w.store.readTurns(continued.threadId)).map((turn) => turn.status)).toEqual(["running"]);
+    // The user's own choice: the old thread resumes and runs in parallel.
+    const followUp = await sendTurn(w.store, source.id, { prompt: "One more thing" });
+    expect(followUp.turn.status).toBe("running");
+    expect(openTurn(await w.store.readTurns(continued.threadId))).not.toBeNull();
+  });
   it("starts at once when the source is idle", async () => {
     const w = await world();
     const source = await w.make("solo");
@@ -283,6 +393,23 @@ describe("continueOwnThread: the old thread stays quiet", () => {
     expect(calls.stopped).toEqual([]);
 
     await interruptTurn(w.store, source.id);
+    await vi.waitFor(() => expect(calls.stopped).toEqual([source.id]), { timeout: 8_000 });
+  });
+
+  it("orders the close before a turn that starts right as the old one settles", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const calls = watch(w);
+
+    await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
+    expect(calls.stopped).toEqual([]);
+
+    // The close re-checks under the thread lock: a turn starting in the gap
+    // queues behind the check instead of racing it, so the session still closes.
+    await completeTurn(w.store, source.id, running.id, { text: "Wrapping up." });
+    const followUp = await sendTurn(w.store, source.id, { prompt: "Right after" });
+    expect(followUp.turn.status).toBe("running");
     await vi.waitFor(() => expect(calls.stopped).toEqual([source.id]), { timeout: 8_000 });
   });
 });
