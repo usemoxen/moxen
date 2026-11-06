@@ -2407,3 +2407,98 @@ describe("DirectConnection close", () => {
     }
   });
 });
+
+
+describe("DirectConnection store ownership", () => {
+  const lockFile = (root: string): string => path.join(root, "server.lock");
+
+  it("lets one server own a store and refuses a second", async () => {
+    const harness = await testHarness();
+    const first = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const second = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await first.claimStore();
+      const refused = await second.claimStore().catch((cause: unknown) => cause);
+      expect(refused).toBeInstanceOf(CliError);
+      expect(refused).toMatchObject({ code: "STORE_OWNED" });
+      expect((refused as CliError).message).toContain(`process ${process.pid}`);
+      expect((refused as CliError).message).toContain("Stop that server first");
+      // Releasing lets the next server in.
+      await first.close();
+      await second.claimStore();
+      await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    } finally {
+      await second.close();
+      await first.close();
+    }
+  });
+
+  it("refuses a live foreign owner and takes over after a crash", async () => {
+    const harness = await testHarness();
+    const foreignPid = process.ppid ?? 1;
+    await writeFile(
+      lockFile(harness.root),
+      JSON.stringify({ build: "release:9.9.9:macos-arm64", display: "release 9.9.9 (macos-arm64)", pid: foreignPid, startedAt: new Date().toISOString() }),
+    );
+    const blocked = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      const refused = await blocked.claimStore().catch((cause: unknown) => cause);
+      expect(refused).toBeInstanceOf(CliError);
+      expect(refused).toMatchObject({ code: "STORE_OWNED" });
+      expect((refused as CliError).message).toContain("release 9.9.9 (macos-arm64)");
+    } finally {
+      await blocked.close();
+    }
+    // A lock from a dead process is taken over, not refused.
+    const dead = spawnSync(process.execPath, ["--version"]).pid ?? 2 ** 31 - 1;
+    await writeFile(
+      lockFile(harness.root),
+      JSON.stringify({ build: "release:9.9.9:macos-arm64", display: "release 9.9.9 (macos-arm64)", pid: dead, startedAt: new Date().toISOString() }),
+    );
+    const next = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await next.claimStore();
+      await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    } finally {
+      await next.close();
+    }
+  });
+
+  it("releases the store on close", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    await connection.claimStore();
+    await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    await connection.close();
+    await expect(readFile(lockFile(harness.root), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("DirectConnection update broadcast", () => {
+  it("tells every shell subscriber the server needs a restart after an update", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => harness.config,
+      updateApp: async () => ({ action: "updated", version: "0.2.0", from: "0.1.0", previous: "0.1.0", folder: "/f", current: "/c", warnings: [] }),
+    });
+    try {
+      expect(connection.serverRestartRequired).toBe(false);
+      const frames: Array<{ kind: string; event?: { type: string; payload?: unknown } }> = [];
+      const stop = connection.subscribeShell({}, (frame) => frames.push(frame as never), () => undefined);
+      try {
+        await connection.dispatch({ type: "app.update.apply", commandId: "update-1" });
+        expect(connection.serverRestartRequired).toBe(true);
+        expect(frames).toContainEqual({
+          kind: "event",
+          event: { type: "app.server-restart-required", payload: { version: "0.2.0", from: "0.1.0" } },
+        });
+      } finally {
+        stop();
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+});

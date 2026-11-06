@@ -4,6 +4,7 @@ import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CliError } from "../../../core/errors.js";
+import { buildIdentity } from "../../../core/build.js";
 import type { ClientApi } from "../../api.js";
 import { RemoteConnection, type LinkState } from "../remote.js";
 import { handleSocket } from "../serve.js";
@@ -43,7 +44,10 @@ async function fakeServer(): Promise<{ endpoint: string; muted: boolean; connect
       for (const line of reader.push(chunk)) {
         if (state.muted) continue;
         const message = JSON.parse(line) as { id: number; method: string };
-        if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+        if (message.method === "hello") socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
         else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
         else if (message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
         else if (message.method === "subscribeShell") {
@@ -135,7 +139,10 @@ describe("heartbeat", () => {
             for (const line of reader.push(chunk)) {
               if (muted) continue;
               const message = JSON.parse(line) as { id: number; method: string };
-              if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+              if (message.method === "hello") socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
               else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
               else if (message.method === "query" || message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
             }
@@ -225,7 +232,10 @@ describe("heartbeat", () => {
           const message = JSON.parse(line) as { id: number; method: string };
           if (message.method !== "hello") continue;
           if (holdHellos) held = { socket, id: message.id };
-          else socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+          else socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
         }
       });
     });
@@ -246,7 +256,10 @@ describe("heartbeat", () => {
     await waitFor("the reconnect's held hello", () => held !== null);
 
     await client.close();
-    held!.socket.write(encode({ id: held!.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+    held!.socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: held!.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
     await waitFor("the held hello to settle", () => sockets.size === 0 || client.linkState.status === "connected");
     expect(client.linkState.status).not.toBe("connected");
     expect(sockets.size).toBe(0);
@@ -277,14 +290,26 @@ describe("server side", () => {
 
   it("closes a client that pinged and then went silent", async () => {
     const { client, closed } = await socketPair(150);
-    client.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }));
+    client.write(
+      encode({
+        id: 1,
+        method: "hello",
+        params: { protocol: PROTOCOL_VERSION, build: buildIdentity().id, buildDisplay: buildIdentity().display },
+      }),
+    );
     client.write(encode({ id: 2, method: "ping" }));
     await waitFor("the server to drop it", closed, 2_000);
   });
 
   it("never times out a client that does not ping", async () => {
     const { client, closed } = await socketPair(150);
-    client.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }));
+    client.write(
+      encode({
+        id: 1,
+        method: "hello",
+        params: { protocol: PROTOCOL_VERSION, build: buildIdentity().id, buildDisplay: buildIdentity().display },
+      }),
+    );
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(closed()).toBe(false);
   });

@@ -8,6 +8,7 @@
  * file detached.
  */
 import { defaultConfigPath, migrateLegacyConfig } from "../core/config.js";
+import { buildIdentity } from "../core/build.js";
 import type { CliConfig } from "../core/types.js";
 import { DirectConnection } from "./connection.js";
 import { defaultEndpoint } from "./transport/endpoint.js";
@@ -24,14 +25,28 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
   // The server owns the config file, so it is the one to bring an old one over.
   if (!options.config) migrateLegacyConfig();
   const connection = new DirectConnection(options.config ? { config: options.config } : {});
+  // The greeting is read per hello: an update lands while the server runs,
+  // and clients connecting after it must hear that a restart is due.
+  const own = buildIdentity();
+  const greeting = (): { configPath?: string; build: string; buildDisplay: string; restartRequired: boolean } => ({
+    // Re-read per operation from this file, unless the caller fixed the config itself.
+    ...(options.config ? {} : { configPath: defaultConfigPath() }),
+    build: own.id,
+    buildDisplay: own.display,
+    restartRequired: connection.serverRestartRequired,
+  });
+  let handle: ServerHandle;
   try {
-    const handle = await serve({
+    // The store has one owner: a second server on it is refused before it
+    // listens, not on the first client request. A lock from a crashed
+    // server is taken over.
+    await connection.claimStore();
+    handle = await serve({
       endpoint: options.endpoint ?? defaultEndpoint(),
       api: connection,
       // Stops every driver: provider processes end with the server.
       onClose: () => connection.close(),
-      // Re-read per operation from this file, unless the caller fixed the config itself.
-      ...(options.config ? {} : { greeting: { configPath: defaultConfigPath() } }),
+      greeting,
     });
     // The server owns every session, so it runs scheduled turns too — with
     // or without a client attached.
