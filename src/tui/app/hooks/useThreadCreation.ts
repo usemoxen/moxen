@@ -14,6 +14,33 @@ import { threadTitle } from "../utils.js";
 export const NO_PROJECT = "__no-project__";
 
 /**
+ * How long the new thread's local research opt-in lives: long enough for the
+ * thread to open and its own opt-in to take over, but bounded, so a start
+ * that never settles cannot hold a responder forever — a later send would
+ * find a listener where nobody listens. Releasing twice is a no-op, like the
+ * subscription's own unsubscribe.
+ */
+export const NEW_THREAD_OPT_IN_MS = 10_000;
+
+/**
+ * Releases `stop` on its own after `timeoutMs` unless released earlier, at
+ * most once. The scheduled release is dropped when the early one wins.
+ */
+export function autoRelease(stop: () => void, timeoutMs: number): () => void {
+  let done = false;
+  const timer = setTimeout(() => {
+    done = true;
+    stop();
+  }, timeoutMs);
+  return () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    stop();
+  };
+}
+
+/**
  * New-thread draft flow: handlers for starting a draft, picking or creating
  * its target project, and sending it as `thread.create` + `thread.turn.start`.
  * The `creating`/`creatingModelSelection`/`creatingRuntimeMode`/
@@ -39,6 +66,12 @@ export function useThreadCreation(params: {
   creatingInteractionMode: InteractionMode;
   /** The `/research` or `/orchestrate` armed for the first prompt, cleared by taking it. */
   takeOneOff: () => InteractionMode | undefined;
+  /** Puts an unsent prompt back after Enter consumed the draft (see `useComposer`). */
+  restoreUnsentDraft: (id: string, snapshot: string) => void;
+  /** Puts images that went out with a failed send back (see `useComposer`). */
+  restoreUnsentAttachments: (id: string, snapshot: readonly ImageAttachmentUpload[]) => void;
+  /** The server parked the run-size question (`researchSizePending`): say the next send asks for it. */
+  notifyResearchSizePending: () => void;
   resetDraft: (id: string) => void;
   writePending: (id: string, next: ImageAttachmentUpload[]) => void;
   setCreating: (creating: boolean) => void;
@@ -65,6 +98,9 @@ export function useThreadCreation(params: {
     creatingRuntimeMode,
     creatingInteractionMode,
     takeOneOff,
+    restoreUnsentDraft,
+    restoreUnsentAttachments,
+    notifyResearchSizePending,
     resetDraft,
     writePending,
     setCreating,
@@ -102,10 +138,14 @@ export function useThreadCreation(params: {
       setError(t("thread.pickProject"));
       return;
     }
+    // Enter consumes the draft at once (single-flight, like `send`); every
+    // failure below puts it back.
+    resetDraft(draftKey);
     const parsed = extractMentions(trimmed);
     void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), prepareImage).then((built) => {
       if (built.error !== null) {
         setError(built.error.slice(0, 120));
+        restoreUnsentDraft(draftKey, trimmed);
         return;
       }
       const threadId = crypto.randomUUID();
@@ -130,10 +170,11 @@ export function useThreadCreation(params: {
         ...(scratch ? {} : { branch: source?.branch ?? null }),
       } as const;
       const oneOff = takeOneOff();
+      const sentAttachments = [...pending, ...built.attachments];
       const start = {
         type: "thread.turn.start",
         threadId,
-        message: { text: parsed.text, attachments: [...pending, ...built.attachments] },
+        message: { text: parsed.text, attachments: sentAttachments },
         ...schedule,
         ...(modelSelection === undefined ? {} : { modelSelection }),
         ...(oneOff === undefined ? {} : { interactionMode: oneOff }),
@@ -141,12 +182,21 @@ export function useThreadCreation(params: {
       void (async () => {
         try {
           await client.dispatch(create);
-          await client.dispatch(start);
         } catch (cause: unknown) {
           setError(String(cause).slice(0, 120));
+          restoreUnsentDraft(draftKey, trimmed);
           return;
         }
-        resetDraft(draftKey);
+        // Opt in before the first prompt: the server only asks a listening
+        // client, so without this the run-size question would park and the
+        // modal would never show on a new thread's first prompt. The thread's
+        // own opt-in takes over once it opens; the local one is bounded so a
+        // start that never settles cannot hold a responder forever.
+        const stopListening = client.subscribeShell({ researchProposals: [threadId] }, () => {}, () => {});
+        const releaseOptIn = autoRelease(stopListening, NEW_THREAD_OPT_IN_MS);
+        const started = client.dispatch(start);
+        // Open the thread at once so a parked run-size question surfaces: the
+        // start may wait for its answer before it settles.
         writePending(draftKey, []);
         setCreating(false);
         setCreatingModelSelection(null);
@@ -154,6 +204,18 @@ export function useThreadCreation(params: {
         setCreatingProjectId(null);
         setFocus("chat");
         setOpenThreadId(threadId);
+        try {
+          const result = await started;
+          if (result.researchSizePending === true) notifyResearchSizePending();
+        } catch (cause: unknown) {
+          setError(String(cause).slice(0, 120));
+          // The composer now reads the new thread's key: put the prompt and
+          // its images back there, not under the old draft.
+          restoreUnsentDraft(threadId, trimmed);
+          restoreUnsentAttachments(threadId, sentAttachments);
+        } finally {
+          releaseOptIn();
+        }
       })();
     });
   };

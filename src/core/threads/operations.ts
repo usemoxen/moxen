@@ -1160,6 +1160,15 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
       }
     });
   }
+  // An unclaimed run-size question moves with the thread: the continuation
+  // has not been offered one either, so its first real prompt still asks.
+  if (source.researchPicker === true) {
+    const targetId = existing ? existing.id : created.id;
+    await store.withThreadLock(targetId, async () => {
+      const current = await store.readThreadRecord(targetId);
+      if (current && current.researchPicker !== true) await store.writeThreadRecord({ ...current, researchPicker: true });
+    });
+  }
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
   const adopted = await adoptRunningTasks(store, source.id, created.id);
