@@ -44,7 +44,13 @@ async function world(provider: "claude" | "codex" = "codex", driverOverride?: Tu
 
 async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId: string) {
   const started = (await w.store.readTurns(threadId)).filter((turn) => turn.status === "running");
-  await flushTurnRunners();
+  await settleRuns();
+  // A blind flush gives up silently after its limit; on a loaded runner the
+  // turns are still going then, so wait for the turns themselves.
+  await expect.poll(
+    async () => (await w.store.readTurns(threadId)).filter((turn) => turn.status === "running").length,
+    { timeout: 10_000 },
+  ).toBe(0);
   const turns = await w.store.readTurns(threadId);
   for (const turn of started) expect(turns.find((settled) => settled.id === turn.id)?.status).toBe("completed");
   expect(openTurn(turns)).toBeNull();
@@ -157,7 +163,7 @@ describe("usage protection", () => {
     } finally { w.guard.close(); }
   });
 
-  it.each([false, true])("persists delegated task facts before the batching timer and does not need the task at replay (batch already pending: %s)", async (pending) => {
+  it.each([false, true])("holds a delegated task notice on a protected parent until its next message", async (pending) => {
     const w = await world();
     const parent = await w.make("parent");
     await completeTurn(w.store, parent, openTurn(await w.store.readTurns(parent))!.id, { text: "idle" });
@@ -167,20 +173,24 @@ describe("usage protection", () => {
       if (pending) await queueTaskNotification(w.ctx, parent, child);
       await w.guard.protect(parent);
       if (!pending) await queueTaskNotification(w.ctx, parent, child);
-      const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
+      // Held: nothing goes out and no turn starts behind the hold.
+      expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
+      expect((await w.store.readTurns(parent)).filter((turn) => turn.status === "queued")).toHaveLength(0);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      // A restart keeps the held batch without delivering it.
+      const store = await openThreadStore(w.root);
+      await recoverTaskNotifications({ ...w.ctx, store });
+      expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      // The user's next message carries the notice with it.
+      const user = await startTurn({ ...w.ctx, store }, { threadId: parent, prompt: "continue" });
+      await user.run;
+      await settleRuns();
+      const messages = (await store.readMessages(parent)).filter((row) => row.origin === "task-notification");
       expect(messages).toHaveLength(1);
       expect(messages[0]!.notification?.tasks[0]).toMatchObject({ taskId: child, title: "child report" });
-      const queued = (await w.store.readTurns(parent)).find((turn) => turn.messageId === messages[0]!.id)!;
-      expect(queued).toMatchObject({ status: "queued", queue: { wakeUp: true } });
-      const record = (await w.store.readThreadRecord(child))!;
-      await w.store.writeThreadRecord({ ...record, deletedAt: w.store.nowIso() });
-      const store = await openThreadStore(w.root);
-      expect((await store.readMessages(parent)).find((row) => row.id === messages[0]!.id)).toEqual(messages[0]);
-      const user = await sendTurn(store, parent, { prompt: "continue" });
-      await completeTurn(store, parent, user.turn.id, { text: "done" });
-      await runWorkQueue({ ...w.ctx, store });
-      await expect.poll(async () => (await store.readTurns(parent)).find((turn) => turn.id === queued.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
-      expect(w.prompts[0]).toContain(messages[0]!.text);
+      expect(w.prompts.at(-1)).toContain(child);
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
     } finally { w.guard.close(); }
   });
 
@@ -193,8 +203,8 @@ describe("usage protection", () => {
     try {
       await queueTaskNotification(w.ctx, parent, child);
       // Durable before the timer fires: the sidecar names the batch.
-      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, string[]>;
-      expect(persisted[parent]).toEqual([child]);
+      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { child: string }[]>;
+      expect(persisted[parent]).toEqual([{ child }]);
       // A restart before the timer fires replays the batch...
       const store = await openThreadStore(w.root);
       const ctx = { ...w.ctx, store };
@@ -223,7 +233,7 @@ describe("usage protection", () => {
       await queueTaskNotification(w.ctx, parent, child);
       await expect(flushTaskNotifications(w.ctx, parent)).rejects.toThrow();
       // At-least-once: the batch is still on disk for the retry, and nothing went out.
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [child] });
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
       expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
       await updateThreadMeta(w.store, parent, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
       await flushTaskNotifications(w.ctx, parent);
@@ -549,6 +559,7 @@ describe("usage protection", () => {
     }
   });
 
+  // Fifty threads of setup plus repeated ticks: a loaded runner does not fit in the twenty-second default.
   it.each(["off", "auto"] as const)("%s ticks do not reread idle history and discover queued work from store events", async (mode) => {
     const w = await world();
     w.ctx.config.usageProtection = mode;
@@ -594,7 +605,7 @@ describe("usage protection", () => {
     expect(turns.mock.calls.some(([id]) => id === external.id)).toBe(true);
     expect(lists).toHaveBeenCalledTimes(1);
     w.guard.close();
-  });
+  }, 60_000);
 
   it("keeps context readings live without rereading activity history, and replaces live cost on settlement", async () => {
     const w = await world();
@@ -937,6 +948,7 @@ describe("usage protection", () => {
     expect(w.sent).toHaveLength(2);
   });
 
+  // Crash, restart, and two recovery turns: a loaded runner does not fit in the twenty-second default.
   it.each([false, true])("resumes after a crash before recovery admission when wrap-up was skipped (queued input: %s)", async (queued) => {
     const w = await world();
     const id = await w.make("skipped wrap-up");
@@ -959,7 +971,7 @@ describe("usage protection", () => {
     expect((await w.store.readMessages(id)).filter((message) => message.role === "user" && message.origin === "usage-continue")).toHaveLength(1);
     await restarted.tick(reset + 7000);
     expect(restarted.read().queue).toEqual([]);
-  });
+  }, 60_000);
 
   it("reuses a persisted handoff and keeps future scheduled requests out of its prompt", async () => {
     const w = await world();

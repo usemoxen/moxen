@@ -31,6 +31,16 @@ export function linkNoticeText(link: Exclude<LinkState, { status: "connected" }>
         return { title, tone: "danger", detail: t("link.its_key_changed_since_3aae") };
       case "PROTOCOL_MISMATCH":
         return { title, tone: "danger", detail: t("link.it_runs_another_moxen_9b67") };
+      case "BUILD_MISMATCH":
+        return {
+          title,
+          tone: "danger",
+          detail: name === null ? t("link.it_runs_another_build_8f2c") : t("link.restart_that_server_4d1e"),
+        };
+      case "SERVER_DISCONNECTED":
+        // Nobody waits on the link, so this client stopped dialling: the
+        // next command tries again, and its own notice says if it lands.
+        return { title, tone: "warn", detail: t("link.stopped", { next: t("link.next_command_tries_again_9c4a") }) };
       default:
         return { title, tone: "danger", detail: t("link.it_refused_this_connection_35f8") };
     }

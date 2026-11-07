@@ -19,6 +19,11 @@
  * (`MOXEN_CONFIG`, which `--config` sets) has it passed to a server it
  * starts, and refuses a running server on another file rather than
  * quietly using that one.
+ *
+ * A client that finds a running server from another build refuses it too —
+ * and never starts a new server over it, which would kill the running
+ * work. Stopping that server is the person's call (`moxen server stop`
+ * works against any build), then the next command starts one from this build.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -75,7 +80,16 @@ export async function openClient(options: OpenClientOptions = {}): Promise<Clien
   }
   const endpoint = options.endpoint ?? defaultEndpoint();
   if (!(await probe(endpoint))) await startDaemon(endpoint);
-  const connection = await RemoteConnection.connect(endpoint);
+  // A mismatched server is read, not replaced: starting a new one over it
+  // would kill whatever it is running. The hello names both builds, and
+  // stopping it (`moxen server stop` works against any build) is the
+  // person's call — the next command then starts one from this build.
+  const connection = await RemoteConnection.connect(endpoint, { allowBuildMismatch: true });
+  if (connection.buildMismatch !== null) {
+    const mismatch = connection.buildMismatch;
+    await connection.close();
+    throw mismatch;
+  }
   const wanted = appEnv("CONFIG") ? defaultConfigPath() : null;
   // A server too old to say which file it runs on is refused too: going
   // ahead would read and write a config nobody asked for.

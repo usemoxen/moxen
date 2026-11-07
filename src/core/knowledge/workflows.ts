@@ -61,7 +61,7 @@ harness profile remove <id> removes the configuration. Existing thread history r
   {
     id: "mcp", title: "Connect and route MCP servers",
     sections: [
-      { id: "add", title: "Add a program or HTTP MCP server", aliases: ["add tools", "Exa", "Brave", "GitHub MCP", "stdio", "HTTP"], text: `In Settings → MCP servers, add a preset or a custom connection and test it. A program connection has command plus an args array; HTTP has type http and url. Use the generated mcpServers field reference for the complete shape.
+      { id: "add", title: "Add a program or HTTP MCP server", aliases: ["add tools", "Exa", "Brave", "stdio", "HTTP"], text: `In Settings → MCP servers, add a preset or a custom connection and test it. A program connection has command plus an args array; HTTP has type http and url. Use the generated mcpServers field reference for the complete shape.
 For a non-secret HTTP entry: moxen config set 'mcpServers[docs]' '{"type":"http","url":"https://docs.example/mcp"}'
 For a non-secret program entry: moxen config set 'mcpServers[example]' '{"command":"npx","args":["-y","<package>"]}'
 Verify the actual package and arguments with its official documentation before installing or launching it. Examples are shapes, not recommendations to install a named package.

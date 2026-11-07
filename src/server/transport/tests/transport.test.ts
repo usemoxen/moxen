@@ -1,9 +1,11 @@
 import net from "node:net";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { defaultConfigPath } from "../../../core/config.js";
+import { buildIdOf, buildIdentity } from "../../../core/build.js";
 import { CliError } from "../../../core/errors.js";
 import { testHarness, type TestHarness } from "../../../core/testing/harness.js";
 import type { ClientApi, ShellFrame } from "../../api.js";
@@ -141,7 +143,7 @@ describe("transport", () => {
     const socket = net.connect(handle.endpoint);
     socket.setEncoding("utf8");
     await new Promise((resolve) => socket.once("connect", resolve));
-    socket.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } } as never));
+    socket.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: buildIdentity().id, buildDisplay: buildIdentity().display } } as never));
     socket.write(encode({ id: 2, method: "query", params: { type: "projects.list" } } as never));
     await enteredQuery;
     socket.destroy();
@@ -239,5 +241,166 @@ describe("transport", () => {
     await remote.shutdownServer();
     await remote.close();
     await waitFor("the server to stop", async () => !(await probe(endpoint)));
+  }, 30_000);
+});
+
+describe("build identity", () => {
+  const otherBuild = () => buildIdOf({ kind: "source", version: buildIdentity().version, revision: "f".repeat(40) });
+
+  it("greets with the server's build", async () => {
+    const harness = await testHarness();
+    const handle = await served(harness);
+    const client = await connected(handle.endpoint);
+    const own = buildIdentity();
+    expect(client.helloResult).toMatchObject({ build: own.id, buildDisplay: own.display });
+  });
+
+  it("greets a local hello from another build only to refuse it, naming both builds", async () => {
+    const harness = await testHarness();
+    const handle = await served(harness);
+    const own = buildIdentity();
+    // Without a build (an older client) the hello is still greeted — with
+    // the server's build — so stopping the old server keeps working; the
+    // client itself refuses on the comparison.
+    const [missing] = await raw(handle.endpoint, [{ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }]);
+    expect(missing).toMatchObject({ id: 1, result: { build: own.id, buildDisplay: own.display } });
+    // From another build: greeted, then every request but `shutdown` is
+    // refused with the mismatch, naming both builds and what to do next.
+    const other = otherBuild();
+    const [greeted, refused, stopped] = await raw(handle.endpoint, [
+      { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: other.id, buildDisplay: other.display } },
+      { id: 2, method: "query", params: { type: "projects.list" } },
+      { id: 3, method: "shutdown" },
+    ]);
+    expect(greeted).toMatchObject({ id: 1, result: { build: own.id } });
+    expect(refused).toMatchObject({ id: 2, error: { code: "BUILD_MISMATCH" } });
+    const message = ((refused as Record<string, unknown>).error as { message: string }).message;
+    expect(message).toContain(own.display);
+    expect(message).toContain(other.display);
+    expect(message).toContain("moxen server stop");
+    // ...except stopping it, which is how the person fixes it.
+    expect(stopped).toMatchObject({ id: 3, result: null });
+    await waitFor("the server to stop", async () => !(await probe(handle.endpoint)));
+  });
+
+  it("a new client refuses an old server that reports no build", async () => {
+    const endpoint = testEndpoint();
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      const reader = new LineReader();
+      socket.on("data", (chunk: string) => {
+        for (const line of reader.push(chunk)) {
+          const message = JSON.parse(line) as { id: number; method: string };
+          if (message.method === "hello") {
+            socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+          }
+        }
+      });
+      socket.on("error", () => undefined);
+    });
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+    teardown.push(async () => {
+      await new Promise((resolve) => server.close(resolve));
+    });
+    const error = await RemoteConnection.connect(endpoint, { reconnect: false }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CliError);
+    expect(error).toMatchObject({ code: "BUILD_MISMATCH" });
+    expect((error as CliError).message).toContain(buildIdentity().display);
+  });
+
+  it("reconnects recheck the build and stop on a mismatch", async () => {
+    const harness = await testHarness();
+    const endpoint = testEndpoint();
+    const first = await served(harness, endpoint);
+    const client = await connected(endpoint);
+    const failures: unknown[] = [];
+    const items: unknown[] = [];
+    client.subscribeShell(
+      {},
+      (item) => items.push(item),
+      (cause) => failures.push(cause),
+    );
+    // Let the subscription establish: closing mid-ack would fail its own
+    // resubscribe with SERVER_DISCONNECTED, which is not what this pins.
+    await waitFor("the subscription", () => items.length > 0);
+    await first.close();
+
+    const other = otherBuild();
+    const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const second = await serve({
+      endpoint,
+      api,
+      onClose: () => api.close(),
+      greeting: { configPath: defaultConfigPath(), build: other.id, buildDisplay: other.display },
+    });
+    teardown.push(() => second.close());
+
+    await waitFor("a failed link", () => client.linkState.status === "failed");
+    expect(client.linkState).toMatchObject({ status: "failed", code: "BUILD_MISMATCH" });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "BUILD_MISMATCH" });
+  });
+
+  it("openClient refuses a running server from another build without stopping it", async () => {
+    const harness = await testHarness();
+    const endpoint = testEndpoint();
+    const other = otherBuild();
+    const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const handle = await serve({
+      endpoint,
+      api,
+      onClose: () => api.close(),
+      greeting: { configPath: defaultConfigPath(), build: other.id, buildDisplay: other.display },
+    });
+    teardown.push(() => handle.close());
+    const error = await openClient({ endpoint }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CliError);
+    expect(error).toMatchObject({ code: "BUILD_MISMATCH" });
+    expect((error as CliError).message).toContain(other.display);
+    // The running server is left alone: stopping it is the person's call.
+    expect(await probe(endpoint)).toBe(true);
+  });
+});
+
+describe("store ownership across processes", () => {
+  it("refuses a second server on one store, and takes over once it stops", async () => {
+    // A real server process, owning the harness store from another pid.
+    const harness = await testHarness();
+    const endpoint = testEndpoint();
+    const client = await openClient({ mode: "daemon", endpoint });
+    const remote = client as RemoteConnection;
+    try {
+      expect(remote.helloResult?.pid).not.toBe(process.pid);
+      const lock = JSON.parse(await readFile(path.join(harness.root, "server.lock"), "utf8")) as { pid: number };
+      expect(lock.pid).toBe(remote.helloResult?.pid);
+      // The same store from this process is refused while that server lives.
+      const api = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+      try {
+        const refused = await api.claimStore().catch((cause: unknown) => cause);
+        expect(refused).toBeInstanceOf(CliError);
+        expect(refused).toMatchObject({ code: "STORE_OWNED" });
+        expect((refused as CliError).message).toContain(`process ${remote.helloResult?.pid}`);
+      } finally {
+        await api.close();
+      }
+      await remote.shutdownServer();
+      await remote.close();
+      await waitFor("the server to stop", async () => !(await probe(endpoint)));
+      // The shutdown reply goes out before the server releases its lock, so
+      // the lock may briefly outlive the socket: wait for the takeover.
+      const next = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+      try {
+        await waitFor("the store lock to release", async () =>
+          next
+            .claimStore()
+            .then(() => true)
+            .catch(() => false),
+        );
+      } finally {
+        await next.close();
+      }
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   }, 30_000);
 });

@@ -2,6 +2,7 @@ import type { BoxRenderable } from "@opentui/core";
 import { createContext, useContext, useEffect, useRef } from "react";
 
 import { useHover } from "../../hooks/useHover.js";
+import { loadDisplay, toDisplayOutcome } from "../../model/imagedisplay.js";
 import { imageFromDataUrl, type LoadedImage } from "../../model/imagethumb.js";
 import { formatBytes } from "../../model/message.js";
 import { COLOR } from "../../theme.js";
@@ -78,8 +79,17 @@ export function AttachmentRow({
     const node = ref.current;
     if (node === null || reader === null || attachmentId === null) return;
     const anchor = { x: node.screenX, y: node.screenY, width: node.width, height: node.height };
-    void loadImage(reader, attachmentId).then((image) => {
-      if (image !== null && over.current) showImagePreview({ id: attachmentId, bytes: image.bytes, size: image.size, anchor });
+    // The verdict and display copy are shared with the transcript and the
+    // viewer under the attachment id, so hovering never probes again.
+    void loadDisplay(`attachment:${attachmentId}`, () => loadImage(reader, attachmentId).then((image) => toDisplayOutcome(image))).then((outcome) => {
+      if (!over.current) return;
+      if (outcome.status === "missing") return;
+      showImagePreview({
+        id: attachmentId,
+        label,
+        display: outcome.status === "ready" ? outcome.display : null,
+        anchor,
+      });
     });
   };
   const hide = () => {
@@ -91,8 +101,11 @@ export function AttachmentRow({
   const view = () => {
     if (reader === null || attachmentId === null) return;
     over.current = false;
-    void loadImage(reader, attachmentId).then((image) => {
-      if (image !== null) openImageViewer({ ...image, label, sizeBytes });
+    // The shared verdict tells the viewer to show its fallback at once,
+    // with the original bytes for opening externally.
+    void loadDisplay(`attachment:${attachmentId}`, () => loadImage(reader, attachmentId).then((image) => toDisplayOutcome(image))).then((outcome) => {
+      if (outcome.status === "missing") return;
+      openImageViewer({ ...outcome.original, label, sizeBytes: outcome.original.bytes.length, undrawable: outcome.status === "undrawable" });
     });
   };
 

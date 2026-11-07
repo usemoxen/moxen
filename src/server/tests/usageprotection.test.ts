@@ -8,6 +8,7 @@ import { callMoxenTool, availableMoxenTools } from "../mcp/tools.js";
 import type { ClientApi } from "../api.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../core/usage/limits.js";
 import { DirectConnection } from "../connection.js";
+import { reportThreadFailure } from "../../core/threads/failures.js";
 import { decodeCommand, decodeQuery, type ThreadFrame } from "../protocol.js";
 import type { UsageProtection } from "../../core/usage/protection.js";
 
@@ -35,6 +36,21 @@ it("exposes forced protection and its durable waiting count through the server a
     await second.dispatch({ type: "thread.turn.start", threadId: thread.id, message: { text: "run my message first" }, wait: true });
     expect((await second.query({ type: "thread.inspect", threadId: thread.id })).thread.protection).toBeUndefined();
   } finally { await second.close(); }
+});
+
+it("routes detached core failures to the server log while the connection is open", async () => {
+  const w = await testHarness();
+  const api = new DirectConnection({ storeRoot: w.root, config: async () => w.config, drivers: w.drivers, builtinMcpServers: null });
+  try {
+    reportThreadFailure("driver event", "a subscriber for thread t1 threw: boom");
+    const log = () => readFile(path.join(w.root, "server.log"), "utf8");
+    await vi.waitFor(async () => expect(await log()).toContain("driver event: a subscriber for thread t1 threw: boom"));
+  } finally {
+    await api.close();
+  }
+  // After close the sink is gone: reporting schedules no write, so the marker can never land.
+  reportThreadFailure("driver event", "after close marker");
+  expect(await readFile(path.join(w.root, "server.log"), "utf8")).not.toContain("after close marker");
 });
 
 it("logs each distinct scheduler failure once instead of silently retrying every two seconds", async () => {
@@ -121,6 +137,7 @@ it("decodes conditional queue entries without trusting internal latches or admis
   expect(() => decodeCommand({ type: "queue.edit", threadId: "thread", turnId: "turn", action: "edit", policy: { conditions: [{ type: "usage", provider: "codex", window: "weekly", minimum: -1 }] } })).toThrow();
 });
 
+// Twenty threads of setup plus two queue scans: a loaded runner does not fit in the twenty-second default.
 it("reads the work queue from candidate threads without rereading idle history", async () => {
   const w = await testHarness();
   for (let index = 0; index < 20; index++) {
@@ -140,4 +157,4 @@ it("reads the work queue from candidate threads without rereading idle history",
     expect(lists).not.toHaveBeenCalled();
     expect(turns.mock.calls.every(([id]) => id === busy.id)).toBe(true);
   } finally { await api.close(); }
-});
+}, 60_000);
