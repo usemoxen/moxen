@@ -84,6 +84,9 @@ import {
   listThreads,
   openTurn,
   promoteDueScheduledTurn,
+  promoteQueuedTurn,
+  redeliverOrphanedSteers,
+  requeueUnownedTurn,
   sendTurn,
   settleThread,
   threadFamily,
@@ -428,7 +431,22 @@ function sameEndpoint(left: OutOfProcessMcpServerSpec, right: McpServerSpec): bo
 export async function recoverOrphanedTurn(ctx: OperationContext, threadId: string): Promise<boolean> {
   const result = await reconcileOrphanedTurn(ctx.store, threadId).catch(() => null);
   if (!result) return false;
-  if (result.promoted && ctx.store.claimRun(result.promoted.id)) await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+  // Its process died with steers mid-flight whose arrival died with it: the
+  // ledger still holds them, so they go out again as queued turns of their
+  // own rather than vanishing. Marked, so a repeated recovery sends nothing
+  // twice. They queue behind the promoted turn's run when there is one, and
+  // run after it; with nothing promoted the first copy is run here, or the
+  // copies would sit running with no runner and never heal in-process.
+  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id).catch(() => [] as string[]);
+  if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
+    await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+    return true;
+  }
+  if (!result.promoted && copies.length > 0) {
+    for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
+    const next = await promoteQueuedTurn(ctx.store, threadId).catch(() => null);
+    if (next && ctx.store.claimRun(next.id)) await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+  }
   return true;
 }
 
@@ -1976,10 +1994,12 @@ export interface StartedTurn extends SendTurnResult {
    */
   readonly run: Promise<void> | null;
   /**
-   * For a steer/inject: whether the running provider turn received the
-   * text. False when it could not — the provider has no mid-turn input,
-   * or the turn runs in another process — and the message is only
-   * recorded. Absent for other deliveries.
+   * For a steer/inject: whether the steer was handed to the running provider
+   * turn. A handoff, not an arrival: the provider confirms arrivals
+   * separately, and whatever settles unconfirmed goes out again as a queued
+   * turn of its own. False when it could not even be handed over — the
+   * provider has no mid-turn input, or the turn runs in another process —
+   * and the message is only recorded. Absent for other deliveries.
    */
   readonly steerDelivered?: boolean;
 }
@@ -2009,7 +2029,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads)) };
+    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId) };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -2154,12 +2174,17 @@ function providerImages(uploads: readonly ImageAttachmentUpload[]): ProviderImag
  * Give the running provider turn the steer, when this process holds its
  * session. Never starts a session: a session opened just for this would be
  * a second, empty conversation, not the one doing the work.
+ *
+ * True is the push being accepted, not the arrival: the steer carries the
+ * ledger message id, and a driver with an arrival signal confirms it later
+ * (`takeUnconfirmedSteers`); whatever settles unconfirmed goes out again
+ * as a queued turn of its own.
  */
-async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[]): Promise<boolean> {
+async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[], steerId: string): Promise<boolean> {
   if (!driver.steerTurn) return false;
   const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
   if (!live) return false;
-  return await Effect.runPromise(driver.steerTurn(threadId, text, images)).then(
+  return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId)).then(
     () => true,
     () => false,
   );
@@ -4571,7 +4596,7 @@ export async function requireTaskControl(
 
 /** What became of a message sent to a delegated task. */
 export type TaskMessageOutcome =
-  /** It reached the running turn, which reads it at its next step. */
+  /** The running turn took it and reads it at its next step; if the turn ends without it reaching the conversation, it is sent again as its own turn. */
   | "steered"
   /** The task is busy and cannot take input mid-turn (here): it runs as the task's next turn, once the current one ends. Not read yet. */
   | "queued"
@@ -4672,7 +4697,7 @@ export async function sendTaskMessage(
   if (row.notify === true && (outcome === "started" || outcome === "queued" || outcome === "steered")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
   const notes: Record<TaskMessageOutcome, string> = {
-    steered: "The running turn received it and reads it at its next step.",
+    steered: "The running turn took it and reads it at its next step. If the turn ends without it reaching the conversation, it is sent again as its own turn.",
     queued: "The task is busy and cannot take input mid-turn, so the message waits and runs as its next turn once the current one ends. It has not read it yet.",
     started: wake && idle ? "The task was idle or settled; the message started a new turn on it. A task notification arrives when it settles again." : "The message started a new turn on the task.",
     not_delivered: "The message is recorded in the task's thread but did not reach its running turn, and nothing will resend it. Send it again once the task settles.",

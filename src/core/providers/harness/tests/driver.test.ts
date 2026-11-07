@@ -533,6 +533,19 @@ describe("HarnessDriver", () => {
       expect(requests[1]!.messages.at(-1)).toMatchObject({ role: "user", content: "actually, use python" });
       await expect(run(driver.steerTurn("t1", "too late"))).rejects.toThrow(/no running turn/);
     });
+
+    it("keeps steering the stopped turn never read on the transcript, for the next turn (MXN-312)", async () => {
+      const { driver, events } = driverWith([call("c1", "bash", { command: "echo hi" })]);
+      await start(driver, { runtimeMode: "approval-required" });
+      const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "go" }));
+      await until(events, (event) => event.type === "permission.request.opened");
+      // Parked on the approval: the loop cannot take this before the stop lands.
+      await run(driver.steerTurn("t1", "remember this"));
+      const cursor = driver.resumeCursor("t1")!;
+      await run(driver.stopSession("t1"));
+      await until(events, (event) => event.type === "turn.interrupted" && (event as { turnId: string }).turnId === turnId);
+      expect(fs.readFileSync(path.join(dir, "sessions", `${cursor}.jsonl`), "utf8")).toContain("remember this");
+    });
   });
 
   it("resumes a session from its cursor with the same history, and tells the model when the instructions changed", async () => {

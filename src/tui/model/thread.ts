@@ -595,7 +595,9 @@ function isBookkeepingActivity(activity: ActivityEnvelope): boolean {
     // read as "Worked for 4s · 2 steps" over a `turn.started` echo of the
     // prompt and a `turn.completed` row whose summary is a raw turn id.
     // `turn.failed` is deliberately absent: its summary is the real error.
-    TURN_LIFECYCLE_KINDS.has(activity.kind) ||
+    // A redelivery that dropped images is the exception: its marker names
+    // the loss, and hiding it would show a copy that looks complete.
+    (TURN_LIFECYCLE_KINDS.has(activity.kind) && !steerRedeliveryLostImages(activity)) ||
     // The live set feeds the background panel. (Per-task rows stay: they
     // collapse by `taskId` into one card that goes running → finished.)
     activity.kind === "background.tasks" ||
@@ -890,6 +892,16 @@ export function backgroundSummaryLabel(tasks: readonly BackgroundTaskRow[]): str
 }
 
 /**
+ * Whether a `steer.redelivered` marker reports images its copy lost: shown
+ * as a note, so the redelivered turn does not read as complete.
+ */
+function steerRedeliveryLostImages(activity: ActivityEnvelope): boolean {
+  if (activity.kind !== "steer.redelivered") return false;
+  const dropped = asRecord(activity.payload)?.["imagesDropped"];
+  return Array.isArray(dropped) && dropped.length > 0;
+}
+
+/**
  * Ledger rows whose summary is either a raw id or an echo of a message
  * rendered elsewhere (see `isBookkeepingActivity`). `handoff-note` is not
  * one of these — it is content a human wrote for the next reader.
@@ -907,6 +919,9 @@ const TURN_LIFECYCLE_KINDS: ReadonlySet<string> = new Set([
   "turn.interrupted",
   "turn.steered",
   "message.injected",
+  // A redelivery is visible as the queued turn it became; the marker only
+  // keeps a repeated recovery from queueing it twice.
+  "steer.redelivered",
 ]);
 
 /**
