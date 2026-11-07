@@ -8,7 +8,7 @@ import * as Stream from "effect/Stream";
 
 import type { CliConfig } from "../../types.js";
 import { resetUsageLimitsForTests, recordUsageWindows } from "../../usage/limits.js";
-import { MAX_USAGE_CONTINUES, autoContinuesAt, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { MAX_USAGE_CONTINUES, autoContinuesAt, runDueScheduledTurn, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { toThreadEnvelope } from "../project.js";
 import { armScheduledTurn, armedScheduleCount, onScheduledTurnDue } from "../schedule.js";
 import { openThreadStore } from "../store.js";
@@ -424,6 +424,48 @@ describe("due held turns after the reset", () => {
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.id)).toMatchObject({ status: "interrupted" });
     expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.interrupted" && row.turnId === continued.id && (row.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
     expect((await store.readTurns(thread.id)).some((turn) => turn.status === "running")).toBe(false);
+  });
+
+  it("takes back a stale automatic continue in admission when the resume shares its due millisecond (MXN-325)", async () => {
+    let now = Date.parse("2026-09-26T10:00:00.000Z");
+    const { store, thread, root } = await setup(() => now);
+    const sent: string[] = [];
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => {
+        sent.push(input.prompt);
+        return Effect.succeed({ threadId: input.threadId, turnId: "native" });
+      },
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.never,
+      awaitTurn: async () => ({ status: "completed" as const, text: "done", usage: null, error: null }),
+    };
+    const ctx: OperationContext = { ...context(store, root), driverFor: () => driver };
+    await store.withThreadLock(thread.id, async () => {
+      const current = (await store.readThreadRecord(thread.id))!;
+      await store.writeThreadRecord({ ...current, usagePause: { provider: "claude", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false }, updatedAt: store.nowIso() });
+    });
+    const at = "2026-09-26T12:00:00.000Z";
+    const continued = await sendTurn(store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduledFor: at, scheduleReason: "usage-reset" });
+    // The clock lands exactly on the due millisecond: the usage-control turn
+    // resumes in the same millisecond the nudge came due — still a resume.
+    now = Date.parse(at);
+    const resumed = await sendTurn(store, thread.id, { prompt: "wrap-up notes", usageControl: true });
+    expect(resumed.turn.status).toBe("running");
+    await completeTurn(store, thread.id, resumed.turn.id, { text: "done" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.turn.id)?.status).toBe("queued");
+    // The hold lifts with the reset: admission takes the nudge back rather
+    // than spending a turn on work that already resumed.
+    await store.withThreadLock(thread.id, async () => {
+      const current = (await store.readThreadRecord(thread.id))!;
+      await store.writeThreadRecord({ ...current, usagePause: null, updatedAt: store.nowIso() });
+    });
+    expect(await runDueScheduledTurn(ctx, thread.id, now)).toBe(false);
+    await settleRuns();
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === continued.turn.id)).toMatchObject({ status: "interrupted" });
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.interrupted" && row.turnId === continued.turn.id && (row.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    expect(sent).toEqual([]);
   });
 
   it("still fires the continue when the running turn spanned the reset", async () => {
