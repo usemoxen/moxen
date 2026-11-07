@@ -156,8 +156,10 @@ does everything except publish, so use it to try a change to the release itself.
 - `bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path>]` unpacks into a temp folder
   outside the checkout and checks the layout (the executable beside the bundle), that the executable and
   the bundle report `package.json` in `--version`, and that the native
-  OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`
-  against the unpacked daemon. `--remove` deletes a path first, to show the test fails when it is missing.
+  OpenTUI library loads from the unpacked folder. `--embeddings` runs the archive's own bundled
+  `dist/verify-memory-embeddings.js` (built from the same sources by `scripts/build.ts`, so the client carries
+  the same release identity as the daemon it checks) with `--dist` against the unpacked daemon and `--workdir`
+  at the scratch folder. `--remove` deletes a path first, to show the test fails when it is missing.
   Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
   name the archive above the changelog, and runs `install.sh` (with a stubbed `uname`, on every runner)
   and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build,
