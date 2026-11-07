@@ -66,6 +66,7 @@ import { runSpanish, runSpanishSettings } from "./scenarios/spanish.js";
 import { registerSyntaxParsers } from "../../core/syntax/register.js";
 import { runExperience } from "./scenarios/experience.js";
 import { runUpdateScreen } from "./scenarios/updateScreen.js";
+import { runSettingsMoxenUpdate } from "./scenarios/settingsMoxenUpdate.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
 import { runCancelAutoContinueModal } from "./scenarios/cancelAutoContinue.js";
@@ -172,6 +173,7 @@ export async function runWalkthrough(): Promise<void> {
   await runAsyncQuestions();
   await runExperience();
   await runUpdateScreen();
+  await runSettingsMoxenUpdate();
   await runModalInput();
   await runWorkQueueModal();
   await runCancelAutoContinueModal();

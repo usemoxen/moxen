@@ -12,6 +12,7 @@ import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
 import { MemoryRuntimePanel, useMemoryRuntime } from "../memory/memoryruntime.js";
 import { MemoryManagerModal } from "../memory/memorymanager.js";
+import { UpdateModal } from "../update/updatemodal.js";
 import type { ClientApi } from "../../../server/api.js";
 import { TextField } from "./textfield.js";
 import type { HarnessRun } from "./useSettings.js";
@@ -24,10 +25,11 @@ import { ModalShell } from "../../ui/modalshell.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
 import { effortTones, sliderLayout } from "../../model/slider.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
+import type { UpdateView } from "../../model/update.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 import { splitInlineCode } from "../../model/inlinecode.js";
-import { nextToggleValue, providerVersionLine, settingControl, withModelOverride, MODEL_OVERRIDE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
+import { nextToggleValue, moxenVersionLine, providerVersionLine, settingControl, withModelOverride, MODEL_OVERRIDE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type MoxenVersionLine, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
 import type { LatestVersions, UpdatableProvider } from "../../../core/catalog/update.js";
 import {
   SECTION_LABEL,
@@ -137,6 +139,7 @@ export function SettingsModal({
   latest,
   updating,
   onUpdate,
+  moxenUpdate,
   providers,
   screenWidth,
   screenHeight,
@@ -172,6 +175,21 @@ export function SettingsModal({
   /** The providers whose updater is running now. */
   updating: ReadonlySet<UpdatableProvider>;
   onUpdate: (provider: UpdatableProvider) => void;
+  /**
+   * The Moxen updater behind the General tab's card: the same state the
+   * update screen draws, so the card is a second door to that screen.
+   * Omitted where it is not wired (the card then stays hidden).
+   */
+  moxenUpdate?: {
+    readonly view: UpdateView;
+    /** This machine's server, or the paired one a client talks to; the screen gates on it. */
+    readonly serverName: string | null;
+    /** Asking GitHub, unless an update is what the screen already shows. */
+    readonly onOpen: () => void;
+    readonly onInstall: () => void;
+    readonly onRollback: () => void;
+    readonly onCheck: () => void;
+  };
   /** The provider catalog: what the model defaults offer. Null while it loads. */
   providers: readonly ProviderSummary[] | null;
   screenWidth: number;
@@ -209,6 +227,8 @@ export function SettingsModal({
   const [accessOpen, setAccessOpen] = useState<string | null>(null);
   /** The memory manager above the page, opened from the Memory tab. */
   const [managing, setManaging] = useState(false);
+  /** The update screen above the page: the same screen the palette opens, over the same state. */
+  const [showUpdate, setShowUpdate] = useState(false);
   /** The per-model hand-off setting whose editor fills the right pane. */
   const [handoffOpen, setHandoffOpen] = useState<string | null>(null);
 
@@ -469,11 +489,16 @@ export function SettingsModal({
   };
 
   const listItem = listOpen === null ? undefined : items.find((item) => item.descriptor.key === listOpen);
+  /** The card's way into the update screen: asking GitHub first, unless the screen already shows an update. */
+  const openUpdate = () => {
+    moxenUpdate?.onOpen();
+    setShowUpdate(true);
+  };
   const accessItem = accessOpen === null ? undefined : items.find((item) => item.descriptor.key === accessOpen);
   const handoffItem = handoffOpen === null ? undefined : items.find((item) => item.descriptor.key === handoffOpen);
 
   useKeyboard((key) => {
-    if (managing) return;
+    if (managing || showUpdate) return;
     if (tab === "skills" && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
     if (listOpen !== null || accessOpen !== null || handoffOpen !== null || key.defaultPrevented) return;
@@ -518,6 +543,12 @@ export function SettingsModal({
     }
     if (key.name === "u" && !key.ctrl && !key.meta && updatable !== null) {
       onUpdate(updatable);
+      return;
+    }
+    // The bare key only: a multi-letter `pressKey("UP")` arrives as a
+    // shifted "u", and must not open the screen (same for "DOWN").
+    if (key.name === "u" && !key.ctrl && !key.meta && !key.shift && tab === "general" && moxenUpdate !== undefined) {
+      openUpdate();
       return;
     }
     if (key.name === "tab") {
@@ -579,9 +610,10 @@ export function SettingsModal({
         : current?.control.kind === "toggle"
           ? t("settings.hint.toggle")
           : t("settings.hint.open");
-  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null ? "" : picking === null && updatable !== null ? t("settings.hint.update", { hint: base }) : base;
+  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null ? "" : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined)) ? t("settings.hint.update", { hint: base }) : base;
 
   return (
+    <>
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
         <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{t("settings.title")}</text>
@@ -780,6 +812,13 @@ export function SettingsModal({
                       onUpdate={() => onUpdate(updatable)}
                     />
                   )}
+                  {tab === "general" && moxenUpdate !== undefined ? (
+                    <MoxenUpdateCard
+                      line={moxenVersionLine(moxenUpdate.view)}
+                      width={paneWidth}
+                      onOpen={openUpdate}
+                    />
+                  ) : null}
                   {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
                     onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
                     onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
@@ -848,6 +887,19 @@ export function SettingsModal({
         </>
       )}
     </ModalShell>
+    {showUpdate && moxenUpdate !== undefined ? (
+      <UpdateModal
+        view={moxenUpdate.view}
+        serverName={moxenUpdate.serverName}
+        screenWidth={screenWidth}
+        screenHeight={screenHeight}
+        onInstall={moxenUpdate.onInstall}
+        onRollback={moxenUpdate.onRollback}
+        onCheck={moxenUpdate.onCheck}
+        onClose={() => setShowUpdate(false)}
+      />
+    ) : null}
+    </>
   );
 }
 
@@ -913,6 +965,44 @@ function ProviderUpdateCard({
       </box>
       <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line.status}</text>
       <text content={prose(t("settings.update.note", { command: PROVIDER_UPDATER[provider] }), COLOR.dim)} bg={SURFACE.panel} wrapMode="word" selectable={false} />
+    </box>
+  );
+}
+
+/**
+ * Where the Moxen install stands, and the way into its update screen: the
+ * installed version against the latest available, with a button that opens
+ * the same screen the palette opens, over the same state. The screen itself
+ * decides what it offers (a source checkout or a paired server gets no
+ * install button), so the card never does.
+ */
+function MoxenUpdateCard({
+  line,
+  width,
+  onOpen,
+}: {
+  line: MoxenVersionLine;
+  width: number;
+  onOpen: () => void;
+}) {
+  const { hovered, handlers } = useHover();
+  const tone = line.tone === "warn" ? COLOR.warn : line.tone === "update" ? COLOR.accent : line.tone === "ok" ? COLOR.added : COLOR.dim;
+  return (
+    <box
+      style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, width }}
+      backgroundColor={SURFACE.panel}
+      selectable={false}
+    >
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.panel}>
+        <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>Moxen</text>
+          <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`  ${line.version ?? "—"}`}</text>
+        </box>
+        <box onMouseDown={onOpen} backgroundColor={SURFACE.panel} {...handlers}>
+          <text fg={hovered ? COLOR.bright : COLOR.accent} bg={SURFACE.panel} selectable={false}>{line.button}</text>
+        </box>
+      </box>
+      <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line.status}</text>
     </box>
   );
 }

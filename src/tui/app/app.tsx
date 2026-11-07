@@ -3684,6 +3684,14 @@ export function App({
           latest={providerVersions.latest}
           updating={providerUpdates.updating}
           onUpdate={providerUpdates.update}
+          moxenUpdate={{
+            view: appUpdate.view,
+            serverName: server?.name ?? null,
+            onOpen: appUpdate.open,
+            onInstall: appUpdate.install,
+            onRollback: appUpdate.rollback,
+            onCheck: appUpdate.check,
+          }}
           providers={providers}
           screenWidth={width}
           screenHeight={height}
