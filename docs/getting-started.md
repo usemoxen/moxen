@@ -87,6 +87,10 @@ from the release itself, so they work from the next release on; until then,
 use the by-hand steps in the [README](../README.md#from-a-release).
 Every GitHub release carries the same steps in its notes.
 
+Bare `moxen` opens the TUI; `moxen --help` opens help; anything else after
+`moxen` is a CLI command with args. Without an interactive terminal, bare
+`moxen` prints help plus a hint instead of launching.
+
 ## Updating Moxen
 
 **Update Moxen** in the command palette opens the update screen, which asks GitHub once

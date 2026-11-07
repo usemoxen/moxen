@@ -143,7 +143,12 @@ try {
   assert.match(applyPath(fakeHome, "/bin/zsh"), /already done/, "install.sh did not notice its snippet");
   assert.equal((readFileSync(path.join(fakeHome, ".zshrc"), "utf8").match(/>>> moxen installer/g) ?? []).length, 1, "install.sh duplicated its snippet");
   applyPath(fakeHome, "/bin/bash");
-  assert.ok(readFileSync(path.join(fakeHome, ".bashrc"), "utf8").includes(">>> moxen installer"), "install.sh wrote no snippet to ~/.bashrc");
+  // Bash on macOS runs as a login shell, which reads ~/.bash_profile, not ~/.bashrc.
+  const bashProfile = path.join(fakeHome, ".bash_profile");
+  assert.ok(readFileSync(bashProfile, "utf8").includes(">>> moxen installer"), "install.sh wrote no snippet to ~/.bash_profile");
+  assert.ok(!existsSync(path.join(fakeHome, ".bashrc")), "install.sh wrote ~/.bashrc for bash instead of ~/.bash_profile");
+  applyPath(fakeHome, "/bin/bash");
+  assert.equal((readFileSync(bashProfile, "utf8").match(/>>> moxen installer/g) ?? []).length, 1, "install.sh duplicated its snippet in ~/.bash_profile");
   // A shell with no supported profile gets instructions, not a write.
   const fishHome = path.join(scratch, "fish home");
   mkdirSync(fishHome);

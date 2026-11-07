@@ -6,8 +6,8 @@
 # It finds the latest release, installs Bun first when it is missing, checks the
 # archive against its .sha256 (and stops on a mismatch), runs self-update
 # --install, and puts Moxen on your PATH: a marker-guarded `export PATH` line in
-# the profile for your shell (zsh: ~/.zshrc, bash: ~/.bashrc, sh: ~/.profile),
-# added once and never duplicated. Other shells get instructions instead of a
+# the profile for your shell (zsh: ~/.zshrc, bash on macOS: ~/.bash_profile,
+# which login shells read; sh: ~/.profile), added once and never duplicated. Other shells get instructions instead of a
 # write. Set MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke test does).
 # MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step against $HOME, for tests.
 # Linux and Intel Macs have no build; Windows uses install.ps1 instead.
@@ -38,7 +38,8 @@ main() {
     moxen_shell="$(basename "${SHELL:-}")"
     case "$moxen_shell" in
       zsh) moxen_profile="$HOME/.zshrc" ;;
-      bash) moxen_profile="$HOME/.bashrc" ;;
+      # macOS terminals run login shells, which read .bash_profile, not .bashrc.
+      bash) moxen_profile="$HOME/.bash_profile" ;;
       sh | dash | ksh) moxen_profile="$HOME/.profile" ;;
       *)
         echo "Your shell is '${SHELL:-unknown}': add $moxen_bin to your PATH by hand"

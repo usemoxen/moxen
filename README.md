@@ -26,7 +26,7 @@ Either script fetches the latest release's archive, installs Bun first when it
 is missing, checks the archive against its `.sha256` and refuses a mismatch,
 then runs `self-update --install` and puts Moxen on your PATH: on macOS it
 appends a marker-guarded `export PATH` snippet to your shell profile (zsh:
-`~/.zshrc`, bash: `~/.bashrc`), added once and never duplicated; on Windows it
+`~/.zshrc`, bash: `~/.bash_profile`), added once and never duplicated; on Windows it
 adds the folder to your user PATH. Set `MOXEN_INSTALL_NO_PATH=1` to skip that
 step. New terminals pick it up.
 Linux and Intel Macs have no build yet. The one-liners download the scripts
