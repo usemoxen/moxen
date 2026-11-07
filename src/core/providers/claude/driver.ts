@@ -660,18 +660,46 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * Whatever the CLI consumed it echoes our client uuid on: a reply's first
    * frames (`user_message_uuid`, plus the full `user_message_uuids` list)
    * and the result. Any echo proves the CLI speaks the protocol; an echo of
-   * a pending steer proves that steer arrived.
+   * a pending steer proves that steer arrived. Returns the pending steers
+   * this echo confirmed, so a result that only queued them can re-arm them
+   * (see `handleResult`).
    */
-  private confirmSteerEchoes(threadId: ThreadId, message: { user_message_uuid?: unknown; user_message_uuids?: unknown }): void {
+  private confirmSteerEchoes(
+    threadId: ThreadId,
+    message: { user_message_uuid?: unknown; user_message_uuids?: unknown },
+  ): Array<{ uuid: string; text: string; images: ProviderImage[] }> {
     const tracking = this.steerTracking.get(threadId);
-    if (!tracking) return;
+    if (!tracking) return [];
     const echoed = [
       ...(typeof message.user_message_uuid === "string" ? [message.user_message_uuid] : []),
       ...(Array.isArray(message.user_message_uuids) ? message.user_message_uuids.filter((uuid): uuid is string => typeof uuid === "string") : []),
     ];
-    if (!echoed.some((uuid) => tracking.sent.has(uuid))) return;
+    if (!echoed.some((uuid) => tracking.sent.has(uuid))) return [];
     tracking.echoCapable = true;
-    for (const uuid of echoed) tracking.pending.delete(uuid);
+    const confirmed: Array<{ uuid: string; text: string; images: ProviderImage[] }> = [];
+    for (const uuid of echoed) {
+      const steer = tracking.pending.get(uuid);
+      if (!steer) continue;
+      tracking.pending.delete(uuid);
+      confirmed.push({ uuid, text: steer.text, images: steer.images });
+    }
+    return confirmed;
+  }
+
+  /**
+   * A result announcing `queued_turn_count` consumed nothing itself: the
+   * steers it echoed are the queued run's input, still to arrive. They go
+   * back pending until the queued run's own frames echo them — or an
+   * interrupt ends the turn first, and they go out again.
+   */
+  private rearmSteerEchoes(
+    threadId: ThreadId,
+    confirmed: ReadonlyArray<{ uuid: string; text: string; images: ProviderImage[] }>,
+  ): void {
+    if (confirmed.length === 0) return;
+    const tracking = this.steerTracking.get(threadId);
+    if (!tracking) return;
+    for (const { uuid, text, images } of confirmed) tracking.pending.set(uuid, { text, images });
   }
 
   /**
@@ -2000,7 +2028,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     // Before the drain check: the interrupted run's own ending still echoes
     // what it consumed, and a consumed steer is arrived (its text persists
     // provider-side), never to be sent again.
-    this.confirmSteerEchoes(session.threadId, message);
+    const confirmedSteers = this.confirmSteerEchoes(session.threadId, message);
     // A run's streaming bookkeeping ends with it.
     const stopFailure = session.lastStopFailure;
     session.lastStopFailure = null;
@@ -2024,7 +2052,12 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       const queued = (message as { queued_turn_count?: unknown }).queued_turn_count;
       if (open && typeof queued === "number" && queued > 0) {
         if (typeof message.result === "string" && message.result) open.text = message.result;
-        // A steered run follows: this run's answer is only a note on the way.
+        // This run's answer is only a note on the way — and the steers its
+        // result echoed are the queued run's input, not arrivals. Re-arm
+        // their confirmation: the queued run's own frames confirm them on
+        // the normal path, while an interrupt before they arrive sends them
+        // again.
+        this.rearmSteerEchoes(session.threadId, confirmedSteers);
         this.flushNote(session, open);
         return;
       }

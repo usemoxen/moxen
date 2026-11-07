@@ -1133,6 +1133,49 @@ describe("claude steer confirmation", () => {
     await outcome;
     expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([{ id: steer, text: "also this", images: [] }]);
   });
+
+  it("redelivers a queued-then-interrupted steer the result had echoed (MXN-312)", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await Effect.runPromise(driver.steerTurn("thread-1", "also this"));
+    await sleep(20);
+    const query = transport.created[0]!;
+    const [opening, steer] = query.messages.map((message) => message.uuid as string);
+    // The CLI consumes the steer as its next run: the result echoes the
+    // steer uuid and announces the queued run behind it.
+    query.push(assistantText("first pass", { input_tokens: 10, output_tokens: 5 }, { user_message_uuids: [opening!] }));
+    query.push(successResult("first pass", 0.01, { user_message_uuids: [opening!, steer!], queued_turn_count: 1 }));
+    await sleep(20);
+    // The user interrupts before the queued run emits anything: the echo
+    // confirmed nothing, so the steer goes out again.
+    await Effect.runPromise(driver.interruptTurn("thread-1"));
+    await expect(outcome).resolves.toMatchObject({ status: "interrupted" });
+    expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([{ id: steer!, text: "also this", images: [] }]);
+  });
+
+  it("sends a queued steer once when the queued run's own frames echo it", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await Effect.runPromise(driver.steerTurn("thread-1", "also this"));
+    await sleep(20);
+    const query = transport.created[0]!;
+    const [opening, steer] = query.messages.map((message) => message.uuid as string);
+    query.push(assistantText("first pass", { input_tokens: 10, output_tokens: 5 }, { user_message_uuids: [opening!] }));
+    query.push(successResult("first pass", 0.01, { user_message_uuids: [opening!, steer!], queued_turn_count: 1 }));
+    await sleep(20);
+    // The queued run arrives and echoes the steer itself: confirmed for
+    // good, so the settle sends nothing again.
+    query.push(assistantText("on it", { input_tokens: 2, output_tokens: 3 }, { user_message_uuids: [steer!] }));
+    query.push(successResult("also this, done", 0.02, { user_message_uuids: [opening!, steer!], queued_turn_count: 0 }));
+    await expect(outcome).resolves.toMatchObject({ status: "completed" });
+    expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([]);
+  });
 });
 
 describe("claude images", () => {
