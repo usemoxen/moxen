@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CliError } from "./errors.js";
+import { FIRST_FORMAT_VERSION, formatTooNew, formatVersionOf, migrateFormat, type FormatMigration } from "./format.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
 import { normalizeHarnessConfig, parseHarnessProfile } from "./providers/harness/profiles.js";
 import { STICKY_INTERACTION_MODES } from "./interactionmode.js";
@@ -48,6 +49,17 @@ export const DEFAULT_CONFIG: CliConfig = {
   interactionMode: "default",
   sessionTtl: "1h",
 };
+
+/** The config file's format version: today's shape is version 1. */
+export const CONFIG_FORMAT_VERSION = FIRST_FORMAT_VERSION;
+
+/**
+ * How a config file moves forward, one version at a time. Empty: no format
+ * change has landed yet, so today's files pass through untouched. A change
+ * that reshapes the file adds one entry per version here (see
+ * `docs/contributing.md`).
+ */
+export const CONFIG_MIGRATIONS: readonly FormatMigration[] = [];
 
 const projectPolicies = new Set<ProjectPolicy>(["create", "existing"]);
 const workspaceModes = new Set<WorkspaceMode>(["repo", "folder"]);
@@ -196,7 +208,11 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new CliError("INVALID_CONFIG", "The config file must contain a JSON object.");
   }
-  const input = raw as Record<string, unknown>;
+  // The version gates everything below: a newer file refuses before any of
+  // it is read, and an older one is migrated to today's shape first.
+  const version = formatVersionOf(raw);
+  if (version > CONFIG_FORMAT_VERSION) throw formatTooNew("The config file", version, CONFIG_FORMAT_VERSION);
+  const input = migrateFormat(raw, { what: "The config file", from: version, current: CONFIG_FORMAT_VERSION, migrations: CONFIG_MIGRATIONS }) as Record<string, unknown>;
   const result: CliConfig = { ...DEFAULT_CONFIG };
 
   if (input.projectPolicy !== undefined) guarded(skipped, "projectPolicy", input.projectPolicy, () => {
@@ -375,6 +391,7 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
     if (providers) result.providers = providers;
   });
   const knownTop = new Set([
+    "formatVersion",
     "projectPolicy", "workspaceMode", "openMode", "threadEnvMode", "runtimeMode", "interactionMode",
     "provider", "model", "promptImprover", "speedMode", "thinkingEffort", "sessionTtl", "backgroundForgottenAfter",
     "instructions", "memory", "memoryEmbeddings", "memoryEmbeddingLoading",
@@ -386,7 +403,9 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
   for (const [key, value] of Object.entries(input)) {
     if (!knownTop.has(key)) (result as unknown as Record<string, unknown>)[key] = value;
   }
-  return retireServerProviders(result);
+  // Every normalized config carries the version it was read as: a save
+  // stamps today's shape, and a newer version never reaches this line.
+  return retireServerProviders({ ...result, formatVersion: CONFIG_FORMAT_VERSION });
 }
 
 /**
@@ -812,7 +831,7 @@ export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
-      const fileConfig = { ...DEFAULT_CONFIG };
+      const fileConfig = { ...DEFAULT_CONFIG, formatVersion: CONFIG_FORMAT_VERSION };
       return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: undefined, path: configPath, exists: false, skipped: [], problems: [] };
     }
     if (error instanceof CliError) throw error;
@@ -874,14 +893,19 @@ export async function backupConfigFile(configPath: string): Promise<void> {
  * A save that changes nothing skips the backup and the rewrite.
  * Skipped entries ride along: a save carries what the load could not read
  * (applied only where the saved config says nothing), so fixing or
- * resetting one entry never drops the others.
+ * resetting one entry never drops the others. A save over a disk file newer
+ * than this build knows refuses instead of clobbering it.
  */
 export async function saveConfig(configPath: string, config: CliConfig, skipped: readonly SkippedConfigEntry[] = []): Promise<void> {
   // Loaded here rather than at the top: `core/config` is imported during
   // test setup, before any file mock registers, and a static edge would pin
   // the atomic write to the real filesystem for the whole test run.
   const { writeAtomic } = await import("./infra/atomic.js");
-  let next = config as unknown as Record<string, unknown>;
+  // A build never writes data newer than it knows: the version rides in the
+  // normalized config, so a newer one can only arrive by hand.
+  const version = formatVersionOf(config);
+  if (version > CONFIG_FORMAT_VERSION) throw formatTooNew("The config file", version, CONFIG_FORMAT_VERSION);
+  let next = { ...config, formatVersion: CONFIG_FORMAT_VERSION } as unknown as Record<string, unknown>;
   let current: string | null = null;
   try {
     current = await readFile(configPath, "utf8");
@@ -897,8 +921,12 @@ export async function saveConfig(configPath: string, config: CliConfig, skipped:
       }
     }
     next = out;
-  } catch {
-    // Missing or unreadable: nothing to strip against; write what was passed.
+  } catch (error) {
+    // A stale save never clobbers a disk file newer than this build knows:
+    // the baseline re-read refuses instead of falling through to the write.
+    if (error instanceof CliError && (error.code === "FORMAT_TOO_NEW" || error.code === "INVALID_FORMAT_VERSION")) throw error;
+    // Missing, not JSON, or otherwise unreadable: nothing to strip against;
+    // write what was passed.
   }
   // A save must never drop what the load could not read: skipped values
   // apply only where the saved config says nothing.

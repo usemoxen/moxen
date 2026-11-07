@@ -16,6 +16,7 @@ import path from "node:path";
 
 import { renameReplacing } from "../infra/atomic.js";
 import { appEnv, appHomeDir } from "../config.js";
+import { FIRST_FORMAT_VERSION, formatTooNew, formatVersionOf, migrateFormat, type FormatMigration } from "../format.js";
 import { CliError } from "../errors.js";
 import type { EventBus } from "../events/bus.js";
 import { createEventBus } from "../events/bus.js";
@@ -44,6 +45,57 @@ export function resolveStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
   const raw = appEnv("STORE_ROOT", env)?.trim();
   if (raw) return path.resolve(raw);
   return path.join(appHomeDir(), "threads");
+}
+
+/** The thread store's format version: today's shape is version 1. */
+export const STORE_FORMAT_VERSION = FIRST_FORMAT_VERSION;
+
+/**
+ * How the store moves forward, one version at a time. Empty: no format
+ * change has landed yet. A change that reshapes the store adds one entry per
+ * version here (see `docs/contributing.md`).
+ */
+export const STORE_MIGRATIONS: readonly FormatMigration[] = [];
+
+/** The store's version marker: one file at the root, beside the ledgers it covers. */
+function storeVersionFile(root: string): string {
+  return path.join(root, "store.json");
+}
+
+/**
+ * The store's version: its marker's `formatVersion`, or 1 when it names
+ * none — today's stores predate markers. Newer than this build refuses;
+ * anything else unreadable fails loudly rather than guessing.
+ */
+async function readStoreVersion(root: string): Promise<number> {
+  const file = storeVersionFile(root);
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return FIRST_FORMAT_VERSION;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new CliError("INVALID_FORMAT_VERSION", `Could not read the store version at ${file}: it is not valid JSON. Remove the file to read the store as version 1.`, { cause: error });
+  }
+  let version: number;
+  try {
+    version = formatVersionOf(parsed);
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw new CliError("INVALID_FORMAT_VERSION", `Could not read the store version at ${file}: ${error.message} Remove the file to read the store as version 1.`, { cause: error });
+    }
+    throw error;
+  }
+  if (version > STORE_FORMAT_VERSION) throw formatTooNew("The thread store", version, STORE_FORMAT_VERSION);
+  // No migrations registered yet, so this passes the marker through — the
+  // call is the wiring the first format change will use.
+  migrateFormat(parsed, { what: "The thread store", from: version, current: STORE_FORMAT_VERSION, migrations: STORE_MIGRATIONS });
+  return version;
 }
 
 type LedgerName = "turns" | "messages" | "activity" | "checkpoints";
@@ -143,7 +195,18 @@ export class ThreadStore {
   }
 
   static async open(root: string, options: ThreadStoreOptions = {}): Promise<ThreadStore> {
+    // The gate for a downgrade runs before anything is created: a refused
+    // open leaves the root untouched. A store that predates markers is
+    // stamped version 1 below, so the store carries a format version from today.
+    await readStoreVersion(root);
     await mkdir(path.join(root, "threads"), { recursive: true });
+    try {
+      await stat(storeVersionFile(root));
+    } catch {
+      const tmp = `${storeVersionFile(root)}.tmp.${process.pid}.${randomUUID()}`;
+      await writeFile(tmp, `${JSON.stringify({ formatVersion: STORE_FORMAT_VERSION })}\n`, "utf8");
+      await renameReplacing(tmp, storeVersionFile(root));
+    }
     return new ThreadStore(root, options);
   }
 
@@ -227,6 +290,22 @@ export class ThreadStore {
   }
 
   /**
+   * A build never writes data newer than it knows: every mutation re-reads
+   * the store's marker (usually stamped at open), so a store that became
+   * newer under a running build refuses its writes. Reads stay lenient —
+   * one bad record warns rather than failing the whole store.
+   *
+   * Not a fence between writers: the re-read and the write are two steps,
+   * and two builds sharing one store could still interleave them. While its
+   * `server.lock` names a live owner a second server is refused at startup;
+   * a missing, corrupt, or stale lock is taken over, so this stays a backstop
+   * for a swapped marker, not a fence.
+   */
+  private async assertStoreWriteable(): Promise<void> {
+    await readStoreVersion(this.root);
+  }
+
+  /**
    * Move a reported bad record aside into `<root>/quarantine/` — never
    * deleted — and repair the source: a bad thread record is moved away so
    * the thread reads as missing, a ledger loses only the bad line (the
@@ -236,6 +315,7 @@ export class ThreadStore {
    * handles them instead.
    */
   async quarantineProblem(id: string): Promise<{ movedTo: string }> {
+    await this.assertStoreWriteable();
     const problem = this.problems.get(id);
     if (!problem) {
       throw new CliError("PROBLEM_NOT_FOUND", `No bad record is reported with id ${id}.`, { details: { id } });
@@ -426,6 +506,7 @@ export class ThreadStore {
   }
 
   async writeThreadRecord(thread: StoredThread): Promise<void> {
+    await this.assertStoreWriteable();
     await mkdir(this.threadDir(thread.id), { recursive: true });
     const file = this.threadFile(thread.id);
     const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
@@ -545,6 +626,7 @@ export class ThreadStore {
    * transcript can show them.
    */
   async saveAttachment(upload: ImageAttachmentUpload): Promise<StoredAttachment> {
+    await this.assertStoreWriteable();
     const decoded = decodeDataUrl(upload.dataUrl);
     if (!decoded) {
       throw new CliError("ATTACHMENT_INVALID", `${upload.name} is not a base64 data URL.`, {
@@ -574,6 +656,7 @@ export class ThreadStore {
 
   /** Write ledger lines atomically (tmp file + rename), so a crash cannot tear the ledger. */
   private async writeLedgerFile(file: string, lines: string[]): Promise<void> {
+    await this.assertStoreWriteable();
     this.assertInsideRoot(file);
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp.${process.pid}.${this.newId()}`;
@@ -661,6 +744,7 @@ export class ThreadStore {
   }
 
   async appendLedger(threadId: string, name: LedgerName, row: unknown): Promise<void> {
+    await this.assertStoreWriteable();
     await mkdir(this.threadDir(threadId), { recursive: true });
     await appendFile(ledgerFile(this.root, threadId, name), `${JSON.stringify(row)}\n`, "utf8");
     if (name === "activity") {
@@ -713,6 +797,7 @@ export class ThreadStore {
   }
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
+    await this.assertStoreWriteable();
     await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
   }
 

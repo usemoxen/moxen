@@ -85,6 +85,13 @@ export interface CliConfig {
   updates?: UpdatesConfig;
   /** The server, reached from other machines (`server/transport/remoteaccess.ts`). */
   remote?: RemoteConfig;
+  /**
+   * The config file's format version: today's shape is version 1, and a file
+   * that names none reads as version 1. Never set by hand (`config set`
+   * refuses it); saves stamp the version this build knows, and a build
+   * refuses data newer than it knows.
+   */
+  formatVersion?: number;
 }
 
 /** The prompt improver's own selection, kept apart from the model a draft's thread will run on. */

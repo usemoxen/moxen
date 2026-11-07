@@ -14,8 +14,8 @@ it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s m
 });
 
 describe("config", () => {
-  it("applies documented defaults", () => {
-    expect(normalizeConfig({})).toEqual(DEFAULT_CONFIG);
+  it("applies documented defaults, stamped as version 1", () => {
+    expect(normalizeConfig({})).toEqual({ ...DEFAULT_CONFIG, formatVersion: 1 });
     expect(DEFAULT_CONFIG).toMatchObject({ runtimeMode: "full-access" });
     expect(DEFAULT_CONFIG).not.toHaveProperty("provider");
     expect(DEFAULT_CONFIG).not.toHaveProperty("model");
@@ -222,6 +222,72 @@ describe("config", () => {
   it("refuses an unknown key on `config set`, instead of writing it", () => {
     expect(() => setConfigValue(normalizeFileConfig({}), "futureTop", "1")).toThrow("Unknown config key: futureTop");
     expect(() => setConfigValue(normalizeFileConfig({}), "ui.futureSection", "1")).toThrow("Unknown config key: ui.futureSection");
+  });
+});
+
+describe("config format version", () => {
+  /** A config file as written today: version 1, before versions were stamped. */
+  const TODAY = {
+    provider: "mine",
+    threadEnvMode: "local",
+    ui: { theme: "moxen" },
+    mcpServers: { docs: { command: "docs-mcp" } },
+    providers: { harness: { autoCompactPercent: 80 } },
+  };
+
+  it("reads today's shape as version 1 and stamps it on save", async () => {
+    expect(normalizeFileConfig(TODAY).formatVersion).toBe(1);
+    expect(normalizeFileConfig({ ...TODAY, formatVersion: 1 })).toEqual(normalizeFileConfig(TODAY));
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify(TODAY, null, 2));
+    // A save stamps the version the build knows; the settings survive it.
+    await saveConfig(file, setConfigValue((await loadConfig(file)).fileConfig, "provider", "theirs"));
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(onDisk.formatVersion).toBe(1);
+    expect(onDisk.provider).toBe("theirs");
+    expect(onDisk.ui).toEqual({ theme: "moxen" });
+    expect((await loadConfig(file)).fileConfig.formatVersion).toBe(1);
+  });
+
+  it("refuses a config newer than it knows, on read and on write", async () => {
+    expect(() => normalizeFileConfig({ ...TODAY, formatVersion: 2 })).toThrow(
+      expect.objectContaining({ code: "FORMAT_TOO_NEW" }),
+    );
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ ...TODAY, formatVersion: 2 }));
+    await expect(loadConfig(file)).rejects.toMatchObject({ code: "FORMAT_TOO_NEW" });
+
+    await expect(saveConfig(file, { ...normalizeFileConfig(TODAY), formatVersion: 2 })).rejects.toMatchObject({
+      code: "FORMAT_TOO_NEW",
+    });
+    // The refused save wrote nothing: the newer file is untouched.
+    expect(JSON.parse(readFileSync(file, "utf8")).formatVersion).toBe(2);
+  });
+
+  it("refuses a save over a disk file newer than it knows, leaving it byte-identical", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    const newer = `{"formatVersion": 2, "provider": "future"}\n`;
+    writeFileSync(file, newer);
+    // The in-memory config reads as version 1; the disk file does not, and
+    // the stale save refuses instead of clobbering it back to version 1.
+    await expect(saveConfig(file, normalizeFileConfig({ provider: "old" }))).rejects.toMatchObject({
+      code: "FORMAT_TOO_NEW",
+    });
+    expect(readFileSync(file, "utf8")).toBe(newer);
+  });
+
+  it("refuses a version that is not a version, and never takes it by hand", () => {
+    expect(() => normalizeFileConfig({ ...TODAY, formatVersion: "2" })).toThrow(
+      expect.objectContaining({ code: "INVALID_FORMAT_VERSION" }),
+    );
+    expect(() => setConfigValue(normalizeFileConfig(TODAY), "formatVersion", "1")).toThrow(
+      "Unknown config key: formatVersion",
+    );
   });
 });
 

@@ -44,7 +44,8 @@ elsewhere). Every client reaches every session, and turns outlive the
 client that started them. The store has one owning build, recorded beside
 it (`server.lock`): a second server on the same files is refused outright,
 and a lock from a crashed server is taken over once its process is gone,
-not left behind.
+not left behind. It also carries a format version (`store.json`, like the
+config file's): a build refuses data newer than it knows.
 
 Clients never change anything themselves. The TUI and every CLI command
 connect to this machine's server, starting it in the background when none
