@@ -394,7 +394,7 @@ describe("targetEntry", () => {
     const folder = temp();
     writeRelease(folder, "1.0.0");
     writeFileSync(path.join(folder, executableName(target)), "binary");
-    expect(targetEntry(folder, target, "/runt/ime", true)).toEqual({ exec: path.join(folder, "moxen"), args: ["--version"], viaBunBeBun: false });
+    expect(targetEntry(folder, target, "/runt/ime", true)).toEqual({ exec: path.join(folder, executableName(target)), args: ["--version"], viaBunBeBun: false });
     const windows = temp();
     writeFileSync(path.join(windows, "package.json"), JSON.stringify({ version: "1.0.0" }));
     writeFileSync(path.join(windows, executableName(win)), "binary");
