@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { CliError } from "./errors.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
-import { normalizeHarnessConfig } from "./providers/harness/profiles.js";
+import { normalizeHarnessConfig, parseHarnessProfile } from "./providers/harness/profiles.js";
 import { STICKY_INTERACTION_MODES } from "./interactionmode.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
 import { normalizeHandoffModels, normalizeModeModels } from "./handoffmodels.js";
@@ -18,6 +18,7 @@ import type {
   CliConfig,
   ForgeConfig,
   GitConfig,
+  HarnessProfileConfig,
   HarnessProviderConfig,
   InteractionMode,
   ModelPriceMaps,
@@ -148,158 +149,231 @@ function asString(value: unknown, key: string): string {
 }
 
 /**
+ * A config entry that failed to parse. A lenient load skips it — with its
+ * location — instead of refusing the whole file, and the raw value rides
+ * along so a save can carry it through rather than silently dropping it.
+ * Values never leave this machine and are never printed: they may hold secrets.
+ */
+export interface SkippedConfigEntry {
+  readonly path: string;
+  readonly message: string;
+  readonly value: unknown;
+}
+
+/** What the server reports for a skipped entry: where it is, never what it holds. */
+export interface ConfigProblem {
+  readonly path: string;
+  readonly message: string;
+}
+
+/**
+ * Parse one field: strict callers throw as before; a lenient load records
+ * the bad entry (with its raw value, for the next save) and keeps the rest.
+ * Only config errors are skipped — anything else still throws.
+ */
+function guarded(skipped: SkippedConfigEntry[] | undefined, path: string, value: unknown, run: () => void): void {
+  if (skipped === undefined) {
+    run();
+    return;
+  }
+  try {
+    run();
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    skipped.push({ path, message: error.message, value });
+  }
+}
+
+/**
  * The config as it lives in the file: validated, retired to the shape an
  * older build reads the same way, with unknown keys kept verbatim at every
  * level (a newer build's keys survive a save here). No environment
  * overrides: those apply in memory only and must never leak into the file.
+ * With a collector, a lenient load: bad entries are recorded and skipped
+ * instead of refusing the whole file.
  */
-export function normalizeFileConfig(raw: unknown): CliConfig {
+export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]): CliConfig {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new CliError("INVALID_CONFIG", "The config file must contain a JSON object.");
   }
   const input = raw as Record<string, unknown>;
   const result: CliConfig = { ...DEFAULT_CONFIG };
 
-  if (input.projectPolicy !== undefined) {
+  if (input.projectPolicy !== undefined) guarded(skipped, "projectPolicy", input.projectPolicy, () => {
     const value = asString(input.projectPolicy, "projectPolicy") as ProjectPolicy;
     if (!projectPolicies.has(value)) throw new CliError("INVALID_CONFIG", "projectPolicy must be create or existing.");
     result.projectPolicy = value;
-  }
-  if (input.workspaceMode !== undefined) {
+  });
+  if (input.workspaceMode !== undefined) guarded(skipped, "workspaceMode", input.workspaceMode, () => {
     const value = asString(input.workspaceMode, "workspaceMode") as WorkspaceMode;
     if (!workspaceModes.has(value)) throw new CliError("INVALID_CONFIG", "workspaceMode must be repo or folder.");
     result.workspaceMode = value;
-  }
-  if (input.openMode !== undefined) {
+  });
+  if (input.openMode !== undefined) guarded(skipped, "openMode", input.openMode, () => {
     const value = asString(input.openMode, "openMode") as OpenMode;
     if (!openModes.has(value)) throw new CliError("INVALID_CONFIG", "openMode is invalid.");
     result.openMode = value;
-  }
-  if (input.threadEnvMode !== undefined) {
+  });
+  if (input.threadEnvMode !== undefined) guarded(skipped, "threadEnvMode", input.threadEnvMode, () => {
     const value = asString(input.threadEnvMode, "threadEnvMode") as ThreadEnvMode;
     if (!threadEnvModes.has(value)) throw new CliError("INVALID_CONFIG", "threadEnvMode is invalid.");
     // `auto` always meant the project checkout; it still loads, as what it meant.
     result.threadEnvMode = value === "auto" ? "local" : value;
-  }
-  if (input.runtimeMode !== undefined) {
+  });
+  if (input.runtimeMode !== undefined) guarded(skipped, "runtimeMode", input.runtimeMode, () => {
     const value = asString(input.runtimeMode, "runtimeMode") as RuntimeMode;
     if (!runtimeModes.has(value)) throw new CliError("INVALID_CONFIG", "runtimeMode is invalid.");
     result.runtimeMode = value;
-  }
-  if (input.interactionMode !== undefined) {
+  });
+  if (input.interactionMode !== undefined) guarded(skipped, "interactionMode", input.interactionMode, () => {
     const raw = asString(input.interactionMode, "interactionMode");
     const value = (REMOVED_INTERACTION_MODES.has(raw) ? "default" : raw) as InteractionMode;
     if (!interactionModes.has(value)) throw new CliError("INVALID_CONFIG", "interactionMode is invalid.");
     result.interactionMode = value;
-  }
-  if (input.provider !== undefined) result.provider = asString(input.provider, "provider");
-  if (input.model !== undefined) result.model = asString(input.model, "model");
-  const promptImprover = normalizeSection<PromptImproverConfig>(input.promptImprover, "promptImprover", ["provider", "model"]);
-  if (promptImprover) result.promptImprover = promptImprover;
-  if (input.speedMode !== undefined) {
+  });
+  if (input.provider !== undefined) guarded(skipped, "provider", input.provider, () => {
+    result.provider = asString(input.provider, "provider");
+  });
+  if (input.model !== undefined) guarded(skipped, "model", input.model, () => {
+    result.model = asString(input.model, "model");
+  });
+  if (input.promptImprover !== undefined) guarded(skipped, "promptImprover", input.promptImprover, () => {
+    const promptImprover = normalizeSection<PromptImproverConfig>(input.promptImprover, "promptImprover", ["provider", "model"], skipped);
+    if (promptImprover) result.promptImprover = promptImprover;
+  });
+  if (input.speedMode !== undefined) guarded(skipped, "speedMode", input.speedMode, () => {
     const value = asString(input.speedMode, "speedMode") as SpeedMode;
     if (!speedModes.has(value)) throw new CliError("INVALID_CONFIG", "speedMode must be standard or fast.");
     result.speedMode = value;
-  }
-  if (input.thinkingEffort !== undefined) {
+  });
+  if (input.thinkingEffort !== undefined) guarded(skipped, "thinkingEffort", input.thinkingEffort, () => {
     result.thinkingEffort = asString(input.thinkingEffort, "thinkingEffort");
-  }
-  if (input.sessionTtl !== undefined) result.sessionTtl = asString(input.sessionTtl, "sessionTtl");
-  if (input.backgroundForgottenAfter !== undefined) {
+  });
+  if (input.sessionTtl !== undefined) guarded(skipped, "sessionTtl", input.sessionTtl, () => {
+    result.sessionTtl = asString(input.sessionTtl, "sessionTtl");
+  });
+  if (input.backgroundForgottenAfter !== undefined) guarded(skipped, "backgroundForgottenAfter", input.backgroundForgottenAfter, () => {
     result.backgroundForgottenAfter = asString(input.backgroundForgottenAfter, "backgroundForgottenAfter");
-  }
-  if (input.instructions !== undefined) {
+  });
+  if (input.instructions !== undefined) guarded(skipped, "instructions", input.instructions, () => {
     const value = asString(input.instructions, "instructions").trim();
     if (value) result.instructions = value;
-  }
-  if (input.memory !== undefined) {
+  });
+  if (input.memory !== undefined) guarded(skipped, "memory", input.memory, () => {
     const raw: unknown = input.memory;
     const value = raw === true || raw === "true" ? true : raw === false || raw === "false" ? false : null;
     if (value === null) throw new CliError("INVALID_CONFIG", "memory must be true or false.");
     // On is the default, so only off is kept.
     if (!value) result.memory = false;
-  }
-  if (input.memoryEmbeddings !== undefined) {
+  });
+  if (input.memoryEmbeddings !== undefined) guarded(skipped, "memoryEmbeddings", input.memoryEmbeddings, () => {
     const value = input.memoryEmbeddings;
     if (value !== true && value !== false && value !== "true" && value !== "false") throw new CliError("INVALID_CONFIG", "memoryEmbeddings must be true or false.");
     result.memoryEmbeddings = value === true || value === "true";
-  }
-  if (input.memoryEmbeddingLoading !== undefined) {
+  });
+  if (input.memoryEmbeddingLoading !== undefined) guarded(skipped, "memoryEmbeddingLoading", input.memoryEmbeddingLoading, () => {
     if (input.memoryEmbeddingLoading !== "keep-loaded" && input.memoryEmbeddingLoading !== "on-demand") throw new CliError("INVALID_CONFIG", "memoryEmbeddingLoading must be keep-loaded or on-demand.");
     result.memoryEmbeddingLoading = input.memoryEmbeddingLoading;
-  }
+  });
   for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"], usageColdResume: ["same-thread", "handoff"] })) {
     const value = (input as Record<string, unknown>)[key];
     if (value === undefined) continue;
-    if (typeof value !== "string" || !choices.includes(value)) throw new CliError("INVALID_CONFIG", `${key} must be one of ${choices.join(", ")}.`);
-    Object.assign(result, { [key]: value });
+    guarded(skipped, key, value, () => {
+      if (typeof value !== "string" || !choices.includes(value)) throw new CliError("INVALID_CONFIG", `${key} must be one of ${choices.join(", ")}.`);
+      Object.assign(result, { [key]: value });
+    });
   }
   for (const key of ["usageMinimumSession", "usageMinimumWeekly"] as const) {
     const value = input[key];
     if (value === undefined) continue;
-    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new CliError("INVALID_CONFIG", `${key} must be a percentage from 0 to 100.`);
-    result[key] = value;
+    guarded(skipped, key, value, () => {
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new CliError("INVALID_CONFIG", `${key} must be a percentage from 0 to 100.`);
+      result[key] = value;
+    });
   }
-  if (input.usageColdResumeAfter !== undefined) {
+  if (input.usageColdResumeAfter !== undefined) guarded(skipped, "usageColdResumeAfter", input.usageColdResumeAfter, () => {
     result.usageColdResumeAfter = asString(input.usageColdResumeAfter, "usageColdResumeAfter");
-  }
-  if (input.usageColdResumeTokens !== undefined) {
+  });
+  if (input.usageColdResumeTokens !== undefined) guarded(skipped, "usageColdResumeTokens", input.usageColdResumeTokens, () => {
     const raw: unknown = input.usageColdResumeTokens;
     const value = typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : raw;
     if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 2_000_000) throw new CliError("INVALID_CONFIG", "usageColdResumeTokens must be a whole number of tokens from 0 to 2000000.");
     result.usageColdResumeTokens = value;
-  }
-  if (input.autoContinueAtUsageLimit !== undefined) {
+  });
+  if (input.autoContinueAtUsageLimit !== undefined) guarded(skipped, "autoContinueAtUsageLimit", input.autoContinueAtUsageLimit, () => {
     // A boolean in the file; `config set` hands it over as text.
     const raw: unknown = input.autoContinueAtUsageLimit;
     const value = raw === true || raw === "true" ? true : raw === false || raw === "false" ? false : null;
     if (value === null) throw new CliError("INVALID_CONFIG", "autoContinueAtUsageLimit must be true or false.");
     if (value) result.autoContinueAtUsageLimit = true;
-  }
-  if (input.usageLimitContinues !== undefined) {
+  });
+  if (input.usageLimitContinues !== undefined) guarded(skipped, "usageLimitContinues", input.usageLimitContinues, () => {
     const value = Number(input.usageLimitContinues);
     if (!Number.isInteger(value) || value < 1 || value > 5) throw new CliError("INVALID_CONFIG", "usageLimitContinues must be a whole number from 1 to 5.");
     if (value !== 2) result.usageLimitContinues = value;
-  }
-  if (input.branchPruneDays !== undefined) {
+  });
+  if (input.branchPruneDays !== undefined) guarded(skipped, "branchPruneDays", input.branchPruneDays, () => {
     const value = Number(input.branchPruneDays);
     if (!Number.isInteger(value) || value < 0 || value > 365) {
       throw new CliError("INVALID_CONFIG", "branchPruneDays must be a whole number of days from 0 to 365.");
     }
     result.branchPruneDays = value;
-  }
-  if (input.installSkills !== undefined) {
+  });
+  if (input.installSkills !== undefined) guarded(skipped, "installSkills", input.installSkills, () => {
     const raw: unknown = input.installSkills;
     const value = raw === true || raw === "true" ? true : raw === false || raw === "false" ? false : null;
     if (value === null) throw new CliError("INVALID_CONFIG", "installSkills must be true or false.");
     if (!value) result.installSkills = false;
-  }
-  if (input.mcpRunner !== undefined) {
+  });
+  if (input.mcpRunner !== undefined) guarded(skipped, "mcpRunner", input.mcpRunner, () => {
     if (input.mcpRunner !== "npx" && input.mcpRunner !== "bunx" && input.mcpRunner !== "pnpm" && input.mcpRunner !== "yarn") throw new CliError("INVALID_CONFIG", "mcpRunner must be npx, bunx, pnpm or yarn.");
     if (input.mcpRunner !== "npx") result.mcpRunner = input.mcpRunner;
-  }
+  });
   if (input.mcpServers !== undefined) {
-    const servers = parseMcpServers(input.mcpServers, "config") as Record<string, McpServerEntry>;
-    if (Object.keys(servers).length > 0) result.mcpServers = servers;
+    if (skipped === undefined) {
+      const servers = parseMcpServers(input.mcpServers, "config") as Record<string, McpServerEntry>;
+      if (Object.keys(servers).length > 0) result.mcpServers = servers;
+    } else {
+      const servers = lenientMcpServers(input.mcpServers, skipped);
+      if (servers && Object.keys(servers).length > 0) result.mcpServers = servers;
+    }
   }
-  const skills = normalizeSection<SkillsConfig>(input.skills, "skills", ["moxen"]);
-  if (skills) result.skills = skills;
-  const web = normalizeSection<WebConfig>(input.web, "web", ["browser", "browserPath", "privateNetwork"]);
-  if (web) result.web = web;
-  const longThreads = normalizeSection<LongThreadsConfig>(input.longThreads, "longThreads", ["handoff", "handoffAt", "compaction", "compactAt"]);
-  if (longThreads) result.longThreads = longThreads;
-  const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "theme", "language", "modelScenes", "hideBinaryDiffs", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds", "autoHandoff", "autoHandoffPercent", "autoHandoffTokens"]);
-  if (ui) result.ui = ui;
-  const git = normalizeSection<GitConfig>(input.git, "git", ["historyLimit", "autoFetch"]);
-  if (git) result.git = git;
-  const forge = normalizeSection<ForgeConfig>(input.forge, "forge", ["enabled", "ghPath", "glabPath"]);
-  if (forge) result.forge = forge;
-  const updates = normalizeSection<UpdatesConfig>(input.updates, "updates", ["checkLatest"]);
-  if (updates) result.updates = updates;
-  const remote = normalizeSection<RemoteConfig>(input.remote, "remote", ["enabled", "interfaces", "port"]);
-  if (remote) result.remote = remote;
-  const providers = normalizeProviders(input.providers);
-  if (providers) result.providers = providers;
+  if (input.skills !== undefined) guarded(skipped, "skills", input.skills, () => {
+    const skills = normalizeSection<SkillsConfig>(input.skills, "skills", ["moxen"], skipped);
+    if (skills) result.skills = skills;
+  });
+  if (input.web !== undefined) guarded(skipped, "web", input.web, () => {
+    const web = normalizeSection<WebConfig>(input.web, "web", ["browser", "browserPath", "privateNetwork"], skipped);
+    if (web) result.web = web;
+  });
+  if (input.longThreads !== undefined) guarded(skipped, "longThreads", input.longThreads, () => {
+    const longThreads = normalizeSection<LongThreadsConfig>(input.longThreads, "longThreads", ["handoff", "handoffAt", "compaction", "compactAt"], skipped);
+    if (longThreads) result.longThreads = longThreads;
+  });
+  if (input.ui !== undefined) guarded(skipped, "ui", input.ui, () => {
+    const ui = normalizeSection<UiConfig>(input.ui, "ui", ["backdrop", "theme", "language", "modelScenes", "hideBinaryDiffs", "defaultSidePanel", "contextRefreshSeconds", "usageRefreshSeconds", "autoHandoff", "autoHandoffPercent", "autoHandoffTokens"], skipped);
+    if (ui) result.ui = ui;
+  });
+  if (input.git !== undefined) guarded(skipped, "git", input.git, () => {
+    const git = normalizeSection<GitConfig>(input.git, "git", ["historyLimit", "autoFetch"], skipped);
+    if (git) result.git = git;
+  });
+  if (input.forge !== undefined) guarded(skipped, "forge", input.forge, () => {
+    const forge = normalizeSection<ForgeConfig>(input.forge, "forge", ["enabled", "ghPath", "glabPath"], skipped);
+    if (forge) result.forge = forge;
+  });
+  if (input.updates !== undefined) guarded(skipped, "updates", input.updates, () => {
+    const updates = normalizeSection<UpdatesConfig>(input.updates, "updates", ["checkLatest"], skipped);
+    if (updates) result.updates = updates;
+  });
+  if (input.remote !== undefined) guarded(skipped, "remote", input.remote, () => {
+    const remote = normalizeSection<RemoteConfig>(input.remote, "remote", ["enabled", "interfaces", "port"], skipped);
+    if (remote) result.remote = remote;
+  });
+  if (input.providers !== undefined) guarded(skipped, "providers", input.providers, () => {
+    const providers = normalizeProviders(input.providers, skipped);
+    if (providers) result.providers = providers;
+  });
   const knownTop = new Set([
     "projectPolicy", "workspaceMode", "openMode", "threadEnvMode", "runtimeMode", "interactionMode",
     "provider", "model", "promptImprover", "speedMode", "thinkingEffort", "sessionTtl", "backgroundForgottenAfter",
@@ -324,6 +398,74 @@ export function normalizeConfig(raw: unknown): CliConfig {
   return applyEnvironmentOverrides(normalizeFileConfig(raw));
 }
 
+/** A lenient load: the file's config with every bad entry skipped, and the skipped entries with their locations. */
+export function normalizeConfigLenient(raw: unknown): { config: CliConfig; skipped: SkippedConfigEntry[] } {
+  const skipped: SkippedConfigEntry[] = [];
+  return { config: applyEnvironmentOverrides(normalizeFileConfig(raw, skipped)), skipped };
+}
+
+/**
+ * One bad MCP server cannot take the rest: parse each entry on its own,
+ * keeping the good ones and recording the bad ones by name.
+ */
+function lenientMcpServers(raw: unknown, skipped: SkippedConfigEntry[]): Record<string, McpServerEntry> | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    skipped.push({ path: "mcpServers", message: "mcpServers must be an object keyed by server name.", value: raw });
+    return undefined;
+  }
+  const out: Record<string, McpServerEntry> = {};
+  const seen = new Set<string>();
+  for (const [name, entry] of Object.entries(raw)) {
+    try {
+      const parsed = parseMcpServers({ [name]: entry }, "config") as Record<string, McpServerEntry>;
+      const normalized = Object.keys(parsed)[0]!;
+      if (seen.has(normalized)) throw new CliError("INVALID_CONFIG", `config: mcpServers name "${name}" duplicates another name ignoring case.`);
+      seen.add(normalized);
+      Object.assign(out, parsed);
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      skipped.push({ path: `mcpServers.${name}`, message: error.message, value: entry });
+    }
+  }
+  return out;
+}
+
+/**
+ * One bad harness profile cannot take the rest: parse each on its own,
+ * keeping the good ones and recording the bad ones by index.
+ */
+function lenientHarnessProfiles(raw: unknown, skipped: SkippedConfigEntry[]): HarnessProviderConfig | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    skipped.push({ path: "providers.harness.profiles", message: "providers.harness.profiles must be a list.", value: raw });
+    return undefined;
+  }
+  const entries = (raw as { profiles?: unknown }).profiles;
+  if (entries === undefined) return undefined;
+  if (!Array.isArray(entries)) {
+    skipped.push({ path: "providers.harness.profiles", message: "providers.harness.profiles must be a list.", value: entries });
+    return undefined;
+  }
+  const profiles: HarnessProfileConfig[] = [];
+  const seen = new Set<string>();
+  entries.forEach((entry, index) => {
+    // By id when the entry names one, so an explicit reset of that profile
+    // clears it; by index when it does not even name itself.
+    const here = typeof entry === "object" && entry !== null && typeof (entry as Record<string, unknown>).id === "string"
+      ? `providers.harness.profiles[${(entry as Record<string, unknown>).id}]`
+      : `providers.harness.profiles[${index}]`;
+    try {
+      const parsed = parseHarnessProfile(entry, index);
+      if (seen.has(parsed.id)) throw new CliError("INVALID_CONFIG", `providers.harness.profiles uses id "${parsed.id}" twice.`);
+      seen.add(parsed.id);
+      profiles.push(parsed);
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      skipped.push({ path: here, message: error.message, value: entry });
+    }
+  });
+  return profiles.length > 0 ? { profiles } : undefined;
+}
+
 function asSection(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new CliError("INVALID_CONFIG", `${label} must be a JSON object.`);
@@ -345,17 +487,29 @@ function withoutRetiredSearch(section: unknown): unknown {
   return webSearch === "exa" || webSearch === "brave" ? rest : section;
 }
 
-function normalizeSection<T>(raw: unknown, prefix: string, fields: readonly string[]): T | undefined {
+function normalizeSection<T>(raw: unknown, prefix: string, fields: readonly string[], skipped?: SkippedConfigEntry[]): T | undefined {
   if (raw === undefined) return undefined;
-  const input = asSection(raw, prefix);
+  let input: Record<string, unknown>;
+  try {
+    input = asSection(raw, prefix);
+  } catch (error) {
+    if (skipped === undefined || !(error instanceof CliError)) throw error;
+    skipped.push({ path: prefix, message: error.message, value: raw });
+    return undefined;
+  }
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     const value = input[field];
     if (value === undefined || value === null) continue;
     const descriptor = settingDescriptor(`${prefix}.${field}`);
     if (!descriptor) continue;
-    // A line (`compactAt`) may be a bare token count in the file; it is read as the same text `config set` takes.
-    out[field] = typeof value === "string" || (descriptor.kind.type === "line" && typeof value === "number") ? parseSettingValue(descriptor, String(value)) : checkTyped(descriptor.kind.type, value, `${prefix}.${field}`);
+    try {
+      // A line (`compactAt`) may be a bare token count in the file; it is read as the same text `config set` takes.
+      out[field] = typeof value === "string" || (descriptor.kind.type === "line" && typeof value === "number") ? parseSettingValue(descriptor, String(value)) : checkTyped(descriptor.kind.type, value, `${prefix}.${field}`);
+    } catch (error) {
+      if (skipped === undefined || !(error instanceof CliError)) throw error;
+      skipped.push({ path: `${prefix}.${field}`, message: error.message, value });
+    }
   }
   for (const [key, value] of Object.entries(input)) if (!(key in out) && !fields.includes(key)) out[key] = value;
   return Object.keys(out).length > 0 ? (out as T) : undefined;
@@ -379,44 +533,85 @@ function checkTyped(kind: string, value: unknown, label: string): unknown {
 type PerModelFields = Pick<ClaudeProviderConfig, "autoHandoffModels" | "compactAtModels" | "handoffModels" | "compactionModels">;
 
 /** A provider section's per-model token prices (USD per million tokens), as the fields to merge in. */
-function modelPricesOf(section: unknown, prefix: string): ModelPriceMaps | undefined {
-  const input = asSection(section, prefix);
+function modelPricesOf(section: unknown, prefix: string, skipped?: SkippedConfigEntry[]): ModelPriceMaps | undefined {
+  let input: Record<string, unknown>;
+  try {
+    input = asSection(section, prefix);
+  } catch (error) {
+    if (skipped === undefined || !(error instanceof CliError)) throw error;
+    skipped.push({ path: prefix, message: error.message, value: section });
+    return undefined;
+  }
   const out: ModelPriceMaps = {};
   for (const field of ["modelInputPrices", "modelOutputPrices", "modelCacheReadPrices", "modelCacheWritePrices"] as const) {
     const raw = input[field];
     if (raw === undefined || raw === null) continue;
-    const map = normalizePriceMap(raw, `${prefix}.${field}`);
-    if (map) out[field] = map;
+    try {
+      const map = normalizePriceMap(raw, `${prefix}.${field}`);
+      if (map) out[field] = map;
+    } catch (error) {
+      if (skipped === undefined || !(error instanceof CliError)) throw error;
+      skipped.push({ path: `${prefix}.${field}`, message: error.message, value: raw });
+    }
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** A provider section's per-model hand-off and compaction overrides (sizes and choices), as the fields to merge in. */
-function handoffModelsOf(section: unknown, prefix: string): PerModelFields | undefined {
-  const input = asSection(section, prefix);
+function handoffModelsOf(section: unknown, prefix: string, skipped?: SkippedConfigEntry[]): PerModelFields | undefined {
+  let input: Record<string, unknown>;
+  try {
+    input = asSection(section, prefix);
+  } catch (error) {
+    if (skipped === undefined || !(error instanceof CliError)) throw error;
+    skipped.push({ path: prefix, message: error.message, value: section });
+    return undefined;
+  }
   const out: PerModelFields = {};
   for (const field of ["autoHandoffModels", "compactAtModels"] as const) {
     const raw = input[field];
     if (raw === undefined || raw === null) continue;
-    const map = normalizeHandoffModels(raw, `${prefix}.${field}`);
-    if (map) out[field] = map;
+    try {
+      const map = normalizeHandoffModels(raw, `${prefix}.${field}`);
+      if (map) out[field] = map;
+    } catch (error) {
+      if (skipped === undefined || !(error instanceof CliError)) throw error;
+      skipped.push({ path: `${prefix}.${field}`, message: error.message, value: raw });
+    }
   }
   if (input.handoffModels !== undefined && input.handoffModels !== null) {
-    const map = normalizeModeModels(input.handoffModels, `${prefix}.handoffModels`, ["ask", "auto", "off"] as const);
-    if (map) out.handoffModels = map;
+    try {
+      const map = normalizeModeModels(input.handoffModels, `${prefix}.handoffModels`, ["ask", "auto", "off"] as const);
+      if (map) out.handoffModels = map;
+    } catch (error) {
+      if (skipped === undefined || !(error instanceof CliError)) throw error;
+      skipped.push({ path: `${prefix}.handoffModels`, message: error.message, value: input.handoffModels });
+    }
   }
   if (input.compactionModels !== undefined && input.compactionModels !== null) {
-    const map = normalizeModeModels(input.compactionModels, `${prefix}.compactionModels`, ["provider", "ask", "auto", "off"] as const);
-    if (map) out.compactionModels = map;
+    try {
+      const map = normalizeModeModels(input.compactionModels, `${prefix}.compactionModels`, ["provider", "ask", "auto", "off"] as const);
+      if (map) out.compactionModels = map;
+    } catch (error) {
+      if (skipped === undefined || !(error instanceof CliError)) throw error;
+      skipped.push({ path: `${prefix}.compactionModels`, message: error.message, value: input.compactionModels });
+    }
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
+function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): ProvidersConfig | undefined {
   if (raw === undefined) return undefined;
-  const input = asSection(raw, "providers");
+  let input: Record<string, unknown>;
+  try {
+    input = asSection(raw, "providers");
+  } catch (error) {
+    if (skipped === undefined || !(error instanceof CliError)) throw error;
+    skipped.push({ path: "providers", message: error.message, value: raw });
+    return undefined;
+  }
   const result: ProvidersConfig = {};
-  if (input.claude !== undefined) {
+  if (input.claude !== undefined) guarded(skipped, "providers.claude", input.claude, () => {
     const claude = normalizeSection<ClaudeProviderConfig>(input.claude, "providers.claude", [
       "binaryPath",
       "homePath",
@@ -451,41 +646,41 @@ function normalizeProviders(raw: unknown): ProvidersConfig | undefined {
       "mcpExclude",
       "disabledNativeTools",
       "webSearchOrder", "webFetchOrder",
-    ]);
+    ], skipped);
     const launchArgs = asSection(input.claude, "providers.claude").launchArgs;
     const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
-    const models = handoffModelsOf(input.claude, "providers.claude");
-    const prices = modelPricesOf(input.claude, "providers.claude");
+    const models = handoffModelsOf(input.claude, "providers.claude", skipped);
+    const prices = modelPricesOf(input.claude, "providers.claude", skipped);
     // `launchArgs` is validated above (an invalid shape is dropped, as before),
     // not carried as an unknown field.
     if (claude) delete (claude as unknown as Record<string, unknown>).launchArgs;
     if (claude || args || models || prices) result.claude = { ...(claude ?? {}), ...(args ? { launchArgs: args } : {}), ...models, ...prices };
-  }
-  if (input.codex !== undefined) {
-    const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"]);
-    const models = handoffModelsOf(input.codex, "providers.codex");
-    const prices = modelPricesOf(input.codex, "providers.codex");
+  });
+  if (input.codex !== undefined) guarded(skipped, "providers.codex", input.codex, () => {
+    const codex = normalizeSection<CodexProviderConfig>(input.codex, "providers.codex", ["binaryPath", "homePath", "launchArgs", "reasoningSummary", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    const models = handoffModelsOf(input.codex, "providers.codex", skipped);
+    const prices = modelPricesOf(input.codex, "providers.codex", skipped);
     if (codex || models || prices) result.codex = { ...codex, ...models, ...prices };
-  }
-  if (input.opencode !== undefined) {
-    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"]);
-    const models = handoffModelsOf(input.opencode, "providers.opencode");
-    const prices = modelPricesOf(input.opencode, "providers.opencode");
+  });
+  if (input.opencode !== undefined) guarded(skipped, "providers.opencode", input.opencode, () => {
+    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"], skipped);
+    const models = handoffModelsOf(input.opencode, "providers.opencode", skipped);
+    const prices = modelPricesOf(input.opencode, "providers.opencode", skipped);
     if (opencode || models || prices) result.opencode = { ...opencode, ...models, ...prices };
-  }
-  if (input.harness !== undefined) {
-    const withProfiles = normalizeHarnessConfig(input.harness);
-    let defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"]);
+  });
+  if (input.harness !== undefined) guarded(skipped, "providers.harness", input.harness, () => {
+    const withProfiles = skipped === undefined ? normalizeHarnessConfig(input.harness) : lenientHarnessProfiles(input.harness, skipped);
+    let defaults = normalizeSection<HarnessProviderConfig>(withoutRetiredSearch(input.harness), "providers.harness", ["runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "slots", "autoCompact", "autoCompactPercent", "autoCompactTokens", "keepRecentTokens", "webSearch", "searxngUrl", "webBrowser", "webBrowserPath", "webPrivateNetwork"], skipped);
     // `profiles` is the list itself (above), not a default: without this an
     // emptied list would linger as `profiles: []` instead of going away.
     if (defaults) {
       delete (defaults as unknown as Record<string, unknown>).profiles;
       if (Object.keys(defaults).length === 0) defaults = undefined;
     }
-    const models = handoffModelsOf(input.harness, "providers.harness");
-    const prices = modelPricesOf(input.harness, "providers.harness");
+    const models = handoffModelsOf(input.harness, "providers.harness", skipped);
+    const prices = modelPricesOf(input.harness, "providers.harness", skipped);
     if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
-  }
+  });
   // A newer build's extra providers stay in the file untouched.
   for (const [kind, value] of Object.entries(input)) {
     if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness") {
@@ -600,22 +795,34 @@ export interface LoadedConfig {
   readonly raw: unknown;
   readonly path: string;
   readonly exists: boolean;
+  /** Entries that failed to parse: skipped, with raw values carried through the next save. */
+  readonly skipped: SkippedConfigEntry[];
+  /** Where the skipped entries are, for reports; never their values. */
+  readonly problems: ConfigProblem[];
 }
 
 export async function loadConfig(explicitPath?: string): Promise<LoadedConfig> {
   const configPath = path.resolve(expandHome(explicitPath ?? defaultConfigPath()));
   try {
     const raw = JSON.parse(await readFile(configPath, "utf8")) as unknown;
-    const fileConfig = normalizeFileConfig(raw);
-    return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw, path: configPath, exists: true };
+    const skipped: SkippedConfigEntry[] = [];
+    const fileConfig = normalizeFileConfig(raw, skipped);
+    const problems = skipped.map((entry) => ({ path: entry.path, message: entry.message }));
+    return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw, path: configPath, exists: true, skipped, problems };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       const fileConfig = { ...DEFAULT_CONFIG };
-      return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: undefined, path: configPath, exists: false };
+      return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: undefined, path: configPath, exists: false, skipped: [], problems: [] };
     }
     if (error instanceof CliError) throw error;
-    throw new CliError("CONFIG_READ_FAILED", `Could not read config at ${configPath}.`, { cause: error });
+    // Truly nothing to load: the file is not JSON at all. Name the way
+    // back: the previous save's backup, or moving the file aside to start fresh.
+    throw new CliError(
+      "CONFIG_READ_FAILED",
+      `Could not parse config at ${configPath}: it is not valid JSON. A backup of the previous save may exist at ${configPath}.bak.1 — restore it, or move the file aside to start fresh.`,
+      { cause: error },
+    );
   }
 }
 
@@ -665,8 +872,11 @@ export async function backupConfigFile(configPath: string): Promise<void> {
  * Unknown keys travel in the config itself (`normalizeFileConfig`
  * keeps them), so clearing a known setting never resurrects it from an old read.
  * A save that changes nothing skips the backup and the rewrite.
+ * Skipped entries ride along: a save carries what the load could not read
+ * (applied only where the saved config says nothing), so fixing or
+ * resetting one entry never drops the others.
  */
-export async function saveConfig(configPath: string, config: CliConfig): Promise<void> {
+export async function saveConfig(configPath: string, config: CliConfig, skipped: readonly SkippedConfigEntry[] = []): Promise<void> {
   // Loaded here rather than at the top: `core/config` is imported during
   // test setup, before any file mock registers, and a static edge would pin
   // the atomic write to the real filesystem for the whole test run.
@@ -690,10 +900,137 @@ export async function saveConfig(configPath: string, config: CliConfig): Promise
   } catch {
     // Missing or unreadable: nothing to strip against; write what was passed.
   }
+  // A save must never drop what the load could not read: skipped values
+  // apply only where the saved config says nothing.
+  next = applySkipped(structuredClone(next) as unknown as Record<string, unknown>, skipped);
   const text = `${JSON.stringify(next, null, 2)}\n`;
   if (current === text) return;
   await backupConfigFile(configPath);
   await writeAtomic(configPath, text);
+}
+
+
+/**
+ * Re-apply skipped entries onto a normalized config, setting only what is
+ * absent: the normalized config (the user's fixes included) always wins.
+ * Array indexes that no longer line up append instead of overwriting, so a
+ * save never invents holes or drops a good entry.
+ */
+function applySkipped(config: Record<string, unknown>, skipped: readonly SkippedConfigEntry[]): Record<string, unknown> {
+  for (const entry of skipped) setPathIfAbsent(config, parseSkippedPath(entry.path), entry.value);
+  return config;
+}
+
+/**
+ * A path segment: a dot-separated object key, a bracketed list index, or a
+ * bracketed list id (`profiles[lab]`). Dots and brackets are not
+ * interchangeable: `mcpServers.lab` addresses a map entry, while
+ * `profiles[lab]` addresses one element of a list, and re-applying a
+ * skipped entry must rebuild the shape the path names.
+ */
+type SkippedSegment = string | number | { readonly id: string };
+
+function parseSkippedPath(path: string): SkippedSegment[] {
+  const segments: SkippedSegment[] = [];
+  for (const part of path.split(".")) {
+    const match = /^([^\[]+?)(?:\[([^\]]+)\])?$/.exec(part);
+    const name = match?.[1];
+    if (!match || name === undefined || name === "") {
+      segments.push(part);
+      continue;
+    }
+    segments.push(name);
+    const raw = match[2];
+    if (raw !== undefined) {
+      const index = Number(raw);
+      segments.push(Number.isInteger(index) && String(index) === raw ? index : { id: raw });
+    }
+  }
+  return segments;
+}
+
+/** Whether two path segments address the same entry: a bracketed id matches its bare name. */
+function sameSegment(left: SkippedSegment | undefined, right: SkippedSegment | undefined): boolean {
+  if (typeof left === "object" && left !== null) return typeof right === "object" && right !== null ? right.id === left.id : right === left.id;
+  if (typeof right === "object" && right !== null) return right.id === left;
+  return left === right;
+}
+
+/**
+ * Whether `config set`/`settings.set` of `key` covers a skipped entry: the
+ * key names the entry or something above it (`ui`, `mcpServers[x]`,
+ * `providers.harness.profiles[x]`). Covered entries are dropped from
+ * preservation, so resetting or removing a bad entry actually clears it
+ * instead of the next save carrying it back.
+ */
+export function configKeyCoversPath(key: string, skippedPath: string): boolean {
+  const wanted = parseSkippedPath(key);
+  const actual = parseSkippedPath(skippedPath);
+  return wanted.length <= actual.length && wanted.every((segment, index) => sameSegment(segment, actual[index]));
+}
+
+function setPathIfAbsent(root: Record<string, unknown>, segments: SkippedSegment[], value: unknown): void {
+  const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
+  const elementId = (element: unknown): unknown =>
+    typeof element === "object" && element !== null ? (element as Record<string, unknown>).id : undefined;
+  let node: Record<string, unknown> | unknown[] = root;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index]!;
+    const next = segments[index + 1]!;
+    if (typeof segment === "number") {
+      if (!Array.isArray(node)) return;
+      if (segment >= node.length) {
+        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" || typeof next === "object" ? [] : {};
+        node.push(fresh);
+        node = fresh;
+      } else {
+        const child = node[segment];
+        if (typeof child !== "object" || child === null) return;
+        node = child as Record<string, unknown> | unknown[];
+      }
+    } else if (typeof segment === "object") {
+      // A bracketed id addresses one list element: follow it when the list
+      // already holds that entry, and never invent one mid-path.
+      if (!Array.isArray(node)) return;
+      const found = node.find((element) => elementId(element) === segment.id);
+      if (typeof found !== "object" || found === null) return;
+      node = found as Record<string, unknown> | unknown[];
+    } else {
+      if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+      const record = node as Record<string, unknown>;
+      const child = record[segment];
+      if (child === undefined) {
+        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" || typeof next === "object" ? [] : {};
+        record[segment] = fresh;
+        node = fresh;
+      } else {
+        if (typeof child !== "object" || child === null) return;
+        node = child as Record<string, unknown> | unknown[];
+      }
+    }
+  }
+  const leaf = segments[segments.length - 1];
+  if (leaf === undefined) return;
+  if (Array.isArray(node) && (typeof leaf === "string" || typeof leaf === "object")) {
+    // A list entry by id: already carried under that id, or superseded by a
+    // good entry the user wrote — either way nothing is appended.
+    const id = typeof leaf === "string" ? leaf : leaf.id;
+    const carried = node.some((element) => elementId(element) === id);
+    if (!carried) node.push(value);
+    return;
+  }
+  if (typeof leaf === "number") {
+    if (!Array.isArray(node)) return;
+    if (leaf < node.length) {
+      // Occupied: already carried (leave it) or holding something else (keep it, append).
+      if (!same(node[leaf], value)) node.push(value);
+    } else {
+      node.push(value);
+    }
+  } else if (typeof leaf === "string") {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+    if ((node as Record<string, unknown>)[leaf] === undefined) (node as Record<string, unknown>)[leaf] = value;
+  }
 }
 
 /**

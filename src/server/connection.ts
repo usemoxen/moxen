@@ -46,7 +46,7 @@ import type { LatestVersions } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
-import { appHomeDir, applyEnvironmentOverrides, defaultConfigPath, loadConfig, normalizeFileConfig, saveConfig, setConfigValueSecure } from "../core/config.js";
+import { appHomeDir, applyEnvironmentOverrides, defaultConfigPath, loadConfig, normalizeFileConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
 import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
@@ -102,6 +102,7 @@ import {
   readThread,
   settleThread,
   snoozeThread,
+  turnProblems,
   unsettleThread,
   unsnoozeThread,
   updateThreadMeta,
@@ -166,6 +167,7 @@ import {
 import { toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
+import { isKnownTurnStatus } from "../core/threads/problems.js";
 import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
@@ -382,7 +384,7 @@ export class DirectConnection implements ClientApi {
   private readonly catalog: () => Promise<ConfigPayload>;
   private readonly providers: () => Promise<ProviderSummary[]>;
   private readonly loadConfig: () => Promise<CliConfig>;
-  private readonly readConfigFile: () => Promise<{ config: CliConfig; fileConfig: CliConfig; raw: unknown; path: string; exists: boolean }>;
+  private readonly readConfigFile: () => Promise<LoadedConfig>;
   /** The per-provider settings the last config read saw; see `driverFor`. */
   private lastProviders: ProvidersConfig | undefined;
   private lastWeb: WebConfig | undefined;
@@ -446,7 +448,7 @@ export class DirectConnection implements ClientApi {
       ? async () => {
         const config = await override();
         const fileConfig = normalizeFileConfig(config);
-        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: options.configPath ?? defaultConfigPath(), exists: true };
+        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] };
       }
       : async () => await loadConfig(options.configPath);
     this.loadConfig = async () => {
@@ -1085,6 +1087,10 @@ export class DirectConnection implements ClientApi {
             const cached = turnCache.get(entry.id);
             const turns = cached && cached.version === version ? cached.turns : await store.readTurns(entry.id);
             if (!cached || cached.version !== version) turnCache.set(entry.id, { version, turns });
+            // Stuck turns surface as warnings with a fix (stop the turn),
+            // not as a blank sidebar: a status no build writes, or a
+            // running turn no process owns, will never settle on its own.
+            store.replaceTurnProblems(entry.id, turnProblems(store, entry.id, turns));
             // This poll already reads every changed thread's turns: a scheduled turn
             // that came due — even one another process scheduled — starts here.
             if (turns.some((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) <= now)) {
@@ -1438,6 +1444,8 @@ export class DirectConnection implements ClientApi {
         }
         return accepted;
       }
+      case "store.quarantine":
+        return await (await this.store()).quarantineProblem(command.id);
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -1691,8 +1699,8 @@ export class DirectConnection implements ClientApi {
               await this.setupEmbeddings({ type: "memory.embeddings.setup", all: true });
             } catch (error) {
               await this.withConfigWrite(async () => {
-                const { fileConfig, path } = await this.readConfigFile();
-                await saveConfig(path, await setConfigValueSecure(fileConfig, "memoryEmbeddings", "false"));
+                const { fileConfig, path, skipped } = await this.readConfigFile();
+                await saveConfig(path, await setConfigValueSecure(fileConfig, "memoryEmbeddings", "false"), skipped);
               });
               throw error;
             }
@@ -1705,9 +1713,12 @@ export class DirectConnection implements ClientApi {
           // The queue above makes even that re-read fresh. Edits apply to
           // the file's config (no environment overrides), so the
           // environment never leaks into the saved file.
-          const { config: before, fileConfig, path } = await this.readConfigFile();
+          const { config: before, fileConfig, path, skipped } = await this.readConfigFile();
           const next = await setConfigValueSecure(fileConfig, command.key, command.value);
-          await saveConfig(path, next);
+          // Setting a key clears what the file held for it: a bad entry the
+          // user just reset or removed is not carried back by the save.
+          const kept = skipped.filter((entry) => !configKeyCoversPath(command.key, entry.path));
+          await saveConfig(path, next, kept);
           if (command.key === "memoryEmbeddings" || command.key === "memoryEmbeddingLoading" || command.key === "memory") {
             void this.applyEmbeddingPolicy().catch(() => undefined);
           }
@@ -1722,7 +1733,7 @@ export class DirectConnection implements ClientApi {
             } catch (cause) {
               // Put back what was listening: a setting that says "on" while
               // nothing listens would be a lie the next restart repeats.
-              await saveConfig(path, fileConfig);
+              await saveConfig(path, fileConfig, skipped);
               await this.remoteAccess.apply(before.remote).catch(() => undefined);
               throw cause;
             }
@@ -1732,10 +1743,10 @@ export class DirectConnection implements ClientApi {
       }
       case "settings.duplicate": {
         return await this.withConfigWrite(async () => {
-          const { fileConfig, path } = await this.readConfigFile();
+          const { fileConfig, path, skipped } = await this.readConfigFile();
           const entry = listTarget(`${command.key}[${command.id}]`);
           if (!entry) throw new CliError("INVALID_CONFIG_KEY", `${command.key} is not a list setting.`);
-          await saveConfig(path, normalizeFileConfig(duplicateListItem(fileConfig, entry, command.newId, command.key)));
+          await saveConfig(path, normalizeFileConfig(duplicateListItem(fileConfig, entry, command.newId, command.key)), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
       }
@@ -1746,7 +1757,7 @@ export class DirectConnection implements ClientApi {
       case "harness.profile.import": {
         const parsed = parseProfileDocument(command.text);
         return await this.withConfigWrite(async () => {
-          const { fileConfig, path } = await this.readConfigFile();
+          const { fileConfig, path, skipped } = await this.readConfigFile();
           const existing = fileConfig.providers?.harness?.profiles ?? [];
           const wanted = (command.id ?? parsed.id).toLowerCase();
           const taken = new Set(existing.map((entry) => entry.id));
@@ -1757,7 +1768,7 @@ export class DirectConnection implements ClientApi {
           const id = taken.has(wanted) && mode === "rename" ? freeProfileId(wanted, taken) : wanted;
           const next = { ...parsed, id };
           const profiles = taken.has(id) ? existing.map((entry) => (entry.id === id ? next : entry)) : [...existing, next];
-          await saveConfig(path, normalizeFileConfig({ ...fileConfig, providers: { ...fileConfig.providers, harness: { ...fileConfig.providers?.harness, profiles } } }));
+          await saveConfig(path, normalizeFileConfig({ ...fileConfig, providers: { ...fileConfig.providers, harness: { ...fileConfig.providers?.harness, profiles } } }), skipped);
           return { ...(await this.settingsSnapshot()), accepted: true, id, fileId: parsed.id };
         });
       }
@@ -1783,7 +1794,7 @@ export class DirectConnection implements ClientApi {
                   ? entry
                   : { ...entry, models: entry.models.map((m) => (m.id === model.id ? { ...m, probed: mergeProbed(m.probed, report) } : m)) },
               );
-              await saveConfig(fresh.path, normalizeFileConfig({ ...fresh.fileConfig, providers: { ...fresh.fileConfig.providers, harness: { ...fresh.fileConfig.providers?.harness, profiles } } }));
+              await saveConfig(fresh.path, normalizeFileConfig({ ...fresh.fileConfig, providers: { ...fresh.fileConfig.providers, harness: { ...fresh.fileConfig.providers?.harness, profiles } } }), fresh.skipped);
             });
           }
           return { ...report, saved: save };
@@ -2054,7 +2065,9 @@ export class DirectConnection implements ClientApi {
     if (!turn) {
       throw new CliError("TURN_NOT_FOUND", `No turn exists with id ${turnId}.`, { exitCode: 3, details: { threadId, turnId } });
     }
-    return turn.status;
+    // A status no build writes reads as unknown on the wire, never raw: the
+    // contract names every state a client can see.
+    return isKnownTurnStatus(turn.status) ? turn.status : "unknown";
   }
 
   /**
@@ -2390,8 +2403,12 @@ export class DirectConnection implements ClientApi {
       case "settings.read":
         return await this.settingsSnapshot();
       case "config.read": {
-        const { config, path, exists } = await this.readConfigFile();
-        return { path, exists, config: config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config };
+        const { config, path, exists, problems } = await this.readConfigFile();
+        return { path, exists, config: config.mcpServers ? { ...config, mcpServers: redactMcpServers(config.mcpServers) } : config, problems };
+      }
+      case "store.problems": {
+        const store = await this.store();
+        return { problems: store.storeProblems() };
       }
       case "harness.profile.export": {
         const { config } = await this.readConfigFile();

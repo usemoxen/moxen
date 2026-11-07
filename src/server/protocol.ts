@@ -73,6 +73,8 @@ import type {
   MergeStrategy,
 } from "../core/forge/forge.js";
 import type { Diagnosis } from "../core/diagnostics/doctor.js";
+import type { StoreProblem } from "../core/threads/problems.js";
+import type { ConfigProblem } from "../core/config.js";
 import type { ExperienceSnapshot } from "../core/experience/experience.js";
 import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
 import type { StatsRange, UsageStats } from "../core/usage/stats.js";
@@ -270,6 +272,13 @@ export type CommandBody =
   | ({ readonly type: "skills.enabled.set"; readonly projectId?: string; readonly enabled: boolean } & SkillAddress)
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
+  /**
+   * Move a reported bad record aside into the store's quarantine folder —
+   * never deleted — and repair the source (a ledger loses only the bad
+   * line). Resolves from the server's own problem log by id, so a client
+   * can never name an arbitrary path.
+   */
+  | { readonly type: "store.quarantine"; readonly id: string }
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string; readonly notifyParent?: boolean }
   /**
    * Settle a task the caller delegated (moxen's `task_settle`), through the
@@ -471,6 +480,7 @@ export interface CommandResults {
   "skills.enabled.set": Accepted;
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
+  "store.quarantine": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
@@ -587,6 +597,13 @@ export type Query =
   | ({ readonly type: "skills.manage.read"; readonly projectId?: string } & SkillAddress)
   /** Binaries, git, store and stored-credential presence on the machine running the sessions. */
   | { readonly type: "doctor" }
+  /**
+   * Bad records readers skipped — corrupt thread records and ledger lines,
+   * stuck turns — with their locations. Read-only; the TUI warns from it,
+   * `doctor` reports it. Config entries that failed to parse ride on
+   * `config.read` instead, beside the file that holds them.
+   */
+  | { readonly type: "store.problems" }
   /** Skills and slash commands one provider resolves for a working directory. */
   | { readonly type: "skills.list"; readonly instanceId: string; readonly cwd: string }
   /** Background work running in a thread's live session; `live: false` when no session runs here. */
@@ -765,6 +782,7 @@ export interface QueryResults {
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
   doctor: Diagnosis;
+  "store.problems": { readonly problems: readonly StoreProblem[] };
   "skills.list": SkillInventory;
   "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
   "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
@@ -798,7 +816,7 @@ export interface QueryResults {
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
   "experience.read": ExperienceSnapshot;
-  "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig };
+  "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig; readonly problems: readonly ConfigProblem[] };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
   "app.update.check": UpdateCheck;
@@ -1276,6 +1294,8 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeSkillAddress(record, type), providers: parseSkillProviders(record.providers) };
     case "skills.remove":
       return { ...meta, type, ...decodeSkillAddress(record, type) };
+    case "store.quarantine":
+      return { ...meta, type, id: requireField(record.id, type, "id") };
     case "thread.image.generate":
       return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
     case "research.role.start":
@@ -1755,6 +1775,7 @@ export function decodeQuery(value: unknown): Query {
     case "remote.devices":
     case "settings.read":
     case "experience.read":
+    case "store.problems":
     case "config.read":
     case "provider.latest":
     case "app.update.check":

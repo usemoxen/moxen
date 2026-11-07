@@ -256,6 +256,11 @@ function tabLine(config: HarnessProviderConfig | undefined): { tokens: number } 
   return null;
 }
 
+/** Parse one harness profile on its own, so a lenient load can keep the good ones and report the bad one by index. */
+export function parseHarnessProfile(raw: unknown, index: number): HarnessProfileConfig {
+  return parseProfile(raw, `providers.harness.profiles[${index}]`);
+}
+
 /** Validate `providers.harness` from the config file. Undefined when it holds no profiles. */
 export function normalizeHarnessConfig(raw: unknown): HarnessProviderConfig | undefined {
   if (raw === undefined || raw === null) return undefined;

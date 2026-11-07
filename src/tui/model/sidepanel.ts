@@ -24,7 +24,7 @@ export interface AgentThreadRow {
   /** When its latest turn started, for the running clock. */
   startedAt: string | null;
   /** Its latest turn's outcome, once settled. */
-  outcome: "completed" | "error" | "interrupted" | null;
+  outcome: "completed" | "error" | "interrupted" | "unknown" | null;
 }
 
 /** The open thread's delegated tasks, newest first. */

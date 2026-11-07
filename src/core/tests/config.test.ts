@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeFileConfig, saveConfig, setConfigValue } from "../config.js";
+import { DEFAULT_CONFIG, configKeyCoversPath, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeConfigLenient, normalizeFileConfig, saveConfig, setConfigValue } from "../config.js";
 import type { CliConfig } from "../types.js";
 import { readSetting } from "../configschema.js";
 
@@ -119,6 +119,104 @@ describe("config", () => {
     // The rewrite before it left a backup beside the file.
     expect(readdirSync(path.join(dir, "nested")).sort()).toEqual(["config.json", "config.json.bak.1"]);
     expect(JSON.parse(readFileSync(path.join(dir, "nested", "config.json.bak.1"), "utf8")).runtimeMode).toBe("full-access");
+  });
+
+  it("loads past one bad scalar, keeping the rest and reporting where it was", async () => {
+    const { config, skipped } = normalizeConfigLenient({ provider: "mine", speedMode: "turbo" });
+    expect(config.provider).toBe("mine");
+    expect(config.speedMode).toBeUndefined();
+    expect(skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    // The strict reader still refuses it whole: `config set` must not accept it either.
+    expect(() => normalizeConfig({ provider: "mine", speedMode: "turbo" })).toThrow("speedMode must be standard or fast");
+  });
+
+  it("skips one bad MCP server and keeps the good one", () => {
+    const { config, skipped } = normalizeConfigLenient({
+      mcpServers: {
+        good: { command: "server" },
+        bad: { command: "" },
+      },
+    });
+    expect(Object.keys(config.mcpServers ?? {})).toEqual(["good"]);
+    expect(skipped.map((entry) => entry.path)).toEqual(["mcpServers.bad"]);
+  });
+
+  it("skips one bad harness profile and keeps the good one", () => {
+    const good = { id: "lab", baseUrl: "http://localhost:8080", models: [{ id: "qwen3" }] };
+    const { config, skipped } = normalizeConfigLenient({
+      providers: { harness: { profiles: [good, { id: "broken" }] } },
+    });
+    expect(config.providers?.harness?.profiles?.map((profile) => profile.id)).toEqual(["lab"]);
+    expect(skipped.map((entry) => entry.path)).toEqual(["providers.harness.profiles[broken]"]);
+  });
+
+  it("a skipped entry survives a save instead of being silently dropped", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ provider: "mine", speedMode: "turbo" }));
+    const loaded = await loadConfig(file);
+    expect(loaded.config.provider).toBe("mine");
+    expect(loaded.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    await saveConfig(file, { ...loaded.config, provider: "theirs" }, loaded.skipped);
+    const reread = await loadConfig(file);
+    // The user's edit landed, and the bad value is still there to fix, not gone.
+    expect(reread.config.provider).toBe("theirs");
+    expect(reread.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    expect(JSON.parse(readFileSync(file, "utf8")).speedMode).toBe("turbo");
+  });
+
+  it("a fixed entry stops being preserved once it parses", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ speedMode: "turbo" }));
+    const loaded = await loadConfig(file);
+    expect(loaded.skipped.map((entry) => entry.path)).toEqual(["speedMode"]);
+    // The user fixed it: the new value is in force, not the old bad one.
+    await saveConfig(file, { ...loaded.config, speedMode: "fast" }, loaded.skipped);
+    expect(JSON.parse(readFileSync(file, "utf8")).speedMode).toBe("fast");
+    expect((await loadConfig(file)).skipped).toEqual([]);
+  });
+
+  it("keeps unknown keys and skipped entries together through a load, edit, and save", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    const written = {
+      provider: "mine",
+      speedMode: "turbo",
+      futureTop: { nested: [1, 2, 3] },
+      ui: { theme: "moxen", futureSection: "keep-me" },
+      providers: { harness: { profiles: [{ id: "broken" }] } },
+    };
+    writeFileSync(file, JSON.stringify(written, null, 2));
+    const loaded = await loadConfig(file);
+    // Both problems are reported, and the unknown keys ride along untouched.
+    expect(loaded.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    expect((loaded.fileConfig as unknown as Record<string, unknown>).futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((loaded.fileConfig.ui as unknown as Record<string, unknown>).futureSection).toBe("keep-me");
+    // A known edit, saved the way the server saves it: unknown keys stay,
+    // the skipped raws ride along, and a backup is written.
+    const edited = setConfigValue(loaded.fileConfig, "provider", "theirs");
+    const kept = loaded.skipped.filter((entry) => !configKeyCoversPath("provider", entry.path));
+    await saveConfig(file, edited, kept);
+    const reread = await loadConfig(file);
+    expect(reread.config.provider).toBe("theirs");
+    expect(reread.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(onDisk.futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((onDisk.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect(onDisk.speedMode).toBe("turbo");
+    expect(((onDisk.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles).toEqual([{ id: "broken" }]);
+    expect(readdirSync(dir).sort()).toEqual(["config.json", "config.json.bak.1"]);
+  });
+
+  it("matches a set key against the skipped entries it covers", () => {
+    expect(configKeyCoversPath("speedMode", "speedMode")).toBe(true);
+    expect(configKeyCoversPath("ui", "ui.theme")).toBe(true);
+    expect(configKeyCoversPath("ui.theme", "ui.theme")).toBe(true);
+    expect(configKeyCoversPath("ui.theme", "ui.language")).toBe(false);
+    expect(configKeyCoversPath("mcpServers[lab]", "mcpServers.lab")).toBe(true);
+    expect(configKeyCoversPath("providers.harness.profiles[broken]", "providers.harness.profiles[broken]")).toBe(true);
+    expect(configKeyCoversPath("providers.harness.profiles[lab]", "providers.harness.profiles[broken]")).toBe(false);
   });
 
   it("refuses an unknown key on `config set`, instead of writing it", () => {
@@ -294,6 +392,34 @@ describe("config keeps unknown keys", () => {
     const names = readdirSync(dir).sort();
     expect(names).toEqual(["config.json", "config.json.bak.1", "config.json.bak.2", "config.json.bak.3", "config.json.bak.4", "config.json.bak.5"]);
     expect(JSON.parse(readFileSync(path.join(dir, "config.json.bak.5"), "utf8")).sessionTtl).toBe("3m");
+  });
+
+  it("keeps skipped entries and unknown keys together through a load, edit, and save", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-roundtrip-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({
+      futureTop: { nested: [1, 2, 3] },
+      speedMode: "turbo",
+      ui: { theme: "moxen", futureSection: "keep-me" },
+      providers: { harness: { profiles: [{ id: "broken" }] } },
+    }, null, 2));
+    const loaded = await loadConfig(file);
+    expect(loaded.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    expect((loaded.fileConfig as unknown as Record<string, unknown>).futureTop).toEqual({ nested: [1, 2, 3] });
+    // Edit a known key the way the server does: fileConfig through
+    // setConfigValue, skipped filtered by the edited key, then saved.
+    const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+    const kept = loaded.skipped.filter((entry) => !configKeyCoversPath("ui.theme", entry.path));
+    await saveConfig(file, edited, kept);
+    expect(readdirSync(dir).sort()).toEqual(["config.json", "config.json.bak.1"]);
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(onDisk.futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((onDisk.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect((onDisk.ui as Record<string, unknown>).theme).toBe("dracula");
+    expect(onDisk.speedMode).toBe("turbo");
+    expect(((onDisk.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles).toEqual([{ id: "broken" }]);
+    const reread = await loadConfig(file);
+    expect(reread.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
   });
 });
 
