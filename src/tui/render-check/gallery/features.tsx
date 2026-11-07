@@ -5,6 +5,7 @@ import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
 import { MemoryManagerModal } from "../../features/memory/memorymanager.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
+import { CancelAutoContinueModal } from "../../features/queue/cancelmodal.js";
 import { ChoiceList, KeyButton, KeyHints } from "../../features/queue/parts.js";
 import { QueueList, queueRows } from "../../features/queue/queuelist.js";
 import { queueGroups } from "../../model/workqueue.js";
@@ -415,6 +416,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
   { id: "work-queue-narrow", group: "queue", title: "Work queue, 80 by 24", width: 80, height: 24, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={80} screenHeight={24} onClose={noop} /> },
   { id: "work-queue-long", group: "queue", title: "Work queue, long titles", width: 90, height: 26, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_LONG_CLIENT} threads={QUEUE_THREADS} screenWidth={90} screenHeight={26} onClose={noop} /> },
   { id: "work-queue-schedule", group: "queue", title: "Schedule a message or new thread", width: 84, height: 28, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={84} screenHeight={28} onClose={noop} onSchedule={noop} /> },
+  { id: "cancel-auto-continue", group: "queue", title: "Cancel automatic continue of a delegated task", width: 84, height: 30, settleMs: 250, element: () => <CancelAutoContinueModal title="Map auth endpoints" screenWidth={84} screenHeight={30} onNotify={noop} onSilent={noop} onBack={noop} /> },
   {
     id: "memory-runtime",
     group: "settings",

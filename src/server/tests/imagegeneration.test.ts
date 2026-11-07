@@ -68,7 +68,7 @@ it("rechecks Codex reserves before dispatch, then runs and reads a native image 
     const newer = transport.sessions.filter((session) => session.server.requestsTo("turn/start").length > 0)[1]!.server;
     expect(newer.requestsTo("turn/start")[0]?.params).toMatchObject({ model: "gpt-6.1-luna", effort: "low" });
     expect((await callMoxenTool(connection, parent.threadId, "task_cancel", { taskId: next.task.taskId })).isError).toBe(false);
-    await vi.waitFor(async () => expect((await connection.query({ type: "thread.task.status", parentThreadId: parent.threadId, taskId: next.task.taskId })).task.status).toBe("interrupted"), SLOW_RUNNER);
+    await vi.waitFor(async () => expect((await connection.query({ type: "thread.task.status", parentThreadId: parent.threadId, taskId: next.task.taskId })).task.status).toBe("cancelled"), SLOW_RUNNER);
     const ordinary = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Ordinary work", title: "Visible work", isolation: "shared", wait: true });
     expect((await harness.store.readThreadRecord(ordinary.task.taskId))?.hidden).toBeUndefined();
     // A new connection proves hiding is persisted, not just a filter cached in the caller.
