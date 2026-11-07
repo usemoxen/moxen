@@ -160,11 +160,19 @@ does everything except publish, so use it to try a change to the release itself.
   Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
   name the archive above the changelog, and runs `install.sh` (with a stubbed `uname`, on every runner)
   and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
+  It also runs each installer's PATH step on its own (`MOXEN_INSTALL_PATH_ONLY=1`): `install.sh` against a
+  fake HOME for zsh and bash (snippet applied once, never duplicated; fish gets instructions, not a write),
+  `install.ps1` on Windows against a throwaway user-environment value (`MOXEN_INSTALL_TEST_VALUE`, never the
+  real Path). With `MOXEN_INSTALL_NO_PATH=1` the step writes nothing: the fake HOME stays empty and the real
+  profiles (and the real user Path) are unchanged.
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.
 - `moxen self-update --install` (`core/selfupdate/installer.ts`) installs a release under `<store root>/app` (`versions/<version>/`,
-  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). `smoke-release.ts` also runs it from the unpacked folder into a
+  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). It prints how to put `bin` on PATH and edits no profile; the
+  one-line installers do that step themselves (`install.sh` appends a marker-guarded snippet to the shell's
+  profile, `install.ps1` adds the folder to the user Path via `[Environment]`, both deduplicated and both
+  skipped under `MOXEN_INSTALL_NO_PATH=1`). `smoke-release.ts` also runs it from the unpacked folder into a
   throwaway store whose path has a space, starts the launcher with `--version` from a working directory with a space,
   deletes the unpacked folder and starts it again, then repeats the install. On Windows it runs the `.cmd` through
   `cmd.exe /d /s /c` with verbatim arguments, so the launcher path is quoted once and Node adds no backslash escapes.

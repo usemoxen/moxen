@@ -16,6 +16,8 @@ Keep this file under 200 lines and 10,000 characters.
 - Keep CLI `--json` output backward compatible. Change a golden only on
   purpose, and say so.
 - Never print a credential or write one to a file.
+- Never invoke bare `moxen`: it opens the interactive TUI. Always pass an
+  explicit command (`moxen --help` for help, otherwise a CLI command).
 - Settings live in one table. Add a setting there, not in a client.
 - Never build shell commands by joining strings.
 - Write tests to pin a bug, a contract or an invariant, not for coverage.

@@ -345,7 +345,9 @@ from this build, on the server's own machine for a paired one),
 A selection of the most-used commands, not the full surface. `moxen --help`
 (then `moxen <group> <command> --help`) lists every command, and the shipped
 knowledge base (the `cli-moxen-*` reference pages, generated from the command
-definitions) documents each one.
+definitions) documents each one. Bare `moxen` opens the TUI; `moxen --help`
+opens help; anything else after `moxen` is a CLI command with args. Without an
+interactive terminal, bare `moxen` prints help plus a hint instead of launching.
 
 ```text
 moxen tui
