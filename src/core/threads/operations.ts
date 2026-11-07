@@ -31,6 +31,7 @@ import {
   type ModelRequest,
   defaultRuntimeMode,
 } from "../catalog/selection.js";
+import { resolveDelegatedRuntimeMode } from "../catalog/permissions.js";
 import { APP_NAME } from "../config.js";
 import { CliError } from "../errors.js";
 import { storedInteractionMode } from "../interactionmode.js";
@@ -2893,6 +2894,14 @@ export interface DelegateRequest extends ModelRequest {
    * empty one: same provider, the parent's checkout (`shared`).
    */
   readonly fork?: boolean;
+  /**
+   * The permission mode the child runs in: one at most the parent's, or the
+   * parent's own when omitted. `auto` and `full-access` count as equal, so
+   * an Auto parent may delegate a Full-access child that runs with real
+   * Full access (intended). Asking for more access is refused
+   * (`RUNTIME_MODE_ESCALATION`), never quietly lowered.
+   */
+  readonly runtimeMode?: RuntimeMode;
   /** The mode the task runs in: Build (the default), Research or Review. Orchestrate is for the one delegating, so it is refused. */
   readonly interactionMode?: InteractionMode;
 }
@@ -3732,7 +3741,8 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const research = options.fullResearchRun ? resolveResearchPlan(modelSelection, ctx.config, {
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
-  const { runtimeMode } = requireParentModes(parent);
+  const { runtimeMode: parentRuntimeMode } = requireParentModes(parent);
+  const runtimeMode = resolveDelegatedRuntimeMode(parentRuntimeMode, request.runtimeMode);
   // A task's mode is the delegating model's choice, Build unless it asks for Research or Review. Orchestrate delegates, and a task never does.
   if (request.interactionMode === "orchestrate") {
     throw new CliError("INVALID_THREAD_OPTION", "A delegated task runs in Build, Research or Review, never Orchestrate: only the thread that delegates orchestrates.", {
@@ -3789,12 +3799,15 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   // An idempotent retry's answer: the original task as it stands now, without
   // starting anything new. The first attempt's reply carried the child's
-  // first message; a retry only needs where the task stands.
+  // first message; a retry only needs where the task stands. The stored
+  // child's mode wins over a retry's requested one: a retry naming a
+  // different allowed mode still describes the original task.
   const describeDelegation = async (childId: string, row: StoredDelegation): Promise<Delegation> => {
     const existing = await threadWithLedger(ctx.store, childId);
     const status = delegatedStatusOf(existing);
     return {
       ...shape,
+      runtimeMode: existing.runtimeMode ?? shape.runtimeMode,
       child: { id: existing.id, projectId: existing.projectId, title: existing.title },
       task: { ...taskOf(existing), waitTimedOut: status === "running" },
       messageId: null,

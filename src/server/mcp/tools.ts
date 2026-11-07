@@ -106,12 +106,13 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "By default it works in its own git worktree, on a new branch cut from yours, and commits there. " +
       "The default is always a worktree (except fork: true, which shares your checkout): even when your thread's record names no branch, the worktree is cut from the branch your checkout is on. " +
       "Where there is no branch to cut from, the call fails and tells you to pass isolation shared instead of quietly sharing your checkout. " +
-      "One call can start several tasks (at most 20): pass tasks (each with title and task, overriding provider, model, effort or isolation where it differs) beside the shared settings, plus rules for instructions every task gets. " +
-      "A task entry takes only task, title, provider, model, effort, isolation and idempotencyKey; anything else is refused. " +
+      "One call can start several tasks (at most 20): pass tasks (each with title and task, overriding provider, model, effort, isolation or permission mode where it differs) beside the shared settings, plus rules for instructions every task gets. " +
+      "A task entry takes only task, title, provider, model, effort, isolation, runtimeMode and idempotencyKey; anything else is refused. " +
       "An entry on another provider does not inherit the shared model or effort: it names its own model, or its start fails. " +
       "What is bad on its face — a malformed entry, a forked task in a worktree, a provider with no model anywhere — fails the whole call with nothing started. " +
       "Once starting, each task is on its own: one that fails to start is reported as that entry's error while the rest still start. " +
       "A top-level idempotencyKey is derived per entry from the key plus the entry's own title and task, so retrying the whole call — in any order, with entries added or removed — returns each original task instead of starting duplicates; a task's own idempotencyKey wins. " +
+      "The child runs in your own permission mode unless runtimeMode names one at most your own (approval-required, auto-accept-edits, auto, full-access; auto and full-access count as equal for the ceiling, so an Auto parent may delegate a child that runs with real Full access, without the checks Auto would apply — that is intended): asking for more than your own is refused, never quietly lowered. " +
       "Each task starts on its own: one that fails to start is reported as that entry's error while the rest still start. " +
       "The result lists every task's taskId and isolation, with one warning when any task shares your checkout. " +
       "A proposal waits at most 45 seconds for the user; otherwise returns at once with a taskId. Do not poll: the subagent's result arrives as a task notification when it settles, so keep working on something else or end your turn and wait.",
@@ -136,7 +137,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         },
         tasks: {
           type: "array",
-          description: "Several tasks to start in one call, each with its own title and task and able to override provider, model, effort or isolation. Not with task, title or researchProposal.",
+          description: "Several tasks to start in one call, each with its own title and task and able to override provider, model, effort, isolation or permission mode. Not with task, title or researchProposal.",
           items: {
             type: "object",
             properties: {
@@ -146,6 +147,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
               model: { type: "string", description: "Model slug on that provider for this task; defaults to the shared model." },
               effort: { type: "string", description: "Reasoning effort for this task; defaults to the shared effort." },
               isolation: { type: "string", enum: ["worktree", "shared"], description: "Isolation for this task; defaults to the shared isolation." },
+              runtimeMode: { type: "string", enum: ["approval-required", "auto-accept-edits", "auto", "full-access"], description: "Permission mode for this task; at most your own (auto and full-access count as equal for the ceiling, so a Full-access child of an Auto parent runs with real Full access — intended). Defaults to the shared mode, else your own." },
               idempotencyKey: { type: "string", description: "A UUID you generate for this task (one per new task). Wins over a call-level idempotencyKey for this entry." },
             },
             required: ["task", "title"],
@@ -162,6 +164,11 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         provider: { type: "string", description: "Provider instance id (claudeAgent, opencode/<provider>…); defaults to yours. The models tool lists them." },
         model: { type: "string", description: "Model slug on that provider; defaults to yours." },
         effort: { type: "string", description: "Reasoning effort for that model (one of its efforts in the models tool); defaults to the model's own." },
+        runtimeMode: {
+          type: "string",
+          enum: ["approval-required", "auto-accept-edits", "auto", "full-access"],
+          description: "Permission mode the subagent runs in; at most your own (auto and full-access count as equal for the ceiling, so a Full-access child of an Auto parent runs with real Full access, without Auto's checks — intended). Asking for more is refused, never lowered. Defaults to yours.",
+        },
         isolation: {
           type: "string",
           enum: ["worktree", "shared"],
@@ -1257,9 +1264,13 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
   const provider = argString(args, "provider");
   const model = argString(args, "model");
   const effort = argString(args, "effort");
+  const runtimeMode = argString(args, "runtimeMode");
+  if (runtimeMode !== undefined && !["approval-required", "auto-accept-edits", "auto", "full-access"].includes(runtimeMode)) {
+    throw new CliError("INVALID_TOOL_INPUT", "runtimeMode must be approval-required, auto-accept-edits, auto or full-access.");
+  }
   const idempotencyKey = argString(args, "idempotencyKey");
   const rules = argString(args, "rules");
-  if (args.tasks !== undefined) return await delegateManyTool(api, parentThreadId, args, { isolationArg: isolationArg === "worktree" || isolationArg === "shared" ? isolationArg : undefined, fork, modeArg, provider, model, effort, idempotencyKey, rules });
+  if (args.tasks !== undefined) return await delegateManyTool(api, parentThreadId, args, { isolationArg: isolationArg === "worktree" || isolationArg === "shared" ? isolationArg : undefined, fork, modeArg, provider, model, effort, runtimeMode, idempotencyKey, rules });
   if (rules !== undefined) throw new CliError("INVALID_TOOL_INPUT", "rules needs tasks: it is shared instructions for several tasks.");
   const task = argString(args, "task", true)!;
   const title = argString(args, "title", true)!;
@@ -1269,6 +1280,7 @@ async function delegateTool(api: ClientApi, parentThreadId: string, args: Record
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
+    ...(runtimeMode ? { runtimeMode: runtimeMode as "approval-required" | "auto-accept-edits" | "auto" | "full-access" } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(fork ? { fork: true } : {}),
     ...(modeArg === "research" ? { mode: "research" as const } : {}),
@@ -1282,7 +1294,7 @@ async function delegateManyTool(
   api: ClientApi,
   parentThreadId: string,
   args: Record<string, unknown>,
-  shared: { isolationArg: "worktree" | "shared" | undefined; fork: boolean; modeArg: string | undefined; provider: string | undefined; model: string | undefined; effort: string | undefined; idempotencyKey: string | undefined; rules: string | undefined },
+  shared: { isolationArg: "worktree" | "shared" | undefined; fork: boolean; modeArg: string | undefined; provider: string | undefined; model: string | undefined; effort: string | undefined; runtimeMode: string | undefined; idempotencyKey: string | undefined; rules: string | undefined },
 ) {
   if (args.task !== undefined || args.title !== undefined) {
     throw new CliError("INVALID_TOOL_INPUT", "Pass either task and title for one task, or tasks for several — not both.");
@@ -1310,6 +1322,7 @@ async function delegateManyTool(
     const model = crossProvider ? entry.model : (entry.model ?? shared.model);
     const effort = crossProvider ? entry.effort : (entry.effort ?? shared.effort);
     const isolation = entry.isolation ?? sharedIsolation;
+    const runtimeMode = entry.runtimeMode ?? shared.runtimeMode;
     try {
       started.push(await startDelegation(api, parentThreadId, {
         task: shared.rules === undefined ? entry.task : `${entry.task}\n\nCommon rules for this task:\n${shared.rules}`,
@@ -1318,6 +1331,7 @@ async function delegateManyTool(
         ...((entry.provider ?? shared.provider) ? { provider: (entry.provider ?? shared.provider)! } : {}),
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
+        ...(runtimeMode ? { runtimeMode: runtimeMode as "approval-required" | "auto-accept-edits" | "auto" | "full-access" } : {}),
         ...((entry.idempotencyKey ?? (shared.idempotencyKey ? batchEntryKey(shared.idempotencyKey, entry.title, entry.task) : undefined)) ? { idempotencyKey: (entry.idempotencyKey ?? batchEntryKey(shared.idempotencyKey!, entry.title, entry.task))! } : {}),
         ...(shared.fork ? { fork: true } : {}),
         ...(shared.modeArg === "research" ? { mode: "research" as const } : {}),
@@ -1347,6 +1361,7 @@ interface BatchEntry {
   readonly model?: string;
   readonly effort?: string;
   readonly isolation?: "worktree" | "shared";
+  readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   readonly idempotencyKey?: string;
 }
 
@@ -1365,7 +1380,7 @@ function batchEntryKey(key: string, title: string, task: string): string {
 const MAX_BATCH_TASKS = 20;
 
 /** The fields one `tasks` entry takes: anything else is refused, naming the key, with nothing started. */
-const BATCH_ENTRY_FIELDS: ReadonlySet<string> = new Set(["task", "title", "provider", "model", "effort", "isolation", "idempotencyKey"]);
+const BATCH_ENTRY_FIELDS: ReadonlySet<string> = new Set(["task", "title", "provider", "model", "effort", "isolation", "runtimeMode", "idempotencyKey"]);
 
 /**
  * What is cheap and pure to check before starting any entry: a forked task in
@@ -1412,7 +1427,7 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
   const record = entry as Record<string, unknown>;
   for (const key of Object.keys(record)) {
     if (!BATCH_ENTRY_FIELDS.has(key)) {
-      throw new CliError("INVALID_TOOL_INPUT", `${nth}: unknown field "${key}". A task entry takes task, title, provider, model, effort, isolation and idempotencyKey.`);
+      throw new CliError("INVALID_TOOL_INPUT", `${nth}: unknown field "${key}". A task entry takes task, title, provider, model, effort, isolation, runtimeMode and idempotencyKey.`);
     }
   }
   const field = (key: string): string | undefined => {
@@ -1433,12 +1448,17 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
   const model = field("model");
   const effort = field("effort");
   const idempotencyKey = field("idempotencyKey");
+  const runtimeMode = field("runtimeMode");
+  if (runtimeMode !== undefined && !["approval-required", "auto-accept-edits", "auto", "full-access"].includes(runtimeMode)) {
+    throw new CliError("INVALID_TOOL_INPUT", `${nth}: runtimeMode must be approval-required, auto-accept-edits, auto or full-access.`);
+  }
   return {
     task, title,
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(isolation === "worktree" || isolation === "shared" ? { isolation } : {}),
+    ...(runtimeMode === "approval-required" || runtimeMode === "auto-accept-edits" || runtimeMode === "auto" || runtimeMode === "full-access" ? { runtimeMode } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
   };
 }
@@ -1447,7 +1467,7 @@ function readBatchEntry(entry: unknown, index: number): BatchEntry {
 async function startDelegation(
   api: ClientApi,
   parentThreadId: string,
-  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; idempotencyKey?: string; fork?: boolean; mode?: "research" | "review"; researchProposal?: unknown },
+  request: { task: string; title: string; isolation: "worktree" | "shared"; provider?: string; model?: string; effort?: string; runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access"; idempotencyKey?: string; fork?: boolean; mode?: "research" | "review"; researchProposal?: unknown },
 ) {
   const delegated = await api.dispatch({
     type: "thread.delegate",
@@ -1460,6 +1480,7 @@ async function startDelegation(
     ...(request.provider ? { provider: request.provider } : {}),
     ...(request.model ? { model: request.model } : {}),
     ...(request.effort ? { thinkingEffort: request.effort } : {}),
+    ...(request.runtimeMode ? { runtimeMode: request.runtimeMode } : {}),
     ...(request.fork === true ? { fork: true } : {}),
     ...(request.mode === "research" ? { interactionMode: "research" as const } : {}),
     ...(request.mode === "review" ? { interactionMode: "review" as const } : {}),

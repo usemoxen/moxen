@@ -128,6 +128,12 @@ starts a full run without a proposal. `--research-models` accepts the model
 entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
 `--mode review` starts a reviewer for the PR or branch in the prompt.
+A delegated child runs in the parent's permission mode unless `--permission`
+names one at most the parent's (`approval-required`, `auto-accept-edits`, `auto`,
+`full-access`; `auto` and `full-access` count as equal for the ceiling, so an
+Auto parent may delegate a Full-access child that runs with real Full access,
+without the checks Auto would apply — that is intended): asking for
+more than the parent's is refused, never quietly lowered.
 Existing calls and CLI JSON envelopes are unchanged.
 
 ### Research run view
@@ -646,7 +652,15 @@ A follow-up, a delegated task, and a thread continued in a new one keeps its
 source thread's selection unless the request overrides it, and never falls
 back to the settings or the installation default. The continuation's model
 request is how a handoff changes models; anything it does not name stays the
-source's.
+source's. A delegated child's permission mode is capped at its parent's:
+omitted it inherits the parent's, and asking for more is refused
+(`RUNTIME_MODE_ESCALATION`), never lowered — so a child delegating further
+is capped by its own mode in turn. `auto` and `full-access` count as equal
+for the ceiling, so an Auto parent may delegate a Full-access child that runs
+with real Full access, without the checks Auto would apply — that is
+intended. The ceiling applies when the task is delegated: lowering a parent
+later does not change running children or what they may delegate further.
+`thread.runtime-mode.set` is the user's own control and isn't capped.
 
 ## Modes: Build, Research, Orchestrate and Review
 
