@@ -152,7 +152,7 @@ async function startDaemon(endpoint: string): Promise<void> {
   while (Date.now() < deadline) {
     if (await probe(endpoint)) return;
     if (failed !== null) {
-      throw new CliError("SERVER_START_FAILED", `Could not start a moxen server: ${runtime} would not run (${(failed as Error).message}). The server needs Bun on PATH.`, {
+      throw new CliError("SERVER_START_FAILED", `Could not start a moxen server: ${standalone ? "the standalone moxen executable" : runtime} would not run (${(failed as Error).message}).${standalone ? "" : " The server needs Bun on PATH."}`, {
         cause: failed,
         details: { endpoint, runtime },
       });

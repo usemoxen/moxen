@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { EmbeddingRuntime } from "../embedding-runtime.js";
 import { EMBEDDING_VERSION } from "../embedding-cache.js";
+import { STANDALONE_EMBEDDING_ARG } from "../../infra/standalone.js";
 
 let root: string | undefined;
 let runtime: EmbeddingRuntime | undefined;
@@ -20,6 +22,57 @@ describe("embedding child entry", () => {
     const run = spawnSync(BUN, [entry], { encoding: "utf8" });
     expect(run.status).toBe(1);
     expect(JSON.parse(run.stdout)).toMatchObject({ error: expect.any(String) });
+  });
+});
+
+describe("standalone dispatch to the embedding worker", () => {
+  it("strips the consumed mode flag, reporting ready and vectors (exe-style argv)", async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "moxen-embedding-dispatch-"));
+    // A stub of the opt-in runtime the worker loads: no native dependencies, no downloads.
+    const dist = path.join(root, "runtime", "node_modules", "@huggingface", "transformers", "dist");
+    await mkdir(dist, { recursive: true });
+    await writeFile(
+      path.join(dist, "transformers.node.mjs"),
+      [
+        "export const env = { cacheDir: '', allowRemoteModels: false };",
+        "export const AutoConfig = { from_pretrained: async () => ({ vision_config: null, audio_config: null }) };",
+        "export const AutoTokenizer = { from_pretrained: async () => async (texts) => texts };",
+        "export const AutoModel = { from_pretrained: async () => Object.assign(async (inputs) => ({ sentence_embedding: { tolist: () => inputs.map(() => [1, ...Array(767).fill(0)]) } }), { dispose: async () => {} }) };",
+      ].join("\n"),
+    );
+    // Replays the executable child's argv, then dispatches like the binary does.
+    const standalone = fileURLToPath(new URL("../../../server/standalone.js", import.meta.url));
+    const driver = path.join(root, "driver.ts");
+    await writeFile(
+      driver,
+      [
+        "const [runtime, cache, download, device] = process.argv.slice(2);",
+        `process.argv = ["bun", "/$bunfs/root/moxen", ${JSON.stringify(STANDALONE_EMBEDDING_ARG)}, runtime, cache, download, device];`,
+        `const { runStandaloneMode } = await import(${JSON.stringify(`file://${standalone}`)});`,
+        'await runStandaloneMode("embedding");',
+      ].join("\n"),
+    );
+    const BUN = process.versions.bun ? process.execPath : "bun";
+    const worker = spawn(BUN, [driver, path.join(root, "runtime"), path.join(root, "runtime", "cache"), "offline", "cpu"], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = createInterface({ input: worker.stdout });
+    const first = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("worker never answered")), 15_000);
+      lines.once("line", (line) => { clearTimeout(timer); resolve(line); });
+      worker.once("error", reject);
+      worker.once("exit", (code) => reject(new Error(`worker exited with ${code} before answering`)));
+    });
+    expect(JSON.parse(first)).toMatchObject({ ready: true, device: "cpu" });
+    const answer = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("worker never embedded")), 15_000);
+      lines.once("line", (line) => { clearTimeout(timer); resolve(line); });
+      worker.once("error", reject);
+    });
+    worker.stdin.write(`${JSON.stringify({ texts: ["task: search result | query: directory separators"] })}\n`);
+    const vectors = JSON.parse(await answer) as { vectors?: number[][] };
+    expect(vectors.vectors?.[0]).toHaveLength(768);
+    worker.stdin.end();
+    const code = await new Promise<number | null>((resolve) => worker.once("exit", resolve));
+    expect(code).toBe(0);
   });
 });
 
