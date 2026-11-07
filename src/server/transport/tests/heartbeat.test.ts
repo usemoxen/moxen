@@ -45,6 +45,7 @@ async function fakeServer(): Promise<{ endpoint: string; muted: boolean; connect
         const message = JSON.parse(line) as { id: number; method: string };
         if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
         else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+        else if (message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
         else if (message.method === "subscribeShell") {
           socket.write(encode({ id: message.id, result: { subscription: message.id } }));
           socket.write(encode({ subscription: message.id, item: { kind: "snapshot" } }));
@@ -111,6 +112,144 @@ describe("heartbeat", () => {
     expect((error as CliError).code).toBe("SERVER_UNAVAILABLE");
     expect((error as CliError).message).toMatch(/did not answer within/);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("drives reconnect and link state for a one-shot request with no subscription", async () => {
+    // A `send --wait` has no subscription: only its in-flight await is
+    // around when the server goes quiet. It must still see the link drop
+    // and come back, rather than fail once while the link claims connected.
+    // Recovery takes a new request: with nobody waiting the client stops
+    // dialling, and the next send kicks it off again.
+    const endpoint = testEndpoint();
+    let muted = false;
+    const sockets = new Set<net.Socket>();
+    const serveOne = (): Promise<net.Server> =>
+      new Promise<net.Server>((resolve) => {
+        const server = net.createServer((socket) => {
+          sockets.add(socket);
+          socket.setEncoding("utf8");
+          socket.on("error", () => undefined);
+          socket.once("close", () => sockets.delete(socket));
+          const reader = new LineReader();
+          socket.on("data", (chunk: string) => {
+            for (const line of reader.push(chunk)) {
+              if (muted) continue;
+              const message = JSON.parse(line) as { id: number; method: string };
+              if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+              else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+              else if (message.method === "query" || message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
+            }
+          });
+        });
+        server.listen(endpoint, () => resolve(server));
+      });
+    const server = await serveOne();
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint, FAST);
+    teardown.push(() => client.close());
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+    expect(client.linkState).toEqual({ status: "connected" });
+
+    muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    muted = false;
+    // The demand kicks the reconnect: the wait below fails while the link
+    // still says connected.
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects in-flight requests on close, even when the server says nothing", async () => {
+    // The socket's own close may never come back from a silent server, so
+    // `close()` settles what is parked itself instead of hanging on it.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await client.close();
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+  });
+
+  it("stops redialling once nobody waits, and redials on the next send", async () => {
+    // With no subscription and nothing in flight, the reconnect gives up
+    // instead of dialling forever — and says it stopped trying. The next
+    // request kicks it off again.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    await waitFor("given up", () => client.linkState.status === "failed");
+    expect(client.linkState).toMatchObject({ status: "failed", code: "SERVER_DISCONNECTED" });
+
+    server.muted = false;
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("leaves no live socket behind when close lands mid-reconnect", async () => {
+    // The reconnect's hello is still waiting for its reply when the client
+    // closes: answering it afterwards must not report a closed client as
+    // connected, nor leave its socket open.
+    const endpoint = testEndpoint();
+    let holdHellos = false;
+    let held: { socket: net.Socket; id: number } | null = null;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("error", () => undefined);
+      socket.once("close", () => sockets.delete(socket));
+      const reader = new LineReader();
+      socket.on("data", (chunk: string) => {
+        for (const line of reader.push(chunk)) {
+          const message = JSON.parse(line) as { id: number; method: string };
+          if (message.method !== "hello") continue;
+          if (holdHellos) held = { socket, id: message.id };
+          else socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint);
+    teardown.push(() => client.close());
+    client.subscribeShell({}, () => undefined, () => undefined);
+    await waitFor("the subscription", () => [...sockets].length === 1);
+
+    holdHellos = true;
+    // Drop the one socket: the reconnect's next hello waits for its reply.
+    for (const socket of [...sockets]) socket.destroy();
+    await waitFor("the reconnect's held hello", () => held !== null);
+
+    await client.close();
+    held!.socket.write(encode({ id: held!.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+    await waitFor("the held hello to settle", () => sockets.size === 0 || client.linkState.status === "connected");
+    expect(client.linkState.status).not.toBe("connected");
+    expect(sockets.size).toBe(0);
   });
 });
 
