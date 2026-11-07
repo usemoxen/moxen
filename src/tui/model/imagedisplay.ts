@@ -29,7 +29,17 @@ const displays = new Map<string, Promise<DisplayOutcome>>();
 export function loadDisplay(key: string, start: () => Promise<DisplayOutcome>): Promise<DisplayOutcome> {
   const hit = displays.get(key);
   if (hit !== undefined) return hit;
-  const pending = start();
+  // A rejecting starter must never escape: an unhandled rejection kills the
+  // TUI process, so failure maps to missing and the failed row draws instead.
+  let pending: Promise<DisplayOutcome>;
+  try {
+    pending = start().then(
+      (outcome) => outcome,
+      (): DisplayOutcome => ({ status: "missing" }),
+    );
+  } catch {
+    pending = Promise.resolve({ status: "missing" });
+  }
   displays.set(key, pending);
   if (displays.size > MAX_CACHED_DISPLAY) displays.delete(displays.keys().next().value as string);
   return pending;

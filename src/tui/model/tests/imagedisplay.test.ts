@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { imageDimensions } from "../../../core/attachments.js";
 import { encodeRgbaPng, type DecodedImage } from "../imageshrink.js";
 import { loadDisplay, MAX_CACHED_DISPLAY, toDisplayOutcome, type DisplayOutcome } from "../imagedisplay.js";
+import { processImage } from "../imageops.js";
 import type { LoadedImage } from "../imagethumb.js";
 
 /** A solid PNG of exactly `width`×`height`. */
@@ -53,6 +54,29 @@ describe("one verdict and display copy per cache key", () => {
     await loadDisplay(`${prefix}first`, start);
     expect(starts).toBe(before + 1);
   });
+
+  it("maps a rejecting starter to missing instead of an unhandled rejection", async () => {
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      seen.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let settled: DisplayOutcome | null = null;
+      // As useDisplay subscribes: fulfillment only, never awaited here, so a
+      // rejection with no handler would escape to the process and kill the TUI.
+      void loadDisplay(`test-reject-${Date.now()}`, async (): Promise<DisplayOutcome> => {
+        throw new Error("starter-boom");
+      }).then((outcome) => {
+        settled = outcome;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toEqual({ status: "missing" });
+      expect(seen).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });
 
 describe("toDisplayOutcome", () => {
@@ -80,5 +104,16 @@ describe("toDisplayOutcome", () => {
     if (outcome.status !== "ready") return;
     expect(outcome.original).toBe(image);
     expect(outcome.display.size).toEqual({ width: 4096, height: 137 });
+  });
+
+  it("takes corrupt bytes with ops to the undrawable fallback instead of throwing", async () => {
+    const corrupt: LoadedImage = { mimeType: "image/png", bytes: new Uint8Array([1, 2, 3]), size: { width: 10, height: 10 } };
+    const outcome = await toDisplayOutcome(
+      processImage(corrupt, [{ op: "pad", aspect: 1 }]),
+      () => {
+        throw new Error("image dimensions exceed limits");
+      },
+    );
+    expect(outcome).toEqual({ status: "undrawable", original: corrupt });
   });
 });
