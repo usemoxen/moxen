@@ -5,6 +5,7 @@
 export type PickerName =
   | "model"
   | "effort"
+  | "continue"
   | "permission"
   | "diff-turn"
   | "command"
@@ -20,6 +21,7 @@ export type PickerName =
   | "stats"
   | "update"
   | "schedule"
+  | "problems"
   | "work-queue"
   | "queue-schedule"
   | "search"

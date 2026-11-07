@@ -26,6 +26,7 @@ import type {
   ActivityEnvelope,
   TurnInteractionMode,
 } from "../types.js";
+import { isKnownTurnStatus } from "./problems.js";
 import type {
   StoredActivity,
   StoredCheckpoint,
@@ -53,7 +54,9 @@ function latestTurnOf(turns: StoredTurn[]): LatestTurnEnvelope | null {
           ? "interrupted"
           : latest.status === "failed"
             ? "error"
-            : "completed",
+            : latest.status === "completed"
+              ? "completed"
+              : "unknown",
     requestedAt: latest.createdAt,
     // A turn that waited in the queue started when it was promoted, not
     // when it was asked for — its live clock must not count the wait.
@@ -64,7 +67,9 @@ function latestTurnOf(turns: StoredTurn[]): LatestTurnEnvelope | null {
 }
 
 function sessionOf(thread: StoredThread, turns: StoredTurn[]): SessionEnvelope {
-  const running = turns.find((turn) => turn.status === "running") ?? null;
+  // Live is running or stuck: a status no build writes never settles on its
+  // own, so the session must not report idle while one is open.
+  const running = turns.find((turn) => turn.status === "running" || !isKnownTurnStatus(turn.status)) ?? null;
   return {
     threadId: thread.id,
     status: running ? "running" : "idle",

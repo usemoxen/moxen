@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Message, Media } from "@opencode/ai";
+import { copyFile, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { locateCompactionMod } from "../config.js";
@@ -21,7 +23,7 @@ const window = () => [
 async function harness() {
   const values = new Map<string, unknown>();
   let native: Array<Record<string, unknown>> = [];
-  const plugin = (await import(pathToFileURL(path.join(locateCompactionMod()!, "index.js")).href)).default;
+  const plugin = (await import(pathToFileURL(path.join(await stageMod(), "index.js")).href)).default;
   const setup = async () => {
     const hooks = new Map<string, (event: any) => Promise<void>>();
     await plugin.setup({ storage: { get: async (key: string) => structuredClone(values.get(key)), set: async (key: string, value: unknown) => { values.set(key, JSON.parse(JSON.stringify(value))); } }, session: { context: async () => ({ data: native }), hook: async (name: string, fn: (event: any) => Promise<void>) => { hooks.set(name, fn); } } });
@@ -32,6 +34,40 @@ async function harness() {
     };
   };
   return { values, setup, checkpoint: (item: Message) => { native = [{ id: item.id, type: "compaction", status: "completed", metadata: item.metadata }]; } };
+}
+
+/** Staged plugin directories, removed after each test. */
+const staged: string[] = [];
+afterEach(async () => {
+  await Promise.all(staged.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+/**
+ * The shipped mod, staged so its `effect` resolves to the SDK's own copy.
+ * In production the mod runs inside `opencode serve`, where the host
+ * provides `effect` — the copy the SDK's schemas are built with. Here a
+ * bare import would resolve to our newer copy while the schemas stay on
+ * the SDK's nested one, and a schema built by one Effect copy cannot run
+ * on another copy's interpreter. So each run copies the shipped files
+ * fresh (never a diverging duplicate) beside a link to the nested copy —
+ * a junction on Windows, which needs no privileges. Nothing ships and
+ * nothing persists; a changed install layout fails here loudly, as an
+ * unresolvable import.
+ */
+async function stageMod(): Promise<string> {
+  const mod = locateCompactionMod()!;
+  const stage = await mkdtemp(path.join(os.tmpdir(), "moxen-compaction-mod-"));
+  staged.push(stage);
+  for (const entry of await readdir(mod)) {
+    if (entry.endsWith(".js")) await copyFile(path.join(mod, entry), path.join(stage, entry));
+  }
+  await mkdir(path.join(stage, "node_modules"), { recursive: true });
+  await symlink(
+    path.join(process.cwd(), "node_modules", "@opencode", "ai", "node_modules", "effect"),
+    path.join(stage, "node_modules", "effect"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  return stage;
 }
 
 describe("OpenCode compaction retention", () => {
@@ -152,7 +188,7 @@ describe("Moxen-run OpenCode compaction", () => {
         },
       },
     };
-    const plugin = (await import(pathToFileURL(path.join(locateCompactionMod()!, "index.js")).href)).default;
+    const plugin = (await import(pathToFileURL(path.join(await stageMod(), "index.js")).href)).default;
     await plugin.setup(ctx);
     const fire = async (kind: string, messages: Message[]) => {
       const event: any = { sessionID: "session", model, messages, system: [], options: {} };

@@ -170,6 +170,12 @@ moxen config set thinkingEffort xhigh
 
 **Older keys.** Settings reshaped since an older build (for example `ui.autoHandoff`, `providers.claude.autoCompact`, `providers.opencode.compactBuffer`, `installSkills`, `providers.harness.webBrowser`) still load, and `config get` / `config set` still accept them; `config list` lists them too. A newer key wins once it is set; while it is unset, the older key is what applies, and the settings page names it as the Default. Loading a file never rewrites it in the new shape: the file is only written when a setting is changed, and then the older keys stay in it, so an older Moxen build sharing `~/.moxen/config.json` keeps working. The one exception is a value an older build reads the same way, such as `threadEnvMode: "auto"`, saved as `local`.
 
+**Unknown keys.** Keys this build does not know (a newer build's settings, at the top level, inside a section, inside a provider, inside a profile or model matched by id, or inside an MCP server) load without error and are carried through every save untouched: editing a known setting, duplicating a list entry, importing a profile or saving a probe never drops them. Clearing a setting or removing an entry still saves as intended — nothing is resurrected from the old file. Setting an unknown key is still refused (`INVALID_CONFIG_KEY`). `MOXEN_*` overrides never leak into the file: a value that matches an active override is not persisted. Setting a key to its active override value therefore leaves the file unchanged — the override still decides while set, so there is nothing for the file to record. Before each rewrite the current file is copied beside itself (`config.json.bak.1` … `config.json.bak.5`, most recent first); a save that changes nothing writes nothing and keeps no backup. A save never writes a secret value, only the keychain reference the file already holds.
+
+**Bad entries.** One bad entry does not unload the whole file: it is skipped, reported with its location (`config show` and `moxen doctor` list it, and the TUI warns with a fix), and carried through saves until it is fixed or reset. A file that is not JSON at all still fails to load; the error names the previous save's backup (`config.json.bak.1`, kept beside the file on every save) and starting fresh.
+
+A bad thread record reads as missing, a bad ledger line is skipped with its file and line number, and a turn with a status no build writes shows as `unknown` and can be stopped but never starts, settles or promotes past. While a turns ledger hides rows, sends and promotions are refused (`TURNS_LEDGER_CORRUPT`) until the bad line is moved aside; moving a record aside never touches a live turn and never deletes. A torn trailing line is reported only once it survives a re-read.
+
 The settings page files every key under General, Defaults, Sessions, Long threads, Agent context, Interface, Git and forges, one tab per provider (each in the same order: Defaults, Tools, Long threads, Sessions, Model prices, Setup, then what is particular to it), and MCP servers. Where a setting lives on the page never changes its key.
 
 **Model prices.** `providers.<claude|codex|opencode|harness>.model{Input,Output,CacheRead,CacheWrite}Prices` value a model's tokens in USD per million, as `model=price` pairs, one per line or comma-separated:
@@ -214,7 +220,7 @@ redacts `env` and `headers` values.
 `env` and `headers` values are secrets: set through `moxen config set` or the settings page, each goes to the
 OS keychain and the file keeps a `keychain:<name>` reference, which is read when a session starts (a value
 written into the file by hand is used as it is). Adding a well-known server in the settings page (Brave Search,
-Exa Search, GitHub…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
+Exa Search…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
 `pnpm`, `yarn`) is what starts the npm ones. Exa uses its hosted server, so it installs nothing and takes the
 key as the `x-api-key` header.
 
@@ -320,14 +326,19 @@ a remote server, commands that resolve a project from a folder need
 `--cwd` with a path on the server (or `--no-project`): `REMOTE_CWD_REQUIRED`
 otherwise. `moxen --json doctor` reports `checks.server.mode: "remote"` with
 the server's name and key fingerprint. `server status` and `server stop`
-manage this machine's server only and refuse `--server`.
+manage this machine's server only and refuse `--server`; `server status`
+also reports the server's build and whether it needs a restart after an
+update, and `server stop` works against any build, which is how a server
+from another build is stopped.
 
 Errors worth knowing: `REMOTE_PAIRING_REFUSED` (wrong, used or expired
 code — show a new one), `REMOTE_DEVICE_REFUSED` (revoked, or the token is
 gone — pair again), `REMOTE_KEY_MISMATCH` (the server presented a different
 key than the one paired: reinstalled, or not the server you think — pair
-again only if you know why), `SERVER_UNAVAILABLE` (not running, remote
-access off, or a firewall in the way).
+again only if you know why), `BUILD_MISMATCH` (client and server are
+different builds — the message names both: stop the server and start again
+from this build, on the server's own machine for a paired one),
+`SERVER_UNAVAILABLE` (not running, remote access off, or a firewall in the way).
 
 ## Commands
 
@@ -426,7 +437,10 @@ prints each stage on stderr as it goes (checking, downloading with how much,
 verifying, unpacking, testing, switching, done); with `--json` stdout holds only
 the final envelope. The server sends the stages as `app.update-progress` shell
 events tagged with the command's `commandId`, which only the CLI that asked for
-them reads. A paired remote client is refused both commands by the server's
+them reads. When the update lands it also broadcasts
+`app.server-restart-required` to every shell subscriber — the TUI shows it as
+a notice — and later hellos say a restart is due, so every client is told.
+A paired remote client is refused both commands by the server's
 transport with `REMOTE_LOCAL_ONLY`, whatever it sends. It downloads the platform's archive and its `.sha256` from GitHub over https (no
 credential is sent; a release missing either file is refused), checks the
 archive's SHA-256 before unpacking, and unpacks into a temp folder inside
@@ -444,7 +458,8 @@ is already the latest exits 0 and writes nothing. A source checkout
 (`SELF_UPDATE_NOT_INSTALLED`, which says to run `--install`) and a second update
 running at once (`SELF_UPDATE_BUSY`) are refused before anything changes; with
 `--server` it exits 2 with `SELF_UPDATE_REMOTE` (before anything is sent; the server refuses it too). It restarts nothing: threads
-that are running keep their version until the moxen server restarts. `--json`
+that are running keep their version until the moxen server restarts, and every
+client connected at the time is told so. `--json`
 data: `{ action: "updated" | "already-current", version, from, previous, folder,
 current, warnings }`.
 

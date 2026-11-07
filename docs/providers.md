@@ -380,7 +380,7 @@ opens with a connection test already run. MCP servers are added the same way,
 from a short list of well-known ones or a custom command, and connect once so
 their tools are listed. A harness profile's flow never asks for a key (only the
 variable's name is stored; save the key on the profile afterwards). A
-well-known MCP server that takes one (GitHub, Brave Search, Exa Search) asks
+well-known MCP server that takes one (Brave Search, Exa Search) asks
 for it instead of a command: Moxen fills the command in, and the key goes to the
 OS keychain.
 

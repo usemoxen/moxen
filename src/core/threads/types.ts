@@ -170,7 +170,7 @@ export interface StoredNativeSubagent {
   readonly stoppedAt: string | null;
 }
 
-export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "failed";
+export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "failed" | "unknown";
 
 /** `background`: a turn the provider started itself, woken by a finished background task or a Monitor event. */
 export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "injected" | "background";

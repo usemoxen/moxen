@@ -665,7 +665,7 @@ export interface QueuedTurnEnvelope {
 
 export interface LatestTurnEnvelope {
   turnId: string;
-  state: "running" | "interrupted" | "completed" | "error";
+  state: "running" | "interrupted" | "completed" | "error" | "unknown";
   requestedAt: string;
   startedAt: string | null;
   completedAt: string | null;

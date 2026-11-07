@@ -7,9 +7,12 @@
  * drivers, so a turn could only be steered, answered or even seen live
  * from the process that started it; here there is exactly one owner.
  *
- * Each socket must open with `hello` (protocol version check) before any
- * other request. Subscriptions belong to the socket that opened them and
- * end with it.
+ * Each socket must open with `hello` — a protocol version check, then a
+ * build identity check (`core/build.ts`) — before any other request. A
+ * client from another build is refused outright on a remote socket, and
+ * greeted with the server's build (so it can refuse itself, keeping
+ * `server stop` working) on a local one. Subscriptions belong to the
+ * socket that opened them and end with it.
  *
  * A client that pings (`./remote.ts`'s heartbeat) has promised to be heard
  * from: once it has pinged, a socket silent past `CLIENT_SILENCE_MS` is
@@ -19,6 +22,7 @@
 import { rm } from "node:fs/promises";
 import net from "node:net";
 
+import { buildIdentity, describeBuildMismatch } from "../../core/build.js";
 import { CliError } from "../../core/errors.js";
 import type { ClientApi } from "../api.js";
 import { LOCAL_ONLY_COMMANDS } from "../protocol.js";
@@ -48,8 +52,13 @@ export interface ServeOptions {
   readonly api: ClientApi;
   /** Runs once the listener has stopped — the owner releases drivers here. */
   readonly onClose?: () => Promise<void>;
-  /** Added to every local socket's hello result (the server's config file). */
-  readonly greeting?: Partial<HelloResult>;
+  /**
+   * Added to every local socket's hello result (the server's config file).
+   * A function is read per hello, for values that change while the server
+   * runs (whether it needs a restart); a test may also override the build
+   * to stand in for another one.
+   */
+  readonly greeting?: Partial<HelloResult> | (() => Partial<HelloResult>);
 }
 
 export async function serve(options: ServeOptions): Promise<ServerHandle> {
@@ -116,8 +125,8 @@ export interface SocketContext {
   readonly admit?: (params: Record<string, unknown>, socket: net.Socket) => Promise<Partial<HelloResult>> | Partial<HelloResult>;
   /** How long a client that pings may go unheard before it is dropped (default `CLIENT_SILENCE_MS`). */
   readonly silenceMs?: number;
-  /** Added to the hello result. */
-  readonly greeting?: Partial<HelloResult>;
+  /** Added to the hello result; a function is read per hello. */
+  readonly greeting?: Partial<HelloResult> | (() => Partial<HelloResult>);
 }
 
 export function handleSocket(socket: net.Socket, api: ClientApi, context: SocketContext): void {
@@ -133,6 +142,11 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
   // on it stops instead of polling the ledger forever.
   const waiting = new AbortController();
   socket.once("close", () => waiting.abort());
+  // Set when a local hello came from another build: greeted (so `shutdown`
+  // keeps working, which stopping the old server needs) but good for
+  // nothing else. Sticky by design: real clients hello once per socket, and
+  // limited is strictly less capable, so a second hello has nothing to gain.
+  let limited: CliError | null = null;
   /** Armed by the first ping: from then on this client has said it will keep being heard from. */
   const watch = (): void => {
     if (watchdog !== null) return;
@@ -190,19 +204,63 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
             { details: { server: PROTOCOL_VERSION, client: params.protocol } },
           );
         }
-        let admitted: Partial<HelloResult> = context.greeting ?? {};
+        // Two builds never share a server: the client's build must be this
+        // one. A remote mismatch is refused here; a local one is still
+        // greeted (carrying the server's build) so the client can refuse
+        // itself — while `shutdown` keeps working, which stopping the old
+        // server needs.
+        const greeting = typeof context.greeting === "function" ? context.greeting() : (context.greeting ?? {});
+        const own = buildIdentity();
+        const serverBuild = typeof greeting.build === "string" ? greeting.build : own.id;
+        const serverDisplay = typeof greeting.buildDisplay === "string" ? greeting.buildDisplay : own.display;
+        const clientBuild = typeof params.build === "string" ? params.build : null;
+        if (clientBuild !== serverBuild) {
+          const client = {
+            id: clientBuild ?? "unknown",
+            display: typeof params.buildDisplay === "string" && params.buildDisplay.length > 0 ? (params.buildDisplay as string) : "an older moxen that does not report its build",
+            version: "unknown",
+            kind: "source" as const,
+            revision: null,
+          };
+          const server = { id: serverBuild, display: serverDisplay, version: "unknown", kind: "source" as const, revision: null };
+          if (context.remote) {
+            throw new CliError("BUILD_MISMATCH", describeBuildMismatch({ server, client, remote: true }), {
+              details: { server: serverBuild, serverDisplay, client: clientBuild, clientDisplay: client.display },
+            });
+          }
+          limited = new CliError("BUILD_MISMATCH", describeBuildMismatch({ server, client, remote: false }), {
+            details: { server: serverBuild, serverDisplay, client: clientBuild, clientDisplay: client.display },
+          });
+          greeted = true;
+          return { ...greeting, protocol: PROTOCOL_VERSION, server: "moxen", pid: process.pid, build: serverBuild, buildDisplay: serverDisplay, restartRequired: greeting.restartRequired ?? false };
+        }
+        let admitted: Partial<HelloResult> = greeting;
         if (context.remote) {
           if (!context.admit) throw new CliError("REMOTE_NOT_PAIRED", "This moxen server does not accept remote clients.");
-          admitted = await context.admit(params, socket);
+          admitted = { ...greeting, ...(await context.admit(params, socket)) };
         }
         greeted = true;
-        const hello: HelloResult = { ...admitted, protocol: PROTOCOL_VERSION, server: "moxen", pid: process.pid };
+        const hello: HelloResult = {
+          ...admitted,
+          protocol: PROTOCOL_VERSION,
+          server: "moxen",
+          pid: process.pid,
+          build: serverBuild,
+          buildDisplay: serverDisplay,
+          restartRequired: greeting.restartRequired ?? false,
+        };
         return hello;
       }, settle);
       return settled;
     }
     if (!greeted) {
       send({ id, error: toWireError(new CliError("PROTOCOL_HELLO_REQUIRED", "Send hello before any request.")) });
+      return undefined;
+    }
+    // A greeted-but-mismatched local socket is good for stopping the old
+    // server only: everything else is refused with the mismatch, loudly.
+    if (limited !== null && method !== "shutdown") {
+      send({ id, error: toWireError(limited) });
       return undefined;
     }
 
@@ -264,8 +322,25 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
           send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
           break;
         }
-        send({ id, result: null });
-        context.shutdown();
+        // The reply must be on the wire before the server stops: stopping
+        // destroys this socket, which drops a reply still being flushed
+        // (Windows named-pipe writes complete asynchronously, so an
+        // immediate destroy can eat the reply `server stop` waits for).
+        // The socket's own close stops the server too, for a client that
+        // is already gone.
+        if (!socket.destroyed) {
+          let stopping = false;
+          const stop = (): void => {
+            if (!stopping) {
+              stopping = true;
+              context.shutdown();
+            }
+          };
+          socket.write(encode({ id, result: null }), stop);
+          socket.once("close", stop);
+        } else {
+          context.shutdown();
+        }
         break;
       default:
         send({ id, error: toWireError(new CliError("UNKNOWN_METHOD", `Unknown method ${method}.`)) });

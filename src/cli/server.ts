@@ -23,10 +23,21 @@ export async function serverStart(
 export async function serverStatus() {
   const endpoint = defaultEndpoint();
   if (!(await probe(endpoint))) return { endpoint, running: false as const, pid: null, protocol: null };
-  const connection = await RemoteConnection.connect(endpoint, { reconnect: false });
+  // Read, not refused: a server from another build still reports itself —
+  // the mismatch is data, since stopping it is how the person fixes it.
+  const connection = await RemoteConnection.connect(endpoint, { reconnect: false, allowBuildMismatch: true });
   try {
     const hello = connection.helloResult;
-    return { endpoint, running: true as const, pid: hello?.pid ?? null, protocol: hello?.protocol ?? null };
+    return {
+      endpoint,
+      running: true as const,
+      pid: hello?.pid ?? null,
+      protocol: hello?.protocol ?? null,
+      build: hello?.build ?? null,
+      buildDisplay: hello?.buildDisplay ?? null,
+      restartRequired: hello?.restartRequired ?? false,
+      ...(connection.buildMismatch === null ? {} : { buildMismatch: connection.buildMismatch.message }),
+    };
   } finally {
     await connection.close();
   }
@@ -35,7 +46,9 @@ export async function serverStatus() {
 export async function serverStop() {
   const endpoint = defaultEndpoint();
   if (!(await probe(endpoint))) return { endpoint, stopped: false as const };
-  const connection = await RemoteConnection.connect(endpoint, { reconnect: false });
+  // Stopping is the fix for a mismatched server, so it works against any
+  // build: the limited connection only lets `shutdown` through.
+  const connection = await RemoteConnection.connect(endpoint, { reconnect: false, allowBuildMismatch: true });
   try {
     await connection.shutdownServer();
   } finally {

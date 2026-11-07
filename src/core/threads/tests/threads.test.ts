@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -15,6 +15,7 @@ import {
   inspectThread,
   interruptTurn,
   listThreads,
+  promoteDueScheduledTurn,
   readThread,
   sendTurn,
   settleThread,
@@ -376,6 +377,91 @@ describe("interrupt", () => {
     const turns = await store.readTurns(thread.id);
     expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
     expect(turns.find((turn) => turn.id === queued.turn.id)).toMatchObject({ status: "queued", heldAtSettle: true });
+  });
+
+  it("stops a turn with an unknown status instead of leaving it stuck", async () => {
+    const store = await testStore();
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    // A status no build writes (a hand edit, a newer build): the turn never
+    // runs and never settles on its own.
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, status: "bogus" })));
+    const result = await interruptTurn(store, thread.id, sent.turn.id);
+    expect(result.interrupted).toBe(true);
+    expect(result.turn?.status).toBe("interrupted");
+  });
+});
+
+describe("stuck and unreadable turns", () => {
+  async function stuckSetup() {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-stuck-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, { projectId: "p", title: "t", modelSelection: MODEL });
+    return { root, store, thread };
+  }
+
+  it("refuses any send while the turns ledger has an unreadable line", async () => {
+    const { root, store, thread } = await stuckSetup();
+    await appendFile(path.join(root, "threads", thread.id, "turns.jsonl"), "{bad\n", "utf8");
+    await store.readTurns(thread.id);
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "two" }))).toBe("TURNS_LEDGER_CORRUPT");
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "two", delivery: "queue" }))).toBe("TURNS_LEDGER_CORRUPT");
+  });
+
+  it("interrupts a tracked run whose turn row is hidden in a bad line", async () => {
+    const { root, store, thread } = await stuckSetup();
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    let aborted = false;
+    store.trackRunning(sent.turn.id, () => {
+      aborted = true;
+    });
+    // The row drops out of every read, but the run is still tracked here.
+    await writeFile(path.join(root, "threads", thread.id, "turns.jsonl"), "{bad\n", "utf8");
+    await store.readTurns(thread.id);
+    const result = await interruptTurn(store, thread.id, sent.turn.id);
+    expect(aborted).toBe(true);
+    expect(result).toMatchObject({ interrupted: true, turn: null });
+  });
+
+  it("does not start or promote past a turn with an unknown status", async () => {
+    const { store, thread } = await stuckSetup();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(store, thread.id, { prompt: "later", delivery: "queue" });
+    await store.updateTurn(thread.id, queued.turn.id, { scheduledFor: new Date(Date.now() - 1000).toISOString(), scheduleReason: "user" });
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) =>
+      turn.id === running.turn.id ? { ...turn, status: "bogus" } : turn,
+    ));
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "more" }))).toBe("THREAD_BUSY");
+    expect(await promoteDueScheduledTurn(store, thread.id)).toBeNull();
+    expect((await store.readTurns(thread.id)).some((turn) => turn.status === "running")).toBe(false);
+  });
+
+  it("refuses to settle past a turn with an unknown status", async () => {
+    const { store, thread } = await stuckSetup();
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, status: "bogus" })));
+    expect(await codeOf(() => settleThread(store, thread.id))).toBe("THREAD_SETTLE_BLOCKED");
+    const settled = await settleThread(store, thread.id, { stop: true });
+    expect(settled.settledAt).not.toBeNull();
+    expect(sent.turn.id).toBeDefined();
+  });
+
+  it("treats a running turn with no owner as busy", async () => {
+    const { store, thread } = await stuckSetup();
+    const sent = await sendTurn(store, thread.id, { prompt: "one" });
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, owner: undefined })));
+    expect(await codeOf(() => sendTurn(store, thread.id, { prompt: "two" }))).toBe("THREAD_BUSY");
+    expect(sent.turn.id).toBeDefined();
+  });
+
+  it("stops a stuck unknown-status turn without naming it", async () => {
+    const { store, thread } = await stuckSetup();
+    await sendTurn(store, thread.id, { prompt: "one" });
+    await store.rewriteLedger(thread.id, "turns", (await store.readTurns(thread.id)).map((turn) => ({ ...turn, status: "bogus" })));
+    const result = await interruptTurn(store, thread.id);
+    expect(result.interrupted).toBe(true);
+    expect(result.turn?.status).toBe("interrupted");
   });
 });
 

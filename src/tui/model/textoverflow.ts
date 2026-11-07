@@ -32,6 +32,34 @@ export function clippedText(value: string, width: number): string {
   return stringWidth(value) <= cells ? value : `${prefix(value, cells - 1)}…`;
 }
 
+/**
+ * Keep the start and the end of a path that is too wide, middle-truncated
+ * with …. Copy actions still take the full text, so nothing is lost.
+ */
+export function middleTruncate(text: string, width: number): string {
+  const cells = Math.max(0, Math.floor(width));
+  if (cells <= 1 || stringWidth(text) <= cells) return text;
+  const tail = Math.floor((cells - 1) / 2);
+  let start = "";
+  let used = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const w = stringWidth(segment);
+    if (used + w > cells - 1 - tail) break;
+    start += segment;
+    used += w;
+  }
+  let end = "";
+  let usedEnd = 0;
+  const segments = [...graphemes.segment(text)].map(({ segment }) => segment);
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const w = stringWidth(segments[index]!);
+    if (usedEnd + w > tail) break;
+    end = segments[index]! + end;
+    usedEnd += w;
+  }
+  return `${start}…${end}`;
+}
+
 /** A continuous marquee, never splitting a surrogate pair or combining mark. */
 export function marqueeWindow(text: string, width: number, tick: number): string {
   const cells = Math.max(0, Math.floor(width));

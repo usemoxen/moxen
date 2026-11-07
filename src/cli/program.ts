@@ -419,17 +419,19 @@ server
 
 server
   .command("status")
-  .description("Report whether a server is running, and which protocol it speaks.")
+  .description("Report whether a server is running, which build it is, and whether it needs a restart.")
   .action(() =>
     action(async () => {
       const context = await commandContext();
       thisMachineOnly("server status");
       const result = await serverStatus();
-      writeSuccess(
-        result,
-        context,
-        result.running ? `moxen server running at ${result.endpoint} (pid ${result.pid}).` : `No moxen server at ${result.endpoint}.`,
-      );
+      const text = !result.running
+        ? `No moxen server at ${result.endpoint}.`
+        : "buildMismatch" in result && typeof result.buildMismatch === "string"
+          // Names both builds and what to do next.
+          ? result.buildMismatch
+          : `moxen server running at ${result.endpoint} (pid ${result.pid}).${result.restartRequired ? " An update is installed: restart it (moxen server stop, then start Moxen again) to use it." : ""}`;
+      writeSuccess(result, context, text);
     }),
   );
 
@@ -582,7 +584,12 @@ program.command("doctor").description("Check provider binaries, auth, store, and
   action(async () => {
     const context = await commandContext();
     const result = await doctor(context.config);
-    writeSuccess(result, context, result.ok ? "moxen CLI is ready." : "moxen CLI has failing checks.");
+    const lines = [result.ok ? "moxen CLI is ready." : "moxen CLI has failing checks."];
+    for (const problem of result.checks.problems) {
+      const where = problem.source === "config" ? `config ${problem.path}` : problem.line === undefined ? problem.file : `${problem.file}:${problem.line}`;
+      lines.push(`warning: ${problem.message} [${where}]`);
+    }
+    writeSuccess(result, context, lines.join("\n"));
     if (!result.ok) process.exitCode = 1;
   }),
 );
