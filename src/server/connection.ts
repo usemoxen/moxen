@@ -115,6 +115,7 @@ import {
   type TurnDriverFactories,
 } from "../core/threads/execute.js";
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
+import { onThreadFailure } from "../core/threads/failures.js";
 import {
   armPendingScheduledTurns,
   recoverTaskNotifications,
@@ -154,6 +155,9 @@ import {
   runDueScheduledTurn,
   queueAgentMessage,
   startTurn,
+  delegationInfo,
+  flushTaskNotifications,
+  noteAutoContinueCancelled,
   type BuiltinMcpOptions,
   type OperationContext,
   type StartedTurn,
@@ -304,6 +308,10 @@ export class DirectConnection implements ClientApi {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
   private readonly usageFailures = new Set<string>();
+  /** Detached core failures already written to the server log, by line: a subscriber that throws on every event must not fill the disk. */
+  private readonly threadFailures = new Set<string>();
+  /** Removes this connection's detached-failure sink; set in the constructor, run in `close`. */
+  private readonly stopThreadFailureSink: () => void;
   private readonly usageSubscriptions: Array<() => void> = [];
   private readonly storeRoot: string;
   private readonly embeddingRuntime: EmbeddingRuntime;
@@ -394,6 +402,24 @@ export class DirectConnection implements ClientApi {
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
+    // Detached core failures (a throwing event subscriber, an abort-time
+    // interrupt, a failed idle probe) have no caller to return them to:
+    // they land in the server log, where the usage tick's own failures go.
+    this.stopThreadFailureSink = onThreadFailure((area, message) => {
+      void this.logThreadFailure(area, message);
+    });
+  }
+
+  /**
+   * One detached core failure in the server log. Each distinct line once,
+   * like the usage tick's failures: a subscriber that throws on every
+   * event is one bug, not one line per event.
+   */
+  private async logThreadFailure(area: string, message: string): Promise<void> {
+    const key = `${area}: ${message}`;
+    if (this.threadFailures.has(key)) return;
+    this.threadFailures.add(key);
+    await appendFile(path.join(this.storeRoot, "server.log"), `${new Date().toISOString()} ${key}\n`, "utf8").catch(() => undefined);
   }
 
   /** Where a memory request points: the thread's project, the project named, or neither (global alone). */
@@ -1250,9 +1276,19 @@ export class DirectConnection implements ClientApi {
         return await this.threadCreate(command);
       case "thread.turn.start":
         return await this.turnStart(command, signal);
-      case "thread.turn.interrupt":
-        await interruptTurn(await this.store(), command.threadId, command.turnId);
+      case "thread.turn.interrupt": {
+        const store = await this.store();
+        // Cancelling a queued usage-reset continue ends the automatic
+        // continue, not a running turn: a delegated task is marked cancelled
+        // and its parent told, unless asked not to.
+        const turns = await store.readTurns(command.threadId).catch(() => []);
+        const target = command.turnId === undefined ? null : (turns.find((turn) => turn.id === command.turnId) ?? null);
+        const result = await interruptTurn(store, command.threadId, command.turnId);
+        if (result.interrupted && target !== null && target.status === "queued" && target.scheduleReason === "usage-reset") {
+          await noteAutoContinueCancelled(await this.context(), command.threadId, { notifyParent: command.notifyParent }).catch(() => undefined);
+        }
         return accepted;
+      }
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -1260,16 +1296,18 @@ export class DirectConnection implements ClientApi {
         await this.usageProtection.protect(command.threadId);
         return accepted;
       case "queue.edit":
-        await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy);
+        await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy, command.notifyParent);
         return accepted;
       case "handoff.submit":
         await submitHandoff(await this.context(), command.threadId, command.requestId, command.summary);
         return accepted;
       case "usage.queue":
-        await this.usageProtection.reorder(command.threadId, command.direction);
+        await this.usageProtection.reorder(command.threadId, command.direction, command.notifyParent ?? true);
         return accepted;
       case "thread.settle":
         await settleThread(await this.store(), command.threadId, command.stop === true ? { stop: true } : {});
+        // A settle can release notices queued while the thread was held; they go out now, together.
+        await flushTaskNotifications(await this.context(), command.threadId).catch(() => undefined);
         return accepted;
       case "thread.unsettle":
         await unsettleThread(await this.store(), command.threadId);
@@ -1366,7 +1404,7 @@ export class DirectConnection implements ClientApi {
         return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
       }
       case "thread.task.cancel":
-        return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
+        return await cancelTask(await this.context(), command.parentThreadId, command.taskId, { notifyParent: command.notifyParent });
       case "thread.task.settle":
         return await settleTask(await this.context(), command.parentThreadId, command.taskId, {
           ...(command.stop === true ? { stop: true } : {}),
@@ -2086,6 +2124,8 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.status":
         return await describeTask(ctx, query.parentThreadId, query.taskId);
+      case "thread.delegation":
+        return await delegationInfo(ctx, query.threadId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
       case "opencode.session-thread": {
@@ -2322,6 +2362,7 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.stopThreadFailureSink();
     for (const entry of this.researchProposals.values()) entry.answer(null);
     for (const timer of this.pollTimers) clearInterval(timer);
     this.pollTimers.clear();
