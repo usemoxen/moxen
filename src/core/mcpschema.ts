@@ -85,7 +85,7 @@ const RUNNERS = [
 export const MCP_RUNNER_SETTING: SettingDescriptor = {
   key: "mcpRunner",
   label: "Run packages with",
-  description: "What starts an npm package when you add a well-known server (Brave Search, Exa, GitHub…). It is written into the server's command: servers you already have, and ones you type yourself, are left as they are.",
+  description: "What starts an npm package when you add a well-known server (Brave Search, Exa…). It is written into the server's command: servers you already have, and ones you type yourself, are left as they are.",
   section: "mcp",
   kind: { type: "enum", choices: RUNNERS },
   defaultValue: "npx",

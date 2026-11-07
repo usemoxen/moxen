@@ -4,7 +4,7 @@
  * provider drivers (`testHarness`), which differ from the real ones in exactly one way a test can
  * choose: whether the driver has `steerTurn` and whether it succeeds.
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { testHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
 import { TASK_NOTIFICATION_BATCH_MS } from "../../../core/threads/operations.js";
@@ -128,6 +128,8 @@ describe("task_send: a finished task", () => {
     }
   }, 20_000);
 
+  // Two fixed 2.5s waits plus polls and two real turns: about 10s green on
+  // Windows, so a loaded runner needs more than twenty seconds.
   it("tells the parent once the queued message's turn has ended too, not when the first turn does", async () => {
     // Turns never finish by themselves here; the test settles them in the ledger, first the running one, then the one it promotes.
     const t = await setup({ leaveTurnsRunning: true });
@@ -150,7 +152,7 @@ describe("task_send: a finished task", () => {
     } finally {
       await t.connection.close();
     }
-  }, 20_000);
+  }, 30_000);
 });
 
 describe("task_send: whose task it is", () => {
@@ -178,16 +180,23 @@ describe("task_send: whose task it is", () => {
 });
 
 describe("task_send: a task that is idle when the orchestrator continues", () => {
+  // Three turn lifecycles (the orchestrator's handover, the delegate's, the
+  // woken one) plus two 2s notification batch windows: a loaded Windows
+  // runner does not fit in twenty seconds (23.3s in the red CI run, against
+  // ~9s green). Each wait below covers one turn settling plus one 2s batch
+  // window: ~2.6s healthy locally, and the red runner (1.45x the green pace
+  // file-wide) still had zero reports at 8s — so the bound is the file's
+  // WAIT, the same 12s every other notification wait here already uses, not
+  // a blind bump. A real hang still fails inside the 30s outer budget.
   it("moves with the continuation, reports there once woken, and never reaches a stranger or the old parent", async () => {
     const t = await setup();
     try {
       const taskId = await t.delegate();
-      // A delegated turn completes on its own runner: on a loaded machine
-      // that takes longer than vitest's default 1s `waitFor` timeout, so the
-      // wait states its bound (like the one below) instead of flaking there.
-      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 8_000 });
-      // The task's first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
-      await vi.waitFor(async () => expect(await t.notifications()).toHaveLength(1), { timeout: 8_000 });
+      // The task's first report reaches the orchestrator before any handoff,
+      // so later counts have a stable baseline. One wait, not two: the report
+      // is queued only after the task's turn settles (and delivered after the
+      // batch window), so seeing it already means the turn completed.
+      await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
       const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
@@ -210,13 +219,13 @@ describe("task_send: a task that is idle when the orchestrator continues", () =>
       // from the woken turn reaches only the thread that owns the task now.
       const beforeOld = await t.notifications(t.orchestrator);
       const beforeMid = await t.notifications(continued.threadId);
-      await vi.waitFor(async () => expect(await t.notifications(again.threadId)).toHaveLength(1), { timeout: 8_000 });
+      await expect.poll(async () => (await t.notifications(again.threadId)).length, WAIT).toBe(1);
       expect(await t.notifications(t.orchestrator)).toEqual(beforeOld);
       expect(await t.notifications(continued.threadId)).toEqual(beforeMid);
     } finally {
       await t.connection.close();
     }
-  }, 20_000);
+  }, 30_000);
 });
 
 describe("task handoff on continue (MXN-300)", () => {

@@ -60,6 +60,19 @@ snoozed thread, a provider with no room — still holds its place, so the new
 message waits behind it rather than running first; unsnoozing, or the limit
 lapsing, releases both in order. Sending an immediate user message to end
 usage protection is the exception: it releases that hold and runs first.
+"Older held turn" includes a due one: a continue set for a usage-limit
+reset, or a message held behind one, whose time has come. The rule is oldest
+first — the new message rides along in the older turn when model and mode
+match, or runs next once it settles.
+
+A due held turn starts after the running turn settles, oldest first, with
+later held messages batched into it as one turn. It never starts while the
+limit still stands, while usage protection holds the thread, or while the
+thread is snoozed or settled: those wait for the reset, the release, or the
+thread becoming active again. An automatic continue whose time came while
+the thread already resumed — a turn ran to completion after it came due —
+is taken back before it runs instead of firing as a pointless turn; a turn
+that failed or was interrupted does not count as resumed.
 
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
@@ -338,8 +351,10 @@ continuations, and provider-native task/Monitor notifications. Scheduled message
 keep their existing conditions and are held at admission. Native completion
 notifications retain the SDK payload, including the summary and output-file
 reference; replay does not look up a still-live task. Provider-native injected
-messages retain their text. Held task reports bypass the volatile batching timer;
-an existing batch is flushed when protection begins. Wake-ups retain insertion
+messages retain their text. Held task reports stay in the durable notification
+batch instead of starting a wake-up turn behind the hold; an existing batch is
+kept when protection begins, and goes out as one message once the thread
+recovers, or with the user's releasing turn. Wake-ups retain insertion
 order and content across a server restart, then run separately through the work
 queue after automatic recovery, or after the user's releasing turn. The existing
 allowance reserves and inactive-thread checks still apply. Archived, deleted,
@@ -458,10 +473,13 @@ otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A
 continuation can also change the model: continuing in a new thread keeps the
 project, the checkout and the handoff, and takes an optional target
-model/provider — the palette's second continue row, or `moxen threads
+model/provider — the palette's Continue in a new thread row opens a modal
+with the provider, model and effort, preselected to the thread's own, so
+enter continues unchanged (waiting for the reset while a usage limit stands
+on the same provider, starting at once on another), or `moxen threads
 continue --provider/--model` (with `--thinking-effort`/`--speed-mode` for the
 effort; without them a model switch re-resolves effort from the settings, as
-for a new thread, while the TUI picker keeps the compatible knobs). The new
+for a new thread, while the TUI modal keeps the compatible knobs). The new
 thread keeps the source's model unless the request overrides it; a provider
 switch names its model. The command takes either a full `modelSelection` or
 `provider`/`model`, never both at once. The tasks keep
@@ -469,6 +487,18 @@ their own provider and model either way, so the handoff works across
 providers and grants no extra access. No extra guard applies when the new
 thread runs a more restricted runtime mode: the mode governs only that
 thread's own turns, and steering a task is a message, not execution.
+A continuation held for the reset inherits the source's usage-limit hold
+when the hold applies to it: the new thread runs on the same account (its
+model is on the held provider) and the limit still stands (the reset is
+still ahead and the allowance is still out). Then the new thread waits,
+shows the limit block from the start, and holds task notifications without
+spending a turn, and its first turn is the recovery entry that runs once
+the reset comes. Otherwise the scheduled turn is created without the hold
+and runs at its time. An immediate message still releases a hold and runs
+first, as on any held thread. A pause notice batched for the source but not
+yet delivered moves to the continuation when it inherits the hold, so the
+parent still hears it naming the live task; without an inherited hold it is
+dropped, and the task's settle report covers it.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
@@ -575,6 +605,11 @@ status grids. An image can be cropped (which is also the zoom), padded to a
 shape and annotated with boxes, arrows and highlights, and two images can be
 laid over each other or differenced. The TUI draws it from the theme's colours
 and stacks it in a narrow pane; under a modal the images are text cells.
+A picture bigger than the display cap but inside what the decoder reads is
+drawn from a smaller copy; one past the decoder's ceiling, or corrupt, cannot
+be shrunk — nothing available decodes it — and collapses to one line saying it
+could not be drawn, which still opens the viewer on the original bytes for
+opening externally.
 Only images in the visible part of the transcript hold native image resources;
 scrolling them out releases those resources while keeping their space in the reply. A
 block that is not valid, over a limit (8 images, 4 levels, 12 bars, 20 rows) or
@@ -588,7 +623,8 @@ mouse wheel to zoom. The fitted image grows across the canvas and clips at the
 pane boundary. Use 0 (or the percentage button) to fit again, up/down and
 Shift+left/right to pan, or drag the image. Stepping to another picture resets
 the view. Esc, the close button and a click outside the pane close the viewer;
-the composer stays below it.
+the composer stays below it. An image that cannot be drawn says so in the
+viewer's canvas while its header and opening externally keep working.
 
 The Shell section is built from the machine (`core/threads/shells.ts`): its
 platform, the login shell and the shells found on `PATH`, and whether the
@@ -850,6 +886,31 @@ on its own. Where Moxen cannot check — no live session here, or a provider
 that cannot report it all (OpenCode reports only the background shells and
 subagents its own server started) — the notification and `task_status` say so
 plainly instead of implying nothing is running.
+
+### A delegated task that runs out of usage
+
+A task that runs out of usage auto-continues as any thread does: a continue
+is scheduled for just after the reset (or protection holds and recovers it),
+and the work goes on there. Its parent is told twice: once when the task
+pauses, with the expected resume time, and again with the normal report when
+the task finishes. `task_status` reads `running` while the resume waits,
+so a waiter does not mistake the pause for the task failing.
+
+Cancelling that automatic continue ends the resume, and the task will not
+pick the work back up on its own. In the TUI this asks first: Cancel and
+notify parent (the default), Cancel without notifying, or Go back. Without a
+modal — the CLI, or another agent cancelling through `task_cancel` — the
+parent is told by default. Either way `task_status` reads `cancelled` from
+then on, until a wake (`task_send` with `wake: true`) revives the task.
+
+A parent that has itself run out of usage does not receive task notices yet:
+they wait, durably — a restart inside the wait loses nothing — and arrive
+together as one message once its usage is back. When its automatic continue
+is switched off, there is no recovery to ride on, so they go out with the
+user's next message instead, all together rather than each on its own.
+Continuing the parent into a new thread moves the wait with it: the live
+thread resolves through `continuedIn`, so the new parent gets the message
+and the old one gets nothing.
 
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the

@@ -13,7 +13,8 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -92,6 +93,34 @@ describe("conditional work queue", () => {
     expect(lists).not.toHaveBeenCalled();
   });
 
+  it("takes back a stale automatic continue in admission instead of running it", async () => {
+    const w = await world(); const thread = await w.make();
+    await w.store.withThreadLock(thread.id, async () => {
+      const current = (await w.store.readThreadRecord(thread.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "waiting", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    const at = Date.now() + 1200;
+    const continued = await sendTurn(w.store, thread.id, { prompt: "continue after the reset", scheduledFor: new Date(at).toISOString(), scheduleReason: "usage-reset" });
+    // Past the reset the thread resumes under its hold: a usage-control turn
+    // runs and finishes, but settling under the hold promotes nothing.
+    await vi.waitFor(() => expect(Date.now() >= at).toBe(true), { timeout: 10_000, interval: 10 });
+    const resumed = await sendTurn(w.store, thread.id, { prompt: "wrap-up notes", usageControl: true });
+    expect(resumed.turn.status).toBe("running");
+    await completeTurn(w.store, thread.id, resumed.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === continued.turn.id)?.status).toBe("queued");
+    // The hold lifts with the reset: admission takes the nudge back rather
+    // than spending a turn on work that already resumed.
+    await w.store.withThreadLock(thread.id, async () => {
+      const current = (await w.store.readThreadRecord(thread.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: null, updatedAt: w.store.nowIso() });
+    });
+    expect(await runDueScheduledTurn(w.ctx, thread.id, Date.now())).toBe(false);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === continued.turn.id)).toMatchObject({ status: "interrupted" });
+    expect((await w.store.readActivities(thread.id)).some((row) => row.kind === "turn.interrupted" && row.turnId === continued.turn.id && (row.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    expect(w.sent).toEqual([]);
+  });
+
   it("does not promote or batch conditional work when an ordinary turn settles", async () => {
     const w = await world(); const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });
@@ -101,6 +130,28 @@ describe("conditional work queue", () => {
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === held.turn.id)?.status).toBe("queued");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === ordinary.turn.id)?.status).toBe("running");
     expect((await w.store.readMessages(thread.id)).find((m) => m.id === held.messageId)?.turnId).toBe(held.turn.id);
+  });
+
+  it("re-asks user content folded into an unanswered continue, without the nudge", async () => {
+    const w = await world(); const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    // The real automatic shape, due almost at once.
+    const continued = (await scheduleUsageContinue(w.ctx, thread.id, running.turn.id, new Date(Date.now() - 59_000).toISOString()))!;
+    const folded = await sendTurn(w.store, thread.id, { prompt: "folded user content", delivery: "queue" });
+    await vi.waitFor(() => expect(Date.now() >= Date.parse(continued.scheduledFor!)).toBe(true), { timeout: 120_000, interval: 25 });
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    // The continue ran with the folded message in one turn...
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === continued.id)?.status).toBe("running");
+    expect(turns.some((turn) => turn.id === folded.turn.id)).toBe(false);
+    // ...then ended with no provider output on a fresh conversation.
+    await w.store.updateTurn(thread.id, continued.id, { status: "completed", completedAt: w.store.nowIso(), unanswered: true });
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "next question" });
+    await settleRuns();
+    const prompt = w.sent.at(-1)!.prompt;
+    expect(prompt).toContain("folded user content");
+    expect(prompt).toContain("next question");
+    expect(prompt).not.toContain(USAGE_CONTINUE_PROMPT);
   });
 
   it("latches cross-provider events durably while other conditions are still blocked", async () => {

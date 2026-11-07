@@ -26,4 +26,21 @@ describe("the server notice's words", () => {
     expect(refused("PROTOCOL_MISMATCH").detail).toMatch(/another moxen version/);
     expect(refused("SOMETHING_ELSE").detail).not.toContain("raw message");
   });
+
+  it("tells a mismatched build to restart the server from this build", () => {
+    const local = linkNoticeText({ status: "failed", reason: "server runs x, client runs y", code: "BUILD_MISMATCH" }, null);
+    expect(local).toMatchObject({ title: "Disconnected from the moxen server", tone: "danger" });
+    expect(local.detail).toContain("another moxen build");
+    expect(local.detail).toContain("moxen server stop");
+    const remote = linkNoticeText({ status: "failed", reason: "server runs x, client runs y", code: "BUILD_MISMATCH" }, testvm);
+    expect(remote).toMatchObject({ title: "Disconnected from testvm", tone: "danger" });
+    expect(remote.detail).toContain("its own machine");
+  });
+
+  it("says a server nobody waits on stopped trying, without the raw reason", () => {
+    const failed = linkNoticeText({ status: "failed", reason: "the connection closed", code: "SERVER_DISCONNECTED" }, null, 60_000);
+    expect(failed).toMatchObject({ title: "Disconnected from the moxen server" });
+    expect(failed.detail).not.toContain("the connection closed");
+    expect(failed.detail).toMatch(/next command|reconnect/i);
+  });
 });

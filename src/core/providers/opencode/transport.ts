@@ -743,6 +743,7 @@ export class LiveOpencodeServerConnection implements OpencodeServerConnection {
         }
         done();
       }, 2000);
+      (timer as { unref?: () => void }).unref?.();
       child.once("exit", () => {
         clearTimeout(timer);
         done();

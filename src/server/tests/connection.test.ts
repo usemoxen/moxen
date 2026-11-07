@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -22,6 +22,8 @@ import type { ProviderRuntimeEvent } from "../../core/providers/spi.js";
 import type { TurnDriver, TurnOutcome } from "../../core/threads/execute.js";
 import { createThread, readThread, sendTurn, completeTurn, updateThreadMeta } from "../../core/threads/threads.js";
 import { DirectConnection } from "../connection.js";
+import { runServer } from "../main.js";
+import { testEndpoint } from "../transport/tests/endpoint.js";
 import { openClient } from "../client.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../core/usage/limits.js";
@@ -1971,6 +1973,35 @@ describe("DirectConnection settings", () => {
       await connection.close();
     }
   });
+
+  it("keeps keys it does not know when settings.set rewrites the file", async () => {
+    // A newer build's keys at every level survive a save from this build.
+    const harness = await testHarness();
+    const configPath = path.join(harness.root, "unknowns-config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        futureTop: 1,
+        ui: { backdrop: "off", futureSection: "keep" },
+        providers: { harness: { profiles: [{ id: "local", baseUrl: "http://localhost:8080", futureProfile: "keep", models: [{ id: "m" }] }] } },
+        mcpServers: { docs: { command: "docs-mcp", futureServer: "keep" } },
+      }),
+      "utf8",
+    );
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, configPath });
+    try {
+      await connection.dispatch({ type: "settings.set", key: "git.historyLimit", value: "120" });
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toMatchObject({
+        futureTop: 1,
+        ui: { backdrop: "off", futureSection: "keep" },
+        git: { historyLimit: 120 },
+        providers: { harness: { profiles: [{ id: "local", futureProfile: "keep" }] } },
+        mcpServers: { docs: { command: "docs-mcp", futureServer: "keep" } },
+      });
+    } finally {
+      await connection.close();
+    }
+  });
 });
 
 describe("DirectConnection harness profiles", () => {
@@ -2210,6 +2241,20 @@ describe("DirectConnection continue in a new thread", () => {
     ).toThrow("either modelSelection or provider/model, not both");
   });
 
+  it("refuses a non-boolean notifyParent instead of silently defaulting", () => {
+    for (const command of [
+      { type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: "yes" },
+      { type: "usage.queue", threadId: "t1", direction: "cancel", notifyParent: 1 },
+      { type: "queue.edit", threadId: "t1", turnId: "r1", action: "remove", notifyParent: 1 },
+      { type: "thread.task.cancel", parentThreadId: "p1", taskId: "t1", notifyParent: "no" },
+    ]) {
+      expect(() => decodeCommand(command)).toThrow(/notifyParent must be true or false/);
+    }
+    expect(
+      decodeCommand({ type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: false }),
+    ).toEqual({ type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: false });
+  });
+
   it("hands the new thread to the requested model, keeping the project and checkout", async () => {
     const harness = await testHarness();
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
@@ -2265,6 +2310,286 @@ describe("DirectConnection side questions", () => {
       ).rejects.toThrow(/\/btw needs a provider .* opencode cannot/);
       const read = await connection.query({ type: "thread.read", threadId: "btw-thread" });
       expect((read.thread as unknown as { messages: unknown[] }).messages).toEqual([]);
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+/**
+ * A driver whose `stopAll` the test scripts: the double behind
+ * "DirectConnection close".
+ */
+class CloseDriver implements TurnDriver {
+  constructor(
+    private readonly name: string,
+    private readonly asked: string[],
+    private readonly stop: () => Effect.Effect<void, CliError>,
+  ) {}
+
+  hasSession(_threadId: string): Effect.Effect<boolean, CliError> {
+    return Effect.succeed(false);
+  }
+
+  startSession(input: { threadId: string }): Effect.Effect<unknown, CliError> {
+    return Effect.sync(() => ({ threadId: input.threadId }));
+  }
+
+  sendTurn(input: { threadId: string }): Effect.Effect<{ threadId: string; turnId: string }, CliError> {
+    return Effect.succeed({ threadId: input.threadId, turnId: "driver-turn-1" });
+  }
+
+  interruptTurn(): Effect.Effect<void, CliError> {
+    return Effect.void;
+  }
+
+  async awaitTurn(): Promise<TurnOutcome> {
+    return { status: "completed", text: "done", usage: null, error: null };
+  }
+
+  get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
+    return Stream.never;
+  }
+
+  readonly stopAll = (): Effect.Effect<void, CliError> => {
+    this.asked.push(this.name);
+    return this.stop();
+  };
+}
+
+/** Own a driver of each instance id on `connection`, without running a turn. */
+async function ownDriver(connection: DirectConnection, threadId: string, projectId: string, instanceId: string): Promise<void> {
+  await connection.dispatch({
+    type: "thread.create",
+    threadId,
+    projectId,
+    title: threadId,
+    modelSelection: { instanceId, model: "model" },
+    branch: "main",
+  });
+  // `runtime-mode.set` resolves the thread's driver, which owns it from then on.
+  await connection.dispatch({ type: "thread.runtime-mode.set", threadId, runtimeMode: "auto" });
+}
+
+describe("DirectConnection close", () => {
+  it("stops drivers concurrently rather than one after another", async () => {
+    // The first-owned driver waits for the second-owned one to start: in
+    // sequence it would wait forever, concurrently it finishes at once.
+    const started: string[] = [];
+    let releaseSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const first = new CloseDriver("first", started, () => Effect.promise(() => secondStarted));
+    const second = new CloseDriver("second", started, () => Effect.sync(() => releaseSecond()));
+    const harness = await testHarness({ drivers: { claude: () => first, codex: () => second } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await ownDriver(connection, "thread-first", ensured.project.id, "claude");
+      await ownDriver(connection, "thread-second", ensured.project.id, "codex");
+      await connection.close();
+      expect(started).toEqual(["first", "second"]);
+    } finally {
+      releaseSecond();
+      await connection.close();
+    }
+  });
+
+  it("asks every driver to stop under a deadline, even when one hangs", async () => {
+    const asked: string[] = [];
+    const stuck = new CloseDriver("stuck", asked, () => Effect.never);
+    const quick = new CloseDriver("quick", asked, () => Effect.void);
+    const harness = await testHarness({ drivers: { claude: () => stuck, codex: () => quick } });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, closeDriverTimeoutMs: 50 });
+    try {
+      const workspaceRoot = await realpath(harness.work);
+      const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
+      await ownDriver(connection, "thread-stuck", ensured.project.id, "claude");
+      await ownDriver(connection, "thread-quick", ensured.project.id, "codex");
+      await connection.close();
+      // The stuck driver was still asked (its session heard it); the hang
+      // only bounds the wait, and the other driver was not starved behind it.
+      expect(asked).toContain("stuck");
+      expect(asked).toContain("quick");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("clears the subscription poll timers, so a closed connection holds nothing open", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, shellPollMs: 5, threadPollMs: 5 });
+    // Every timer the subscriptions start must be handed back on close: the
+    // poll intervals are the only ones `close()` did not already clear, and
+    // without them a closed connection keeps the event loop alive.
+    const setOriginal = globalThis.setInterval.bind(globalThis);
+    const clearOriginal = globalThis.clearInterval.bind(globalThis);
+    const created: unknown[] = [];
+    const cleared: unknown[] = [];
+    const setSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((...args: unknown[]) => {
+      const timer = (setOriginal as (...rest: unknown[]) => unknown)(...args);
+      created.push(timer);
+      return timer;
+    }) as typeof setInterval);
+    const clearSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(((timer: unknown) => {
+      cleared.push(timer);
+      (clearOriginal as (handle: unknown) => void)(timer);
+    }) as typeof clearInterval);
+    const stopShell = connection.subscribeShell({}, () => {}, () => {});
+    const stopThread = connection.subscribeThread("missing-thread", {}, () => {}, () => {});
+    try {
+      expect(created.length).toBeGreaterThan(0);
+      await connection.close();
+      for (const timer of created) expect(cleared).toContain(timer);
+    } finally {
+      stopShell();
+      stopThread();
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+      await connection.close();
+    }
+  });
+});
+
+
+describe("DirectConnection store ownership", () => {
+  const lockFile = (root: string): string => path.join(root, "server.lock");
+
+  it("lets one server own a store and refuses a second", async () => {
+    const harness = await testHarness();
+    const first = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const second = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await first.claimStore();
+      const refused = await second.claimStore().catch((cause: unknown) => cause);
+      expect(refused).toBeInstanceOf(CliError);
+      expect(refused).toMatchObject({ code: "STORE_OWNED" });
+      expect((refused as CliError).message).toContain(`process ${process.pid}`);
+      expect((refused as CliError).message).toContain("Stop that server first");
+      // Releasing lets the next server in.
+      await first.close();
+      await second.claimStore();
+      await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    } finally {
+      await second.close();
+      await first.close();
+    }
+  });
+
+  it("refuses a live foreign owner and takes over after a crash", async () => {
+    const harness = await testHarness();
+    const foreignPid = process.ppid ?? 1;
+    await writeFile(
+      lockFile(harness.root),
+      JSON.stringify({ build: "release:9.9.9:macos-arm64", display: "release 9.9.9 (macos-arm64)", pid: foreignPid, startedAt: new Date().toISOString() }),
+    );
+    const blocked = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      const refused = await blocked.claimStore().catch((cause: unknown) => cause);
+      expect(refused).toBeInstanceOf(CliError);
+      expect(refused).toMatchObject({ code: "STORE_OWNED" });
+      expect((refused as CliError).message).toContain("release 9.9.9 (macos-arm64)");
+    } finally {
+      await blocked.close();
+    }
+    // A lock from a dead process is taken over, not refused.
+    const dead = spawnSync(process.execPath, ["--version"]).pid ?? 2 ** 31 - 1;
+    await writeFile(
+      lockFile(harness.root),
+      JSON.stringify({ build: "release:9.9.9:macos-arm64", display: "release 9.9.9 (macos-arm64)", pid: dead, startedAt: new Date().toISOString() }),
+    );
+    const next = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await next.claimStore();
+      await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    } finally {
+      await next.close();
+    }
+  });
+
+  it("releases the store on close", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    await connection.claimStore();
+    await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+    await connection.close();
+    await expect(readFile(lockFile(harness.root), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("a refused second claimant closing does not release the owner's lock", async () => {
+    const harness = await testHarness();
+    const first = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const second = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      await first.claimStore();
+      await expect(second.claimStore()).rejects.toMatchObject({ code: "STORE_OWNED" });
+      // The refused claimant never owned anything: closing it must leave
+      // the owner's lock file alone (same pid, so pid alone can't tell).
+      await second.close();
+      await expect(readFile(lockFile(harness.root), "utf8")).resolves.toContain(String(process.pid));
+      // ...so a third claimant is still refused.
+      const third = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+      try {
+        await expect(third.claimStore()).rejects.toMatchObject({ code: "STORE_OWNED" });
+      } finally {
+        await third.close();
+      }
+    } finally {
+      await first.close();
+    }
+    // And the owner closing still releases.
+    await expect(readFile(lockFile(harness.root), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("starts over a lock whose owner dies mid-wait, instead of needing a retry", async () => {
+    // A stopping server answers shutdown before it releases the store; a
+    // server started in that gap must wait the lock out, not fail. The
+    // owner here is a short-lived helper process, so the wait is seconds.
+    const harness = await testHarness();
+    const owner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], { stdio: "ignore" });
+    owner.unref();
+    try {
+      await writeFile(
+        lockFile(harness.root),
+        JSON.stringify({ build: "test", display: "test", pid: owner.pid, startedAt: new Date().toISOString() }),
+      );
+      const handle = await runServer({ endpoint: testEndpoint(), config: async () => harness.config });
+      await handle.close();
+    } finally {
+      try {
+        owner.kill("SIGKILL");
+      } catch {
+        // Already gone: its death is what the test waited for.
+      }
+    }
+  });
+});
+
+describe("DirectConnection update broadcast", () => {
+  it("tells every shell subscriber the server needs a restart after an update", async () => {
+    const harness = await testHarness();
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => harness.config,
+      updateApp: async () => ({ action: "updated", version: "0.2.0", from: "0.1.0", previous: "0.1.0", folder: "/f", current: "/c", warnings: [] }),
+    });
+    try {
+      expect(connection.serverRestartRequired).toBe(false);
+      const frames: Array<{ kind: string; event?: { type: string; payload?: unknown } }> = [];
+      const stop = connection.subscribeShell({}, (frame) => frames.push(frame as never), () => undefined);
+      try {
+        await connection.dispatch({ type: "app.update.apply", commandId: "update-1" });
+        expect(connection.serverRestartRequired).toBe(true);
+        expect(frames).toContainEqual({
+          kind: "event",
+          event: { type: "app.server-restart-required", payload: { version: "0.2.0", from: "0.1.0" } },
+        });
+      } finally {
+        stop();
+      }
     } finally {
       await connection.close();
     }

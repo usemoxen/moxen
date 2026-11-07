@@ -17,7 +17,7 @@ export type ThreadListStatus = "active" | "settled" | "snoozed" | "all";
 
 export type ThreadReadView = ReadView;
 
-export type DelegatedTaskStatus = "running" | "completed" | "failed" | "interrupted";
+export type DelegatedTaskStatus = "running" | "completed" | "failed" | "interrupted" | "cancelled";
 
 export type DelegatedTaskWorkState = "working" | "result_available";
 

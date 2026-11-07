@@ -71,6 +71,18 @@ export function updateEventFromFrame(frame: unknown): Extract<UpdateEvent, { typ
   return { type: "progress", commandId: typeof payload.commandId === "string" ? payload.commandId : null, progress: progress as UpdateProgress };
 }
 
+/** The restart notice a shell frame carries, or null for any other frame. */
+export function restartRequiredFromFrame(frame: unknown): { readonly version: string; readonly from: string | null } | null {
+  if (frame === null || typeof frame !== "object") return null;
+  const record = frame as { kind?: unknown; event?: unknown };
+  if (record.kind !== "event" || record.event === null || typeof record.event !== "object") return null;
+  const event = record.event as { type?: unknown; payload?: unknown };
+  if (event.type !== "app.server-restart-required" || event.payload === null || typeof event.payload !== "object") return null;
+  const payload = event.payload as { version?: unknown; from?: unknown };
+  if (typeof payload.version !== "string") return null;
+  return { version: payload.version, from: typeof payload.from === "string" ? payload.from : null };
+}
+
 export type UpdateAction = "install" | "rollback" | "check";
 
 /**

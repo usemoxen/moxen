@@ -671,7 +671,7 @@ describe("full research runs", () => {
       const cancelled = await connection.dispatch({ type: "research.role.cancel", leadThreadId: lead.child.id, taskId: role.child.id });
       expect(cancelled.interruptRequested).toBe(true);
       await expect.poll(async () => (await store.readTurns(role.child.id)).at(-1)?.status, WAIT).toBe("interrupted");
-      expect(await connection.query({ type: "research.run", threadId: lead.child.id })).toMatchObject({ state: "running", roles: [{ role: "researcher", task: { status: "interrupted" } }] });
+      expect(await connection.query({ type: "research.run", threadId: lead.child.id })).toMatchObject({ state: "running", roles: [{ role: "researcher", task: { status: "cancelled" } }] });
       expect((await store.readMessages(parent.threadId)).filter((message) => message.origin === "task-notification")).toEqual([]);
       expect((await store.readThreadRecord(role.child.id))?.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-5.4", options: expect.arrayContaining([{ id: "effort", value: "high" }]) });
     } finally {

@@ -67,7 +67,7 @@ describe("presets", () => {
     expect(mcpTarget(brave, "bunx")).toBe("bunx @brave/brave-search-mcp-server");
     expect(mcpTarget(brave, "pnpm")).toBe("pnpm dlx @brave/brave-search-mcp-server");
     expect(mcpTarget(brave, "yarn")).toBe("yarn dlx @brave/brave-search-mcp-server");
-    expect(mcpTarget(MCP_PRESETS.find((preset) => preset.id === "fetch")!, "bunx")).toBe("uvx mcp-server-fetch");
+    expect(mcpTarget(MCP_PRESETS.find((preset) => preset.id === "exa")!, "bunx")).toBe("https://mcp.exa.ai/mcp");
   });
 
   it("names the variable a key goes in, never a value", () => {

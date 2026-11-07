@@ -1,9 +1,11 @@
 import { rm } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import net from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CliError } from "../../../core/errors.js";
+import { buildIdentity } from "../../../core/build.js";
 import type { ClientApi } from "../../api.js";
 import { RemoteConnection, type LinkState } from "../remote.js";
 import { handleSocket } from "../serve.js";
@@ -43,8 +45,12 @@ async function fakeServer(): Promise<{ endpoint: string; muted: boolean; connect
       for (const line of reader.push(chunk)) {
         if (state.muted) continue;
         const message = JSON.parse(line) as { id: number; method: string };
-        if (message.method === "hello") socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+        if (message.method === "hello") socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
         else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+        else if (message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
         else if (message.method === "subscribeShell") {
           socket.write(encode({ id: message.id, result: { subscription: message.id } }));
           socket.write(encode({ subscription: message.id, item: { kind: "snapshot" } }));
@@ -112,6 +118,153 @@ describe("heartbeat", () => {
     expect((error as CliError).message).toMatch(/did not answer within/);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
+
+  it("drives reconnect and link state for a one-shot request with no subscription", async () => {
+    // A `send --wait` has no subscription: only its in-flight await is
+    // around when the server goes quiet. It must still see the link drop
+    // and come back, rather than fail once while the link claims connected.
+    // Recovery takes a new request: with nobody waiting the client stops
+    // dialling, and the next send kicks it off again.
+    const endpoint = testEndpoint();
+    let muted = false;
+    const sockets = new Set<net.Socket>();
+    const serveOne = (): Promise<net.Server> =>
+      new Promise<net.Server>((resolve) => {
+        const server = net.createServer((socket) => {
+          sockets.add(socket);
+          socket.setEncoding("utf8");
+          socket.on("error", () => undefined);
+          socket.once("close", () => sockets.delete(socket));
+          const reader = new LineReader();
+          socket.on("data", (chunk: string) => {
+            for (const line of reader.push(chunk)) {
+              if (muted) continue;
+              const message = JSON.parse(line) as { id: number; method: string };
+              if (message.method === "hello") socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
+              else if (message.method === "ping") socket.write(encode({ id: message.id, result: null }));
+              else if (message.method === "query" || message.method === "getConfig") socket.write(encode({ id: message.id, result: { ok: true } }));
+            }
+          });
+        });
+        server.listen(endpoint, () => resolve(server));
+      });
+    const server = await serveOne();
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint, FAST);
+    teardown.push(() => client.close());
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+    expect(client.linkState).toEqual({ status: "connected" });
+
+    muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    muted = false;
+    // The demand kicks the reconnect: the wait below fails while the link
+    // still says connected.
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects in-flight requests on close, even when the server says nothing", async () => {
+    // The socket's own close may never come back from a silent server, so
+    // `close()` settles what is parked itself instead of hanging on it.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await client.close();
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+  });
+
+  it("stops redialling once nobody waits, and redials on the next send", async () => {
+    // With no subscription and nothing in flight, the reconnect gives up
+    // instead of dialling forever — and says it stopped trying. The next
+    // request kicks it off again.
+    const server = await fakeServer();
+    const client = await RemoteConnection.connect(server.endpoint, FAST);
+    teardown.push(() => client.close());
+    server.muted = true;
+    const inFlight = client.getConfig().catch((cause: unknown) => cause);
+    await waitFor("reconnecting", () => client.linkState.status === "reconnecting");
+    const error = await inFlight;
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("SERVER_DISCONNECTED");
+
+    await waitFor("given up", () => client.linkState.status === "failed");
+    expect(client.linkState).toMatchObject({ status: "failed", code: "SERVER_DISCONNECTED" });
+
+    server.muted = false;
+    await expect(client.getConfig()).rejects.toMatchObject({ code: "SERVER_DISCONNECTED" });
+    await waitFor("connected again", () => client.linkState.status === "connected");
+    await expect(client.getConfig()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("leaves no live socket behind when close lands mid-reconnect", async () => {
+    // The reconnect's hello is still waiting for its reply when the client
+    // closes: answering it afterwards must not report a closed client as
+    // connected, nor leave its socket open.
+    const endpoint = testEndpoint();
+    let holdHellos = false;
+    let held: { socket: net.Socket; id: number } | null = null;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("error", () => undefined);
+      socket.once("close", () => sockets.delete(socket));
+      const reader = new LineReader();
+      socket.on("data", (chunk: string) => {
+        for (const line of reader.push(chunk)) {
+          const message = JSON.parse(line) as { id: number; method: string };
+          if (message.method !== "hello") continue;
+          if (holdHellos) held = { socket, id: message.id };
+          else socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+    teardown.push(async () => {
+      for (const socket of [...sockets]) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+      if (process.platform !== "win32") await rm(endpoint, { force: true }).catch(() => undefined);
+    });
+    const client = await RemoteConnection.connect(endpoint);
+    teardown.push(() => client.close());
+    client.subscribeShell({}, () => undefined, () => undefined);
+    await waitFor("the subscription", () => [...sockets].length === 1);
+
+    holdHellos = true;
+    // Drop the one socket: the reconnect's next hello waits for its reply.
+    for (const socket of [...sockets]) socket.destroy();
+    await waitFor("the reconnect's held hello", () => held !== null);
+
+    await client.close();
+    held!.socket.write(encode((() => {
+          const own = buildIdentity();
+          return { id: held!.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: own.id, buildDisplay: own.display, restartRequired: false } };
+        })()));
+    await waitFor("the held hello to settle", () => sockets.size === 0 || client.linkState.status === "connected");
+    expect(client.linkState.status).not.toBe("connected");
+    expect(sockets.size).toBe(0);
+  });
 });
 
 describe("server side", () => {
@@ -138,15 +291,98 @@ describe("server side", () => {
 
   it("closes a client that pinged and then went silent", async () => {
     const { client, closed } = await socketPair(150);
-    client.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }));
+    client.write(
+      encode({
+        id: 1,
+        method: "hello",
+        params: { protocol: PROTOCOL_VERSION, build: buildIdentity().id, buildDisplay: buildIdentity().display },
+      }),
+    );
     client.write(encode({ id: 2, method: "ping" }));
     await waitFor("the server to drop it", closed, 2_000);
   });
 
   it("never times out a client that does not ping", async () => {
     const { client, closed } = await socketPair(150);
-    client.write(encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } }));
+    client.write(
+      encode({
+        id: 1,
+        method: "hello",
+        params: { protocol: PROTOCOL_VERSION, build: buildIdentity().id, buildDisplay: buildIdentity().display },
+      }),
+    );
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(closed()).toBe(false);
+  });
+});
+
+/**
+ * A socket whose writes flush later, like a Windows named pipe under load:
+ * the bytes are buffered, not on the wire, until the test says so. Stopping
+ * the server on `write` would eat the shutdown reply `server stop` waits
+ * for; the server must wait for the flush (or the socket's own close).
+ */
+function deferredSocket(): {
+  socket: net.Socket;
+  writes: string[];
+  flush: () => void;
+  peerGone: () => void;
+} {
+  const events = new EventEmitter();
+  const writes: string[] = [];
+  let flush: (() => void) | null = null;
+  let stoppedFlushing = false;
+  const socket = Object.assign(events, {
+    setEncoding: () => undefined,
+    destroyed: false,
+    write: (line: string, done?: () => void): boolean => {
+      writes.push(line);
+      if (!stoppedFlushing) flush = () => done?.();
+      return true;
+    },
+    destroy: (): net.Socket => {
+      stoppedFlushing = true;
+      events.emit("close");
+      return socket as unknown as net.Socket;
+    },
+  }) as unknown as net.Socket;
+  return {
+    socket,
+    writes,
+    flush: () => flush?.(),
+    peerGone: () => events.emit("close"),
+  };
+}
+
+describe("shutdown reply", () => {
+  it("flushes the shutdown reply before stopping, even when the write is slow", async () => {
+    const own = buildIdentity();
+    let stopped = false;
+    const peer = deferredSocket();
+    handleSocket(peer.socket, {} as ClientApi, { remote: false, shutdown: () => { stopped = true; } });
+    const send = (line: object): void => { peer.socket.emit("data", encode(line as never)); };
+    send({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: own.id, buildDisplay: own.display } });
+    await waitFor("the hello reply", () => peer.writes.length >= 1);
+    expect(JSON.parse(peer.writes[0]!)).toMatchObject({ id: 1, result: { build: own.id } });
+    send({ id: 2, method: "shutdown" });
+    await waitFor("the shutdown reply to be written", () => peer.writes.length >= 2);
+    expect(JSON.parse(peer.writes[1]!)).toMatchObject({ id: 2, result: null });
+    // The reply is still buffered: stopping now would eat it.
+    expect(stopped).toBe(false);
+    peer.flush();
+    await waitFor("the server to stop once flushed", () => stopped);
+  });
+
+  it("still stops when the client is gone before the flush", async () => {
+    const own = buildIdentity();
+    let stopped = false;
+    const peer = deferredSocket();
+    handleSocket(peer.socket, {} as ClientApi, { remote: false, shutdown: () => { stopped = true; } });
+    peer.socket.emit("data", encode({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: own.id, buildDisplay: own.display } } as never));
+    await waitFor("the hello reply", () => peer.writes.length >= 1);
+    peer.socket.emit("data", encode({ id: 2, method: "shutdown" } as never));
+    await waitFor("the shutdown reply to be written", () => peer.writes.length >= 2);
+    peer.peerGone();
+    await waitFor("the server to stop on the dead socket", () => stopped);
   });
 });

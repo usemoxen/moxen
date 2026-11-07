@@ -765,6 +765,12 @@ export const client: ClientApi = {
     if (query.type === "thread.background.output") {
       return { available: true, lines: ["watching build.log", "...still going"] };
     }
+    if (query.type === "store.problems") {
+      return { problems: [] };
+    }
+    if (query.type === "config.read") {
+      return { path: "/mock/config.json", exists: true, config: {}, problems: [] };
+    }
     if (query.type === "usage.stats") {
       // The last few days, counted from today so the heatmap and chart always have them in view.
       const day = (back: number) => {
