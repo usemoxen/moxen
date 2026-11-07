@@ -214,6 +214,7 @@ does everything except publish, so use it to try a change to the release itself.
 - Keep local project discovery read-only; fall back to authenticated HTTP when the projection DB/schema is unavailable.
 - Pass handover prompts as argv/stdin arrays, never concatenated into shell commands.
 - Vendoring third-party code needs its notice to travel with it: MIT-licensed reuse is permitted, the combined work stays AGPL-3.0-only, never relicense vendored files and never strip notices. Grammar licenses are generated (`bun run update:tree-sitter-assets` rewrites `THIRD_PARTY_LICENSES.md`); non-grammar vendored code is recorded in `THIRD_PARTY_NOTICES.md`, creating it if absent.
+- **Bumping a format version**: `config.json` and the thread store (`store.json` at the store root) each carry `formatVersion`, today's shape being version 1 and a missing version reading as version 1. A change that reshapes either one bumps its `*_FORMAT_VERSION` by exactly one, adds one `FormatMigration` step for the version it leaves (`CONFIG_MIGRATIONS` in `src/core/config.ts`, `STORE_MIGRATIONS` in `src/core/threads/store.ts`), and extends the version tests with a fixture of the shape it replaces (`src/core/tests/format.test.ts`, `src/core/tests/config.test.ts`, `src/core/threads/tests/storeformat.test.ts`). Never reinterpret an old version's fields in place, and never write data newer than the build knows — the readers refuse it (`FORMAT_TOO_NEW`).
 
 ## Tests
 
