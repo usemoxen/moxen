@@ -124,7 +124,8 @@ To read a failed run: `gh run view <id> --log-failed | grep -E 'FAIL|Error|×'`.
 - New feature-specific state goes in that feature's own hook under `src/tui/features/<feature>/`; cross-cutting state that a single feature can't own goes in `src/tui/app/hooks/`. Shared, stateless-ish runtime hooks live in `src/tui/hooks/`. Avoid adding more raw `useState` to `app.tsx` itself.
 - Every modal renders inside `ModalShell`; notices go through `useToasts`.
 - Interactive chrome gets `useHover()` feedback and `selectable={false}`; only readable text stays selectable.
-- Daily use runs the bundle: `bun run build` writes `dist/` (`scripts/build.ts`), and `moxen` is `bun dist/cli/index.js`. Bundling transpiles once, bakes in `NODE_ENV=production` (including React's production runtime) and splits the TUI out of the startup path of plain commands. The production runtime matters: under Bun's development JSX runtime every React element captures an `Error` stack in native memory, which grew a long session to 10+ GB (MXN-38). `bun run tui` rebuilds, stops the running moxen server (killing it if it will not stop), starts a new one from the new build, and opens the TUI on it (`scripts/tui.ts`), so the server never runs stale code and remote access, which only the server has, is always there. Restarting the server ends any turn it was running. Running the source directly (`bun src/cli tui`) uses the development runtime — fine for short runs, not for measuring memory or CPU. After changing anything that loads assets or finds files relative to itself, rebuild and check `bun dist/cli/index.js tui`: the tree-sitter grammars and worker are file imports that the build rewrites (see the comment in `scripts/build.ts`), and the server daemon runs `dist/server/daemon.js`.
+- Daily use runs the bundle: `bun run build` writes `dist/` (`scripts/build.ts`), and `moxen` is `bun dist/cli/index.js`. Bundling transpiles once, bakes in `NODE_ENV=production` (including React's production runtime) and splits the TUI out of the startup path of plain commands. The production runtime matters: under Bun's development JSX runtime every React element captures an `Error` stack in native memory, which grew a long session to 10+ GB (MXN-38). `bun run tui` rebuilds, stops the running moxen server (killing it if it will not stop), starts a new one from the new build, and opens the TUI on it (`scripts/tui.ts`), so the server never runs stale code and remote access, which only the server has, is always there. Restarting the server ends any turn it was running. Running the source directly (`bun src/cli tui`) uses the development runtime — fine for short runs, not for measuring memory or CPU. After changing anything that loads assets or finds files relative to itself, rebuild and check `bun dist/cli/index.js tui`: the tree-sitter grammars and worker are file imports that the build rewrites (see the comment in `scripts/build.ts`), and the server daemon runs `dist/server/daemon.js`. Bare `moxen` opens the TUI;
+`moxen --help` opens help; anything else after `moxen` is a CLI command.
 
 ## Releases
 
@@ -160,11 +161,19 @@ does everything except publish, so use it to try a change to the release itself.
   Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
   name the archive above the changelog, and runs `install.sh` (with a stubbed `uname`, on every runner)
   and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
+  It also runs each installer's PATH step on its own (`MOXEN_INSTALL_PATH_ONLY=1`): `install.sh` against a
+  fake HOME for zsh and bash (snippet applied once, never duplicated; fish gets instructions, not a write),
+  `install.ps1` on Windows against a throwaway user-environment value (`MOXEN_INSTALL_TEST_VALUE`, never the
+  real Path). With `MOXEN_INSTALL_NO_PATH=1` the step writes nothing: the fake HOME stays empty and the real
+  profiles (and the real user Path) are unchanged.
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.
 - `moxen self-update --install` (`core/selfupdate/installer.ts`) installs a release under `<store root>/app` (`versions/<version>/`,
-  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). `smoke-release.ts` also runs it from the unpacked folder into a
+  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). It prints how to put `bin` on PATH and edits no profile; the
+  one-line installers do that step themselves (`install.sh` appends a marker-guarded snippet to the shell's
+  profile, `install.ps1` adds the folder to the user Path via `[Environment]`, both deduplicated and both
+  skipped under `MOXEN_INSTALL_NO_PATH=1`). `smoke-release.ts` also runs it from the unpacked folder into a
   throwaway store whose path has a space, starts the launcher with `--version` from a working directory with a space,
   deletes the unpacked folder and starts it again, then repeats the install. On Windows it runs the `.cmd` through
   `cmd.exe /d /s /c` with verbatim arguments, so the launcher path is quoted once and Node adds no backslash escapes.
