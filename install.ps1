@@ -2,10 +2,10 @@
 #
 #   irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 #
-# It finds the latest release, installs Bun first when it is missing, checks the
-# archive against its .sha256 (and stops on a mismatch), runs self-update
-# --install, and says how to put Moxen on your PATH. macOS uses install.sh
-# instead; Linux and Intel Macs have no build.
+# It finds the latest release, checks the archive against its `.sha256` (and
+# stops on a mismatch), runs `self-update --install`, and says how to put
+# Moxen on your PATH. macOS uses install.sh instead; Linux and Intel Macs
+# have no build.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -51,15 +51,6 @@ if (-not $ChecksumUrl) {
   Fail "release $Tag has no $Checksum for this platform."
 }
 
-if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-  Write-Host 'Bun is missing, installing it first (https://bun.sh)...'
-  powershell -NoProfile -Command "irm bun.sh/install.ps1 | iex"
-  $env:Path += ";$env:USERPROFILE\.bun\bin"
-  if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-    Fail 'bun is still missing after its install.'
-  }
-}
-
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('moxen-install-' + [System.Guid]::NewGuid().ToString('N'))
 try {
   New-Item -ItemType Directory -Path $Tmp | Out-Null
@@ -83,8 +74,8 @@ try {
   }
 
   Write-Host 'Installing...'
-  $Entry = Join-Path (Join-Path $Tmp $Base) 'dist\cli\index.js'
-  & bun "$Entry" self-update --install
+  $Entry = Join-Path (Join-Path $Tmp $Base) 'moxen.exe'
+  & $Entry self-update --install
   if ($LASTEXITCODE -ne 0) {
     Fail 'self-update --install failed.'
   }

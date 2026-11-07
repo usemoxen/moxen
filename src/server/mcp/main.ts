@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { McpServerSpec } from "../../core/mcp.js";
+import { isStandaloneExecutable, STANDALONE_MCP_ARG } from "../../core/infra/standalone.js";
 import { openClient } from "../client.js";
 import { memoryAccessOf, MOXEN_CHECKLIST_ARG, MOXEN_DELEGATED_ARG, MOXEN_MEMORY_ARG, MOXEN_NO_WEB_FETCH_ARG, serveMcp } from "./stdio.js";
 
@@ -28,7 +29,11 @@ function mcpEntry(): string {
 }
 
 /** How a provider session launches the moxen tools for one thread. */
-export function moxenMcpServerSpec(threadId: string): Extract<McpServerSpec, { type: "stdio" }> {
+export function moxenMcpServerSpec(threadId: string, standalone: boolean = isStandaloneExecutable()): Extract<McpServerSpec, { type: "stdio" }> {
+  // A standalone binary re-runs itself in its internal MCP mode; otherwise the entry runs on Bun.
+  if (standalone) {
+    return { name: MOXEN_MCP_SERVER_NAME, type: "stdio", command: process.execPath, args: [STANDALONE_MCP_ARG, "--thread", threadId], env: {} };
+  }
   const entry = mcpEntry();
   // Bun runs the TypeScript directly: this runtime when it is Bun, else `bun` from PATH.
   const runtime = process.versions.bun ? process.execPath : "bun";

@@ -4,19 +4,21 @@
  *   bun scripts/package-release.ts [--out <dir>]        (default: release/ in the checkout)
  *
  * writes `moxen-<version>-<os>-<arch>.tar.gz|zip` and a `.sha256` file beside it. The archive has one
- * top-level folder holding the bundle (`dist/`), `mods/`, `package.json`, `release.json` (the marker that makes it a release install), the licenses, and the one
- * dependency the bundle still loads from disk: this platform's native OpenTUI package. Everything else
- * the bundle needs is bundled, so the archive runs with only Bun installed (`bun dist/cli/index.js`).
+ * top-level folder holding a standalone executable (`moxen`, `moxen.exe` on Windows: nothing else
+ * needs installing to run it) beside the bundle (`dist/`), `mods/`, `package.json`, `release.json`
+ * (the marker that makes it a release install), the licenses, and the one dependency the bundle still
+ * loads from disk: this platform's native OpenTUI package. Everything else the executable needs is
+ * compiled into it; the bundle stays for updates from older releases and as the launcher's fallback.
  *
- * The bundle is built here into a clean folder, never taken from `dist/`, which can hold older chunks and
- * which a running Moxen is loading from.
+ * The bundle and the executable are both built here into a clean folder, never taken from `dist/`,
+ * which can hold older chunks and which a running Moxen is loading from.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveFileName, packCommand, RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget } from "./release-lib.js";
+import { archiveFileName, executableName, packCommand, RELEASE_MARKER, releaseBaseName, releaseMarker, releaseTarget } from "./release-lib.js";
 
 const root = path.resolve(import.meta.dir, "..");
 const outFlag = process.argv.indexOf("--out");
@@ -37,6 +39,7 @@ try {
   mkdirSync(folder);
 
   run(process.execPath, [path.join(root, "scripts", "build.ts"), "--outdir", path.join(folder, "dist")]);
+  run(process.execPath, [path.join(root, "scripts", "build-exe.ts"), "--out", path.join(folder, executableName(target))]);
 
   cpSync(path.join(root, "mods"), path.join(folder, "mods"), { recursive: true });
   for (const file of ["package.json", "README.md", "LICENSE", "THIRD_PARTY_LICENSES.md"]) {

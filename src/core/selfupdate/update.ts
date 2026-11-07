@@ -23,11 +23,12 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { CliError } from "../errors.js";
+import { isStandaloneExecutable } from "../infra/standalone.js";
 import { renameReplacing, writeAtomic } from "../infra/atomic.js";
-import { RELEASE_MARKER, listCommand, releaseBaseName, releaseMarker, releaseTargetOf, unpackCommand, type ReleaseTarget } from "../release.js";
+import { RELEASE_MARKER, executableName, listCommand, releaseBaseName, releaseMarker, releaseTargetOf, unpackCommand, type ReleaseTarget } from "../release.js";
 import { checkForUpdate } from "./check.js";
 import { readInstall, type ReadInstallOptions } from "./install.js";
-import { appLayout, isInstalledFolder, SAFE_VERSION, TEMP_PREFIX, type AppLayout } from "./installer.js";
+import { appLayout, ensureLauncher, isInstalledFolder, SAFE_VERSION, TEMP_PREFIX, type AppLayout } from "./installer.js";
 import type { InstallInfo, ReleaseAsset, RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "./vocabulary.js";
 
 export type { RollbackResult, UpdateAction, UpdateProgress, UpdateResult, UpdateStage } from "./vocabulary.js";
@@ -43,6 +44,32 @@ const MAX_CHECKSUM_BYTES = 4096;
 /** A download reports at most once per this many bytes. */
 const PROGRESS_STEP_BYTES = 512 * 1024;
 const ENTRY = ["dist", "cli", "index.js"];
+
+export interface TargetEntry {
+  readonly exec: string;
+  readonly args: readonly string[];
+  /** The bundle entry runs on the standalone binary's own Bun CLI (a dist-only install under a standalone binary). */
+  readonly viaBunBeBun: boolean;
+}
+
+/**
+ * How to start the release in `folder` to check it reports `version`: the
+ * standalone executable when the folder holds one, else the bundle entry on
+ * this runtime — or on the standalone binary's own Bun CLI when this process
+ * is one. `runtime` and `standalone` are injected in tests.
+ */
+export function targetEntry(folder: string, target: ReleaseTarget, runtime: string = process.execPath, standalone: boolean = isStandaloneExecutable()): TargetEntry {
+  const exe = path.join(folder, executableName(target));
+  if (existsSync(exe)) return { exec: exe, args: ["--version"], viaBunBeBun: false };
+  const entry = path.join(folder, ...ENTRY);
+  if (standalone) return { exec: runtime, args: [entry, "--version"], viaBunBeBun: true };
+  return { exec: runtime, args: [entry, "--version"], viaBunBeBun: false };
+}
+
+/** Whether `folder` holds something startable: the executable or the bundle entry. */
+export function hasEntry(folder: string, target: ReleaseTarget): boolean {
+  return existsSync(path.join(folder, executableName(target))) || existsSync(path.join(folder, ...ENTRY));
+}
 
 export interface UpdateOptions extends ReadInstallOptions {
   readonly layout?: AppLayout;
@@ -86,8 +113,6 @@ function readVersionFile(file: string): string | null {
     return null;
   }
 }
-
-const entryOf = (folder: string): string => path.join(folder, ...ENTRY);
 
 /** Only a release install running from inside `versions/` may be updated or rolled back; both are refused before anything is written. */
 function requireInstalledRelease(install: InstallInfo, layout: AppLayout): void {
@@ -276,7 +301,8 @@ async function unpackArchive(target: ReleaseTarget, archive: string, destination
   const folder = path.join(destination, base);
   const escaping = await escapingEntries(folder);
   if (escaping.length > 0) throw fail("SELF_UPDATE_BAD_ARCHIVE", "The archive holds a link or special file that points outside it.");
-  for (const required of [ENTRY, ["package.json"], [RELEASE_MARKER]]) {
+  if (!hasEntry(folder, target)) throw fail("SELF_UPDATE_BAD_ARCHIVE", `The archive has neither ${executableName(target)} nor ${ENTRY.join("/")}.`);
+  for (const required of [["package.json"], [RELEASE_MARKER]]) {
     if (!existsSync(path.join(folder, ...required))) throw fail("SELF_UPDATE_BAD_ARCHIVE", `The archive has no ${required.join("/")}.`);
   }
   let marker: unknown;
@@ -290,12 +316,13 @@ async function unpackArchive(target: ReleaseTarget, archive: string, destination
 }
 
 /** Starts the release with `--version` and checks that it reports `version`, within a timeout. */
-async function startTest(folder: string, version: string, options: UpdateOptions, scratch: string): Promise<void> {
+async function startTest(folder: string, version: string, entry: TargetEntry, options: UpdateOptions, scratch: string): Promise<void> {
   const probe = path.join(scratch, "probe");
   const env: NodeJS.ProcessEnv = { ...process.env, MOXEN_STORE_ROOT: probe, MOXEN_CONFIG: path.join(probe, "config.json") };
+  if (entry.viaBunBeBun) env.BUN_BE_BUN = "1";
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(options.execPath ?? process.execPath, [entryOf(folder), "--version"], {
+    ({ stdout } = await execFileAsync(entry.exec, [...entry.args], {
       cwd: folder,
       env,
       timeout: options.startTimeoutMs ?? START_TIMEOUT_MS,
@@ -336,8 +363,8 @@ async function recordPrevious(layout: AppLayout, version: string | null): Promis
   else await writeAtomic(layout.previous, `${version}\n`);
 }
 
-function usable(layout: AppLayout, version: string | null): version is string {
-  return version !== null && existsSync(entryOf(path.join(layout.versions, version)));
+function usable(layout: AppLayout, target: ReleaseTarget, version: string | null): version is string {
+  return version !== null && hasEntry(path.join(layout.versions, version), target);
 }
 
 export async function updateRelease(options: UpdateOptions = {}): Promise<UpdateResult> {
@@ -369,7 +396,7 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
   }
   const version = latest.version;
   // `current` may already name the release (a server that has not restarted still runs the older one).
-  if (readVersionFile(layout.current) === version && usable(layout, version)) return finished(alreadyCurrent(version));
+  if (readVersionFile(layout.current) === version && usable(layout, target, version)) return finished(alreadyCurrent(version));
 
   return await withLock(layout, async () => {
     await mkdir(layout.versions, { recursive: true });
@@ -385,7 +412,7 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
       report({ stage: "unpacking", version });
       const unpacked = await unpackArchive(target, archiveFile, path.join(scratch, "unpacked"), version);
       report({ stage: "testing", version });
-      await startTest(unpacked, version, options, scratch);
+      await startTest(unpacked, version, targetEntry(unpacked, target, options.execPath ?? process.execPath), options, scratch);
 
       // It works. Give the folder its name, then record what it replaces, and only then change `current`.
       report({ stage: "switching", version });
@@ -400,9 +427,11 @@ export async function updateRelease(options: UpdateOptions = {}): Promise<Update
         throw error;
       }
       const from = readVersionFile(layout.current);
-      const previous = usable(layout, from) ? from : null;
+      const previous = usable(layout, target, from) ? from : null;
       await recordPrevious(layout, previous);
       await writeAtomic(layout.current, `${version}\n`);
+      // The launcher matches the release just switched to: an executable install launches it, a bundle-only one Bun.
+      await ensureLauncher(layout.bin, target.os);
 
       const keep = new Set<string>([version, install.version]);
       if (previous !== null) keep.add(previous);
@@ -420,13 +449,14 @@ export async function rollbackRelease(options: UpdateOptions = {}): Promise<Roll
   const install = readInstall(options);
   const layout = options.layout ?? appLayout(options.env);
   requireInstalledRelease(install, layout);
+  const target = releaseTargetOf(install.target!.os, install.target!.arch);
 
   return await withLock(layout, async () => {
     const from = readVersionFile(layout.current);
     const previous = readVersionFile(layout.previous);
     if (previous === null || previous === from) throw fail("SELF_UPDATE_NO_PREVIOUS", "There is no previous version to go back to.");
     const folder = path.join(layout.versions, previous);
-    if (!usable(layout, previous)) throw fail("SELF_UPDATE_NO_PREVIOUS", `The previous version ${previous} is no longer installed, so nothing was changed.`);
+    if (!usable(layout, target, previous)) throw fail("SELF_UPDATE_NO_PREVIOUS", `The previous version ${previous} is no longer installed, so nothing was changed.`);
     if (from === null) throw fail("SELF_UPDATE_NO_PREVIOUS", "No current version is recorded, so there is nothing to roll back from.");
     const scratch = path.join(layout.versions, `${TEMP_PREFIX}rollback-${process.pid}-${Date.now()}`);
     await mkdir(scratch, { recursive: true });
@@ -434,7 +464,7 @@ export async function rollbackRelease(options: UpdateOptions = {}): Promise<Roll
     try {
       // The version being returned to must still start.
       report({ stage: "testing", version: previous });
-      await startTest(folder, previous, options, scratch);
+      await startTest(folder, previous, targetEntry(folder, target, options.execPath ?? process.execPath), options, scratch);
     } finally {
       await removeFully(scratch).catch(() => undefined);
     }
@@ -442,6 +472,7 @@ export async function rollbackRelease(options: UpdateOptions = {}): Promise<Roll
     report({ stage: "switching", version: previous });
     await recordPrevious(layout, from);
     await writeAtomic(layout.current, `${previous}\n`);
+    await ensureLauncher(layout.bin, target.os);
     report({ stage: "done", version: previous });
     return { action: "rolled-back", version: previous, from, previous: from, folder, current: layout.current, warnings: [] } satisfies RollbackResult;
   });

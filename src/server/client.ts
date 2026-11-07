@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 
 import { appEnv, defaultConfigPath } from "../core/config.js";
 import { CliError } from "../core/errors.js";
+import { isStandaloneExecutable, STANDALONE_DAEMON_ARG } from "../core/infra/standalone.js";
 import { workspaceRootsEqual } from "../core/projects/projects.js";
 import { resolveOnPath } from "../core/infra/process.js";
 import type { CliConfig } from "../core/types.js";
@@ -126,13 +127,15 @@ function serverEntry(): string {
 
 /** Start the server entry detached and wait until it accepts connections. */
 async function startDaemon(endpoint: string): Promise<void> {
-  const entry = serverEntry();
+  // A standalone binary re-runs itself in its internal daemon mode; otherwise the server entry runs on Bun.
+  const standalone = isStandaloneExecutable();
+  const entry = standalone ? STANDALONE_DAEMON_ARG : serverEntry();
   // The server is Bun: this runtime when it is Bun, else `bun` from PATH —
   // e.g. when the caller runs under Node.
   let runtime = process.versions.bun ? process.execPath : "bun";
   // Bun installed through npm is a `bun.cmd` shim on Windows, which only the shell can start.
   if (runtime === "bun" && process.platform === "win32") runtime = resolveOnPath("bun") ?? runtime;
-  const shim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(runtime);
+  const shim = !standalone && process.platform === "win32" && /\.(?:cmd|bat)$/i.test(runtime);
   const child = spawn(shim ? `"${runtime}"` : runtime, [shim ? `"${entry}"` : entry], {
     detached: true,
     stdio: "ignore",

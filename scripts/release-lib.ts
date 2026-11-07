@@ -3,6 +3,7 @@
 export {
   archiveFileName,
   checksumFileName,
+  executableName,
   INSTALL_SCRIPT_POSIX,
   INSTALL_SCRIPT_WINDOWS,
   RELEASE_MARKER,

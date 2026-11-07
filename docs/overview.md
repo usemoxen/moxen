@@ -141,7 +141,8 @@ TUI's sidebar title names it while connected.
 Two things to know on Windows:
 
 - **Firewall.** The first time the server listens, Windows asks whether to
-  let Bun through; allow it for private networks, or nothing reaches the
+  let Moxen through (the standalone `moxen` executable, which embeds its
+  runtime); allow it for private networks, or nothing reaches the
   port. A client that cannot connect says to check this.
 - **Keychain over SSH.** A server started from an SSH session cannot reach
   Windows Credential Manager (error 1312, "logon session does not exist"),

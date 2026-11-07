@@ -1,5 +1,7 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { EmbeddingRuntime } from "../embedding-runtime.js";
@@ -8,6 +10,18 @@ import { EMBEDDING_VERSION } from "../embedding-cache.js";
 let root: string | undefined;
 let runtime: EmbeddingRuntime | undefined;
 afterEach(async () => { vi.useRealTimers(); runtime?.close(); if (root) await rm(root, { recursive: true, force: true }); });
+
+describe("embedding child entry", () => {
+  // The script runs on Bun (TypeScript directly); vitest itself may run on Node.
+  const BUN = process.versions.bun ? process.execPath : "bun";
+  const entry = fileURLToPath(new URL("../embedding-child-entry.ts", import.meta.url));
+
+  it("reports a protocol error without arguments and exits non-zero", () => {
+    const run = spawnSync(BUN, [entry], { encoding: "utf8" });
+    expect(run.status).toBe(1);
+    expect(JSON.parse(run.stdout)).toMatchObject({ error: expect.any(String) });
+  });
+});
 
 it("warms only a validated install, honors its CPU selection and keeps it resident until on-demand idle release", async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "moxen-residency-"));

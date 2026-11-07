@@ -47,6 +47,11 @@ export function checksumFileName(version: string, target: ReleaseTarget): string
   return `${archiveFileName(version, target)}.sha256`;
 }
 
+/** The standalone executable's file name for a target: `moxen`, or `moxen.exe` on Windows. */
+export function executableName(target: ReleaseTarget): string {
+  return target.os === "windows" ? "moxen.exe" : "moxen";
+}
+
 /** The tag a release of this version is made from. */
 export function tagForVersion(version: string): string {
   return `v${version}`;
@@ -122,6 +127,8 @@ export function releaseInstallNotes(version: string): string {
   const windowsArchive = archiveFileName(version, windows);
   const macosChecksum = checksumFileName(version, macos);
   const windowsChecksum = checksumFileName(version, windows);
+  const macosFolder = releaseBaseName(version, macos);
+  const windowsFolder = releaseBaseName(version, windows);
   return [
     "## Install",
     "",
@@ -137,9 +144,7 @@ export function releaseInstallNotes(version: string): string {
     `irm ${releaseAssetUrl(tag, INSTALL_SCRIPT_WINDOWS)} | iex`,
     "```",
     "",
-    "The script downloads this release's archive and `.sha256`, installs Bun first when it is missing,",
-    "refuses a checksum mismatch, runs `self-update --install`, and says how to put Moxen on your PATH.",
-    "Linux and Intel Macs have no build and are refused with a message.",
+    "The script downloads this release's archive and `.sha256`, refuses a checksum mismatch, runs `self-update --install`, and says how to put Moxen on your PATH. It installs nothing else: each archive holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support files, and needs no Bun. Linux and Intel Macs have no build and are refused with a message.",
     "",
     `By hand instead, download \`${macosArchive}\` and \`${macosChecksum}\` (macOS)`,
     `or \`${windowsArchive}\` and \`${windowsChecksum}\` (Windows) from this release,`,
@@ -148,8 +153,10 @@ export function releaseInstallNotes(version: string): string {
     "```sh",
     `shasum -a 256 -c ${macosChecksum}`,
     `tar -xzf ${macosArchive}`,
-    `bun ${releaseBaseName(version, macos)}/dist/cli/index.js self-update --install`,
+    `./${macosFolder}/${executableName(macos)} self-update --install`,
     "```",
+    "",
+    "A download macOS quarantines refuses to run until it is cleared (`xattr -d com.apple.quarantine`, which the script above does for you); by hand, run it on the executable first.",
     "",
     "Windows (PowerShell):",
     "",
@@ -157,7 +164,7 @@ export function releaseInstallNotes(version: string): string {
     `$archive = "${windowsArchive}"; $expected = ((Get-Content "$archive.sha256") -split '\\s+')[0]`,
     `if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) { throw 'checksum mismatch' }`,
     `tar -xf ${windowsArchive}`,
-    `bun ${releaseBaseName(version, windows)}/dist/cli/index.js self-update --install`,
+    `& .\\${windowsFolder}\\${executableName(windows)} self-update --install`,
     "```",
     "",
     "`self-update --install` copies the release to `~/.moxen/app/versions/<version>/`, records it in",

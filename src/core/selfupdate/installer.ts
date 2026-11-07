@@ -4,6 +4,7 @@
  *   <app>/versions/<version>/   the unpacked release, as it came
  *   <app>/current               a plain text file naming the active version
  *   <app>/bin/moxen[.cmd]       the launcher, which reads `current` on every start
+ *                               and runs the installed executable (or its bundle on Bun)
  *
  * It only ever runs on this machine and only from a `release` install; a source checkout is refused before
  * anything is written. It never edits a shell profile or PATH: it says how, and the person does it. This is
@@ -59,7 +60,8 @@ export const WINDOWS_LAUNCHER = "moxen.cmd";
 
 /**
  * The two launcher scripts. Both find `app/` from their own location (a symlink to the sh one is followed),
- * read `current` each start, pass every argument through untouched and exit with Bun's code. The `.cmd` uses
+ * read `current` each start, and run the installed executable when it is there, else the bundle on Bun.
+ * Every argument passes through untouched and the exit is the program's code. The `.cmd` uses
  * CRLF line endings, which `goto` labels need.
  */
 export function launcherScripts(): { readonly posix: string; readonly windows: string } {
@@ -78,12 +80,15 @@ if [ ! -f "$app/current" ]; then
   exit 1
 fi
 version=$(tr -d '\\r\\n' < "$app/current")
+exe="$app/versions/$version/moxen"
 entry="$app/versions/$version/dist/cli/index.js"
-if [ -z "$version" ] || [ ! -f "$entry" ]; then
-  echo "moxen: version '$version' named in $app/current is not installed; run moxen self-update --install from a release." >&2
-  exit 1
+if [ -x "$exe" ]; then
+  exec "$exe" "$@"
+elif [ -f "$entry" ]; then
+  exec bun "$entry" "$@"
 fi
-exec bun "$entry" "$@"
+echo "moxen: version '$version' named in $app/current is not installed; run moxen self-update --install from a release." >&2
+exit 1
 `;
   const windows = [
     "@echo off",
@@ -94,7 +99,13 @@ exec bun "$entry" "$@"
     'set "VERSION="',
     'set /p VERSION=<"%APP%\\current"',
     "if not defined VERSION goto missing",
-    'if not exist "%APP%\\versions\\%VERSION%\\dist\\cli\\index.js" goto missing',
+    'if exist "%APP%\\versions\\%VERSION%\\moxen.exe" goto runexe',
+    'if exist "%APP%\\versions\\%VERSION%\\dist\\cli\\index.js" goto runbundle',
+    "goto missing",
+    ":runexe",
+    '"%APP%\\versions\\%VERSION%\\moxen.exe" %*',
+    "exit /b %ERRORLEVEL%",
+    ":runbundle",
     'bun "%APP%\\versions\\%VERSION%\\dist\\cli\\index.js" %*',
     "exit /b %ERRORLEVEL%",
     ":nocurrent",
@@ -116,6 +127,23 @@ export function pathHint(os: ReleaseOs | string, bin: string): string {
   return `Add ${bin} to your PATH, for example in ~/.zshrc or ~/.bashrc (then open a new terminal):\n  export PATH="${bin}:$PATH"`;
 }
 
+async function writeLauncher(file: string, text: string): Promise<void> {
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  await writeFile(tmp, text, { encoding: "utf8", mode: 0o755 });
+  await chmod(tmp, 0o755);
+  await renameReplacing(tmp, file);
+}
+
+/** Writes the platform's launcher into `bin` when it differs, so it matches the running release's format. */
+export async function ensureLauncher(bin: string, os: ReleaseOs | string): Promise<void> {
+  const windows = os === "windows";
+  const scripts = launcherScripts();
+  const file = path.join(bin, windows ? WINDOWS_LAUNCHER : POSIX_LAUNCHER);
+  const text = windows ? scripts.windows : scripts.posix;
+  await mkdir(bin, { recursive: true });
+  if (!existsSync(file) || readFileSync(file, "utf8") !== text) await writeLauncher(file, text);
+}
+
 export interface InstallResult {
   readonly version: string;
   /** `<app>/versions/<version>`. */
@@ -134,13 +162,6 @@ export interface InstallOptions extends ReadInstallOptions {
 }
 
 export const TEMP_PREFIX = ".tmp-";
-
-async function writeLauncher(file: string, text: string): Promise<void> {
-  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-  await writeFile(tmp, text, { encoding: "utf8", mode: 0o755 });
-  await chmod(tmp, 0o755);
-  await renameReplacing(tmp, file);
-}
 
 export async function installRelease(options: InstallOptions = {}): Promise<InstallResult> {
   // First, before any write: only a release install may be installed.
@@ -177,14 +198,11 @@ export async function installRelease(options: InstallOptions = {}): Promise<Inst
   }
 
   const windows = install.target.os === "windows";
-  const launcher = path.join(layout.bin, windows ? WINDOWS_LAUNCHER : POSIX_LAUNCHER);
   // Only change `current` when it differs, so a repeat install writes nothing it does not need to.
   const stored = existsSync(layout.current) ? readFileSync(layout.current, "utf8") : null;
   if (stored !== `${install.version}\n`) await writeAtomic(layout.current, `${install.version}\n`);
-  await mkdir(layout.bin, { recursive: true });
-  const scripts = launcherScripts();
-  const text = windows ? scripts.windows : scripts.posix;
-  if (!existsSync(launcher) || readFileSync(launcher, "utf8") !== text) await writeLauncher(launcher, text);
+  await ensureLauncher(layout.bin, install.target.os);
+  const launcher = path.join(layout.bin, windows ? WINDOWS_LAUNCHER : POSIX_LAUNCHER);
 
   return {
     version: install.version,

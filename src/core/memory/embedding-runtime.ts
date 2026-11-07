@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { isStandaloneExecutable, STANDALONE_EMBEDDING_ARG } from "../infra/standalone.js";
 import { validEmbedding } from "./embedding-cache.js";
 import { renameReplacing } from "../infra/atomic.js";
 import { compatibleValidation, validateEmbeddings, type EmbeddingValidation } from "./embedding-validation.js";
@@ -11,6 +13,16 @@ import { compatibleValidation, validateEmbeddings, type EmbeddingValidation } fr
 export interface EmbeddingEncoder {
   encode(texts: readonly string[], signal?: AbortSignal): Promise<readonly (readonly number[])[]>;
   close(): void;
+}
+
+/**
+ * The embedding worker entry: `./embedding-child-entry.ts` in the source
+ * tree, `core/memory/embedding-child-entry.js` beside the bundle (where this
+ * code lives in a chunk under `chunks/`).
+ */
+function embeddingWorkerEntry(): string {
+  const source = fileURLToPath(new URL("./embedding-child-entry.ts", import.meta.url));
+  return existsSync(source) ? source : fileURLToPath(new URL("../core/memory/embedding-child-entry.js", import.meta.url));
 }
 
 export interface EmbeddingStatus {
@@ -111,11 +123,15 @@ export class EmbeddingRuntime implements EmbeddingEncoder {
         this.status = { ...this.status, validation: report };
       }
     }
-    const asset = this.processFile ?? (await import("./embedding-process.mjs" as string, { with: { type: "file" } })).default as string;
+    const workerFile = this.processFile ?? embeddingWorkerEntry();
     if (generation !== this.generation || signal?.aborted) throw new Error("Embedding request cancelled");
-    const file = path.isAbsolute(asset) ? asset : fileURLToPath(new URL(asset, import.meta.url));
     this.status = { ...this.status, state: "loading", device: null, message: null, file: null, percent: null, phase: download ? "downloading" : this.status.phase === "validating" ? "validating" : "idle" };
-    const child = spawn(process.execPath, [file, this.root, path.join(this.root, "cache"), download ? "download" : "offline", this.preferredDevice], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    // The worker's code is bundled in a standalone binary: re-run it in the internal embedding mode.
+    // Otherwise the worker entry runs on this runtime, as the bundle does.
+    const workerArgs = isStandaloneExecutable()
+      ? [STANDALONE_EMBEDDING_ARG, this.root, path.join(this.root, "cache"), download ? "download" : "offline", this.preferredDevice]
+      : [workerFile, this.root, path.join(this.root, "cache"), download ? "download" : "offline", this.preferredDevice];
+    const child = spawn(process.execPath, workerArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     this.child = child;
     child.stdin.on("error", () => { if (this.child === child) this.fail("Embedding process input failed"); });
     // Do not forward native logs or environment-dependent details to clients.
@@ -173,11 +189,14 @@ export class EmbeddingRuntime implements EmbeddingEncoder {
       await writeFile(path.join(this.root, "package.json"), JSON.stringify({ private: true, dependencies: { "@huggingface/transformers": "4.3.2" }, trustedDependencies: ["onnxruntime-node", "sharp"] }));
       if (generation !== this.generation) throw new Error("Embedding setup cancelled");
       await new Promise<void>((resolve, reject) => {
-        const child = spawn(process.execPath, ["install", "--cwd", this.root], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
-        this.installer = child;
-        const timer = setTimeout(() => { child.kill(); reject(new Error("Embedding runtime installation timed out")); }, 600_000);
-        child.once("error", () => { clearTimeout(timer); this.installer = null; reject(new Error("Could not install embedding runtime")); });
-        child.once("exit", (code) => { clearTimeout(timer); this.installer = null; code === 0 ? resolve() : reject(new Error("Could not install embedding runtime")); });
+        // A standalone binary carries the Bun CLI inside (`BUN_BE_BUN`): the install runs through itself.
+        const installer = isStandaloneExecutable()
+          ? spawn(process.execPath, ["install", "--cwd", this.root], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true, env: { ...process.env, BUN_BE_BUN: "1" } })
+          : spawn(process.execPath, ["install", "--cwd", this.root], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
+        this.installer = installer;
+        const timer = setTimeout(() => { installer.kill(); reject(new Error("Embedding runtime installation timed out")); }, 600_000);
+        installer.once("error", () => { clearTimeout(timer); this.installer = null; reject(new Error("Could not install embedding runtime")); });
+        installer.once("exit", (code) => { clearTimeout(timer); this.installer = null; code === 0 ? resolve() : reject(new Error("Could not install embedding runtime")); });
       });
       if (generation !== this.generation) throw new Error("Embedding setup cancelled");
       try { await this.start(true); }

@@ -3,17 +3,21 @@
  *
  *   bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path inside the archive folder>]
  *
- * It checks the folder layout, that the bundle reports the version in `package.json`, and that the native
- * OpenTUI package loads from the unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against
- * the unpacked daemon. `--remove` deletes a path first, to prove the check fails when something is missing.
+ * It checks the folder layout (the standalone executable beside the bundle), that the executable and
+ * the bundle report the version in `package.json`, and that the native OpenTUI package loads from the
+ * unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against the unpacked daemon.
+ * `--remove` deletes a path first, to prove the check fails when something is missing.
  * Without any network it also checks `scripts/release-notes.ts` names this archive above the changelog,
  * `install.sh` refuses platforms with no build on every runner (Git Bash provides its `sh`), and `install.ps1`
  * does on Windows.
  * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below),
- * then updates that install to a copy of the archive that reports a higher version (the core function, in-process,
+ * runs a real command through the launcher so the installed executable autostarts its own daemon, then
+ * updates that install to a copy of the archive that reports a higher version (the core function, in-process,
  * with an injected fetch: no setting can point a real `moxen` at another download), checks the launcher runs it,
  * rolls back and checks the launcher runs the old one again, and that a wrong checksum leaves `current` alone.
- * Nothing here starts a server or touches `~/.moxen`: the commands run with a throwaway store.
+ * The higher-version copy is bundle-only: the executable bakes its version in and cannot be patched like the
+ * bundle, so the update flow exercises the bundle path while `--version` and the launcher above exercise the
+ * executable. Nothing here starts a server or touches `~/.moxen`: the commands run with a throwaway store.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -24,7 +28,7 @@ import path from "node:path";
 import { appLayout } from "../src/core/selfupdate/installer.js";
 import { rollbackRelease, updateRelease } from "../src/core/selfupdate/update.js";
 import { LATEST_RELEASE_URL } from "../src/core/selfupdate/check.js";
-import { RELEASE_MARKER, archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
+import { RELEASE_MARKER, archiveFileName, checksumFileName, executableName, packCommand, releaseBaseName, releaseMarker, releaseTarget, unpackCommand } from "./release-lib.js";
 
 const checkout = path.resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
@@ -57,7 +61,7 @@ try {
   const remove = flagValue("--remove");
   if (remove) rmSync(path.join(folder, remove), { recursive: true, force: true });
 
-  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
+  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "dist/core/memory/embedding-child-entry.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules", executableName(target)]) {
     assert.ok(existsSync(path.join(folder, ...entry.split("/"))), `${entry} is missing from the archive`);
   }
 
@@ -71,9 +75,13 @@ try {
   };
   delete env.NODE_PATH;
 
-  const version = run(process.execPath, [path.join(folder, "dist", "cli", "index.js"), "--version"], { cwd: folder, env });
-  assert.equal(version.status, 0, `--version failed: ${version.stderr}`);
-  assert.equal(version.stdout.trim(), manifest.version, "the bundle reports a version other than package.json's");
+  const exe = path.join(folder, executableName(target));
+  const versionExe = run(exe, ["--version"], { cwd: folder, env });
+  assert.equal(versionExe.status, 0, `the executable's --version failed: ${versionExe.stderr}`);
+  assert.equal(versionExe.stdout.trim(), manifest.version, "the executable reports a version other than package.json's");
+  const versionDist = run(process.execPath, [path.join(folder, "dist", "cli", "index.js"), "--version"], { cwd: folder, env });
+  assert.equal(versionDist.status, 0, `--version failed: ${versionDist.stderr}`);
+  assert.equal(versionDist.stdout.trim(), manifest.version, "the bundle reports a version other than package.json's");
   const shipped = JSON.parse(readFileSync(path.join(folder, "package.json"), "utf8")) as { version: string };
   assert.equal(shipped.version, manifest.version);
 
@@ -117,12 +125,21 @@ try {
   refusedInstall("Linux", "x86_64", /no Moxen release for Linux/);
   refusedInstall("Darwin", "x86_64", /only Apple silicon/);
   console.log("ok: install.sh refuses platforms with no build");
+  const installSh = readFileSync(path.join(checkout, "install.sh"), "utf8");
+  assert.ok(installSh.includes("xattr -dr com.apple.quarantine"), "install.sh does not clear the download quarantine");
+  assert.ok(!installSh.includes("bun.sh/install"), "install.sh still bootstraps Bun");
+  assert.ok(installSh.includes('/moxen" self-update --install'), "install.sh does not install through the executable");
+  console.log("ok: install.sh installs the executable with nothing else");
   if (process.platform === "win32") {
     // A wrong architecture refuses before any download.
     const refused = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(checkout, "install.ps1")], { env: { ...process.env, PROCESSOR_ARCHITECTURE: "ARM64" } });
     assert.notEqual(refused.status, 0, "install.ps1 ran on ARM64");
     assert.match(`${refused.stdout}${refused.stderr}`, /only Windows x64/, "install.ps1 refused ARM64 unclearly");
     console.log("ok: install.ps1 refuses platforms with no build");
+    const installPs1 = readFileSync(path.join(checkout, "install.ps1"), "utf8");
+    assert.ok(installPs1.includes("moxen.exe"), "install.ps1 does not install through the executable");
+    assert.ok(!installPs1.includes("bun.sh/install"), "install.ps1 still bootstraps Bun");
+    console.log("ok: install.ps1 installs the executable with nothing else");
   }
 
   if (args.includes("--embeddings")) {
@@ -133,10 +150,12 @@ try {
 
   // Install from the unpacked folder into a throwaway store (its path holds a space, as a Windows user folder can),
   // start through the launcher from a working directory with a space, then delete the source: the copy must stand alone.
+  // The install runs the unpacked executable, the way the install scripts do.
+  // The endpoint is a temp socket: without it the commands below would meet the live server on the default one.
   const installStore = path.join(scratch, "install store");
-  const installEnv: NodeJS.ProcessEnv = { ...env, MOXEN_STORE_ROOT: installStore, MOXEN_CONFIG: path.join(installStore, "config.json") };
+  const installEnv: NodeJS.ProcessEnv = { ...env, MOXEN_STORE_ROOT: installStore, MOXEN_CONFIG: path.join(installStore, "config.json"), MOXEN_SERVER_ENDPOINT: path.join(scratch, "smoke.sock") };
   const install = () => {
-    const result = run(process.execPath, [path.join(folder, "dist", "cli", "index.js"), "self-update", "--install", "--json"], { cwd: folder, env: installEnv });
+    const result = run(exe, ["self-update", "--install", "--json"], { cwd: folder, env: installEnv });
     assert.equal(result.status, 0, `--install failed: ${result.stdout}${result.stderr}`);
     return JSON.parse(result.stdout) as { ok: true; data: { version: string; folder: string; current: string; launcher: string; alreadyInstalled: boolean } };
   };
@@ -153,25 +172,32 @@ try {
   console.log("ok: repeat install changes nothing");
   const workdir = path.join(scratch, "work dir");
   mkdirSync(workdir);
-  const launch = () => {
+  const launch = (args: readonly string[] = ["--version"]) => {
     if (process.platform === "win32") {
       // /s strips the outer quotes of the command line; verbatim arguments stop Node adding backslash-escapes cmd does not read.
-      const result = spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${first.launcher}" --version"`], { encoding: "utf8", cwd: workdir, env: installEnv, timeout: 120_000, windowsVerbatimArguments: true });
+      const line = [`""${first.launcher}"`, ...args].join(" ");
+      const result = spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", line], { encoding: "utf8", cwd: workdir, env: installEnv, timeout: 120_000, windowsVerbatimArguments: true });
       if (result.error) throw result.error;
       return result;
     }
-    return run(first.launcher, ["--version"], { cwd: workdir, env: installEnv });
+    return run(first.launcher, [...args], { cwd: workdir, env: installEnv });
   };
   const launched = launch();
   assert.equal(launched.status, 0, `the launcher failed: ${launched.stderr}`);
   assert.equal(launched.stdout.trim(), manifest.version, "the launcher runs a different version");
+  // A real command through the launcher: the installed executable autostarts its own daemon, which is then stopped.
+  const listed = launch(["--json", "threads", "list"]);
+  assert.equal(listed.status, 0, `a command through the launcher failed: ${listed.stdout}${listed.stderr}`);
+  assert.equal((JSON.parse(listed.stdout) as { ok: boolean }).ok, true, "a command through the launcher did not succeed");
+  const stopped = launch(["server", "stop"]);
+  assert.equal(stopped.status, 0, `server stop through the launcher failed: ${stopped.stdout}${stopped.stderr}`);
   rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   const alone = launch();
   assert.equal(alone.status, 0, `the installed copy does not run without the unpacked folder: ${alone.stderr}`);
   assert.equal(alone.stdout.trim(), manifest.version);
-  console.log(`ok: install, launcher (${path.basename(first.launcher)}) in a folder with spaces`);
+  console.log(`ok: install, launcher (${path.basename(first.launcher)}) runs a command through its own daemon in a folder with spaces`);
   // From inside versions it only sets current and rewrites the launcher.
-  const inside = run(process.execPath, [path.join(first.folder, "dist", "cli", "index.js"), "self-update", "--install", "--json"], { cwd: workdir, env: installEnv });
+  const inside = run(path.join(first.folder, executableName(target)), ["self-update", "--install", "--json"], { cwd: workdir, env: installEnv });
   assert.equal(inside.status, 0, `install from inside versions failed: ${inside.stdout}${inside.stderr}`);
   assert.deepEqual(readdirSync(path.join(installStore, "app", "versions")), [manifest.version]);
   console.log("ok: install from the installed copy");
@@ -186,7 +212,9 @@ try {
   assert.equal(reopened.status, 0, `unpacking the copy failed: ${reopened.stderr}`);
   const fakeFolder = path.join(fakeParent, releaseBaseName(higher, target));
   renameSync(path.join(fakeParent, base), fakeFolder);
-  // The version is compiled into the bundle's chunks as a quoted string; `--version` below proves every spot was found.
+  // The version is compiled into the executable, so the fake reports its higher version through the bundle:
+  // drop the executable and patch the bundle's chunks instead. `--version` below proves every spot was found.
+  rmSync(path.join(fakeFolder, executableName(target)), { force: true });
   const patchVersion = (dir: string): void => {
     for (const name of readdirSync(dir)) {
       const full = path.join(dir, name);

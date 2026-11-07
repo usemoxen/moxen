@@ -2,14 +2,17 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isStandaloneExecutable, resolveAppRoot } from "../infra/standalone.js";
 
-export function locateBundledMod(name: string, entry: string, from = path.dirname(fileURLToPath(import.meta.url))): string | null {
-  let root = from;
-  while (!existsSync(path.join(root, "package.json"))) {
-    const parent = path.dirname(root);
-    if (parent === root) return null;
-    root = parent;
-  }
+export function locateBundledMod(
+  name: string,
+  entry: string,
+  from = path.dirname(fileURLToPath(import.meta.url)),
+  execDir: string = path.dirname(process.execPath),
+  standalone: boolean = isStandaloneExecutable(),
+): string | null {
+  const root = resolveAppRoot(from, execDir, standalone);
+  if (root === null) return null;
   const mod = path.join(root, "mods", name);
   return existsSync(path.join(mod, entry)) ? mod : null;
 }

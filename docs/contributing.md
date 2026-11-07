@@ -141,10 +141,12 @@ does everything except publish, so use it to try a change to the release itself.
 
 - `bun scripts/package-release.ts [--out dir]` packs one archive for the platform it runs on:
   `moxen-<version>-<os>-<arch>.tar.gz` (macOS) or `.zip` (Windows), one top-level folder, plus `.sha256`.
-  It builds into a clean folder with `scripts/build.ts --outdir`, never from `dist/` (which keeps old chunks for
-  a day and may be in use). The folder holds `dist/`, `mods/`, `package.json`, `release.json`, `README.md`, `LICENSE`,
+  It builds into a clean folder with `scripts/build.ts --outdir` and `scripts/build-exe.ts --out`, never from `dist/` (which keeps old chunks for
+  a day and may be in use). The folder holds the standalone executable (`moxen`, `moxen.exe` on Windows:
+  `bun build --compile` of the CLI entry, which re-runs itself for the daemon, MCP and embedding processes),
+  beside `dist/`, `mods/`, `package.json`, `release.json`, `README.md`, `LICENSE`,
   `THIRD_PARTY_LICENSES.md` and `node_modules/@opentui/core-<platform>-<arch>`: the one package the bundle
-  still loads from disk (`external` in `build.ts`). The SDK's native `claude` binary is left out, since Moxen
+  still loads from disk (`external` in both builds). The SDK's native `claude` binary is left out, since Moxen
   always passes the user's own `claude`. If the bundle starts loading another package or file from disk,
   `package-release.ts` must copy it and `smoke-release.ts` must fail without it.
 - `release.json` (version, OS, architecture) is how an installed Moxen knows it is a release and not a source
@@ -152,27 +154,35 @@ does everything except publish, so use it to try a change to the release itself.
   update. The naming rules (`core/release.ts`) are shared by the scripts and the server's check
   (`core/selfupdate/check.ts`, the `app.update.check` query).
 - `bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path>]` unpacks into a temp folder
-  outside the checkout and checks the layout, that `--version` equals `package.json`, and that the native
+  outside the checkout and checks the layout (the executable beside the bundle), that the executable and
+  the bundle report `package.json` in `--version`, and that the native
   OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`
   against the unpacked daemon. `--remove` deletes a path first, to show the test fails when it is missing.
   Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
   name the archive above the changelog, and runs `install.sh` (with a stubbed `uname`, on every runner)
-  and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
+  and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build,
+  then checks the scripts install through the executable with nothing else (and that `install.sh` clears the
+  download quarantine).
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.
 - `moxen self-update --install` (`core/selfupdate/installer.ts`) installs a release under `<store root>/app` (`versions/<version>/`,
-  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). `smoke-release.ts` also runs it from the unpacked folder into a
-  throwaway store whose path has a space, starts the launcher with `--version` from a working directory with a space,
+  `current`, `bin/moxen[.cmd]`; see `docs/cli.md`). The launcher runs the installed executable, falling back to
+  `bun` on the bundle for releases with no executable. `smoke-release.ts` also runs the install from the unpacked
+  executable into a throwaway store whose path has a space, starts the launcher with `--version` and with a real
+  command (which autostarts the installed executable's own daemon, then stops it) from a working directory with a space,
   deletes the unpacked folder and starts it again, then repeats the install. On Windows it runs the `.cmd` through
   `cmd.exe /d /s /c` with verbatim arguments, so the launcher path is quoted once and Node adds no backslash escapes.
   The installer is in the layering test's kernel list because it must never be a server command (it runs from an unpacked archive, before Moxen is installed): only the CLI imports it. `core/selfupdate/update.ts` is not: it is behind the server, and only `server/connection.ts` imports it. A layering test pins both, and that `tui/` imports neither.
 - `moxen self-update` (`core/selfupdate/update.ts`, run by the server's `app.update.apply` / `app.update.rollback` commands) downloads the release's archive and `.sha256`, checks the SHA-256, unpacks into a
-  `.tmp-` folder inside `versions/`, starts it with `--version`, and only then names the folder and changes `current`
-  (`app/previous` records what it replaced; `--rollback` swaps them). `smoke-release.ts` runs this end to end after the
+  `.tmp-` folder inside `versions/`, starts it with `--version` (the executable when the folder holds one, else the
+  bundle entry on this runtime or the standalone binary's own Bun CLI), and only then names the folder and changes `current`
+  (and rewrites the launcher to match; `app/previous` records what it replaced, `--rollback` swaps them). `smoke-release.ts` runs this end to end after the
   install steps: it makes a copy of the real archive that reports a higher version, serves it from an injected `fetch`
   (no environment variable or setting may redirect a download: that would let someone send people a fake release), checks a
   wrong checksum leaves `current` alone, updates, checks the launcher runs the new version, rolls back, and checks it runs the old one.
+  The higher-version copy is bundle-only (the executable bakes its version in, so the fake drops it): that also
+  exercises starting a dist-only release under the installed executable.
   The commands are local-only: `server/transport/serve.ts` refuses `LOCAL_ONLY_COMMANDS` (`protocol.ts`) to any remote socket by name with `REMOTE_LOCAL_ONLY`, before they are decoded, and a test over the real remote listener pins it. `updateRelease` reports its stages through `onProgress`; the server forwards them as `app.update-progress` events on the shell subscription, tagged with the command's `commandId`, and once the update lands it broadcasts `app.server-restart-required` to every subscriber (pinned in `src/server/tests/connection.test.ts`). When the server restarts from another build, every client's hello is refused with `BUILD_MISMATCH` (pinned in `src/server/transport/tests/`): the builds are `core/build.ts` identities — a release's version and platform, or a source checkout's commit, which `scripts/build.ts` bakes into the bundle and a source run reads from git. The smoke script calls the core functions in-process (the server path is pinned by `src/cli/tests/selfupdate.test.ts` and `remoteaccess.test.ts`) and checks the stage order.
   Always run it with `--embeddings`, as the workflow does.
 - Not signed or notarized, no Intel Mac build, and Bun is not bundled.

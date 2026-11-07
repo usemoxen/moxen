@@ -5,6 +5,7 @@
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { isStandaloneExecutable } from "../../infra/standalone.js";
 import { resolveOnPath } from "../../infra/process.js";
 import { CliError } from "../../errors.js";
 import { JsonRpcPeer, nodeProcessSpawner, type ProcessSpawner } from "../stdio.js";
@@ -22,12 +23,14 @@ export interface CodexTransport {
 }
 
 /** Follow a standard Windows npm shim to its JS entry, keeping every argument out of a shell. */
-export function codexLaunchCommand(binary: string, args: readonly string[], env: NodeJS.ProcessEnv, options: { platform?: NodeJS.Platform; isFile?: (file: string) => boolean } = {}): { command: string; args: readonly string[] } {
+export function codexLaunchCommand(binary: string, args: readonly string[], env: NodeJS.ProcessEnv, options: { platform?: NodeJS.Platform; isFile?: (file: string) => boolean; standalone?: boolean } = {}): { command: string; args: readonly string[]; env?: NodeJS.ProcessEnv } {
   if ((options.platform ?? process.platform) !== "win32") return { command: binary, args };
   const resolved = path.win32.isAbsolute(binary) ? binary : resolveOnPath(binary, env) ?? binary;
   if (!/\.(cmd|bat|ps1)$/i.test(resolved)) return { command: resolved, args };
   const entry = path.win32.join(path.win32.dirname(resolved), "node_modules", "@openai", "codex", "bin", "codex.js");
   if (!(options.isFile ?? existsSync)(entry)) throw new CliError("CODEX_SPAWN_FAILED", "Codex's npm launcher has no package entry. Configure providers.codex.binaryPath with the native Codex executable.");
+  // A standalone binary is moxen, not Bun: it runs the entry through the Bun CLI it carries.
+  if (options.standalone ?? isStandaloneExecutable()) return { command: process.execPath, args: [entry, ...args], env: { BUN_BE_BUN: "1" } };
   return { command: process.execPath, args: [entry, ...args] };
 }
 
@@ -39,7 +42,7 @@ export class SpawnCodexTransport implements CodexTransport {
     const launch = codexLaunchCommand(options.settings.binaryPath, codexAppServerArgs(options.settings.launchArgs, baseEnv), baseEnv);
     const child = spawner.spawn(launch.command, launch.args, {
       cwd: options.cwd,
-      env: { ...baseEnv, CODEX_HOME: home },
+      env: { ...baseEnv, ...launch.env, CODEX_HOME: home },
     });
     // One app-server per session; the peer owns its lifetime.
     return new JsonRpcPeer(child, { forceKillAfterMs: 2000 });

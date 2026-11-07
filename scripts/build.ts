@@ -31,11 +31,13 @@ const STALE_MS = 24 * 60 * 60 * 1000;
 
 const result = await Bun.build({
   // The server and the moxen MCP server are spawned as their own processes
-  // (`src/server/client.ts`, `src/server/mcp/main.ts`).
+  // (`src/server/client.ts`, `src/server/mcp/main.ts`), as is the embedding
+  // worker (`src/core/memory/embedding-runtime.ts`).
   entrypoints: [
     join(root, "src/cli/index.ts"),
     join(root, "src/server/daemon.ts"),
     join(root, "src/server/mcp/entry.ts"),
+    join(root, "src/core/memory/embedding-child-entry.ts"),
   ],
   outdir,
   target: "bun",

@@ -23,6 +23,16 @@ describe("codex config", () => {
     expect(tokenizeLaunchArgs('C:\\tools\\codex.exe')).toEqual(['C:\\tools\\codex.exe']);
   });
 
+  it("runs a Windows npm launcher through the standalone binary's own Bun CLI", () => {
+    const shim = path.win32.join("C:", "tools", "codex.cmd");
+    const script = path.win32.join("C:", "tools", "node_modules", "@openai", "codex", "bin", "codex.js");
+    expect(codexLaunchCommand(shim, ["app-server"], {}, { platform: "win32", isFile: (file) => file === script, standalone: true })).toEqual({
+      command: process.execPath,
+      args: [script, "app-server"],
+      env: { BUN_BE_BUN: "1" },
+    });
+  });
+
   it("normalizes settings with codex defaults", () => {
     expect(normalizeCodexSettings()).toMatchObject({
       binaryPath: "codex",

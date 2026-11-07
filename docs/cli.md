@@ -421,7 +421,9 @@ updatable }`.
 `versions/<version>/` holds the unpacked release, `current` is a plain text file
 naming the active version (replaced by a temp-file rename, so never half
 written), and `bin/moxen` (a POSIX `sh` script; `bin/moxen.cmd` on Windows)
-reads `current` on every start and runs `bun versions/<version>/dist/cli/index.js`
+reads `current` on every start and runs the installed executable
+(`versions/<version>/moxen`, `moxen.exe` on Windows), falling back to
+`bun versions/<version>/dist/cli/index.js` when only a bundle is installed,
 with the arguments untouched. It works only from an unpacked `release` install:
 a source checkout exits 1 with `SELF_UPDATE_SOURCE_INSTALL` before anything is
 written. It is local only: with `--server` it exits 2 with `SELF_UPDATE_REMOTE`,
@@ -451,7 +453,9 @@ archive's SHA-256 before unpacking, and unpacks into a temp folder inside
 folder with nothing outside it, then starts the new version with `--version`
 (60 s limit) and requires it to report the release's version. Only then does
 the folder take its name `versions/<version>/`, the old `current` is recorded in
-`<app>/previous`, and `current` changes. Any failure before that (download,
+`<app>/previous`, `current` changes, and the launcher is rewritten to match
+the new release (the executable when it ships one, else the bundle on Bun).
+Any failure before that (download,
 checksum, unpack, start, wrong version) exits 1, removes the temp folder and
 changes nothing. Old versions are then deleted, keeping `current`, `previous`,
 and the version the server running the update runs from. One that cannot be deleted
