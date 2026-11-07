@@ -67,6 +67,7 @@ import { runExperience } from "./scenarios/experience.js";
 import { runUpdateScreen } from "./scenarios/updateScreen.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
+import { runCancelAutoContinueModal } from "./scenarios/cancelAutoContinue.js";
 import { runResearchRun } from "./scenarios/researchRun.js";
 import { runNewThreadResearch } from "./scenarios/newThreadResearch.js";
 import { runSendGate } from "./scenarios/sendGate.js";
@@ -171,6 +172,7 @@ export async function runWalkthrough(): Promise<void> {
   await runUpdateScreen();
   await runModalInput();
   await runWorkQueueModal();
+  await runCancelAutoContinueModal();
   await runResearchRun();
   await runNewThreadResearch();
   await runSendGate();

@@ -1602,6 +1602,10 @@ export interface TaskNotificationView {
   verdict: string | null;
   /** Whether the task ran in Review mode: a review with no verdict is shown as unfinished, not as an ordinary task. */
   review: boolean;
+  /** When the task paused for usage instead of settling: its expected resume time, or null when unknown. */
+  resumesAt: string | null;
+  /** Whether the task's automatic continue was cancelled: it will not resume on its own. */
+  cancelled: boolean;
 }
 
 /**
@@ -1618,6 +1622,7 @@ export function taskNotifications(message: MessageEnvelope | null): TaskNotifica
     const task = asRecord(raw);
     const taskId = text(task?.taskId);
     if (task === null || taskId === null) return [];
+    const resumesAt = task.resumesAt === undefined ? null : text(task.resumesAt);
     return [
       {
         taskId,
@@ -1634,6 +1639,8 @@ export function taskNotifications(message: MessageEnvelope | null): TaskNotifica
         deletions: count(task.deletions),
         verdict: text(asRecord(task.review)?.verdict),
         review: asRecord(task.review) !== null,
+        resumesAt,
+        cancelled: task.cancelled === true,
       },
     ];
   });

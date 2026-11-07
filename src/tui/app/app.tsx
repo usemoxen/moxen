@@ -42,6 +42,7 @@ import { parseModeCommand } from "../model/modes.js";
 import { latestRunOf, roleThreadIds, runOfRole, summarizeRun } from "../model/researchrun.js";
 import { describeScheduled } from "../model/schedule.js";
 import { WorkQueueModal } from "../features/queue/queuemodal.js";
+import { CancelAutoContinueModal, useAutoContinueCancel } from "../features/queue/cancelmodal.js";
 import type { QueuePolicy } from "../features/queue/useWorkQueue.js";
 import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
 import { useGitPanel } from "../features/gitpanel/useGitPanel.js";
@@ -1277,9 +1278,12 @@ export function App({
     scrollPane(chatScrollRef.current, key.name);
   });
 
+  // Cancelling a delegated task's automatic continue asks whether its parent
+  // hears about it; the modal below owns that choice.
+  const autoCancel = useAutoContinueCancel(client);
   // Stopped by a plan usage limit: a banner over the composer says when it
   // resets and offers (or shows) the continue for then.
-  const usageBanner = useUsageLimitBanner({ client, threadState, openThreadId, now, setError });
+  const usageBanner = useUsageLimitBanner({ client, threadState, openThreadId, now, setError, openThread: setOpenThreadId, requestAutoCancel: autoCancel.request });
   const queued = useQueuedPanel({ client, threadState, threadId: openThreadId, setError });
   const sideQuestion = useSideQuestion(client, openThreadId);
   // Tasks and Queued share the slot over the composer and page like the
@@ -1706,7 +1710,18 @@ export function App({
   const notices: Notice[] = linkNotice === null ? [] : [linkNotice];
   const threadProtection = threadState.thread?.protection ?? selected?.protection;
   if (threadProtection !== undefined) notices.push(threadProtectionNotice(threadProtection));
-  notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now, providers));
+  // Cancelling a recovery on a delegated task asks whether its parent hears about it.
+  const protectionAct: typeof usageProtection.act = (command) => {
+    if (command.type === "usage.queue" && command.direction === "cancel") {
+      const entry = usageProtection.state.queue.find((row) => row.threadId === command.threadId);
+      autoCancel.request(command.threadId, entry?.title ?? command.threadId, (notifyParent) =>
+        usageProtection.act({ ...command, ...(notifyParent ? {} : { notifyParent: false }) }),
+      );
+      return;
+    }
+    usageProtection.act(command);
+  };
+  notices.push(...usageProtectionNotices(usageProtection.state, protectionAct, now, providers));
   if (usageProtection.error) notices.push({ key: "usage-error", glyph: "!", glyphColor: COLOR.danger, title: usageProtection.error, detail: null, actions: [] });
   if (usageBanner.banner !== null) {
     const banner = usageBanner.banner;
@@ -3458,6 +3473,24 @@ export function App({
           onClose={sideQuestion.close}
         />
       ) : null}
+      {autoCancel.pending === null ? null : (
+        <CancelAutoContinueModal
+          title={autoCancel.pending.title}
+          screenWidth={width}
+          screenHeight={height}
+          onNotify={() => {
+            const pending = autoCancel.pending;
+            autoCancel.close();
+            pending?.cancel(true);
+          }}
+          onSilent={() => {
+            const pending = autoCancel.pending;
+            autoCancel.close();
+            pending?.cancel(false);
+          }}
+          onBack={autoCancel.close}
+        />
+      )}
       {picker === null || picker === "onboarding" ? null : picker === "rename" ? (
         <RenameModal
           initialTitle={selected === null ? "" : String(selected.title ?? "")}

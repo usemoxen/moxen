@@ -76,6 +76,7 @@ import {
   deleteThread,
   delegationForChild,
   failTurn,
+  isStaleContinueTurn,
   reconcileOrphanedTurn,
   holdStrandedPromotions,
   inspectThread,
@@ -88,6 +89,7 @@ import {
   threadFamily,
   turnPrompt,
   updateThreadMeta,
+  wakeUpHasRiders,
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
@@ -100,7 +102,7 @@ import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, t
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn } from "./types.js";
+import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn, UsagePause } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -213,6 +215,21 @@ function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
 }
 
 /**
+ * What an unanswered continue still owes its conversation: never the
+ * automatic nudge itself, but any user messages folded into its turn —
+ * without them the re-ask would leave that content in neither the new
+ * prompt nor any live session.
+ */
+function unansweredContinueText(messages: readonly StoredMessage[], turn: StoredTurn): string | null {
+  const riders = messages
+    .filter((message) => message.turnId === turn.id && message.role === "user" && message.id !== turn.messageId && message.text.trim().length > 0)
+    .map((message) => message.text.trim());
+  const first = messages.find((message) => message.id === turn.messageId);
+  if (first && first.text.trim().length > 0 && first.text.trim() !== USAGE_CONTINUE_PROMPT.trim()) riders.unshift(first.text.trim());
+  return riders.length > 0 ? riders.join("\n\n") : null;
+}
+
+/**
  * A conversation with no history starts clean, but an earlier turn on it may
  * have ended with no output from the provider (a usage limit; see `unanswered`
  * on the turn): the provider never read that prompt, and the work is in it
@@ -237,8 +254,10 @@ async function withUnansweredPrompts(
   for (const turn of turns) {
     if (turn.id === turnId || driverKey((turn.modelSelection ?? thread.modelSelection).instanceId) !== setup.key) continue;
     if (turn.unanswered) {
-      const own = turn.scheduleReason === "usage-reset" ? null : turnPrompt(messages, turn);
-      if (own) owed.push(own.text);
+      // A usage continue is only a nudge and stays out — but user messages
+      // folded into its turn still need asking.
+      const own = turn.scheduleReason === "usage-reset" ? unansweredContinueText(messages, turn) : turnPrompt(messages, turn)?.text;
+      if (own) owed.push(own);
     } else if (turn.owner && (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) owed = [];
   }
   return owed.length === 0 ? prompt : `${owed.join("\n\n")}\n\n${prompt}`;
@@ -476,8 +495,14 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // A delegated task resumed after a usage limit (or recovered after a crash)
       // still owes its parent the report when it finally ends.
       .then(async () => {
-        await syncResearchRun(ctx, threadId);
-        await notifyParentOfResumedTask(ctx, threadId);
+        await syncResearchRun(ctx, threadId).catch(() => undefined);
+        await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
+        // This thread's own recovery may have released task notices queued
+        // while it could not receive them: they go out now, together.
+        await flushTaskNotifications(ctx, threadId).catch(() => undefined);
+        // Fresh work settling clears a cancelled mark, so task_status reads
+        // the new outcome instead of the old cancellation.
+        await clearCancelledOnSettle(ctx, threadId).catch(() => undefined);
       })
       .catch(() => undefined);
   } catch (cause) {
@@ -545,12 +570,25 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     else rows.push({ thread, turns });
   }
   const idle = !openTurn([...row.turns]);
+  let messages: readonly StoredMessage[] | null = null;
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued") continue;
     // A plain turn still waits for the running turn's settle unless settle
     // held it for admission (a snoozed or settled thread, or an exhausted
     // provider) and the thread is idle now.
     if (!candidate.queue && !candidate.scheduledFor && (!candidate.heldAtSettle || !idle)) continue;
+    // A stale automatic continue never fires as a pointless turn: the
+    // thread's work already resumed, so it is taken back before it runs and
+    // the loop moves on to whatever waits behind it.
+    if (isStaleContinueTurn(row.turns, candidate, now)) {
+      if (candidate.queue?.wakeUp === true) {
+        messages ??= await ctx.store.readMessages(threadId).catch(() => []);
+        if (wakeUpHasRiders(messages, candidate)) continue;
+      }
+      await interruptTurn(ctx.store, threadId, candidate.id).catch(() => undefined);
+      rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
+      continue;
+    }
     const pause = row.thread.usagePause;
     if (pause?.forced) continue;
     if (candidate.queue?.continuation && candidate.queue.continuation !== "same-thread") continue;
@@ -650,7 +688,7 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
   return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
 }
 
-export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy): Promise<void> {
+export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy, notifyParent?: boolean): Promise<void> {
   await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
     const allEntries = await readWorkQueue(ctx);
     const selected = allEntries.find((entry) => entry.threadId === threadId && entry.turnId === turnId);
@@ -706,6 +744,10 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       const thread = await ctx.store.readThreadRecord(threadId);
       if (!thread?.usagePause?.forced && thread?.usagePause?.recoveryTurnId === turnId) await ctx.store.writeThreadRecord({ ...thread, usagePause: null });
     });
+    // A cancelled recovery on a delegated task marks it and tells its parent, unless asked not to.
+    if (cancelProtection) await noteAutoContinueCancelled(ctx, threadId, { notifyParent }).catch(() => undefined);
+    // Putting the entry back re-arms the resume: the task no longer reads cancelled.
+    if (action === "restore") await reviveCancelledDelegation(ctx, threadId).catch(() => undefined);
   });
 }
 
@@ -819,6 +861,8 @@ async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, tur
     await store.appendLedger(threadId, "activity", { id: store.newId(), threadId, turnId, kind: "handoff.prepared", summary: handoff.fallback ? "Model summary unavailable; used stored handoff" : handoff.summary ? "Model handoff accepted" : "Stored handoff prepared", payload: { destinationThreadId: handoff.destinationThreadId, fallback: handoff.fallback === true }, createdAt: store.nowIso() });
     store.emit(threadId, "handoff-prepared");
   });
+  // A handoff that carried the recovery released the hold: queued notices go out now, together.
+  await flushTaskNotifications(ctx, threadId).catch(() => undefined);
 }
 
 /** Arm timers for every pending scheduled turn on disk (a starting owner process calls this once). */
@@ -894,7 +938,94 @@ export async function scheduleUsageContinue(
     continueAttempt: attempt,
   });
   armScheduledTurn(threadId, sent.turn.id, at);
+  // A delegated task runs out of usage: its parent hears now, with the
+  // expected resume time, and still gets the normal report when the task
+  // finishes. Best effort, like the continue itself.
+  await queueTaskPauseNotification(ctx, threadId, at).catch(() => undefined);
   return sent.turn;
+}
+
+/** Options for cancelling an automatic continue: the TUI's "without notifying" sets `notifyParent` false. */
+export interface CancelAutoContinueOptions {
+  readonly notifyParent?: boolean | undefined;
+}
+
+/** A thread's pending automatic continue after a usage limit, if any. */
+async function pendingAutoContinue(
+  ctx: OperationContext,
+  threadId: string,
+): Promise<{ continues: StoredTurn[]; recoveryTurnId: string | null }> {
+  const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+  const continues = turns.filter((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
+  const pause = (await ctx.store.readThreadRecord(threadId).catch(() => null))?.usagePause;
+  const recoveryTurnId =
+    pause?.recoveryTurnId && turns.some((turn) => turn.id === pause.recoveryTurnId && turn.status === "queued") ? pause.recoveryTurnId : null;
+  return { continues, recoveryTurnId };
+}
+
+/**
+ * Mark a delegated task's automatic continue cancelled so `task_status`
+ * says so either way, and tell its parent unless asked not to. The mark
+ * applies only when the child has no live work left: a follow-up still
+ * running reports on its own when it settles. No-op when the thread is not
+ * a live delegated task.
+ */
+export async function noteAutoContinueCancelled(ctx: OperationContext, threadId: string, opts: CancelAutoContinueOptions = {}): Promise<boolean> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
+  if (!row) return false;
+  if (await taskHasSettledForGood(ctx, threadId)) {
+    if (row.status !== "cancelled") await ctx.store.updateDelegation(row.id, { status: "cancelled" }).catch(() => null);
+  }
+  if (row.notify === true && opts.notifyParent !== false) await queueTaskCancelNotification(ctx, threadId);
+  return true;
+}
+
+/**
+ * Revive a cancelled delegation row when fresh work starts on the task, so
+ * the new work reports on its own instead of reading cancelled. Returns
+ * whether a mark was cleared.
+ */
+async function reviveCancelledDelegation(ctx: OperationContext, threadId: string): Promise<boolean> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
+  if (!row || row.status !== "cancelled") return false;
+  await ctx.store.updateDelegation(row.id, { status: "running" }).catch(() => null);
+  return true;
+}
+
+/**
+ * A cancelled mark reflects no live work, so fresh work settling clears it
+ * and `task_status` reads the new outcome instead of the old cancellation.
+ * Runs after every turn started here or admitted from the queue.
+ */
+async function clearCancelledOnSettle(ctx: OperationContext, threadId: string): Promise<void> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
+  if (!row || row.status !== "cancelled") return;
+  if (await taskHasSettledForGood(ctx, threadId)) await ctx.store.updateDelegation(row.id, { status: "running" }).catch(() => null);
+}
+
+/**
+ * Cancel a thread's pending automatic continue after a usage limit: the
+ * queued usage-reset continue and the protection recovery entry. A
+ * delegated task is marked cancelled and its parent told, unless the call
+ * opts out. Returns whether anything was pending.
+ */
+export async function cancelAutoContinue(ctx: OperationContext, threadId: string, opts: CancelAutoContinueOptions = {}): Promise<boolean> {
+  const { continues, recoveryTurnId } = await pendingAutoContinue(ctx, threadId);
+  if (continues.length === 0 && recoveryTurnId === null) return false;
+  for (const turn of continues) await interruptTurn(ctx.store, threadId, turn.id).catch(() => undefined);
+  if (recoveryTurnId !== null) {
+    const pause = (await ctx.store.readThreadRecord(threadId).catch(() => null))?.usagePause;
+    if (pause?.forced) throw new CliError("THREAD_PROTECTED", "Send a message to end manual protection.");
+    // Removal clears the hold (the work queue's cancel-protection path);
+    // it also marks and notifies through the same helper below.
+    await editWorkQueue(ctx, threadId, recoveryTurnId, "remove", undefined, opts.notifyParent);
+  } else {
+    await noteAutoContinueCancelled(ctx, threadId, opts);
+  }
+  return true;
 }
 
 // -- long threads --------------------------------------------------------------
@@ -1182,6 +1313,91 @@ export function firstMessageNote(firstMessage: string | undefined): string {
   return `\n\n## What to do first\n\n${text}`;
 }
 
+/**
+ * Whether a source's usage-limit hold applies to its continuation: the
+ * destination runs on the same account (usage key), and the limit still
+ * stands — a reset already past, or windows with room again, release it.
+ * Otherwise the scheduled turn is created without the hold: it must not
+ * wait for a limit that does not apply to it.
+ */
+function continuedHoldApplies(pause: UsagePause, selection: ModelSelection, now = Date.now()): boolean {
+  if (usageKeyForInstance(selection.instanceId) !== pause.provider) return false;
+  if (pause.resetsAt !== null && Number.isFinite(Date.parse(pause.resetsAt)) && Date.parse(pause.resetsAt) <= now) return false;
+  return providerExhausted(pause.provider, now);
+}
+
+/**
+ * Finish inheriting a usage-limit hold on a continuation held for the reset:
+ * the destination's oldest queued scheduled turn becomes its recovery entry,
+ * so the admission path runs it once nothing blocks it; and the source's
+ * limit marker travels along, so the new thread shows the block from the
+ * start and holds notifications without spending a turn. A retry rejoining
+ * the destination links the same turn rather than duplicating anything.
+ */
+async function linkScheduledContinuation(ctx: OperationContext, sourceId: string, destinationId: string): Promise<void> {
+  const { store } = ctx;
+  await store.withThreadLock(destinationId, async () => {
+    const destination = await store.readThreadRecord(destinationId);
+    if (!destination) return;
+    const pause = destination.usagePause;
+    if (pause && pause.phase === "waiting" && !pause.recoveryTurnId) {
+      const first = (await store.readTurns(destinationId)).find((turn) => turn.status === "queued" && typeof turn.scheduledFor === "string");
+      if (first) await store.writeThreadRecord({ ...destination, usagePause: { ...pause, recoveryTurnId: first.id } });
+    }
+    const source = await store.readThreadRecord(sourceId).catch(() => null);
+    if (!source?.usagePause || !continuedHoldApplies(source.usagePause, destination.modelSelection)) return;
+    const activities = await store.readActivities(destinationId);
+    if (activities.some((activity) => activity.kind === "usage.limit" || activity.kind === "usage.wrap-up")) return;
+    const marker = await scheduledContinuationMarker(store, sourceId);
+    if (!marker) return;
+    await store.appendLedger(destinationId, "activity", {
+      id: store.newId(),
+      threadId: destinationId,
+      turnId: null,
+      kind: marker.kind,
+      summary: marker.summary,
+      payload: marker.payload,
+      createdAt: store.nowIso(),
+    });
+  });
+}
+
+/**
+ * The limit marker a continuation held for the reset shows from the start:
+ * the source's latest hit, or the hold's own reset when the hit predates the
+ * marker rows. Null when the source names no limit at all.
+ */
+async function scheduledContinuationMarker(
+  store: ThreadStore,
+  sourceId: string,
+): Promise<{ kind: "usage.limit" | "usage.wrap-up"; summary: string; payload: Record<string, unknown> } | null> {
+  const source = await store.readThreadRecord(sourceId).catch(() => null);
+  const hit = (await store.readActivities(sourceId).catch(() => [] as StoredActivity[])).findLast(
+    (activity) => activity.kind === "usage.limit" || activity.kind === "usage.wrap-up",
+  );
+  if (hit) {
+    const payload = (hit.payload ?? {}) as Record<string, unknown>;
+    return {
+      kind: hit.kind as "usage.limit" | "usage.wrap-up",
+      summary: hit.kind === "usage.wrap-up" ? "Usage limit reached, wrapping up" : "Usage limit reached",
+      payload: {
+        provider: payload.provider ?? source?.usagePause?.provider ?? null,
+        rateLimitType: payload.rateLimitType ?? null,
+        label: payload.label ?? null,
+        resetsAt: payload.resetsAt ?? source?.usagePause?.resetsAt ?? null,
+      },
+    };
+  }
+  const pause = source?.usagePause;
+  if (!pause) return null;
+  const latestWindow = [...(pause.windows ?? [])].sort((a, b) => String(a.resetsAt ?? "").localeCompare(String(b.resetsAt ?? ""))).at(-1);
+  return {
+    kind: "usage.limit",
+    summary: "Usage limit reached",
+    payload: { provider: pause.provider, rateLimitType: null, label: latestWindow?.label ?? null, resetsAt: pause.resetsAt },
+  };
+}
+
 async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
@@ -1213,6 +1429,11 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     });
   }
   const live = await store.readThreadRecord(source.id);
+  // A continuation held for the reset inherits the hold; one starting now does not.
+  // The hold has to apply to the destination: same account, limit still standing.
+  const scheduledHold = request.scheduledFor !== undefined && !request.destinationThreadId
+    && live?.usagePause != null
+    && continuedHoldApplies(live.usagePause, request.modelSelection ?? source.modelSelection);
   if (live?.usagePause && !request.destinationThreadId) {
     if (live.usagePause.continuedThreadId !== created.id) {
       await store.withThreadLock(source.id, async () => {
@@ -1222,12 +1443,27 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
         }
       });
     }
-    await store.withThreadLock(created.id, async () => {
-      const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
-      if (destination && !destination.usagePause && pause?.usagePause) {
-        await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "resuming", handoff: false } });
-      }
-    });
+    if (scheduledHold) {
+      // Waiting, not resuming: until the reset nothing starts on the new
+      // thread — notifications and sends queue behind the hold — and its
+      // first turn becomes the recovery entry below. Written before that
+      // turn starts so a notification racing it still waits.
+      await store.withThreadLock(created.id, async () => {
+        const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
+        if (destination && !destination.usagePause && pause?.usagePause) {
+          await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "waiting", handoff: false } });
+        }
+      });
+    } else if (request.scheduledFor === undefined) {
+      await store.withThreadLock(created.id, async () => {
+        const [destination, pause] = await Promise.all([store.readThreadRecord(created.id), store.readThreadRecord(source.id)]);
+        if (destination && !destination.usagePause && pause?.usagePause) {
+          await store.writeThreadRecord({ ...destination, usagePause: { provider: pause.usagePause.provider, resetsAt: pause.usagePause.resetsAt, order: pause.usagePause.order, phase: "resuming", handoff: false } });
+        }
+      });
+    }
+    // A scheduled continuation the hold does not apply to gets no pause at
+    // all: its turn runs at its time, not behind another account's reset.
   }
   // An unclaimed run-size question moves with the thread: the continuation
   // has not been offered one either, so its first real prompt still asks.
@@ -1264,6 +1500,7 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     const parent = notifyParent ?? (await continuationNotifier(store, created.id));
     if (parent) await watchContinuation(ctx, parent, created.id);
   }
+  if (scheduledHold) await linkScheduledContinuation(ctx, source.id, created.id);
   if (!(await store.readActivities(source.id)).some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === created.id)) {
     await store.appendLedger(source.id, "activity", {
       id: store.newId(),
@@ -1888,12 +2125,20 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
-    }).then(() => syncResearchRun(ctx, thread.id)).catch(() => undefined);
+    }).then(() => syncResearchRun(ctx, thread.id).catch(() => undefined)).then(() => clearCancelledOnSettle(ctx, thread.id)).catch(() => undefined);
   } catch (cause) {
     // The prompt never reached a runner (a ledger read failed while building
     // it): release the claim rather than leaving the turn tracked forever.
     if (claimed) store.untrackRunning(sent.turn.id);
     throw cause;
+  }
+  // The user's own message spends fresh allowance and ends a usage hold, so
+  // task notices queued while the thread could not receive them go out with
+  // it, together — steered into the turn just started when the provider
+  // takes mid-turn input, else queued behind it. Internal sends (recovery,
+  // notifications, agent messages) never pull other threads' notices along.
+  if (input.origin === undefined && !input.usageControl) {
+    await flushTaskNotifications(ctx, thread.id).catch(() => undefined);
   }
   return { ...sent, run };
 }
@@ -2670,7 +2915,7 @@ async function forkParentSession(
 /** Tasks settling within this long of each other reach their parent as one message. */
 export const TASK_NOTIFICATION_BATCH_MS = 2_000;
 
-const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; taskIds: string[] }>();
+const pendingNotifications = new Map<string, { timer: ReturnType<typeof setTimeout>; entries: PendingTaskNotification[] }>();
 
 /** Pending notification batches beside the thread store, so a server restart inside the batch window loses nothing. */
 const TASK_NOTIFICATION_BATCHES_FILE = "task-notification-batches.json";
@@ -2679,7 +2924,61 @@ function taskNotificationBatchesFile(storeRoot: string): string {
   return path.join(storeRoot, TASK_NOTIFICATION_BATCHES_FILE);
 }
 
-async function readTaskNotificationBatches(storeRoot: string): Promise<Record<string, string[]>> {
+/**
+ * One parent's pending task notice: a settle report, a usage-pause heads-up
+ * (with the expected resume time, null when unknown), or a cancelled
+ * auto-continue. All three wait the same way when the parent cannot receive
+ * them yet, and go out together as one message.
+ */
+export interface PendingTaskNotification {
+  readonly child: string;
+  readonly resumesAt?: string | null;
+  readonly cancelled?: true;
+}
+
+/** Settle entries report; pause entries carry `resumesAt` (possibly null), cancel entries `cancelled`. */
+function pendingEntryKind(entry: PendingTaskNotification): "settle" | "pause" | "cancel" {
+  return entry.cancelled === true ? "cancel" : entry.resumesAt !== undefined ? "pause" : "settle";
+}
+
+/** Union pending entries: one entry per child and kind; a repeat carries the latest facts. */
+function unionTaskEntries(
+  left: readonly PendingTaskNotification[],
+  right: readonly PendingTaskNotification[],
+): PendingTaskNotification[] {
+  const merged = new Map<string, PendingTaskNotification>();
+  for (const entry of [...left, ...right]) merged.set(`${pendingEntryKind(entry)}:${entry.child}`, entry);
+  return [...merged.values()];
+}
+
+function normalizeTaskEntries(value: unknown): PendingTaskNotification[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: PendingTaskNotification[] = [];
+  for (const raw of value) {
+    if (typeof raw === "string") {
+      if (raw.length > 0) entries.push({ child: raw });
+      continue;
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const record = raw as Record<string, unknown>;
+    if (typeof record.child !== "string" || record.child.length === 0) return null;
+    const entry: PendingTaskNotification = { child: record.child };
+    if (record.resumesAt !== undefined) {
+      if (record.resumesAt !== null && (typeof record.resumesAt !== "string" || !Number.isFinite(Date.parse(record.resumesAt)))) return null;
+      entries.push({ ...entry, resumesAt: record.resumesAt });
+      continue;
+    }
+    if (record.cancelled !== undefined) {
+      if (record.cancelled !== true) return null;
+      entries.push({ ...entry, cancelled: true });
+      continue;
+    }
+    entries.push(entry);
+  }
+  return unionTaskEntries(entries, []);
+}
+
+async function readTaskNotificationBatches(storeRoot: string): Promise<Record<string, PendingTaskNotification[]>> {
   const file = taskNotificationBatchesFile(storeRoot);
   let text: string;
   try {
@@ -2698,9 +2997,12 @@ async function readTaskNotificationBatches(storeRoot: string): Promise<Record<st
     await quarantineTaskNotificationBatches(storeRoot, file, text).catch(() => undefined);
     return {};
   }
-  const batches: Record<string, string[]> = {};
-  for (const [parent, taskIds] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof parent === "string" && Array.isArray(taskIds) && taskIds.every((id): id is string => typeof id === "string" && id.length > 0)) batches[parent] = [...new Set(taskIds)];
+  const batches: Record<string, PendingTaskNotification[]> = {};
+  for (const [parent, entries] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof parent !== "string") continue;
+    const normalized = normalizeTaskEntries(entries);
+    if (normalized === null || normalized.length === 0) continue;
+    batches[parent] = normalized;
   }
   return batches;
 }
@@ -2720,7 +3022,7 @@ async function quarantineTaskNotificationBatches(storeRoot: string, file: string
 /** File writes chain behind each other, so batches queued on different parents cannot drop each other's entries. */
 let batchFileChain: Promise<unknown> = Promise.resolve();
 
-async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, string[]>) => void): Promise<void> {
+async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, PendingTaskNotification[]>) => void): Promise<void> {
   const run = batchFileChain.then(async () => {
     const batches = await readTaskNotificationBatches(storeRoot);
     update(batches);
@@ -2730,7 +3032,24 @@ async function updateTaskNotificationBatches(storeRoot: string, update: (batches
   await run.catch(() => undefined);
 }
 
-/** Move an in-flight notification batch onto a newly protected thread's durable queue. */
+/** A parent held by usage protection cannot receive a notification yet: it waits with the batch instead. */
+function parentNotificationsHeld(parent: StoredThread | null): boolean {
+  return !!parent?.usagePause && parent.usagePause.phase !== "resuming";
+}
+
+/**
+ * A parent that ran out of usage with no hold to wait behind: a notification
+ * delivered now would start its own turn into the same wall (or fail there),
+ * so it waits too — for the recovery, or for the user's next message.
+ */
+async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThread): Promise<boolean> {
+  if (parentNotificationsHeld(parent)) return true;
+  const turns = await ctx.store.readTurns(parent.id).catch(() => [] as StoredTurn[]);
+  const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
+  return providerExhausted(usageKeyForInstance(selection.instanceId));
+}
+
+/** Deliver a parent's pending notification batch, unless it still cannot receive it. */
 export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
     const pending = pendingNotifications.get(parentThreadId);
@@ -2741,11 +3060,56 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     // Delivered before it is forgotten: a crash between the two replays the
     // batch on restart (at-least-once), while forgetting first could lose it
     // with the dying process. The union below keeps one flush to one message.
-    let replay: string[] = [];
+    let replay: PendingTaskNotification[] = [];
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       replay = batches[parentThreadId] ?? [];
     });
-    await deliverTaskNotifications(ctx, parentThreadId, [...new Set([...(pending?.taskIds ?? []), ...replay])]);
+    const entries = unionTaskEntries(pending?.entries ?? [], replay);
+    if (entries.length === 0) {
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        delete batches[parentThreadId];
+      });
+      return;
+    }
+    // A task whose parent continued in a new thread reports there instead —
+    // even when this thread is held: the batches belong to the live
+    // conversation now, not the dormant one.
+    const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+    const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
+    const moved = entries.filter((entry) => {
+      const live = liveParent(entry.child);
+      return live !== undefined && live !== parentThreadId;
+    });
+    for (const entry of moved) await enqueueTaskNotification(ctx, liveParent(entry.child)!, entry);
+    const mine = entries.filter((entry) => !moved.includes(entry));
+    if (mine.length === 0) {
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        delete batches[parentThreadId];
+      });
+      return;
+    }
+    const held = await ctx.store.withThreadLock(parentThreadId, async () => ctx.store.readThreadRecord(parentThreadId));
+    if (held !== null) {
+      const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
+      const running = openTurn(turns) !== null;
+      const spent = providerExhausted(usageKeyForInstance((openTurn(turns)?.modelSelection ?? held.modelSelection).instanceId));
+      // An archived or deleted parent can never receive again: drop the
+      // batch at once instead of keeping what no flush could deliver.
+      const receivable = held.archivedAt == null && held.deletedAt == null;
+      if (receivable && (parentNotificationsHeld(held) || (!running && spent))) {
+        // Still held, or spent with no live turn to steer into: stay durable
+        // in the batch file instead of starting a turn into the same wall —
+        // startTurn resolves even when the session fails, and the batch would
+        // be forgotten. A live running turn still takes the notice by steer;
+        // the recovery, the user's next message, and the next restart each
+        // flush again, so a settled spent parent waits for activity, not forever.
+        await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+          batches[parentThreadId] = mine;
+        });
+        return;
+      }
+    }
+    await deliverTaskNotifications(ctx, parentThreadId, mine);
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       delete batches[parentThreadId];
     });
@@ -2756,7 +3120,12 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
  * Deliver notification batches a restarted server inherited: tasks that
  * settled inside the batch window before the previous process died. Called
  * once at startup; each batch is forgotten once delivered, so replaying
- * finds nothing left and delivers nothing twice.
+ * finds nothing left and delivers nothing twice. No need to wait for the
+ * first usage tick: the registry loads its persisted pre-restart windows in
+ * the constructor, and exhaustion is only ever concluded from recorded
+ * windows — an early snapshot yields "not exhausted" only when no data
+ * says spent, in which case delivering is correct. A spent parent keeps its
+ * batch for the recovery or the next message instead.
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
@@ -2767,27 +3136,60 @@ export async function recoverTaskNotifications(ctx: OperationContext): Promise<v
 
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
 export async function queueTaskNotification(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
+  await enqueueTaskNotification(ctx, parentThreadId, { child: childThreadId });
+}
+
+/**
+ * Tell a parent its task paused for usage instead of settling, with the
+ * expected resume time. Still gets the normal report when the task finishes.
+ * No-op when the task is not a notifying delegation (nobody waits to hear).
+ */
+export async function queueTaskPauseNotification(ctx: OperationContext, childThreadId: string, resumesAt: string | null): Promise<void> {
+  const parentThreadId = await notifyDelegationParent(ctx, childThreadId);
+  if (parentThreadId === null) return;
+  await enqueueTaskNotification(ctx, parentThreadId, { child: childThreadId, resumesAt });
+}
+
+/** Tell a parent its task's automatic continue was cancelled: no resume will come on its own. */
+export async function queueTaskCancelNotification(ctx: OperationContext, childThreadId: string): Promise<void> {
+  const parentThreadId = await notifyDelegationParent(ctx, childThreadId);
+  if (parentThreadId === null) return;
+  await enqueueTaskNotification(ctx, parentThreadId, { child: childThreadId, cancelled: true });
+}
+
+/** The live parent a task reports to: its notifying row's parent. Null when nobody should be told. */
+async function notifyDelegationParent(ctx: OperationContext, childThreadId: string): Promise<string | null> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined);
+  return row?.notify === true ? row.parentThreadId : null;
+}
+
+/** Batch a task notice for its parent; held or spent parents keep it durably until they can receive it. */
+async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
     // Serialize fact collection too: a later, faster report cannot overtake an
-    // earlier one. Register batches under the thread lock so protection's flush
+    // earlier one. Registered under the thread lock so protection's flush
     // cannot race a report that read the old, unprotected record.
-    const held = await ctx.store.withThreadLock(parentThreadId, async () => {
-      const parent = await ctx.store.readThreadRecord(parentThreadId);
-      if (parent?.usagePause && parent.usagePause.phase !== "resuming") return true;
-      const pending = pendingNotifications.get(parentThreadId);
-      if (pending) clearTimeout(pending.timer);
-      const taskIds = [...new Set([...(pending?.taskIds ?? []), childThreadId])];
-      // Persisted before the timer is armed: a restart inside the batch
-      // window replays the file, and the replay unions what is on disk.
+    const parent = await ctx.store.withThreadLock(parentThreadId, async () => ctx.store.readThreadRecord(parentThreadId));
+    if (parent !== null && (await parentMustWaitForUsage(ctx, parent))) {
+      // Held or spent: keep it durably in the batch file for the recovery or
+      // the user's next message, instead of starting its own turn into the wall.
       await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-        batches[parentThreadId] = [...new Set([...(batches[parentThreadId] ?? []), ...taskIds])];
+        batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], [entry]);
       });
-      const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
-      timer.unref?.();
-      pendingNotifications.set(parentThreadId, { timer, taskIds });
-      return false;
+      return;
+    }
+    const pending = pendingNotifications.get(parentThreadId);
+    if (pending) clearTimeout(pending.timer);
+    const entries = unionTaskEntries(pending?.entries ?? [], [entry]);
+    // Persisted before the timer is armed: a restart inside the batch
+    // window replays the file, and the replay unions what is on disk.
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], entries);
     });
-    if (held) await deliverTaskNotifications(ctx, parentThreadId, [childThreadId]);
+    const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+    timer.unref?.();
+    pendingNotifications.set(parentThreadId, { timer, entries });
   });
 }
 
@@ -2804,6 +3206,14 @@ async function notifyParentOfResumedTask(ctx: OperationContext, childThreadId: s
 async function taskHasSettledForGood(ctx: OperationContext, childThreadId: string): Promise<boolean> {
   const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
   return !turns.some((turn) => turn.status === "running" || turn.status === "queued");
+}
+
+/** A usage pause is not an end: a queued continue or recovery means the task still has work to run. */
+function hasQueuedResume(turns: readonly StoredTurn[], recoveryTurnId: string | undefined): boolean {
+  return (
+    turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset") ||
+    (recoveryTurnId !== undefined && turns.some((turn) => turn.id === recoveryTurnId && turn.status === "queued"))
+  );
 }
 
 /** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
@@ -2970,6 +3380,8 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   }
   const task = taskOf(child);
   if (isStoppedBySettle(record, task.status)) return null;
+  // A usage pause is not an end: a queued continue or recovery reads running.
+  const status = hasQueuedResume(turns, record?.usagePause?.recoveryTurnId) ? ("running" as const) : task.status;
   const background = await taskBackgroundState(ctx, childThreadId, child.modelSelection ?? null);
   // A review task's verdict and findings ride in the notification itself, and a
   // missing verdict (or a reviewer on the parent's own model) is said visibly.
@@ -2979,11 +3391,11 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined) ??
     rows.find((candidate) => candidate.childThreadId === childThreadId);
   const parent = row ? await ctx.store.readThreadRecord(row.parentThreadId).catch(() => null) : null;
-  const facts = await reviewFactsForTask(ctx, child, parent, row, task);
+  const facts = await reviewFactsForTask(ctx, child, parent, row, { ...task, status });
   return {
     taskId: childThreadId,
     title: child.title,
-    status: task.status,
+    status,
     durationMs,
     model: child.modelSelection ? `${child.modelSelection.instanceId}/${child.modelSelection.model}` : null,
     branch: record?.env.mode === "worktree" ? record.env.branch : null,
@@ -3017,22 +3429,48 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  * provider takes input mid-turn (Claude, OpenCode) and this process
  * holds that session; otherwise as a turn of its own, queued behind any
  * running one. It wakes a settled parent — the work is the parent's own.
+ * Pause and cancellation notices ride along in the same message: a pause a
+ * settle covers is stale and dropped, and a settle a cancellation covers
+ * wins over it, so each child reads once.
  */
-async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, childThreadIds: readonly string[]): Promise<void> {
+async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   // A task whose parent continued in a new thread reports there instead.
   const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
-  for (const id of childThreadIds) {
-    const parent = liveParent(id);
-    if (parent !== undefined && parent !== parentThreadId) await queueTaskNotification(ctx, parent, id);
+  for (const entry of entries) {
+    const parent = liveParent(entry.child);
+    if (parent !== undefined && parent !== parentThreadId) await enqueueTaskNotification(ctx, parent, entry);
   }
-  const mine = childThreadIds.filter((id) => (liveParent(id) ?? parentThreadId) === parentThreadId);
+  const mine = entries.filter((entry) => (liveParent(entry.child) ?? parentThreadId) === parentThreadId);
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
-  const final = (await Promise.all(mine.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
+  const settleIds = mine.filter((entry) => pendingEntryKind(entry) === "settle").map((entry) => entry.child);
+  const final = (await Promise.all(settleIds.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
     (id): id is string => id !== null,
   );
+  const settled = new Set(final);
+  // A pause or cancellation a settle report covers is stale: the settle says where the task stands.
+  // One whose task handed off is the continuation's to report.
+  const pauseIds = mine.filter((entry) => pendingEntryKind(entry) === "pause" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
+  // A pause batched for a task that has since continued belongs to the live
+  // conversation when that conversation is itself held for the reset: report
+  // the continuation as paused. Otherwise (no inherited hold, nothing left to
+  // resume) dropping stays correct.
+  const continuedPauses = (await Promise.all(mine.filter((entry) => pendingEntryKind(entry) === "pause" && movedOn(entry.child)).map(async (entry) => {
+    const seen = new Set([entry.child]);
+    let next = rows.find((row) => row.childThreadId === entry.child && row.parentThreadId === parentThreadId)?.continuedIn;
+    while (next !== undefined && !seen.has(next)) {
+      seen.add(next);
+      const record = await ctx.store.readThreadRecord(next).catch(() => null);
+      if (record?.usagePause?.phase === "waiting") return { ...entry, child: next };
+      next = rows.find((row) => row.childThreadId === next && row.parentThreadId === parentThreadId)?.continuedIn;
+    }
+    return null;
+  }))).filter((entry): entry is PendingTaskNotification => entry !== null);
+  pauseIds.push(...continuedPauses.map((entry) => entry.child));
+  const pauseEntries = [...mine, ...continuedPauses];
+  const cancelIds = mine.filter((entry) => pendingEntryKind(entry) === "cancel" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
   // The settle generation each snapshot was taken at: a turn settling between
   // the snapshot and the arming below must still report at once (finding: the
@@ -3047,7 +3485,23 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
-  if (tasks.length === 0) return;
+  const pauseTasks = (await Promise.all(pauseIds.map(async (id): Promise<TaskNotification | null> => {
+    const task = await taskNotificationOf(ctx, id);
+    if (!task || movedOn(id) || (await taskHasSettledForGood(ctx, id))) return null;
+    const resumesAt = pauseEntries.find((entry) => entry.child === id && pendingEntryKind(entry) === "pause")?.resumesAt ?? null;
+    return { ...task, status: "running" as const, resumesAt };
+  }))).filter(
+    (task): task is TaskNotification => task !== null,
+  );
+  const cancelTasks = (await Promise.all(cancelIds.map(async (id): Promise<TaskNotification | null> => {
+    const task = await taskNotificationOf(ctx, id);
+    if (!task) return null;
+    return { ...task, status: "cancelled" as const, cancelled: true as const };
+  }))).filter(
+    (task): task is TaskNotification => task !== null,
+  );
+  const all = [...tasks, ...pauseTasks, ...cancelTasks];
+  if (all.length === 0) return;
   // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
@@ -3074,7 +3528,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     // line in the server log; nothing more (MXN-290 review).
     await appendFile(
       path.join(ctx.storeRoot, "server.log"),
-      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${tasks.length} task(s)\n`,
+      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${all.length} task(s)\n`,
       "utf8",
     ).catch(() => undefined);
     return;
@@ -3083,9 +3537,9 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const steerable = running && (await canSteer(ctx, parent));
   await startTurn(ctx, {
     threadId: parentThreadId,
-    prompt: taskNotificationText(tasks),
+    prompt: taskNotificationText(all),
     origin: "task-notification",
-    notification: { tasks },
+    notification: { tasks: all },
     delivery: steerable ? "steer" : "queue",
     wakeSettled: true,
   });
@@ -3540,7 +3994,8 @@ async function syncResearchRun(ctx: OperationContext, threadId: string): Promise
     const task = taskOf(await threadWithLedger(ctx.store, threadId));
     const settled = await taskHasSettledForGood(ctx, threadId) && (!own ||
       (await Promise.all(thread.researchRun.roles.map((role) => taskHasSettledForGood(ctx, role.threadId)))).every(Boolean));
-    const state = settled ? task.status : "running";
+    // A run's own states predate task cancellation: a cancelled lead reads interrupted here.
+    const state = settled ? (task.status === "cancelled" ? "interrupted" : task.status) : "running";
     if (state === thread.researchRun.state && !(own && settled)) return;
     const now = ctx.store.nowIso();
     await ctx.store.writeThreadRecord({ ...thread, researchRun: { ...thread.researchRun, state, updatedAt: now,
@@ -3725,7 +4180,24 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   const live = await ownedDelegation(ctx, parentThreadId, taskId).catch(() => null);
   const target = live !== null ? await threadWithLedger(ctx.store, live.childThreadId).catch(() => null) : null;
   const seen = target ?? child;
-  const task = taskOf(seen, taskId);
+  const ledger = taskOf(seen, taskId);
+  // A usage pause is not an end: a queued continue or recovery reads running
+  // until it settles, so `task_status` waits rather than reporting it failed.
+  const childTurns = await ctx.store.readTurns(seen.id).catch(() => [] as StoredTurn[]);
+  const childPause = (await ctx.store.readThreadRecord(seen.id).catch(() => null))?.usagePause;
+  const resume = hasQueuedResume(childTurns, childPause?.recoveryTurnId);
+  // A cancelled automatic continue — or the whole task — reads cancelled,
+  // however the child's turns settled, until a wake revives it. The mark
+  // applies only when the child has no live work: a follow-up still running
+  // reports on its own, and its settle clears the mark.
+  const settledForGood = !childTurns.some((turn) => turn.status === "running" || turn.status === "queued");
+  const status =
+    (live ?? delegation)?.status === "cancelled" && settledForGood
+      ? ("cancelled" as const)
+      : resume
+        ? ("running" as const)
+        : ledger.status;
+  const task = { ...ledger, status, workState: delegatedWorkStateOf(status) };
   // A review child's verdict, warnings and finished state ride with the
   // status. The settled verdict is pinned on the (live) delegation row, so a
   // follow-up turn cannot rewrite it; `task_status` and the task
@@ -3794,7 +4266,25 @@ async function ownedDelegation(ctx: OperationContext, parentThreadId: string, ra
   return row;
 }
 
-export type CancelledTaskStatus = DelegatedTaskStatus | "cancelled" | "cancel_requested";
+export interface DelegationInfo {
+  readonly parentThreadId: string;
+  readonly notify: boolean;
+}
+
+/**
+ * The live delegation that made this thread a task, if any: which thread it
+ * reports to and whether it notifies. Lets a client cancelling an automatic
+ * continue ask before telling the parent. Null for threads that are
+ * nobody's task, or whose task carried on elsewhere.
+ */
+export async function delegationInfo(ctx: OperationContext, rawThreadId: string): Promise<DelegationInfo | null> {
+  const threadId = requireThreadId(rawThreadId);
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = [...rows].reverse().find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
+  return row ? { parentThreadId: row.parentThreadId, notify: row.notify === true } : null;
+}
+
+export type CancelledTaskStatus = DelegatedTaskStatus | "cancel_requested";
 
 export interface CancelledTask extends Omit<DescribedTask, "task"> {
   readonly task: Omit<TaskView, "status"> & { readonly status: CancelledTaskStatus };
@@ -3807,14 +4297,42 @@ export interface CancelledTask extends Omit<DescribedTask, "task"> {
 /**
  * Interrupt a running task. Cancelling one that already ended is a no-op that reports how it ended.
  * Only the thread that owns the task may: the one that delegated it, or the continuation a continue handed it to.
+ * Cancelling also ends a pending automatic continue after a usage limit — without this the task would
+ * resume on the reset after being cancelled — and tells the parent, unless asked not to.
  */
-export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<CancelledTask> {
+export async function cancelTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string, opts: CancelAutoContinueOptions = {}): Promise<CancelledTask> {
   const parentThreadId = requireThreadId(rawParentThreadId);
   const row = await ownedDelegation(ctx, parentThreadId, rawTaskId);
   const described = await describeTask(ctx, parentThreadId, row.childThreadId);
   const { child } = described;
-  if (!isThreadActive(child)) {
+  if (isThreadActive(child)) {
+    try {
+      await interruptTurn(ctx.store, child.id);
+    } catch (cause) {
+      throw new CliError(
+        "TASK_CANCEL_UNSUPPORTED",
+        `Could not interrupt delegated task ${described.task.taskId}; cancellation is unsupported for this thread.`,
+        { exitCode: 4, cause, details: { taskId: described.task.taskId, childThreadId: child.id } },
+      );
+    }
+  } else {
     const terminal = child.latestTurn?.state;
+    // A queued automatic continue still waits: ending here would leave the
+    // task to resume on the reset after being cancelled.
+    const { continues, recoveryTurnId } = await pendingAutoContinue(ctx, child.id);
+    for (const turn of continues) await interruptTurn(ctx.store, child.id, turn.id).catch(() => undefined);
+    if (recoveryTurnId !== null) {
+      const pause = (await ctx.store.readThreadRecord(child.id).catch(() => null))?.usagePause;
+      if (!pause?.forced) await editWorkQueue(ctx, child.id, recoveryTurnId, "remove", undefined, opts.notifyParent).catch(() => undefined);
+    }
+    const hadAutoContinue = continues.length > 0 || recoveryTurnId !== null;
+    if (hadAutoContinue) await noteAutoContinueCancelled(ctx, child.id, opts).catch(() => undefined);
+    // task_cancel always marks: the whole task was stopped, even where live
+    // work remains and the mark alone would not apply.
+    if (row.status !== "cancelled") await ctx.store.updateDelegation(row.id, { status: "cancelled" }).catch(() => null);
+    if (hadAutoContinue) {
+      return { ...described, task: { ...described.task, status: "cancelled" as const }, interruptRequested: false, stateAfter: terminal ?? null };
+    }
     const status: CancelledTaskStatus =
       terminal === "completed" ? "completed"
       : terminal === "error" ? "failed"
@@ -3822,18 +4340,18 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
       : "cancelled";
     return { ...described, task: { ...described.task, status }, interruptRequested: false, stateAfter: terminal ?? null };
   }
-  try {
-    await interruptTurn(ctx.store, child.id);
-  } catch (cause) {
-    throw new CliError(
-      "TASK_CANCEL_UNSUPPORTED",
-      `Could not interrupt delegated task ${described.task.taskId}; cancellation is unsupported for this thread.`,
-      { exitCode: 4, cause, details: { taskId: described.task.taskId, childThreadId: child.id } },
-    );
+  const { continues, recoveryTurnId } = await pendingAutoContinue(ctx, child.id);
+  for (const turn of continues) await interruptTurn(ctx.store, child.id, turn.id).catch(() => undefined);
+  if (recoveryTurnId !== null) {
+    const pause = (await ctx.store.readThreadRecord(child.id).catch(() => null))?.usagePause;
+    if (!pause?.forced) await editWorkQueue(ctx, child.id, recoveryTurnId, "remove", undefined, opts.notifyParent).catch(() => undefined);
   }
-  const delegation = await delegationForChild(ctx.store, described.parent.id, child.id);
-  if (delegation && delegation.status !== "cancelled") {
-    await ctx.store.updateDelegation(delegation.id, { status: "cancelled" }).catch(() => null);
+  const hadAutoContinue = continues.length > 0 || recoveryTurnId !== null;
+  if (hadAutoContinue) {
+    await noteAutoContinueCancelled(ctx, child.id, opts).catch(() => undefined);
+  }
+  if (row.status !== "cancelled") {
+    await ctx.store.updateDelegation(row.id, { status: "cancelled" }).catch(() => null);
   }
   const after = await threadWithLedger(ctx.store, child.id);
   const state = after.latestTurn?.state ?? null;
@@ -4144,8 +4662,14 @@ export async function sendTaskMessage(
   // row snapshot and a refusal that landed too late is back in work: it
   // reports to the thread that sent this, not the older one.
   if (outcome !== "not_delivered" && row.parentThreadId !== parentThreadId) await ctx.store.updateDelegation(row.id, { parentThreadId });
+  // A message that reaches the task revives a cancelled auto-continue: the
+  // fresh work reports on its own, not as cancelled — including a steer,
+  // which reaches the live turn without starting one.
+  if (outcome !== "not_delivered" && row.status === "cancelled") {
+    await reviveCancelledDelegation(ctx, target.id);
+  }
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
-  if (row.notify === true && (outcome === "started" || outcome === "queued")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);
+  if (row.notify === true && (outcome === "started" || outcome === "queued" || outcome === "steered")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
   const notes: Record<TaskMessageOutcome, string> = {
     steered: "The running turn received it and reads it at its next step.",

@@ -451,8 +451,14 @@ export async function sendTurn(
     // the new message waits behind it — visibly queued, never swallowed. A
     // message ending usage protection is the exception: it releases the hold
     // and runs first, as protection promises.
+    //
+    // The same oldest-first rule covers a due held turn (a continue set for
+    // a usage-limit reset, or a message held behind one, whose time has
+    // come): the new message queues behind it rather than overtaking it, and
+    // rides along in its turn when model and mode match. Usage-control turns
+    // (wrap-up and other maintenance) are exempt: they run past holds by design.
     const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
-      && turns.some((turn) => turn.status === "queued" && turn.heldAtSettle === true && !turn.queue);
+      && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
     let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
@@ -778,6 +784,19 @@ export function isHeldTurn(turn: StoredTurn, now: number = Date.now()): boolean 
   return turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) > now;
 }
 
+/**
+ * A held turn whose time has come (or that never had one): a continue set
+ * for a usage-limit reset, or a message held behind one, now due. A new send
+ * queues behind these oldest-first rather than overtaking them.
+ */
+function isDueHeldTurn(turn: StoredTurn, now: number): boolean {
+  return (
+    turn.status === "queued" &&
+    (turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") &&
+    !isHeldTurn(turn, now)
+  );
+}
+
 function sameModel(left: StoredTurn, right: StoredTurn): boolean {
   return left.modelSelection?.instanceId === right.modelSelection?.instanceId && left.modelSelection?.model === right.modelSelection?.model;
 }
@@ -793,9 +812,14 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * before it even sees the second. Their turns never ran, so they are dropped
  * and their messages move onto `next`. A message for another model or mode, or one
  * still waiting for a later time, keeps its own turn.
+ *
+ * A continue set for a usage-limit reset batches the same way even though it
+ * carries its automatic wait: that queue holds no conditions of its own, so
+ * the folded messages ride the same reset. Any other queue-carrying turn (a
+ * wake-up, a handoff, a held entry) keeps its own turn, as before.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
-  if (next.queue) return;
+  if (next.queue && next.scheduleReason !== "usage-reset") return;
   const batch = turns.filter(
     (turn) =>
       turn.id !== next.id &&
@@ -839,20 +863,140 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
   };
 }
 
+/**
+ * A held turn settle may start once its time has come: a continue set for a
+ * usage-limit reset, or a message held behind one. Queue-carrying turns stay
+ * owned by the admission path — their conditions, holds and sequence need
+ * the queue's view — except a bare automatic wait: no conditions, not held
+ * or removed, not sequential, running here rather than alongside other
+ * entries. Anything else queued (a wake-up, a handoff, a held entry) waits
+ * for admission like before.
+ */
+function settleStartsHeldTurn(turn: StoredTurn): boolean {
+  if (turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold") return false;
+  const queue = turn.queue;
+  if (!queue) return true;
+  return (
+    queue.automatic === true &&
+    queue.wakeUp !== true &&
+    queue.summaryFor === undefined &&
+    queue.continuation === "same-thread" &&
+    queue.held !== true &&
+    queue.removed !== true &&
+    queue.sequential !== true &&
+    queue.conditions.length === 0
+  );
+}
+
+/**
+ * An automatic continue settle may cancel but never promote: a handoff
+ * summary stays owned by the admission path, while a bare automatic wait due
+ * here is stale when the work resumed. A wake-up may also carry a merged
+ * notification — the riders check below decides that.
+ */
+function settleCancelsStaleTurn(turn: StoredTurn): boolean {
+  if (turn.scheduleReason !== "usage-reset") return false;
+  const queue = turn.queue;
+  if (queue && (queue.automatic !== true || queue.summaryFor !== undefined)) return false;
+  return true;
+}
+
+/**
+ * Whether this queued turn is a stale automatic continue: due, and a turn
+ * ran to completion after it came due, so the thread's work already resumed
+ * and the scheduled nudge would fire as a pointless turn. Only a completed
+ * turn counts — one that failed or was interrupted did not resume anything.
+ * Wake-up riders are not considered here; callers check `wakeUpHasRiders`.
+ */
+export function isStaleContinueTurn(turns: readonly StoredTurn[], turn: StoredTurn, instant: number): boolean {
+  if (turn.status !== "queued" || !settleCancelsStaleTurn(turn) || isHeldTurn(turn, instant)) return false;
+  return continueStale(turns, turn, instant);
+}
+
+/**
+ * Whether a stale-candidate wake-up turn carries another delivery's message:
+ * a native task edge merges its report into the queued wake-up rather than
+ * losing either. Cancelling that turn would drop the report, so a turn with
+ * riders is never stale — it still has something to say.
+ */
+export function wakeUpHasRiders(messages: readonly StoredMessage[], turn: StoredTurn): boolean {
+  return messages.some((message) => message.turnId === turn.id && message.id !== turn.messageId);
+}
+
+/**
+ * Whether an automatic continue after a usage limit is stale: a turn ran to
+ * completion after it came due, so the thread's work already resumed and the
+ * scheduled nudge would fire as a pointless turn. Only a completed turn
+ * counts — one that failed or was interrupted did not resume anything.
+ */
+function continueStale(turns: readonly StoredTurn[], turn: StoredTurn, instant: number): boolean {
+  if (turn.scheduleReason !== "usage-reset") return false;
+  // Due from its scheduled time, or from creation when it has none.
+  const due = turn.scheduledFor !== undefined && turn.scheduledFor !== null ? Date.parse(turn.scheduledFor) : Date.parse(turn.createdAt);
+  if (!Number.isFinite(due) || due > instant) return false;
+  return turns.some(
+    (other) =>
+      other.id !== turn.id &&
+      other.status === "completed" &&
+      Date.parse(other.startedAt ?? other.createdAt) > due,
+  );
+}
+
+/** Caller must hold the thread lock. Take back a stale automatic continue before it runs. */
+async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, turn: StoredTurn, now: string): Promise<void> {
+  await store.updateTurn(threadId, turn.id, { status: "interrupted", updatedAt: now, completedAt: now });
+  await store.appendLedger(threadId, "activity", {
+    id: store.newId(),
+    threadId,
+    turnId: turn.id,
+    kind: "turn.interrupted",
+    summary: turn.id,
+    // Taken back before it ran: clients drop it from the transcript rather
+    // than show a turn that never happened.
+    payload: { beforeStart: true },
+    createdAt: now,
+  });
+  store.emit(threadId, "turn-interrupted");
+}
+
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
   if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
-  const turns = await store.readTurns(threadId);
+  let turns = await store.readTurns(threadId);
   if (openTurn(turns)) return;
-  // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
+  // A scheduled turn waits for its time; ordinary queued turns go ahead of one still waiting.
   const instant = Date.parse(now);
+  if (admittedId === undefined) {
+    // A stale automatic continue never fires: the thread's work already
+    // resumed, so the scheduled nudge is taken back before it runs. Done
+    // before candidacy so batching below never folds a cancelled turn in.
+    let stale = false;
+    let messages: readonly StoredMessage[] | null = null;
+    for (const turn of turns) {
+      if (!isStaleContinueTurn(turns, turn, instant)) continue;
+      if (turn.queue?.wakeUp === true) {
+        messages ??= await store.readMessages(threadId);
+        if (wakeUpHasRiders(messages, turn)) continue;
+      }
+      await cancelStaleContinueLocked(store, threadId, turn, now);
+      stale = true;
+    }
+    if (stale) turns = await store.readTurns(threadId);
+  }
   const threadHeld = admittedId === undefined && threadStatus(thread, instant) !== "active";
   const next = turns.find((turn) => {
     if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
     if (admittedId) return turn.id === admittedId;
-    if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     if (threadHeld) return false;
+    // A held turn whose time has come starts after the running turn settles,
+    // oldest first like any queued turn — but never while the limit stands.
+    // (The usage-protection tick and the schedule timer admit queue-carrying
+    // turns with their conditions; settle only takes bare automatic waits.)
+    if (settleStartsHeldTurn(turn)) {
+      return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+    }
+    if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     // Plain turns never pass through the admission path, so their one
     // admission check lives here: `queueAdmission` — and the Work queue
     // display built on it — blocks any non-automatic turn on an exhausted
@@ -937,7 +1081,7 @@ export async function holdStrandedPromotions(store: ThreadStore, rawThreadId: st
  * Start the thread's scheduled turn that has come due, if the thread is free:
  * promoted to `running` (owned by this process) and returned for the caller
  * to run. Null when nothing is due, or a turn is already running — that
- * turn's settle promotes it instead.
+ * turn's settle promotes the due held turn instead (see `promoteQueuedLocked`).
  */
 export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string, admittedId?: string, summary = false): Promise<StoredTurn | null> {
   const threadId = requireThreadId(rawThreadId);

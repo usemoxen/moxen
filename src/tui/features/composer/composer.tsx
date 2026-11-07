@@ -1082,8 +1082,9 @@ export function Composer({
               onCycleMode();
               return;
             }
-            // Tab while a turn runs queues the draft behind it.
-            if (key.name === "tab" && key.shift !== true && running && onQueue !== undefined && (areaRef.current?.plainText ?? "").trim().length > 0) {
+            // Tab while a turn runs — or while a continue waits out the limit —
+            // queues the draft behind it.
+            if (key.name === "tab" && key.shift !== true && (running || waitingOutLimit === true) && onQueue !== undefined && (areaRef.current?.plainText ?? "").trim().length > 0) {
               key.preventDefault();
               onQueue();
               return;
