@@ -3,12 +3,11 @@
  * release's description, sends no credential, and says "unavailable" instead of throwing when it cannot ask.
  * The check is the user's explicit request; nothing here runs in the background.
  */
-import { archiveFileName, checksumFileName, releaseTargetOf } from "../release.js";
+import { archiveFileName, checksumFileName, RELEASES_REPOSITORY, releaseTargetOf } from "../release.js";
 import { compareVersions, isPrerelease, parseVersion, type InstallInfo, type LatestRelease, type ReleaseAsset, type UpdateCheck, type UpdateStatus } from "./vocabulary.js";
 
-export { compareVersions, isPrerelease, parseVersion };
+export { compareVersions, isPrerelease, parseVersion, RELEASES_REPOSITORY };
 
-export const RELEASES_REPOSITORY = "usemoxen/moxen";
 export const LATEST_RELEASE_URL = `https://api.github.com/repos/${RELEASES_REPOSITORY}/releases/latest`;
 export const CHECK_TIMEOUT_MS = 8_000;
 

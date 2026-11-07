@@ -1,5 +1,12 @@
+import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { archiveFileName, packCommand, releaseBaseName, releaseTarget, tagForVersion, tagMismatch, unpackCommand } from "../../scripts/release-lib.js";
+import { archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseInstallNotes, releaseNotesBody, releaseTarget, tagForVersion, tagMismatch, unpackCommand } from "../../scripts/release-lib.js";
+
+// The script runs on Bun (TypeScript directly); vitest itself may run on Node.
+const BUN = process.versions.bun ? process.execPath : "bun";
 
 describe("release archives", () => {
   it("names one archive per platform, the way the updater will look for it", () => {
@@ -16,6 +23,8 @@ describe("release archives", () => {
   it("refuses a platform it does not release for", () => {
     expect(() => releaseTarget("linux", "x64")).toThrow();
     expect(() => releaseTarget("darwin", "ia32")).toThrow();
+    expect(() => releaseTarget("darwin", "x64")).toThrow();
+    expect(() => releaseTarget("win32", "arm64")).toThrow();
   });
 
   it("accepts only the tag v<version>", () => {
@@ -30,5 +39,44 @@ describe("release archives", () => {
     expect(packCommand(windows, "out.zip", "stage", "moxen", env)).toEqual({ command: "C:\\Windows\\System32\\tar.exe", args: ["-a", "-c", "-f", "out.zip", "-C", "stage", "moxen"] });
     expect(unpackCommand(windows, "out.zip", "dest", env).command).toBe("C:\\Windows\\System32\\tar.exe");
     expect(packCommand(releaseTarget("darwin", "arm64"), "out.tar.gz", "stage", "moxen").command).toBe("tar");
+  });
+});
+
+describe("release notes", () => {
+  it("names both archives, their checksums and the one-line installers for the version", () => {
+    const notes = releaseInstallNotes("0.1.2");
+    expect(notes).toContain("moxen-0.1.2-macos-arm64.tar.gz");
+    expect(notes).toContain(checksumFileName("0.1.2", releaseTarget("darwin", "arm64")));
+    expect(notes).toContain("moxen-0.1.2-windows-x64.zip");
+    expect(notes).toContain(checksumFileName("0.1.2", releaseTarget("win32", "x64")));
+    expect(notes).toContain("releases/download/v0.1.2/install.sh");
+    expect(notes).toContain("releases/download/v0.1.2/install.ps1");
+  });
+
+  it("says what an install needs and what happens next", () => {
+    const notes = releaseInstallNotes("0.1.2");
+    expect(notes).toContain("Bun");
+    expect(notes).toContain("self-update --install");
+    expect(notes).toContain("PATH");
+  });
+
+  it("puts the install steps above the changelog and keeps the changelog as it is", () => {
+    const changelog = "## What's changed\n* something by @someone in #1\n";
+    const body = releaseNotesBody("0.1.2", changelog);
+    expect(body.indexOf("## Install")).toBeLessThan(body.indexOf("## What's changed"));
+    expect(body).toContain(changelog);
+  });
+
+  it("is just the install steps when there is no changelog", () => {
+    expect(releaseNotesBody("0.1.2", "\n")).toBe(`${releaseInstallNotes("0.1.2")}\n`);
+  });
+
+  it("fails cleanly when the changelog file cannot be read", () => {
+    const missing = path.join(os.tmpdir(), "moxen-release-notes-missing.md");
+    rmSync(missing, { force: true });
+    const run = spawnSync(BUN, [path.resolve("scripts/release-notes.ts"), "0.1.2", "--changelog", missing], { encoding: "utf8" });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(`release-notes: cannot read ${missing}`);
+    expect(run.stderr).toContain("Usage:");
   });
 });

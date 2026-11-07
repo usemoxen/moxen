@@ -10,10 +10,29 @@ Bun (it manages packages and runs everything) and at least one provider CLI: `cl
 
 ### From a release
 
-Each tagged release on [GitHub Releases](https://github.com/usemoxen/moxen/releases) has an archive per
+One line on macOS (Apple silicon):
+
+```bash
+curl -fsSL https://github.com/usemoxen/moxen/releases/latest/download/install.sh | sh
+```
+
+One line on Windows (x64, PowerShell):
+
+```powershell
+irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
+```
+
+Either script fetches the latest release's archive, installs Bun first when it
+is missing, checks the archive against its `.sha256` and refuses a mismatch,
+then runs `self-update --install` and says how to put Moxen on your PATH.
+Linux and Intel Macs have no build yet. The one-liners download the scripts
+from the release itself, so they work from the next release on; until then,
+follow the by-hand steps below.
+
+Each tagged release on [GitHub Releases](https://github.com/usemoxen/moxen/releases)
+carries the same steps in its notes, and holds an archive per
 platform, `moxen-<version>-macos-arm64.tar.gz` or `moxen-<version>-windows-x64.zip`, and a `.sha256` file
 beside it. Bun is the only thing you need installed: the archive holds the bundle and its native library.
-Intel Macs are not built yet.
 
 ```bash
 tar -xzf moxen-<version>-macos-arm64.tar.gz     # Windows: tar -xf moxen-<version>-windows-x64.zip
