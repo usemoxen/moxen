@@ -6,8 +6,9 @@
  * It checks the folder layout, that the bundle reports the version in `package.json`, and that the native
  * OpenTUI package loads from the unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against
  * the unpacked daemon. `--remove` deletes a path first, to prove the check fails when something is missing.
- * Without any network it also checks `scripts/release-notes.ts` names this archive above the changelog, and
- * that `install.sh` / `install.ps1` refuse platforms with no build (each on its own platform).
+ * Without any network it also checks `scripts/release-notes.ts` names this archive above the changelog,
+ * `install.sh` refuses platforms with no build on every runner (Git Bash provides its `sh`), and `install.ps1`
+ * does on Windows.
  * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below),
  * then updates that install to a copy of the archive that reports a higher version (the core function, in-process,
  * with an injected fetch: no setting can point a real `moxen` at another download), checks the launcher runs it,
@@ -103,20 +104,19 @@ try {
   assert.ok(notes.stdout.includes(base), "the notes do not name this release's archive");
   assert.ok(notes.stdout.includes(checksumFileName(manifest.version, target)), "the notes do not name this release's checksum");
   console.log("ok: release notes name this archive above the changelog");
-  if (process.platform !== "win32") {
-    // A stubbed `uname` proves the refusal paths: the script asks GitHub only after they pass.
-    const stubBin = path.join(scratch, "stub bin");
-    mkdirSync(stubBin);
-    const refusedInstall = (system: string, machine: string, pattern: RegExp): void => {
-      writeFileSync(path.join(stubBin, "uname"), `#!/bin/sh\nif [ "$1" = "-s" ]; then echo "${system}"; else echo "${machine}"; fi\n`, { mode: 0o755 });
-      const refused = run("sh", [path.join(checkout, "install.sh")], { env: { ...process.env, PATH: `${stubBin}${path.delimiter}${process.env.PATH}` } });
-      assert.notEqual(refused.status, 0, `install.sh ran on ${system}/${machine}`);
-      assert.match(`${refused.stdout}${refused.stderr}`, pattern, `install.sh refused ${system}/${machine} unclearly`);
-    };
-    refusedInstall("Linux", "x86_64", /no Moxen release for Linux/);
-    refusedInstall("Darwin", "x86_64", /only Apple silicon/);
-    console.log("ok: install.sh refuses platforms with no build");
-  }
+  // A stubbed `uname` proves the refusal paths: the script asks GitHub only after they pass.
+  // Git Bash provides `sh` on every workflow runner, so this runs on Windows too.
+  const stubBin = path.join(scratch, "stub bin");
+  mkdirSync(stubBin);
+  const refusedInstall = (system: string, machine: string, pattern: RegExp): void => {
+    writeFileSync(path.join(stubBin, "uname"), `#!/bin/sh\nif [ "$1" = "-s" ]; then echo "${system}"; else echo "${machine}"; fi\n`, { mode: 0o755 });
+    const refused = run("sh", [path.join(checkout, "install.sh")], { env: { ...process.env, PATH: `${stubBin}${path.delimiter}${process.env.PATH}` } });
+    assert.notEqual(refused.status, 0, `install.sh ran on ${system}/${machine}`);
+    assert.match(`${refused.stdout}${refused.stderr}`, pattern, `install.sh refused ${system}/${machine} unclearly`);
+  };
+  refusedInstall("Linux", "x86_64", /no Moxen release for Linux/);
+  refusedInstall("Darwin", "x86_64", /only Apple silicon/);
+  console.log("ok: install.sh refuses platforms with no build");
   if (process.platform === "win32") {
     // A wrong architecture refuses before any download.
     const refused = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(checkout, "install.ps1")], { env: { ...process.env, PROCESSOR_ARCHITECTURE: "ARM64" } });

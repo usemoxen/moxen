@@ -1,5 +1,12 @@
+import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseInstallNotes, releaseNotesBody, releaseTarget, tagForVersion, tagMismatch, unpackCommand } from "../../scripts/release-lib.js";
+
+// The script runs on Bun (TypeScript directly); vitest itself may run on Node.
+const BUN = process.versions.bun ? process.execPath : "bun";
 
 describe("release archives", () => {
   it("names one archive per platform, the way the updater will look for it", () => {
@@ -16,6 +23,8 @@ describe("release archives", () => {
   it("refuses a platform it does not release for", () => {
     expect(() => releaseTarget("linux", "x64")).toThrow();
     expect(() => releaseTarget("darwin", "ia32")).toThrow();
+    expect(() => releaseTarget("darwin", "x64")).toThrow();
+    expect(() => releaseTarget("win32", "arm64")).toThrow();
   });
 
   it("accepts only the tag v<version>", () => {
@@ -60,5 +69,14 @@ describe("release notes", () => {
 
   it("is just the install steps when there is no changelog", () => {
     expect(releaseNotesBody("0.1.2", "\n")).toBe(`${releaseInstallNotes("0.1.2")}\n`);
+  });
+
+  it("fails cleanly when the changelog file cannot be read", () => {
+    const missing = path.join(os.tmpdir(), "moxen-release-notes-missing.md");
+    rmSync(missing, { force: true });
+    const run = spawnSync(BUN, [path.resolve("scripts/release-notes.ts"), "0.1.2", "--changelog", missing], { encoding: "utf8" });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(`release-notes: cannot read ${missing}`);
+    expect(run.stderr).toContain("Usage:");
   });
 });

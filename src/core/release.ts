@@ -20,12 +20,12 @@ export interface ReleaseTarget {
   readonly extension: "tar.gz" | "zip";
 }
 
-/** The release target for a Node/Bun `process.platform` and `process.arch`; throws for any other. */
+/** The release target for a Node/Bun `process.platform` and `process.arch`; throws for anything else. */
 export function releaseTarget(platform: string, arch: string): ReleaseTarget {
-  if (arch !== "arm64" && arch !== "x64") throw new Error(`No Moxen release for the ${arch} architecture`);
-  if (platform === "darwin") return { os: "macos", arch, nativePackage: `@opentui/core-darwin-${arch}`, extension: "tar.gz" };
-  if (platform === "win32") return { os: "windows", arch, nativePackage: `@opentui/core-win32-${arch}`, extension: "zip" };
-  throw new Error(`No Moxen release for ${platform}`);
+  if (platform === "darwin" && arch === "arm64") return { os: "macos", arch, nativePackage: "@opentui/core-darwin-arm64", extension: "tar.gz" };
+  if (platform === "win32" && arch === "x64") return { os: "windows", arch, nativePackage: "@opentui/core-win32-x64", extension: "zip" };
+  if (platform !== "darwin" && platform !== "win32") throw new Error(`No Moxen release for ${platform}`);
+  throw new Error(`No Moxen release for the ${arch} architecture`);
 }
 
 /** The target named by its OS and architecture, as the marker and the wire say them. */

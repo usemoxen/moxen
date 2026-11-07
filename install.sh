@@ -40,15 +40,16 @@ main() {
   archive="${base}.tar.gz"
   checksum="${archive}.sha256"
 
+  tmp="$(mktemp -d -t moxen-install.XXXXXX)"
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+
   if ! command -v bun >/dev/null 2>&1; then
     echo "Bun is missing, installing it first (https://bun.sh)..."
-    curl -fsSL https://bun.sh/install | bash || fail "the Bun install failed."
+    curl -fsSL -o "$tmp/bun-install.sh" https://bun.sh/install || fail "the Bun download failed."
+    bash "$tmp/bun-install.sh" || fail "the Bun install failed."
     export PATH="$HOME/.bun/bin:$PATH"
     command -v bun >/dev/null 2>&1 || fail "bun is still missing after its install."
   fi
-
-  tmp="$(mktemp -d -t moxen-install.XXXXXX)"
-  trap 'rm -rf "$tmp"' EXIT INT TERM
 
   echo "Downloading ${tag} (${archive})..."
   curl -fsSL -o "$tmp/$archive" "https://github.com/${REPO}/releases/download/${tag}/${archive}" || fail "could not download ${archive}."

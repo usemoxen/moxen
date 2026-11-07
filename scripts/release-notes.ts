@@ -45,7 +45,14 @@ if (!changelogFile) {
   console.error(usage);
   process.exit(1);
 }
-const body = releaseNotesBody(version, readFileSync(changelogFile, "utf8"));
+let changelog: string;
+try {
+  changelog = readFileSync(changelogFile, "utf8");
+} catch {
+  console.error(`release-notes: cannot read ${changelogFile}\n${usage}`);
+  process.exit(1);
+}
+const body = releaseNotesBody(version, changelog);
 if (out) writeFileSync(out, body);
 else process.stdout.write(body);
 console.error(`release notes for ${tagForVersion(version)} (${body.length} chars)`);

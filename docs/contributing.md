@@ -145,8 +145,8 @@ does everything except publish, so use it to try a change to the release itself.
   OpenTUI library loads from the unpacked folder. `--embeddings` runs `scripts/verify-memory-embeddings.ts --dist`
   against the unpacked daemon. `--remove` deletes a path first, to show the test fails when it is missing.
   Without any network it also runs `scripts/release-notes.ts` against a fixture changelog and checks the notes
-  name the archive above the changelog, and runs `install.sh` (off Windows, with a stubbed `uname`) or
-  `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
+  name the archive above the changelog, and runs `install.sh` (with a stubbed `uname`, on every runner)
+  and `install.ps1` (on Windows, with a wrong architecture) to show each refuses a platform with no build.
 - Windows archives are made and opened with the system `tar.exe` (`bsdtar`); Git Bash's `tar` is GNU tar and
   cannot write zip. The rules (names, tag check, commands) are in `scripts/release-lib.ts`, pinned by
   `src/tests/release.test.ts`.
