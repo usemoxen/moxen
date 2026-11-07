@@ -212,6 +212,40 @@ describe("moxen MCP server", () => {
     }
   });
 
+  it("caps each delegated task at the parent permission mode, per entry", async () => {
+    const harness = await testHarness({});
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      const project = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      const parent = await connection.dispatch({ type: "thread.create", projectId: project.project.id, runtimeMode: "approval-required" });
+      // Omitted inherits the parent's mode.
+      const single = await callMoxenTool(connection, parent.threadId, "delegate", { task: "Stay supervised", title: "supervised", isolation: "shared" });
+      expect(single.isError).toBe(false);
+      const store = await openThreadStore(harness.root);
+      expect((await store.readThreadRecord((JSON.parse(single.text) as { taskId: string }).taskId))?.runtimeMode).toBe("approval-required");
+      // One entry escalating does not stop the other: its error names the ceiling refusal.
+      const result = await callMoxenTool(connection, parent.threadId, "delegate", {
+        isolation: "shared",
+        tasks: [
+          { task: "Stay supervised", title: "stays", runtimeMode: "approval-required" },
+          { task: "Reach higher", title: "reaches", runtimeMode: "full-access" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>> };
+      expect(batch.tasks).toHaveLength(2);
+      expect(batch.tasks[0]).toMatchObject({ title: "stays", isolation: "shared" });
+      expect(batch.tasks[1]).toMatchObject({ title: "reaches", error: expect.stringContaining("RUNTIME_MODE_ESCALATION") });
+      expect((await store.readThreadRecord(batch.tasks[0]!["taskId"] as string))?.runtimeMode).toBe("approval-required");
+      // A bad mode name is refused up front with nothing started.
+      const bad = await callMoxenTool(connection, parent.threadId, "delegate", { task: "Work", title: "work", isolation: "shared", runtimeMode: "wide-open" });
+      expect(bad.isError).toBe(true);
+      expect(bad.text).toContain("runtimeMode must be");
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("starts the tasks that can start when one fails, and says the failed one plainly", async () => {
     const harness = await testHarness({});
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });

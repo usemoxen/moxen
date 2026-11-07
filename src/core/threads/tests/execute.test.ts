@@ -15,7 +15,7 @@ import { openThreadStore, type ThreadStore } from "../store.js";
 import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
 import type { StoredTurn } from "../types.js";
 import { retitleThread, type OperationContext } from "../operations.js";
-import { driverForInstance, ensureDriverSession, executeTurn, subscribeDriverThread, watchDriverSession, type TurnDriver } from "../execute.js";
+import { driverForInstance, ensureDriverSession, executeTurn, flushTurnRunners, subscribeDriverThread, watchDriverSession, type TurnDriver } from "../execute.js";
 import { onThreadFailure } from "../failures.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { settleRuns } from "../../testing/turns.js";
@@ -1045,6 +1045,134 @@ describe("a turn that fails while a limit stands", () => {
     ]);
     const { store, threadId } = await failingTurn();
     expect((await store.readActivities(threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+  });
+});
+
+/**
+ * MXN-312: a steer the provider never confirms reaching the conversation is
+ * not lost when its turn ends — it goes out again as a queued turn of its
+ * own. The fake driver below plays the swallowing CLI: it takes the steer
+ * and reports it unconfirmed at settle.
+ */
+describe("steer redelivery at settle", () => {
+  async function steeredThread() {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-steer-redeliver-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "p",
+      title: "Steer",
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const first = await sendTurn(store, thread.id, { prompt: "go" });
+    const steered = await sendTurn(store, thread.id, { prompt: "task settled", delivery: "steer" });
+    expect(steered.delivery).toBe("steered");
+    return { store, thread, first, steered };
+  }
+
+  function redeliveringDriver(threadId: string, steeredMessageId: string): TurnDriver {
+    const pending: Array<{ id: string; text: string; images: [] }> = [{ id: steeredMessageId, text: "task settled", images: [] }];
+    return {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.empty,
+      awaitTurn: async () => ({ status: "completed", text: "done", usage: null, error: null }),
+      steerTurn: () => Effect.void,
+      takeUnconfirmedSteers: () => pending.splice(0),
+    };
+  }
+
+  it("redelivers a provider-unconfirmed steer as its own turn when the turn settles", async () => {
+    const { store, thread, first, steered } = await steeredThread();
+    const driver = redeliveringDriver(thread.id, steered.messageId);
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    const messages = await store.readMessages(thread.id);
+    expect(messages.filter((row) => row.text === "task settled").map((row) => row.turnId)).toHaveLength(2);
+    const activities = await store.readActivities(thread.id);
+    expect(activities.filter((row) => row.kind === "steer.redelivered")).toHaveLength(1);
+    expect(activities.find((row) => row.kind === "steer.redelivered")?.payload).toMatchObject({ messageId: steered.messageId });
+    // The redelivery was promoted and runs as its own turn; flush the background run, then it has settled too.
+    expect((await store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "running"]);
+    await flushTurnRunners();
+    expect((await store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "completed"]);
+  });
+
+  it("leaves a provider-confirmed steer alone", async () => {
+    const { store, thread, first } = await steeredThread();
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.empty,
+      awaitTurn: async () => ({ status: "completed", text: "done", usage: null, error: null }),
+      steerTurn: () => Effect.void,
+      takeUnconfirmedSteers: () => [],
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(1);
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "steer.redelivered")).toBe(false);
+  });
+
+  it("redelivers the unconfirmed steer when the turn is interrupted", async () => {
+    const { store, thread, first, steered } = await steeredThread();
+    const pending: Array<{ id: string; text: string; images: [] }> = [{ id: steered.messageId, text: "task settled", images: [] }];
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.empty,
+      awaitTurn: async () => {
+        await interruptTurn(store, thread.id, first.turn.id);
+        throw new CliError("TURN_ABORTED", "Interrupted before result");
+      },
+      steerTurn: () => Effect.void,
+      takeUnconfirmedSteers: () => pending.splice(0),
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    // The redelivery copy runs in the background — promotion never blocks
+    // the settling runner — so flush it before teardown: the rmdir below
+    // races its ledger writes and checkpoint capture otherwise (EBUSY on
+    // Windows, where an in-use directory cannot go away).
+    await flushTurnRunners();
+    expect((await store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["interrupted", "interrupted"]);
+    expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(2);
+    expect((await store.readActivities(thread.id)).filter((row) => row.kind === "steer.redelivered")).toHaveLength(1);
+  });
+
+  it("runs the redelivery when the turn was already terminal, so nothing promotes it (MXN-312)", async () => {
+    const { store, thread, first, steered } = await steeredThread();
+    const pending: Array<{ id: string; text: string; images: [] }> = [{ id: steered.messageId, text: "task settled", images: [] }];
+    let calls = 0;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: () => Effect.succeed({ threadId: thread.id, turnId: "native-turn" }),
+      interruptTurn: () => Effect.void,
+      streamEvents: Stream.empty,
+      awaitTurn: async () => {
+        calls += 1;
+        if (calls === 1) {
+          // A concurrent interrupt settles the turn first: the catch below
+          // redelivers behind a terminal turn, which promotes nothing.
+          await interruptTurn(store, thread.id, first.turn.id);
+          throw new Error("boom");
+        }
+        return { status: "completed", text: "copy done", usage: null, error: null };
+      },
+      steerTurn: () => Effect.void,
+      takeUnconfirmedSteers: () => pending.splice(0),
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    await flushTurnRunners();
+    const turns = await store.readTurns(thread.id);
+    // The copy ran instead of sitting queued (or running with no runner) with nothing to promote it.
+    expect(turns.map((turn) => turn.status)).toEqual(["interrupted", "completed"]);
+    expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(2);
   });
 });
 

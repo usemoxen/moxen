@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   compatibleRuntimeMode,
   displayRuntimeMode,
+  resolveDelegatedRuntimeMode,
   RUNTIME_MODE_CHOICES,
   runtimeModeChoicesForSupportedModes,
 } from "../permissions.js";
@@ -57,5 +58,32 @@ describe("displayRuntimeMode", () => {
   it("prettifies known modes and passes unknown strings through", () => {
     expect(displayRuntimeMode("full-access")).toBe("Full access");
     expect(displayRuntimeMode("mystery-mode")).toBe("mystery-mode");
+  });
+});
+
+describe("resolveDelegatedRuntimeMode", () => {
+  it("inherits the parent mode when nothing is requested", () => {
+    expect(resolveDelegatedRuntimeMode("auto-accept-edits")).toBe("auto-accept-edits");
+    expect(resolveDelegatedRuntimeMode("full-access", undefined)).toBe("full-access");
+  });
+
+  it("allows the same mode and a lower one", () => {
+    expect(resolveDelegatedRuntimeMode("full-access", "approval-required")).toBe("approval-required");
+    expect(resolveDelegatedRuntimeMode("auto-accept-edits", "approval-required")).toBe("approval-required");
+  });
+
+  it("counts auto and full-access as equal access", () => {
+    expect(resolveDelegatedRuntimeMode("auto", "full-access")).toBe("full-access");
+    expect(resolveDelegatedRuntimeMode("full-access", "auto")).toBe("auto");
+  });
+
+  it("refuses a higher mode with a typed error instead of lowering it", () => {
+    expect(() => resolveDelegatedRuntimeMode("approval-required", "auto-accept-edits")).toThrowError(
+      expect.objectContaining({ code: "RUNTIME_MODE_ESCALATION" }),
+    );
+    expect(() => resolveDelegatedRuntimeMode("auto-accept-edits", "full-access")).toThrowError(
+      expect.objectContaining({ code: "RUNTIME_MODE_ESCALATION" }),
+    );
+    expect(() => resolveDelegatedRuntimeMode("auto", "approval-required")).not.toThrow();
   });
 });

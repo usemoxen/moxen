@@ -145,6 +145,19 @@ export interface ProviderImage {
   readonly data: string;
 }
 
+/**
+ * A steer pushed to the provider's running turn that the provider never
+ * confirmed reaching the conversation. `id` is the `steerId` the push
+ * carried (the ledger message id), or the driver's own when the push came
+ * without one. Taking is destructive: each steer is reported once, so a
+ * turn settling reports nothing twice.
+ */
+export interface UnconfirmedSteer {
+  readonly id: string;
+  readonly text: string;
+  readonly images: readonly ProviderImage[];
+}
+
 export interface ProviderSendTurnInput {
   readonly threadId: ThreadId;
   readonly prompt: string;
@@ -578,8 +591,20 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * rounds; Codex `turn/steer`). Fails when no turn is running. Omitted by
    * drivers whose provider cannot take input mid-turn (Grok's ACP has no
    * such request) — a steer then stays recorded in the ledger only.
+   *
+   * `steerId` is the ledger message id core filed the steer under, when the
+   * caller has one: a driver that can confirm provider-side arrival keys its
+   * pending steers by it, so the turn runner can match a confirmation (or a
+   * redelivery) back to the recorded message exactly. Drivers without a
+   * confirmation signal ignore it.
    */
-  readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[]) => Effect.Effect<void, TError>;
+  readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[], steerId?: string) => Effect.Effect<void, TError>;
+
+  /**
+   * A steer handed to the provider's running turn that the provider has not
+   * confirmed reaching the conversation.
+   */
+  readonly takeUnconfirmedSteers?: (threadId: ThreadId) => ReadonlyArray<UnconfirmedSteer>;
 
   readonly sendTurn: (
     input: ProviderSendTurnInput,

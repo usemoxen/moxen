@@ -27,7 +27,7 @@ printf '%s' "$PROMPT" | moxen handover --stdin
 | `--mode`, `--interaction-mode` | `build`/`default`, `research` or `orchestrate` on thread creation (see [Modes](threads.md#modes-build-research-orchestrate-and-review)); `threads delegate --mode` also accepts `review` for a code reviewer. Plan mode was removed: `plan` is refused (`PLAN_MODE_REMOVED`, exit 2), and a thread or config saved with it reads as Build |
 | `--checkout`, `--env-mode` | `current`/`local`, `worktree`, or the resolved default via `auto` |
 
-Command flags override the CLI config, which overrides the project's saved model selection. Without either override, the saved selection and its options are passed through unchanged. A newly-created project has no default; the fallback is `MOXEN_DEFAULT_MODEL` when set, otherwise Claude Code's catalog default when Claude Code is installed. Native Codex is selected with `--provider codex --model <model>` or the corresponding defaults in Settings.
+Most specific wins: command flags, then the project's saved model selection, then the CLI config, then the installation default. Without any override, the saved selection and its options are passed through unchanged. A newly-created project has no saved selection, so the CLI config applies; with neither, the fallback is `MOXEN_DEFAULT_MODEL` when set, otherwise Claude Code's catalog default when Claude Code is installed. Native Codex is selected with `--provider codex --model <model>` or the corresponding defaults in Settings.
 
 Speed and thinking effort are stored as model options. The provider driver applies the option ids supported by the selected provider/model. If `--provider` changes the project's default provider instance, also pass `--model` because provider instance ids can be user-defined and do not imply a model.
 
@@ -121,7 +121,7 @@ moxen threads task-cancel --thread <parent-id> --task <child-thread-id>
 
 `task-cancel` (and the `task_cancel` tool) stop only a task that `--thread` delegated, or that the thread it continued from delegated and was handed to it on `thread.continue`; any other thread id, real or not, fails with `TASK_NOT_FOUND`. `task-status` is unchanged.
 
-`delegate` sends only the task prompt as the child's first turn and waits for its latest turn to reach `completed`, `interrupted`, or `error` (default budget 600000ms via `--timeout-ms`; `--no-wait` returns after acceptance). A wait timeout exits 0 with `data.task.waitTimedOut: true` and never cancels the child — re-poll with `task-status`. `task-cancel` interrupts the live provider run through the store and marks the turn interrupted. `--mode review` delegates a code review of the PR or branch in the prompt: the reviewer checks it out in a scratch worktree, changes nothing in it, and ends with `VERDICT: MERGE` or `VERDICT: FIX FIRST`. A finished review task's `task-status` carries a `review` object with the parsed `verdict`, whether the reviewer shares the parent's model (`sameModel`), and a visible `note` when the final message holds no verdict or the model is shared; `review` is absent for other tasks.
+`delegate` sends only the task prompt as the child's first turn and waits for its latest turn to reach `completed`, `interrupted`, or `error` (default budget 600000ms via `--timeout-ms`; `--no-wait` returns after acceptance). A wait timeout exits 0 with `data.task.waitTimedOut: true` and never cancels the child — re-poll with `task-status`. `task-cancel` interrupts the live provider run through the store and marks the turn interrupted. `--mode review` delegates a code review of the PR or branch in the prompt: the reviewer checks it out in a scratch worktree, changes nothing in it, and ends with `VERDICT: MERGE` or `VERDICT: FIX FIRST`. A finished review task's `task-status` carries a `review` object with the parsed `verdict`, whether the reviewer shares the parent's model (`sameModel`), and a visible `note` when the final message holds no verdict or the model is shared; `review` is absent for other tasks. `--permission <mode>` (alias `--runtime-mode`) runs the child in that permission mode when it is at most the parent's (`approval-required`, `auto-accept-edits`, `auto`, `full-access`; `auto` and `full-access` count as equal for the ceiling, so an Auto parent may delegate a Full-access child that runs with real Full access, without the checks Auto would apply — that is intended); omitted it inherits the parent's, and asking for more is refused (`RUNTIME_MODE_ESCALATION`).
 
 Thread targeting uses exit code `3` for a missing target and `4` for a lifecycle/confirmation refusal.
 
@@ -193,7 +193,7 @@ A row you set beats Moxen's shipped price list for that model on that provider; 
 
 `projectPolicy: "existing"` makes a missing project a hard error. `workspaceMode: "folder"` uses the exact current folder instead of walking up to the Git root. Whether a thread from `moxen handover` or `moxen threads create` gets a worktree is decided by the command (`--checkout`), then the project, then its `moxen.json`, then `threadEnvMode`. Explicit CLI config values remain overrides.
 
-`--checkout worktree` provisions a local worktree for the new thread: a `moxen/<id>` branch (named from the thread title: `moxen/<title-slug>`; the thread id only when there is no title) off the current branch (or its origin — new worktrees always start from origin), placed under the store's `worktrees` directory, with the thread rooted there. A repository without a current branch returns `WORKTREE_REQUIRES_BRANCH` instead of silently falling back to the current checkout.
+`--checkout worktree` provisions a local worktree for the new thread: a `moxen/<id>` branch (named from the thread title: `moxen/<title-slug>`; the thread id only when there is no title) off the current branch — from its origin when the origin has the branch, else the local branch — placed under the store's `worktrees` directory, with the thread rooted there. A repository without a current branch returns `WORKTREE_REQUIRES_BRANCH` instead of silently falling back to the current checkout.
 
 ### MCP servers
 
@@ -342,12 +342,17 @@ from this build, on the server's own machine for a paired one),
 
 ## Commands
 
+A selection of the most-used commands, not the full surface. `moxen --help`
+(then `moxen <group> <command> --help`) lists every command, and the shipped
+knowledge base (the `cli-moxen-*` reference pages, generated from the command
+definitions) documents each one.
+
 ```text
 moxen tui
 moxen remote pair <address> <code>
 moxen --server <name> <command>
 moxen --json doctor
-moxen config path|show|set
+moxen config path|show|set|get|list
 moxen projects list
 moxen projects resolve --cwd .
 moxen projects ensure --cwd . --project-policy create
@@ -381,13 +386,11 @@ moxen handover --stdin
 
 ## Providers, models, and efforts
 
-`providers list`, `models list`, and `efforts list` probe live sources on every call with no server in the loop: `claudeAgent` from its bundled catalog, and one `opencode` instance carrying the whole models.dev catalog (slugs are `provider/model`, matching migrated threads) plus local API-key presence and stored OAuth state. Use them to pick valid `--provider`, `--model`, and `--thinking-effort` values before a handover instead of guessing — unknown ids fail with `PROVIDER_NOT_FOUND` / `MODEL_NOT_FOUND` and list what exists. Choices marked `*` in human output are the model's defaults.
+`providers list`, `models list`, and `efforts list` go through the server like every other command, and every call probes live sources rather than reading a cache: `claudeAgent` from its bundled catalog, and one `opencode` instance carrying the whole models.dev catalog (slugs are `provider/model`, matching migrated threads) plus local API-key presence and stored OAuth state. Use them to pick valid `--provider`, `--model`, and `--thinking-effort` values before a handover instead of guessing — unknown ids fail with `PROVIDER_NOT_FOUND` / `MODEL_NOT_FOUND` and list what exists. Choices marked `*` in human output are the model's defaults.
 
-`models hide` / `models show` curate the pickers: hidden models stay usable when named explicitly and stay visible on threads already running them — they only leave the model picker lists.
+`models hide` / `models show` curate the pickers: hidden models stay usable when named explicitly and stay visible on threads already running them — they only leave the model picker lists. `models list` still lists them, with a `hidden` marker.
 
-`models list` never reports `hidden` on this backend — there is no picker-preference store yet, so everything reads visible.
-
-`providers list` reports each instance's `usageLimits` as `null`: subscription-quota windows are session-live in every native driver and there is no session to probe at listing time. Per-turn token totals are recorded in the turn ledger as runs settle and feed the TUI usage display.
+`providers list` reports each instance's `usageLimits` from the server's last recorded windows; it reads `null` only before any session has reported for that account. Per-turn token totals are recorded in the turn ledger as runs settle and feed the TUI usage display.
 
 ## Opening threads
 

@@ -22,7 +22,7 @@ import {
   type ThreadListStatus,
   type ThreadReadView,
 } from "../../core/threads/views.js";
-import type { CliConfig, OpenMode, ProjectEnvelope, SpeedMode, ThreadEnvelope } from "../../core/types.js";
+import type { CliConfig, OpenMode, ProjectEnvelope, RuntimeMode, SpeedMode, ThreadEnvelope } from "../../core/types.js";
 import type { ClientApi } from "../../server/api.js";
 import { decodeResearchPlan } from "../../server/protocol.js";
 import { awaitTurn, cliClient, type TurnDriverFactories } from "../infra/client.js";
@@ -344,6 +344,7 @@ export interface ThreadDelegateOptions {
   model?: string;
   speedMode?: SpeedMode;
   thinkingEffort?: string;
+  runtimeMode?: RuntimeMode;
   wait?: boolean;
   timeoutMs?: number;
   openMode?: OpenMode;
@@ -382,6 +383,7 @@ export async function delegateTask(config: CliConfig, options: ThreadDelegateOpt
     task: options.task,
     ...(research ? { research, interactionMode: "research" as const } : options.interactionMode ? { interactionMode: options.interactionMode } : {}),
     ...(options.title !== undefined ? { title: options.title } : {}),
+    ...(options.runtimeMode !== undefined ? { runtimeMode: options.runtimeMode } : {}),
     ...(options.wait !== undefined ? { wait: options.wait } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),

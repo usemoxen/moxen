@@ -129,7 +129,7 @@ describe("in-process tools for Claude", () => {
   it("turns the tools' JSON schemas into Zod shapes", () => {
     const delegate = MOXEN_TOOLS.find((tool) => tool.name === "delegate")!;
     const shape = zodShape(delegate.inputSchema);
-    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "idempotencyKey", "isolation", "mode", "model", "provider", "researchProposal", "rules", "task", "tasks", "title"]);
+    expect(Object.keys(shape).sort()).toEqual(["effort", "fork", "idempotencyKey", "isolation", "mode", "model", "provider", "researchProposal", "rules", "runtimeMode", "task", "tasks", "title"]);
     expect(shape.fork!.safeParse(true).success).toBe(true);
     expect(shape.idempotencyKey!.safeParse("0198c8f4-...").success).toBe(true);
     expect(shape.idempotencyKey!.safeParse(undefined).success).toBe(true);

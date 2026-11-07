@@ -970,8 +970,8 @@ export function asString(value: unknown): string | null {
 
 export const RUNTIME_MODES: ReadonlyArray<RuntimeMode> = [
   "approval-required",
-  "auto",
   "auto-accept-edits",
+  "auto",
   "full-access",
 ];
 
@@ -1319,6 +1319,7 @@ export function decodeCommand(value: unknown): Command {
         ...optionalString(record, "title"),
         ...optionalString(record, "idempotencyKey"),
         ...decodeModelRequest(record, type),
+        ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
         ...optionalBoolean(record, "wait", type),
         ...optionalNumber(record, "timeoutMs", type),
         ...optionalBoolean(record, "dryRun", type),
