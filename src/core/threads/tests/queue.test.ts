@@ -532,6 +532,52 @@ describe("setup failures behind a recovery", () => {
     expect(w.store.isTracked(b.turn.id)).toBe(false);
     expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === b.turn.id)?.status).toBe("running");
   });
+
+  it("sends a steered message on an orphaned turn again as its own queued turn, exactly once (MXN-312)", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const steered = await sendTurn(w.store, thread.id, {
+      prompt: "task settled",
+      delivery: "steer",
+      origin: "task-notification",
+      notification: { tasks: [] },
+    });
+    expect(steered.delivery).toBe("steered");
+    // The runner died with the steer mid-flight: nothing will ever settle it.
+    await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(true);
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
+    const messages = await w.store.readMessages(thread.id);
+    const copies = messages.filter((message) => message.text === "task settled");
+    expect(copies).toHaveLength(2);
+    // The redelivery keeps the notification's facts, so it still notifies.
+    expect(copies.find((message) => message.id !== steered.messageId)).toMatchObject({ origin: "task-notification", notification: { tasks: [] } });
+    const activities = await w.store.readActivities(thread.id);
+    expect(activities.filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
+    expect(activities.find((activity) => activity.kind === "steer.redelivered")?.payload).toMatchObject({ messageId: steered.messageId });
+    // A repeated recovery sends nothing twice: the orphan is gone, and the mark holds.
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(false);
+    expect((await w.store.readMessages(thread.id)).filter((message) => message.text === "task settled")).toHaveLength(2);
+    expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
+  });
+
+  it("runs the redelivered copy when an orphaned steer has nothing queued behind it (MXN-312)", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    await sendTurn(w.store, thread.id, { prompt: "task settled", delivery: "steer" });
+    await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(true);
+    // The copy would otherwise sit running with no runner: a later send
+    // would pile behind it and nothing in-process would ever heal it.
+    await settleRuns();
+    const turns = await w.store.readTurns(thread.id);
+    const copy = turns.find((turn) => turn.id !== running.turn.id);
+    expect(copy?.status).toBe("completed");
+    expect((await w.store.readMessages(thread.id)).find((message) => message.turnId === copy?.id)?.text).toBe("task settled");
+  });
 });
 
 /**

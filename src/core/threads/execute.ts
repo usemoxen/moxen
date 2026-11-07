@@ -44,6 +44,7 @@ import type {
   SideQuestionInput,
   TextCompletionInput,
   SubagentHistoryItem,
+  UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
 import type { InteractionMode, ModelSelection, ProvidersConfig, RuntimeMode } from "../types.js";
@@ -53,7 +54,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -108,7 +109,15 @@ export interface TurnDriver extends ProviderSessionTitles {
   refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow> } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
-  steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[]): Effect.Effect<void, CliError>;
+  steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
+  /**
+   * Steers pushed to the running turn that the provider never confirmed
+   * reaching the conversation (see `ProviderAdapter.takeUnconfirmedSteers`).
+   * The turn runner takes them as each turn settles and sends each again as
+   * a queued turn of its own. Absent where the provider gives no arrival
+   * signal; those drivers keep push-means-delivered.
+   */
+  takeUnconfirmedSteers?(threadId: string): ReadonlyArray<UnconfirmedSteer>;
   /**
    * The thread's permission mode, changed while a session is running. The session's next permission check uses it,
    * so a running turn follows it from its next tool call. Absent where the provider takes the mode only when a
@@ -1417,6 +1426,10 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     await recordContextUsage(store, driver, threadId, storeTurnId);
     if (outcome.status === "failed") recordTools.noteFailure();
     if (outcome.status !== "completed" || !outcome.text) await recordTools.saveUnfinishedText();
+    // Steers the provider never confirmed reach the conversation go out
+    // again first, as queued turns of their own: still running, they are
+    // promoted by the settle below and the next runner takes them at once.
+    await redeliverSteers(store, driver, threadId, storeTurnId);
     await settleTurn(store, args, outcome, cwd, pre);
     completedWithText = outcome.status === "completed" && !!outcome.text;
   } catch (cause) {
@@ -1427,17 +1440,25 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
-      await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
+      const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+      const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
+      // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
+      if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
       return;
     }
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
     await recordPreOutcome(store, driver, args, cwd, pre);
+    const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+    let settled = false;
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
+      settled = true;
     } catch {
       // Already terminal (e.g. a concurrent interrupt won the race).
     }
+    // Already terminal, same as above: nothing promoted the copies.
+    if (!settled) await runStrandedRedelivery(args, copies);
   } finally {
     clearInterval(liveContext);
     controller.signal.removeEventListener("abort", onAbort);
@@ -1536,6 +1557,43 @@ async function recordPreOutcome(
       timer = setTimeout(() => resolve(), EXCEPTION_PRE_OUTCOME_TIMEOUT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * What the provider never confirmed reaching the conversation goes out
+ * again, as queued turns of their own (see `redeliverUnconfirmedSteers`).
+ * A driver without an arrival signal reports nothing and this is a no-op;
+ * a throwing one must never rewrite the turn's outcome, so failures are
+ * swallowed — the ledger still holds the steer for orphan recovery.
+ */
+async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string): Promise<string[]> {
+  let pending: ReadonlyArray<UnconfirmedSteer> = [];
+  try {
+    pending = driver.takeUnconfirmedSteers?.(threadId) ?? [];
+  } catch {
+    pending = [];
+  }
+  if (pending.length === 0) return [];
+  return await redeliverUnconfirmedSteers(
+    store,
+    threadId,
+    storeTurnId,
+    pending.map((steer) => ({ messageId: steer.id, text: steer.text, images: steer.images })),
+  ).catch(() => []);
+}
+
+/**
+ * Run redelivery copies their settle missed: the turn was already terminal,
+ * so the settle below promotes nothing and the copies would sit with no
+ * runner. Requeued, promoted and run the normal way instead. No-op when the
+ * settle did promote, or admission holds the copies.
+ */
+async function runStrandedRedelivery(args: ExecuteTurnArgs, copies: readonly string[]): Promise<void> {
+  const { store, threadId } = args;
+  if (copies.length === 0) return;
+  for (const id of copies) await requeueUnownedTurn(store, threadId, id).catch(() => false);
+  const next = await promoteQueuedTurn(store, threadId).catch(() => null);
+  if (next) await runPromotedTurn(args).catch(() => undefined);
 }
 
 async function settleTurn(

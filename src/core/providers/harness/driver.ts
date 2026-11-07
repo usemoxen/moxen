@@ -609,9 +609,19 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     this.launchTurn(session, turn, target, { text });
   }
 
+  /**
+   * Text sent after the model's last step was never read: keep it where the
+   * next turn will. The transcript append is synchronous and durable, so
+   * this is also the failure and stop paths' whole redelivery — the next
+   * turn on the session reads it, whatever settled this one.
+   */
+  private keepSteering(session: HarnessSession): void {
+    for (const steer of session.steering.splice(0)) session.transcript.append({ role: "user", content: steer.text, ...(steer.images.length > 0 ? { images: steer.images } : {}) });
+  }
+
   /** Run the loop for a turn that exists, in the background of the call that made it: the settle comes through `settle`. */
   private launchTurn(session: HarnessSession, turn: HarnessTurn, target: ResolvedHarnessTarget, prompt: { readonly text: string; readonly images?: readonly ProviderImage[] | undefined }): void {
-  const effort = session.modelOptions?.find((option) => option.id === "effort");
+    const effort = session.modelOptions?.find((option) => option.id === "effort");
 
     const config: TurnConfig = {
       baseUrl: target.profile.baseUrl,
@@ -641,11 +651,11 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         if (result.lastUsage) session.lastUsage = result.lastUsage;
         // Room is made while the turn is still open, so nothing else can start on the transcript meanwhile.
         if (result.status === "completed") await this.compactAfterTurn(session, turn, target);
-        // Text sent after the model's last step was never read: keep it where the next turn will.
-        for (const steer of session.steering.splice(0)) session.transcript.append({ role: "user", content: steer.text, ...(steer.images.length > 0 ? { images: steer.images } : {}) });
+        this.keepSteering(session);
         this.settle(session, turn, { status: result.status, text: result.text, error: result.error, usage: { input: result.usage.input + turn.subagentUsage.input, cacheRead: result.usage.cacheRead + turn.subagentUsage.cacheRead, output: result.usage.output + turn.subagentUsage.output, thinking: result.usage.thinking + turn.subagentUsage.thinking, cacheCreate: 0 } });
       })
       .catch((error: unknown) => {
+        this.keepSteering(session);
         this.settle(session, turn, { status: "failed", text: "", error: error instanceof Error ? error.message : String(error), usage: null });
       });
   }
@@ -1497,6 +1507,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       if (session.wakeTimer) clearTimeout(session.wakeTimer);
       const turn = this.openTurn(session);
       turn?.controller.abort();
+      this.keepSteering(session);
       if (turn) this.settle(session, turn, { status: "interrupted", text: "", error: "Session stopped.", usage: null });
       // A successor may have registered while the close was awaited: delete
       // only the session this stop closed.
@@ -1527,6 +1538,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         if (session.wakeTimer) clearTimeout(session.wakeTimer);
         const turn = this.openTurn(session);
         turn?.controller.abort();
+        this.keepSteering(session);
         if (turn) this.settle(session, turn, { status: "interrupted", text: "", error: "Driver stopped.", usage: null });
       }
       await Promise.allSettled(
