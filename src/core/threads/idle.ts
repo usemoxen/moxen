@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 
 import type { CliConfig } from "../types.js";
 import type { ThreadStore } from "./store.js";
+import { failureMessage, reportThreadFailure } from "./failures.js";
 import { openTurn } from "./threads.js";
 
 /** How often idle sessions are looked for. A lifetime is honoured to within this. */
@@ -105,7 +106,15 @@ export async function sweepIdleSessions(): Promise<string[]> {
   for (const [driver, byThread] of sessions) {
     for (const [threadId, state] of [...byThread]) {
       if (state.ttlMs === null || now - state.last < state.ttlMs || state.tasks > 0) continue;
-      const alive = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
+      let alive: boolean;
+      try {
+        alive = await Effect.runPromise(driver.hasSession(threadId));
+      } catch (cause) {
+        // A failed probe says nothing about the session: keep the watcher
+        // and retry on the next sweep. Only a confirmed false unwatches.
+        reportThreadFailure("idle", `hasSession for thread ${threadId} failed: ${failureMessage(cause)}; keeping the watcher`);
+        continue;
+      }
       if (!alive) {
         byThread.delete(threadId);
         state.unwatch();

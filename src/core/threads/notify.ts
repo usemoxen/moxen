@@ -26,6 +26,19 @@ export interface TaskNotification {
   readonly branch: string | null;
   /** The first line of its report — delegated threads are asked to lead with one. */
   readonly headline: string | null;
+  /**
+   * Present when the task paused for usage instead of settling: the parent
+   * hears now (with the expected resume time, null when unknown) and again
+   * with the normal report when the task finishes. Only on pause
+   * notifications; a settled task never carries it.
+   */
+  readonly resumesAt?: string | null;
+  /**
+   * Present when the task's automatic continue was cancelled: no resume will
+   * come on its own. Only on cancellation notifications; `status` reads
+   * `cancelled` with it.
+   */
+  readonly cancelled?: true;
   /** What it changed, from its checkpoint; null when unknown. */
   readonly filesChanged: number | null;
   readonly additions: number | null;
@@ -153,11 +166,14 @@ const VERB: Record<DelegatedTaskStatus, string> = {
   completed: "finished",
   failed: "failed",
   interrupted: "was stopped",
+  cancelled: "was cancelled",
 };
 
 /** The message the parent's agent reads. A task whose turn ended with
  * background work still running is not finished: the message says so and
- * names the work, so the parent reads it as "not finished". */
+ * names the work, so the parent reads it as "not finished". A task that
+ * paused for usage auto-continues on its own, and a cancelled one does not:
+ * both say so, so the parent neither waits blindly nor polls. */
 export function taskNotificationText(tasks: readonly TaskNotification[], nowMs: number = Date.now()): string {
   const lines = tasks.map((task) => {
     const facts = [
@@ -169,26 +185,42 @@ export function taskNotificationText(tasks: readonly TaskNotification[], nowMs: 
     return [
       `- Task "${task.title}" (taskId ${task.taskId}${task.continuedFrom ? `, continued from taskId ${task.continuedFrom}` : ""}) ${VERB[task.status]}${facts.length > 0 ? ` · ${facts.join(" · ")}` : ""}.`,
       task.headline === null ? null : `  Headline: ${task.headline}`,
+      ...(task.resumesAt === undefined
+        ? []
+        : [task.resumesAt === null ? "  It continues once the provider allows." : `  Resumes at ${task.resumesAt}.`]),
+      ...(task.cancelled === true ? ["  Its automatic continue was cancelled; it will not resume on its own."] : []),
       ...backgroundLines(task, nowMs),
       ...(task.review === undefined ? [] : reviewLines(task.review)),
     ]
       .filter((line): line is string => line !== null)
       .join("\n");
   });
+  const paused = tasks.filter((task) => task.resumesAt !== undefined);
+  const cancelled = tasks.filter((task) => task.cancelled === true);
   const running = tasks.some((task) => task.background.length > 0);
   const unknown = tasks.some((task) => task.backgroundUnknown);
   const head =
-    tasks.length === 1 && running
-      ? "A task you delegated ended its turn with background work still running. It is not finished: do not treat its report as complete."
-      : tasks.length === 1 && unknown
-        ? "Moxen could not verify whether background work is still running on a task you delegated. Check task_status."
-        : tasks.length === 1
-          ? "A task you delegated has settled."
-          : running
-            ? "Tasks you delegated ended their turns with background work still running. They are not finished: do not treat their reports as complete."
-            : unknown
-              ? "Moxen could not verify whether background work is still running on some tasks you delegated. Check task_status."
-              : `${tasks.length} tasks you delegated have settled.`;
+    tasks.length === 1 && paused.length === 1
+      ? "A task you delegated paused for usage. It resumes on its own; its report arrives when it finishes."
+      : tasks.length === 1 && cancelled.length === 1
+        ? "A task you delegated was cancelled. It will not resume on its own."
+        : tasks.length > 1 && paused.length === tasks.length
+          ? `${tasks.length} tasks you delegated paused for usage. They resume on their own; their reports arrive when they finish.`
+          : tasks.length > 1 && cancelled.length === tasks.length
+            ? `${tasks.length} tasks you delegated were cancelled. They will not resume on their own.`
+            : tasks.length > 1 && (paused.length > 0 || cancelled.length > 0)
+              ? `Updates on ${tasks.length} tasks you delegated.`
+              : tasks.length === 1 && running
+                ? "A task you delegated ended its turn with background work still running. It is not finished: do not treat its report as complete."
+                : tasks.length === 1 && unknown
+                  ? "Moxen could not verify whether background work is still running on a task you delegated. Check task_status."
+                  : tasks.length === 1
+                    ? "A task you delegated has settled."
+                    : running
+                      ? "Tasks you delegated ended their turns with background work still running. They are not finished: do not treat their reports as complete."
+                      : unknown
+                        ? "Moxen could not verify whether background work is still running on some tasks you delegated. Check task_status."
+                        : `${tasks.length} tasks you delegated have settled.`;
   return [
     "<task-notification>",
     head,

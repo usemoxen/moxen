@@ -91,7 +91,7 @@ export function useUsageProtection(client: ClientApi) {
     }, 2000);
     return () => { stopped = true; stop(); };
   }, [client]);
-  const act = useCallback((command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel" }) => {
+  const act = useCallback((command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel"; notifyParent?: boolean }) => {
     setError(null);
     void client.dispatch(command)
       .then(() => client.query({ type: "usage.protection" }))

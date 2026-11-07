@@ -36,9 +36,9 @@ const syntaxStyle = markdownSyntaxStyle;
 /** PowerShell rows use the vendored `powershell` grammar
     (`parsers-config.json`); everything else gets `bash`, which also covers
     zsh/ksh/sh/git-bash and is the closest approximation for `cmd.exe`. */
-const TASK_VERB: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = { finished: "task.finished", failed: "task.failed", stopped: "task.stopped", running: "task.running" };
-const TASK_VERB_IN: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = { finished: "task.finishedIn", failed: "task.failedIn", stopped: "task.stoppedIn", running: "task.runningFor" };
-const TASK_VERB_FOR: Record<"finished" | "failed" | "stopped" | "running", MessageKey> = TASK_VERB_IN;
+const TASK_VERB: Record<"finished" | "failed" | "stopped" | "running" | "cancelled", MessageKey> = { finished: "task.finished", failed: "task.failed", stopped: "task.stopped", running: "task.running", cancelled: "task.cancelled" };
+const TASK_VERB_IN: Record<"finished" | "failed" | "stopped" | "running" | "cancelled", MessageKey> = { finished: "task.finishedIn", failed: "task.failedIn", stopped: "task.stoppedIn", running: "task.runningFor", cancelled: "task.cancelledIn" };
+const TASK_VERB_FOR: Record<"finished" | "failed" | "stopped" | "running" | "cancelled", MessageKey> = TASK_VERB_IN;
 
 function commandFiletype(tool: string): string {
   return /powershell|pwsh/i.test(tool) ? "powershell" : "bash";
@@ -761,7 +761,8 @@ function TaskNotificationBlock({
   // border, padding: 5).
   const inner = Math.max(16, width - 12);
   const native = tasks.every((task) => task.source === "native");
-  const header = tasks.length === 1 ? null : tr(native ? "timeline.subagentsSettled" : "timeline.tasksSettled", { count: tasks.length });
+  const settled = tasks.every((task) => task.status === "completed" || task.status === "failed" || task.status === "interrupted");
+  const header = tasks.length === 1 ? null : settled ? tr(native ? "timeline.subagentsSettled" : "timeline.tasksSettled", { count: tasks.length }) : tr("timeline.tasksUpdated", { count: tasks.length });
   return (
     <box
       border={["left"]}
@@ -774,9 +775,9 @@ function TaskNotificationBlock({
         <SpeakerHeader label={header} time={clockTime(entry.at, now)} color={COLOR.diff} background={SURFACE.panel} />
       )}
       {tasks.map((task, index) => {
-        const glyph = task.status === "completed" ? "✓" : task.status === "failed" ? "✗" : task.status === "interrupted" ? "■" : "●";
+        const glyph = task.status === "completed" ? "✓" : task.status === "failed" ? "✗" : task.status === "cancelled" ? "■" : task.status === "interrupted" ? "■" : "●";
         const glyphColor = task.status === "completed" ? COLOR.added : task.status === "failed" ? COLOR.danger : COLOR.warn;
-        const verb = task.status === "completed" ? "finished" : task.status === "failed" ? "failed" : task.status === "interrupted" ? "stopped" : "running";
+        const verb = task.status === "completed" ? "finished" : task.status === "failed" ? "failed" : task.status === "cancelled" ? "cancelled" : task.status === "interrupted" ? "stopped" : "running";
         // "finished in 1m 32s": the outcome and how long it took read as one fact.
         const outcome = task.durationMs === null ? tr(TASK_VERB[verb]) : tr(task.status === "running" ? TASK_VERB_FOR[verb] : TASK_VERB_IN[verb], { time: formatDuration(Math.max(1000, task.durationMs)) });
         const model = task.model === null ? null : modelLabel(task.model);
@@ -804,6 +805,8 @@ function TaskNotificationBlock({
           task.filesChanged === null || task.filesChanged === 0 ? null : `+${task.additions ?? 0} −${task.deletions ?? 0} · ${tr("git.files", { count: task.filesChanged })}`,
           task.branch === null ? null : tr("timeline.branch", { name: task.branch }),
         ].filter((fact): fact is string => fact !== null);
+        // A task paused for usage names its expected resume, like the usage banner does.
+        const resume = task.status !== "running" ? null : task.resumesAt === null ? tr("timeline.resumesUnknown") : tr("timeline.resumesAt", { at: clockTime(task.resumesAt, now) });
         return (
           <box key={task.taskId} style={{ flexDirection: "column", flexShrink: 0, marginTop: index === 0 && header === null ? 0 : 1 }} backgroundColor={SURFACE.panel}>
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
@@ -828,7 +831,7 @@ function TaskNotificationBlock({
                 {`  ${task.verdict === null ? tr("timeline.reviewNoVerdict") : tr("timeline.reviewVerdict", { verdict: task.verdict })}`}
               </text>
             )}
-            {footer.length === 0 ? null : <text fg={COLOR.dim} bg={SURFACE.panel}>{`  ${footer.join("  ·  ")}`}</text>}
+            {footer.length === 0 && resume === null ? null : <text fg={COLOR.dim} bg={SURFACE.panel}>{`  ${[resume, ...footer].filter((fact): fact is string => fact !== null).join("  ·  ")}`}</text>}
           </box>
         );
       })}

@@ -46,19 +46,12 @@ export interface McpPreset {
   readonly needs?: string;
   /** A key it takes, in its environment (`env`) or as an HTTP header (`header`): asked for while adding it and kept in the keychain. */
   readonly secret?: { readonly env?: string; readonly header?: string; readonly label: string };
-  /** The command has an argument worth changing (a folder), so adding it shows the command. */
-  readonly askTarget?: boolean;
 }
 
 export const MCP_PRESETS: readonly McpPreset[] = [
-  { id: "filesystem", label: "Filesystem", hint: "read and write files in a folder", name: "filesystem", npm: "@modelcontextprotocol/server-filesystem .", askTarget: true },
-  { id: "fetch", label: "Fetch", hint: "read web pages as text", name: "fetch", target: "uvx mcp-server-fetch", needs: "uv installed" },
-  { id: "git", label: "Git", hint: "inspect a git repository", name: "git", target: "uvx mcp-server-git", needs: "uv installed" },
-  { id: "github", label: "GitHub", hint: "issues, pull requests, code search", name: "github", npm: "@modelcontextprotocol/server-github", secret: { env: "GITHUB_PERSONAL_ACCESS_TOKEN", label: "GitHub token" } },
   { id: "brave-search", label: "Brave Search", hint: "web, image and news search", name: "brave-search", npm: "@brave/brave-search-mcp-server", secret: { env: "BRAVE_API_KEY", label: "Brave Search API key" } },
   { id: "exa", label: "Exa Search", hint: "web search and page contents", name: "exa", target: "https://mcp.exa.ai/mcp", secret: { header: "x-api-key", label: "Exa API key" } },
   { id: "playwright", label: "Playwright", hint: "drive a browser", name: "playwright", npm: "@playwright/mcp@latest" },
-  { id: "memory", label: "Memory", hint: "a small knowledge graph that persists", name: "memory", npm: "@modelcontextprotocol/server-memory" },
 ];
 
 export type McpRunner = "npx" | "bunx" | "pnpm" | "yarn";

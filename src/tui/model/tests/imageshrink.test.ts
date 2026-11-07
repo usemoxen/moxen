@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { attachmentFromBytes, imageDimensions, MAX_IMAGE_BYTES } from "../../../core/attachments.js";
-import { encodeRgbaPng, pngName, shrinkImage, type DecodedImage } from "../imageshrink.js";
+import { drawableImage, DISPLAY_MAX_EDGE, encodeRgbaPng, pngName, shrinkImage, type DecodedImage } from "../imageshrink.js";
+import type { LoadedImage } from "../imagethumb.js";
 
 /** A solid PNG of exactly `width`×`height`. */
 function png(width: number, height: number): Uint8Array {
@@ -82,5 +83,48 @@ describe("shrinking an image over a limit", () => {
   it("names the copy as a PNG whatever the original was", () => {
     expect(pngName("photo.final.jpeg")).toBe("photo.final.png");
     expect(pngName("noext")).toBe("noext.png");
+  });
+});
+
+describe("a picture drawn in the TUI", () => {
+  function loaded(width: number, height: number): LoadedImage {
+    return { mimeType: "image/png", bytes: png(width, height), size: { width, height } };
+  }
+
+  it("draws an image within the display cap as it is", () => {
+    const image = loaded(3000, 2000);
+    expect(drawableImage(image, fakeDecoder().decode)).toBe(image);
+  });
+
+  it("draws an image over the display cap from a smaller copy with a long edge of 4096", () => {
+    const drawn = drawableImage(loaded(9000, 300), fakeDecoder().decode);
+    expect(drawn).not.toBeNull();
+    expect(drawn!.size).toEqual({ width: 4096, height: 137 });
+    expect(drawn!.mimeType).toBe("image/png");
+    expect(imageDimensions(drawn!.bytes)).toEqual({ width: 4096, height: 137 });
+  });
+
+  it("brings even an absurd image under the native decode ceiling", () => {
+    // opentui's decoder refuses anything over about 25 megapixels, so the
+    // copy must stay under it whatever the original claims. Zeros compress,
+    // so the 4096 px square the copy becomes costs nothing here.
+    const decode = (bytes: Uint8Array): DecodedImage => ({
+      width: 20000,
+      height: 20000,
+      hasAlpha: false,
+      resize: (width: number, height: number) => ({ width, height, stride: width * 4, data: new Uint8Array(width * height * 4) }),
+      dispose: () => {},
+    });
+    const drawn = drawableImage(loaded(100, 100), decode);
+    expect(drawn!.size).toEqual({ width: DISPLAY_MAX_EDGE, height: DISPLAY_MAX_EDGE });
+    expect(drawn!.size.width * drawn!.size.height).toBeLessThan(25_000_000);
+  });
+
+  it("says null for an image the native decoder cannot read", () => {
+    expect(
+      drawableImage(loaded(100, 100), () => {
+        throw new Error("image dimensions exceed limits");
+      }),
+    ).toBeNull();
   });
 });

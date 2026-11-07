@@ -5,12 +5,14 @@ import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
 import { MemoryManagerModal } from "../../features/memory/memorymanager.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
+import { CancelAutoContinueModal } from "../../features/queue/cancelmodal.js";
 import { ChoiceList, KeyButton, KeyHints } from "../../features/queue/parts.js";
 import { QueueList, queueRows } from "../../features/queue/queuelist.js";
 import { queueGroups } from "../../model/workqueue.js";
 import { ENTRY_LONG, ENTRY_NEXT, QUEUE_ENTRIES, ENTRY_STOPPED, QUEUE_THREADS, RECOVERY_ENTRY, queueFixture } from "../queueFixture.js";
 import { ImagePreviewLayer } from "../../features/timeline/imagepreview.js";
 import { BlendedImage, ReplyImage, ReplyImageReaderContext } from "../../features/timeline/replyimage.js";
+import { Placeholder, UndrawableLine } from "../../features/timeline/imagefallback.js";
 import { UiBlockView } from "../../features/timeline/uiblockview.js";
 import { ChartView, KeyValueView, ProgressView, StatusView } from "../../features/timeline/uidataview.js";
 import { parseUiBlock, type UiBlock } from "../../../core/threads/uiblock.js";
@@ -28,6 +30,7 @@ import { PermissionPanel } from "../../features/permissionpanel/permissionpanel.
 import { QueuedPanel } from "../../features/queuedpanel/queuedpanel.js";
 import { PAIRING_PANEL_HEIGHT, PairingCodeModal } from "../../features/remote/codemodal.js";
 import { ResearchPickerModal } from "../../features/researchrun/researchpicker.js";
+import { ContinueModal } from "../../features/continue/continuemodal.js";
 import { ResearchRunView } from "../../features/researchrun/researchrunview.js";
 import { RunBackBar } from "../../features/researchrun/runbackbar.js";
 import { useResearchRunView } from "../../features/researchrun/useResearchRunView.js";
@@ -39,7 +42,7 @@ import type { UsageStats } from "../../model/stats.js";
 import { PickerModal, type PickerBody } from "../../features/pickers/pickermodal.js";
 import { SkillPicker } from "../../features/composer/skillpicker.js";
 import { MinSizeGate } from "../../ui/terminalgate.js";
-import type { SkillSummary } from "../../../core/catalog/summary.js";
+import type { ProviderSummary, SkillSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { BackgroundTaskRow } from "../../model/thread.js";
 import { TasksPanel } from "../../features/taskspanel/taskspanel.js";
@@ -386,6 +389,70 @@ const side = (overrides: Partial<SideQuestion>): SideQuestion => ({
   ...overrides,
 });
 
+const CONTINUE_PROVIDERS: ProviderSummary[] = [
+  {
+    instanceId: "claude",
+    driver: "claudeAgent",
+    displayName: "Claude",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    authStatus: "authenticated",
+    models: [
+      {
+        slug: "opus",
+        name: "Claude Opus 5",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [{
+          id: "effort",
+          label: "Effort",
+          currentValue: null,
+          choices: [
+            { id: "low", label: "Low", isDefault: false },
+            { id: "medium", label: "Medium", isDefault: true },
+            { id: "high", label: "High", isDefault: false },
+          ],
+        }],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
+  {
+    instanceId: "opencode",
+    driver: "opencode",
+    displayName: "OpenCode",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    authStatus: "authenticated",
+    models: [
+      {
+        slug: "oc-model",
+        name: "OC Model",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [{
+          id: "reasoningEffort",
+          label: "Effort",
+          currentValue: null,
+          choices: [
+            { id: "low", label: "Low", isDefault: true },
+            { id: "high", label: "High", isDefault: false },
+          ],
+        }],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
+];
+
 const composer = (width: number, mode: InteractionMode, draft: string, running: boolean) => (
   <Composer
     draft={draft}
@@ -414,6 +481,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
   { id: "work-queue-narrow", group: "queue", title: "Work queue, 80 by 24", width: 80, height: 24, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={80} screenHeight={24} onClose={noop} /> },
   { id: "work-queue-long", group: "queue", title: "Work queue, long titles", width: 90, height: 26, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_LONG_CLIENT} threads={QUEUE_THREADS} screenWidth={90} screenHeight={26} onClose={noop} /> },
   { id: "work-queue-schedule", group: "queue", title: "Schedule a message or new thread", width: 84, height: 28, settleMs: 250, element: () => <WorkQueueModal client={QUEUE_CLIENT} threads={QUEUE_THREADS} screenWidth={84} screenHeight={28} onClose={noop} onSchedule={noop} /> },
+  { id: "cancel-auto-continue", group: "queue", title: "Cancel automatic continue of a delegated task", width: 84, height: 30, settleMs: 250, element: () => <CancelAutoContinueModal title="Map auth endpoints" screenWidth={84} screenHeight={30} onNotify={noop} onSilent={noop} onBack={noop} /> },
   {
     id: "memory-runtime",
     group: "settings",
@@ -579,6 +647,19 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
         <RunBackBar title="Critic 2 · Risks" state="working" width={100} onBack={noop} />
         <Caption text="narrow" />
         <RunBackBar title="Critic 2 · Risks" state="working" width={50} onBack={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "continue-modal",
+    group: "continue",
+    title: "ContinueModal",
+    width: 100,
+    height: 28,
+    settleMs: 250,
+    element: () => (
+      <Stage width={100} height={28}>
+        <ContinueModal providers={CONTINUE_PROVIDERS} initial={{ instanceId: "claude", model: "opus" }} resetsAt={null} screenWidth={100} screenHeight={28} onConfirm={noop} onClose={noop} />
       </Stage>
     ),
   },
@@ -875,7 +956,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     width: 80,
     height: 24,
     element: () => {
-      const image = { mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 };
+      const image = { mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576, undrawable: false };
       return (
         <>
           <Stage width={80} height={24}>
@@ -890,7 +971,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       );
     },
     drive: async () => {
-      openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576 });
+      openImageViewer({ mimeType: "image/png", bytes: new Uint8Array(GALLERY_PNG), size: { width: 240, height: 120 }, label: "clipboard-1793333172202.png", sizeBytes: 1048576, undrawable: false });
       await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
     },
   },
@@ -928,6 +1009,20 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
       closeImageViewer();
       await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
     },
+  },
+  {
+    id: "reply-image-undrawable",
+    group: "timeline",
+    title: "ReplyImage fallback, one line when a picture cannot be drawn",
+    width: 60,
+    height: 8,
+    element: () => (
+      <Stage width={60} height={8}>
+        <Placeholder label="quarterly chart" state="loading" />
+        <Placeholder label="missing.png" state="failed" />
+        <UndrawableLine label="ceiling.png" onOpen={noop} />
+      </Stage>
+    ),
   },
   {
     id: "ui-block-pair",

@@ -2212,6 +2212,20 @@ describe("DirectConnection continue in a new thread", () => {
     ).toThrow("either modelSelection or provider/model, not both");
   });
 
+  it("refuses a non-boolean notifyParent instead of silently defaulting", () => {
+    for (const command of [
+      { type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: "yes" },
+      { type: "usage.queue", threadId: "t1", direction: "cancel", notifyParent: 1 },
+      { type: "queue.edit", threadId: "t1", turnId: "r1", action: "remove", notifyParent: 1 },
+      { type: "thread.task.cancel", parentThreadId: "p1", taskId: "t1", notifyParent: "no" },
+    ]) {
+      expect(() => decodeCommand(command)).toThrow(/notifyParent must be true or false/);
+    }
+    expect(
+      decodeCommand({ type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: false }),
+    ).toEqual({ type: "thread.turn.interrupt", threadId: "t1", turnId: "r1", notifyParent: false });
+  });
+
   it("hands the new thread to the requested model, keeping the project and checkout", async () => {
     const harness = await testHarness();
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
