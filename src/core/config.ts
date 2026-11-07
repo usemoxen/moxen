@@ -893,7 +893,8 @@ export async function backupConfigFile(configPath: string): Promise<void> {
  * A save that changes nothing skips the backup and the rewrite.
  * Skipped entries ride along: a save carries what the load could not read
  * (applied only where the saved config says nothing), so fixing or
- * resetting one entry never drops the others.
+ * resetting one entry never drops the others. A save over a disk file newer
+ * than this build knows refuses instead of clobbering it.
  */
 export async function saveConfig(configPath: string, config: CliConfig, skipped: readonly SkippedConfigEntry[] = []): Promise<void> {
   // Loaded here rather than at the top: `core/config` is imported during
@@ -920,8 +921,12 @@ export async function saveConfig(configPath: string, config: CliConfig, skipped:
       }
     }
     next = out;
-  } catch {
-    // Missing or unreadable: nothing to strip against; write what was passed.
+  } catch (error) {
+    // A stale save never clobbers a disk file newer than this build knows:
+    // the baseline re-read refuses instead of falling through to the write.
+    if (error instanceof CliError && (error.code === "FORMAT_TOO_NEW" || error.code === "INVALID_FORMAT_VERSION")) throw error;
+    // Missing, not JSON, or otherwise unreadable: nothing to strip against;
+    // write what was passed.
   }
   // A save must never drop what the load could not read: skipped values
   // apply only where the saved config says nothing.

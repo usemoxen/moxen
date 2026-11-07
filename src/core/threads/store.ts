@@ -195,11 +195,11 @@ export class ThreadStore {
   }
 
   static async open(root: string, options: ThreadStoreOptions = {}): Promise<ThreadStore> {
-    await mkdir(path.join(root, "threads"), { recursive: true });
-    // The gate for a downgrade: a newer store refuses before anything reads
-    // it, and a store that predates markers is stamped version 1, so the
-    // store carries a format version from today.
+    // The gate for a downgrade runs before anything is created: a refused
+    // open leaves the root untouched. A store that predates markers is
+    // stamped version 1 below, so the store carries a format version from today.
     await readStoreVersion(root);
+    await mkdir(path.join(root, "threads"), { recursive: true });
     try {
       await stat(storeVersionFile(root));
     } catch {
@@ -294,6 +294,12 @@ export class ThreadStore {
    * the store's marker (usually stamped at open), so a store that became
    * newer under a running build refuses its writes. Reads stay lenient —
    * one bad record warns rather than failing the whole store.
+   *
+   * Not a fence between writers: the re-read and the write are two steps,
+   * and two builds sharing one store could still interleave them. They never
+   * do through moxen itself — exactly one server process owns the store
+   * (its `server.lock` refuses a second) — so this is a backstop for a
+   * marker swapped under a running build, not a lock.
    */
   private async assertStoreWriteable(): Promise<void> {
     await readStoreVersion(this.root);

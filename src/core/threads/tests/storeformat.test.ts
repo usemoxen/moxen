@@ -4,7 +4,7 @@
  * reads as version 1, today's records load under the new gate, and a build
  * refuses to open or write a store newer than it knows.
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -70,6 +70,15 @@ describe("store format version", () => {
     const root = await testRoot();
     await writeFile(path.join(root, "store.json"), JSON.stringify({ formatVersion: 2 }), "utf8");
     await expect(openThreadStore(root)).rejects.toMatchObject({ code: "FORMAT_TOO_NEW" });
+  });
+
+  it("creates nothing when it refuses a newer store", async () => {
+    const root = await testRoot();
+    await writeFile(path.join(root, "store.json"), JSON.stringify({ formatVersion: 2 }), "utf8");
+    await expect(openThreadStore(root)).rejects.toMatchObject({ code: "FORMAT_TOO_NEW" });
+    // The version gate runs before anything is created: no threads/ beside
+    // the marker the test itself wrote.
+    expect(await readdir(root)).toEqual(["store.json"]);
   });
 
   it("refuses a marker that is not a version instead of guessing", async () => {

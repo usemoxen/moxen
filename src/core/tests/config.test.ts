@@ -268,6 +268,19 @@ describe("config format version", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).formatVersion).toBe(2);
   });
 
+  it("refuses a save over a disk file newer than it knows, leaving it byte-identical", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    const newer = `{"formatVersion": 2, "provider": "future"}\n`;
+    writeFileSync(file, newer);
+    // The in-memory config reads as version 1; the disk file does not, and
+    // the stale save refuses instead of clobbering it back to version 1.
+    await expect(saveConfig(file, normalizeFileConfig({ provider: "old" }))).rejects.toMatchObject({
+      code: "FORMAT_TOO_NEW",
+    });
+    expect(readFileSync(file, "utf8")).toBe(newer);
+  });
+
   it("refuses a version that is not a version, and never takes it by hand", () => {
     expect(() => normalizeFileConfig({ ...TODAY, formatVersion: "2" })).toThrow(
       expect.objectContaining({ code: "INVALID_FORMAT_VERSION" }),
