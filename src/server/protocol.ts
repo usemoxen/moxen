@@ -849,6 +849,16 @@ export type ShellFrame =
   | {
       readonly kind: "event";
       readonly event: { readonly type: "app.update-progress"; readonly payload: { readonly commandId: string | null; readonly progress: UpdateProgress } };
+    }
+  /**
+   * An update or rollback has landed: the running server is stale and needs
+   * a restart. Broadcast to every shell subscriber (not just the client that
+   * started it, which already follows the progress above); new clients learn
+   * it from the hello instead.
+   */
+  | {
+      readonly kind: "event";
+      readonly event: { readonly type: "app.server-restart-required"; readonly payload: { readonly version: string; readonly from: string | null } };
     };
 
 export type ThreadFrame =

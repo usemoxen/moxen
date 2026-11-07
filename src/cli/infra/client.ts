@@ -96,11 +96,6 @@ export async function cliClient(config: CliConfig, drivers?: TurnDriverFactories
   return await openClient();
 }
 
-/**
- * Block until a turn settles. A one-shot CLI is often the only process
- * running the turn, so returning early would strand it `running`; Ctrl-C
- * interrupts the turn (keeping the thread) and exits 130.
- */
 const AWAIT_RETRY_DELAY_MS = 500;
 /**
  * How many times `awaitTurn` re-asks after a dropped connection: a server
@@ -109,6 +104,11 @@ const AWAIT_RETRY_DELAY_MS = 500;
  */
 const AWAIT_MAX_RETRIES = 60;
 
+/**
+ * Block until a turn settles. A one-shot CLI is often the only process
+ * running the turn, so returning early would strand it `running`; Ctrl-C
+ * interrupts the turn (keeping the thread) and exits 130.
+ */
 export async function awaitTurn(
   client: ClientApi,
   threadId: string,

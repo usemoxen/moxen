@@ -24,6 +24,7 @@ import { useExperience } from "../features/experience/useExperience.js";
 import { StatsModal } from "../features/stats/statsmodal.js";
 import { UpdateModal } from "../features/update/updatemodal.js";
 import { useAppUpdate } from "../features/update/useAppUpdate.js";
+import { restartRequiredFromFrame } from "../model/update.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import type { ActiveServer } from "../features/remote/server.js";
 import { useRemote } from "../features/remote/useRemote.js";
@@ -443,6 +444,10 @@ export function App({
       {},
       (item) => {
         appUpdate.onFrame(item);
+        // Another client's update landed: the running server is stale.
+        // Upserted by id, so the notice stays one toast no matter how many
+        // frames carry it, until the server restarts and it stops arriving.
+        if (restartRequiredFromFrame(item) !== null) toasts.push("moxen:update", "warn", t("update.beforeInstall"));
         setShell((current) => applyShellFrame(current, item));
       },
       (cause) => setError(String(cause).slice(0, 120)),

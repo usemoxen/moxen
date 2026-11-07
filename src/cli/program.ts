@@ -419,17 +419,19 @@ server
 
 server
   .command("status")
-  .description("Report whether a server is running, and which protocol it speaks.")
+  .description("Report whether a server is running, which build it is, and whether it needs a restart.")
   .action(() =>
     action(async () => {
       const context = await commandContext();
       thisMachineOnly("server status");
       const result = await serverStatus();
-      writeSuccess(
-        result,
-        context,
-        result.running ? `moxen server running at ${result.endpoint} (pid ${result.pid}).` : `No moxen server at ${result.endpoint}.`,
-      );
+      const text = !result.running
+        ? `No moxen server at ${result.endpoint}.`
+        : "buildMismatch" in result && typeof result.buildMismatch === "string"
+          // Names both builds and what to do next.
+          ? result.buildMismatch
+          : `moxen server running at ${result.endpoint} (pid ${result.pid}).${result.restartRequired ? " An update is installed: restart it (moxen server stop, then start Moxen again) to use it." : ""}`;
+      writeSuccess(result, context, text);
     }),
   );
 
