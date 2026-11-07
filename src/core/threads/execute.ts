@@ -58,6 +58,7 @@ import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUp
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
 import { forgetSession, touchSession, trackSession } from "./idle.js";
+import { failureMessage, reportThreadFailure } from "./failures.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
@@ -351,6 +352,20 @@ export function liveTurnText(driver: TurnDriver, threadId: string): LiveTurnText
   };
 }
 
+/**
+ * One subscriber's event, isolated: a throw is reported, never propagated.
+ * A throw inside the pump's `Effect.sync` is a defect, and a defected
+ * `runForEach` ends the fiber — every subscriber would go quiet until the
+ * pump is rebuilt, with the old subscriber set orphaned.
+ */
+function deliverEvent(subscriber: EventSubscriber, event: ProviderRuntimeEvent): void {
+  try {
+    subscriber(event);
+  } catch (cause) {
+    reportThreadFailure("driver event", `a subscriber for thread ${event.threadId} threw: ${failureMessage(cause)}`);
+  }
+}
+
 function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>> {
   const existing = pumps.get(driver);
   if (existing) return existing;
@@ -365,8 +380,8 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
         // once per event, whoever (if anyone) watches the thread.
         if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows);
         trackLiveText(buffers, event);
-        for (const subscriber of subscribers.get("*") ?? []) subscriber(event);
-        for (const subscriber of subscribers.get(event.threadId) ?? []) subscriber(event);
+        for (const subscriber of subscribers.get("*") ?? []) deliverEvent(subscriber, event);
+        for (const subscriber of subscribers.get(event.threadId) ?? []) deliverEvent(subscriber, event);
       }),
     ),
   );
@@ -1348,7 +1363,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
   const onAbort = (): void => {
-    Effect.runFork(driver.interruptTurn(threadId));
+    // Detached, as before — but a failed interrupt is reported instead of
+    // dropped: `runFork` leaves nobody to hear it.
+    void Effect.runPromise(driver.interruptTurn(threadId)).catch((cause) => {
+      reportThreadFailure("interrupt", `interruptTurn for thread ${threadId} failed: ${failureMessage(cause)}`);
+    });
   };
   controller.signal.addEventListener("abort", onAbort, { once: true });
   try {
