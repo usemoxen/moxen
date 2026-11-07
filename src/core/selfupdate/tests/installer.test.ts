@@ -118,6 +118,15 @@ describe("launcherScripts", () => {
     expect(windows.replaceAll("\r\n", "")).not.toContain("\n");
   });
 
+  it("runs the installed executable when it is there, and the bundle on Bun otherwise", () => {
+    expect(posix).toContain('if [ -x "$exe" ]; then');
+    expect(posix).toContain('exec "$exe" "$@"');
+    expect(posix).toContain('elif [ -f "$entry" ]; then');
+    expect(windows).toContain('if exist "%APP%\\versions\\%VERSION%\\moxen.exe" goto runexe');
+    expect(windows).toContain('"%APP%\\versions\\%VERSION%\\moxen.exe" %*');
+    expect(windows).toContain(":runbundle");
+  });
+
   it("names a platform's way onto PATH", () => {
     expect(pathHint("macos", "/a b/bin")).toContain('export PATH="/a b/bin:$PATH"');
     expect(pathHint("windows", "C:\\a b\\bin")).toContain("SetEnvironmentVariable");
@@ -144,5 +153,15 @@ describe("launcherScripts", () => {
     const none = spawnSync("sh", [launcher], { encoding: "utf8", env });
     expect(none.status).not.toBe(0);
     expect(none.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === "win32")("sh launcher prefers the installed executable over the bundle", async () => {
+    const one = release("1.2.3");
+    const exe = path.join(one.folder, "moxen");
+    writeFileSync(exe, `#!/bin/sh\nprintf 'EXE:%s' "$1"; exit 7\n`, { mode: 0o755 });
+    const { launcher } = await installRelease({ ...one.options, layout: layoutIn(temp()) });
+    const ran = spawnSync("sh", [launcher, "--version"], { encoding: "utf8", env: process.env });
+    expect(ran.status).toBe(7);
+    expect(ran.stdout).toBe("EXE:--version");
   });
 });

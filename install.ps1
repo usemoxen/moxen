@@ -2,13 +2,13 @@
 #
 #   irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 #
-# It finds the latest release, installs Bun first when it is missing, checks the
-# archive against its .sha256 (and stops on a mismatch), runs self-update
-# --install, and puts Moxen on your PATH: it appends ~/.moxen/app/bin to the
-# user's persistent Path (deduplicated, via [Environment] so no setx
-# 1024-character truncation), new terminals pick it up, and the current shell
-# gets it too. Set MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke test
-# does). MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step, and
+# It finds the latest release, checks the archive against its `.sha256` (and
+# stops on a mismatch), runs `self-update --install`, and puts Moxen on your
+# PATH: it appends ~/.moxen/app/bin to the user's persistent Path
+# (deduplicated, via [Environment] so no setx 1024-character truncation), new
+# terminals pick it up, and the current shell gets it too. Set
+# MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke test does).
+# MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step, and
 # MOXEN_INSTALL_TEST_VALUE=<name> writes that user-environment value instead
 # of Path: both for tests.
 # macOS uses install.sh instead; Linux and Intel Macs have no build.
@@ -109,15 +109,6 @@ function Main {
     Fail "release $Tag has no $Checksum for this platform."
   }
 
-  if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-    Write-Host 'Bun is missing, installing it first (https://bun.sh)...'
-    powershell -NoProfile -Command "irm bun.sh/install.ps1 | iex"
-    $env:Path += ";$env:USERPROFILE\.bun\bin"
-    if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-      Fail 'bun is still missing after its install.'
-    }
-  }
-
   $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('moxen-install-' + [System.Guid]::NewGuid().ToString('N'))
   try {
     New-Item -ItemType Directory -Path $Tmp | Out-Null
@@ -141,8 +132,8 @@ function Main {
     }
 
     Write-Host 'Installing...'
-    $Entry = Join-Path (Join-Path $Tmp $Base) 'dist\cli\index.js'
-    & bun "$Entry" self-update --install
+    $Entry = Join-Path (Join-Path $Tmp $Base) 'moxen.exe'
+    & $Entry self-update --install
     if ($LASTEXITCODE -ne 0) {
       Fail 'self-update --install failed.'
     }

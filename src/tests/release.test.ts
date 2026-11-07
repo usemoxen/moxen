@@ -3,7 +3,7 @@ import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseInstallNotes, releaseNotesBody, releaseTarget, tagForVersion, tagMismatch, unpackCommand } from "../../scripts/release-lib.js";
+import { archiveFileName, checksumFileName, executableName, packCommand, releaseBaseName, releaseInstallNotes, releaseNotesBody, releaseTarget, tagForVersion, tagMismatch, unpackCommand } from "../../scripts/release-lib.js";
 
 // The script runs on Bun (TypeScript directly); vitest itself may run on Node.
 const BUN = process.versions.bun ? process.execPath : "bun";
@@ -25,6 +25,11 @@ describe("release archives", () => {
     expect(() => releaseTarget("darwin", "ia32")).toThrow();
     expect(() => releaseTarget("darwin", "x64")).toThrow();
     expect(() => releaseTarget("win32", "arm64")).toThrow();
+  });
+
+  it("names one executable per platform", () => {
+    expect(executableName(releaseTarget("darwin", "arm64"))).toBe("moxen");
+    expect(executableName(releaseTarget("win32", "x64"))).toBe("moxen.exe");
   });
 
   it("accepts only the tag v<version>", () => {
@@ -55,7 +60,11 @@ describe("release notes", () => {
 
   it("says what an install needs and what happens next", () => {
     const notes = releaseInstallNotes("0.1.2");
-    expect(notes).toContain("Bun");
+    expect(notes).toContain("standalone");
+    expect(notes).toContain("needs no Bun");
+    expect(notes).toContain("./moxen-0.1.2-macos-arm64/moxen self-update --install");
+    expect(notes).toContain("moxen.exe self-update --install");
+    expect(notes).toContain("xattr -d com.apple.quarantine");
     expect(notes).toContain("self-update --install");
     expect(notes).toContain("PATH");
     expect(notes).toContain("MOXEN_INSTALL_NO_PATH");

@@ -10,10 +10,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RELEASE_MARKER, archiveFileName, checksumFileName, packCommand, releaseBaseName, releaseMarker, releaseTarget } from "../../release.js";
+import { RELEASE_MARKER, archiveFileName, checksumFileName, executableName, packCommand, releaseBaseName, releaseMarker, releaseTarget } from "../../release.js";
 import { LATEST_RELEASE_URL } from "../check.js";
 import { appLayout, type AppLayout } from "../installer.js";
-import { escapingEntries, parseChecksum, rollbackRelease, unsafeEntries, updateRelease, type UpdateOptions, type UpdateProgress } from "../update.js";
+import { escapingEntries, parseChecksum, rollbackRelease, targetEntry, unsafeEntries, updateRelease, type UpdateOptions, type UpdateProgress } from "../update.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -378,6 +378,33 @@ describe("updateRelease", () => {
       expect(text(w.layout.previous)).toBe("1.0.0\n");
       expect(readdirSync(w.layout.versions).sort()).toEqual(["1.0.0", "1.1.0"]);
     });
+  });
+});
+
+describe("targetEntry", () => {
+  const win = releaseTarget("win32", "x64");
+
+  it("runs the bundle entry on the given runtime when the folder holds no executable", () => {
+    const folder = temp();
+    writeRelease(folder, "1.0.0");
+    expect(targetEntry(folder, target, "/runt/ime", false)).toEqual({ exec: "/runt/ime", args: [path.join(folder, "dist", "cli", "index.js"), "--version"], viaBunBeBun: false });
+  });
+
+  it("prefers the standalone executable, by platform name, with no fallback runtime", () => {
+    const folder = temp();
+    writeRelease(folder, "1.0.0");
+    writeFileSync(path.join(folder, executableName(target)), "binary");
+    expect(targetEntry(folder, target, "/runt/ime", true)).toEqual({ exec: path.join(folder, executableName(target)), args: ["--version"], viaBunBeBun: false });
+    const windows = temp();
+    writeFileSync(path.join(windows, "package.json"), JSON.stringify({ version: "1.0.0" }));
+    writeFileSync(path.join(windows, executableName(win)), "binary");
+    expect(targetEntry(windows, win, "/runt/ime", false)).toEqual({ exec: path.join(windows, "moxen.exe"), args: ["--version"], viaBunBeBun: false });
+  });
+
+  it("runs a dist-only folder on the standalone binary's own Bun CLI", () => {
+    const folder = temp();
+    writeRelease(folder, "1.0.0");
+    expect(targetEntry(folder, target, "/runt/ime", true)).toEqual({ exec: "/runt/ime", args: [path.join(folder, "dist", "cli", "index.js"), "--version"], viaBunBeBun: true });
   });
 });
 

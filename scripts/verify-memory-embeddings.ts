@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
@@ -85,10 +85,8 @@ try {
     assert.equal(offline.memories[0]?.name, "secrets");
     // Exercise the actual shipped CPU worker on macOS too, independently of
     // automatic WebGPU selection. On Windows this is the default backend.
-    const assets = path.join(dist, "assets");
-    const workers = await Promise.all((await readdir(assets)).filter((file) => /^embedding-process-.*\.mjs$/.test(file)).map(async (file) => ({ file: path.join(assets, file), mtime: (await stat(path.join(assets, file))).mtimeMs })));
-    const worker = workers.sort((a, b) => b.mtime - a.mtime)[0]?.file;
-    assert.ok(worker, "No bundled embedding process asset");
+    const worker = path.join(dist, "core", "memory", "embedding-child-entry.js");
+    assert.ok((await stat(worker).catch(() => null))?.isFile(), `No bundled embedding worker at ${worker}`);
     const runtime = path.join(root, "embedding-runtime", "transformers-4.3.2");
     const cpu = spawn(process.execPath, [worker, runtime, path.join(runtime, "cache"), "offline", "cpu"], { stdio: ["pipe", "pipe", "ignore"] });
     const lines = createInterface({ input: cpu.stdout });

@@ -9,19 +9,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isStandaloneExecutable, resolveAppRoot } from "../infra/standalone.js";
 import { RELEASE_MARKER, releaseTarget, type ReleaseMarker, type ReleaseTarget } from "../release.js";
 import type { InstallInfo, InstallKind } from "./vocabulary.js";
 import { APP_VERSION } from "../version.js";
 
 /** The folder above `from` that holds `package.json` (the same walk bundled mods use), or null. */
-export function installFolder(from = path.dirname(fileURLToPath(import.meta.url))): string | null {
-  let folder = from;
-  while (!existsSync(path.join(folder, "package.json"))) {
-    const parent = path.dirname(folder);
-    if (parent === folder) return null;
-    folder = parent;
-  }
-  return folder;
+export function installFolder(from = path.dirname(fileURLToPath(import.meta.url)), execDir?: string, standalone?: boolean): string | null {
+  return resolveAppRoot(from, execDir ?? path.dirname(process.execPath), standalone ?? isStandaloneExecutable());
 }
 
 function platformTarget(platform: string, arch: string): ReleaseTarget | null {
@@ -48,6 +43,10 @@ export interface ReadInstallOptions {
   readonly version?: string;
   readonly platform?: string;
   readonly arch?: string;
+  /** The folder holding the executable; injected in tests. Defaults to the running one. */
+  readonly execDir?: string;
+  /** Whether this runs from a standalone executable; injected in tests. */
+  readonly standalone?: boolean;
 }
 
 /**
@@ -57,7 +56,7 @@ export interface ReadInstallOptions {
 export function readInstall(options: ReadInstallOptions = {}): InstallInfo {
   const version = options.version ?? APP_VERSION;
   const target = platformTarget(options.platform ?? process.platform, options.arch ?? process.arch);
-  const folder = installFolder(options.from);
+  const folder = installFolder(options.from, options.execDir, options.standalone);
   const info = (kind: InstallKind): InstallInfo => ({
     version,
     kind,

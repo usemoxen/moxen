@@ -4,7 +4,7 @@
 
 ## Requirements
 
-Bun (it manages packages and runs everything) and at least one provider CLI: `claude` (`claude auth login`), `codex` 0.164.0 or newer (`codex login`), or `opencode` v2 or newer (`opencode auth login`, including `openai` for ChatGPT and `xai` for SuperGrok, or provider API keys).
+Bun (to build from a checkout; a release runs with nothing else installed) and at least one provider CLI: `claude` (`claude auth login`), `codex` 0.164.0 or newer (`codex login`), or `opencode` v2 or newer (`opencode auth login`, including `openai` for ChatGPT and `xai` for SuperGrok, or provider API keys).
 
 ## Install
 
@@ -22,29 +22,29 @@ One line on Windows (x64, PowerShell):
 irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 ```
 
-Either script fetches the latest release's archive, installs Bun first when it
-is missing, checks the archive against its `.sha256` and refuses a mismatch,
-then runs `self-update --install` and puts Moxen on your PATH: on macOS it
-appends a marker-guarded `export PATH` snippet to your shell profile (zsh:
-`~/.zshrc`, bash: `~/.bash_profile`), added once and never duplicated; on Windows it
-adds the folder to your user PATH. Set `MOXEN_INSTALL_NO_PATH=1` to skip that
-step. New terminals pick it up.
-Linux and Intel Macs have no build yet. The one-liners download the scripts
+Either script fetches the latest release's archive, checks it against its
+`.sha256` and refuses a mismatch, then runs `self-update --install` and puts
+Moxen on your PATH: a marker-guarded `export PATH` snippet on macOS, the user
+Path on Windows. Nothing else needs installing: each release
+holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support
+files, and needs no Bun. Linux and Intel Macs have no build yet. The one-liners download the scripts
 from the release itself, so they work from the next release on; until then,
 follow the by-hand steps below.
 
 Each tagged release on [GitHub Releases](https://github.com/usemoxen/moxen/releases)
 carries the same steps in its notes, and holds an archive per
 platform, `moxen-<version>-macos-arm64.tar.gz` or `moxen-<version>-windows-x64.zip`, and a `.sha256` file
-beside it. Bun is the only thing you need installed: the archive holds the bundle and its native library.
+beside it.
 
 ```bash
 tar -xzf moxen-<version>-macos-arm64.tar.gz     # Windows: tar -xf moxen-<version>-windows-x64.zip
-bun moxen-<version>-macos-arm64/dist/cli/index.js self-update --install
+./moxen-<version>-macos-arm64/moxen self-update --install
 ```
 
 Check the download against its `.sha256` first (`shasum -a 256 -c <file>.sha256` on macOS; on Windows compare
-`Get-FileHash` with the file's contents). `self-update --install` copies the release to
+`Get-FileHash` with the file's contents). A macOS download is quarantined: clear it from the executable
+(`xattr -d com.apple.quarantine moxen-<version>-macos-arm64/moxen`) or the first run is killed on launch.
+`self-update --install` copies the release to
 `~/.moxen/app/versions/<version>/`, records it in `~/.moxen/app/current`, writes a `moxen` launcher (`moxen.cmd` on
 Windows) in `~/.moxen/app/bin`, and prints how to put that folder on your PATH. It edits no shell profile (the
 one-line installers above do that step for you). Run

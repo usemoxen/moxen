@@ -77,11 +77,12 @@ One line on Windows (x64, PowerShell):
 irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 ```
 
-Either script fetches the latest release, installs Bun first when it is
-missing, checks the download against its `.sha256` and refuses a mismatch,
-then runs `self-update --install` and puts Moxen on your PATH (a snippet in
-your shell profile on macOS, the user Path on Windows;
-`MOXEN_INSTALL_NO_PATH=1` skips that step).
+Either script fetches the latest release, checks the download against its
+`.sha256` and refuses a mismatch, then runs `self-update --install` and puts
+Moxen on your PATH (a snippet in your shell profile on macOS, the user Path
+on Windows; `MOXEN_INSTALL_NO_PATH=1` skips that step). Nothing else needs
+installing: each release holds a standalone `moxen` executable (`moxen.exe`
+on Windows) and its support files, and needs no Bun.
 Linux and Intel Macs have no build yet. The one-liners download the scripts
 from the release itself, so they work from the next release on; until then,
 use the by-hand steps in the [README](../README.md#from-a-release).

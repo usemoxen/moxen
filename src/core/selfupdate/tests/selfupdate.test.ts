@@ -159,4 +159,17 @@ describe("readInstall", () => {
   it("is source when run from this checkout's own src", () => {
     expect(readInstall().kind).toBe("source");
   });
+
+  it("is the executable's folder when standalone, source without a package.json beside it", () => {
+    const exe = mkdtempSync(path.join(os.tmpdir(), "moxen-install-exe-"));
+    folders.push(exe);
+    const install = () => readInstall({ from: "/$bunfs/root/x", version: "0.1.2", platform: "darwin", arch: "arm64", execDir: exe, standalone: true });
+    expect(install().kind).toBe("source");
+    writeFileSync(path.join(exe, "package.json"), JSON.stringify({ version: "0.1.2" }));
+    expect(install().kind).toBe("source");
+    writeFileSync(path.join(exe, RELEASE_MARKER), marker);
+    expect(install()).toMatchObject({ kind: "release", folder: exe, target: { os: "macos", arch: "arm64" } });
+    // Without the standalone flag the executable's folder is ignored and `from` is walked as always.
+    expect(readInstall({ from: exe, version: "0.1.2", platform: "darwin", arch: "arm64", execDir: "/nope", standalone: false })).toMatchObject({ kind: "release", folder: exe });
+  });
 });

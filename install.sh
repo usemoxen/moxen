@@ -3,14 +3,15 @@
 #
 #   curl -fsSL https://github.com/usemoxen/moxen/releases/latest/download/install.sh | sh
 #
-# It finds the latest release, installs Bun first when it is missing, checks the
-# archive against its .sha256 (and stops on a mismatch), runs self-update
-# --install, and puts Moxen on your PATH: a marker-guarded `export PATH` line in
-# the profile for your shell (zsh: ~/.zshrc, bash on macOS: ~/.bash_profile,
-# which login shells read; sh: ~/.profile), added once and never duplicated. Other shells get instructions instead of a
-# write. Set MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke test does).
-# MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step against $HOME, for tests.
-# Linux and Intel Macs have no build; Windows uses install.ps1 instead.
+# It finds the latest release, checks the archive against its `.sha256` (and
+# stops on a mismatch), clears the download quarantine macOS puts on the
+# executable, runs `self-update --install`, and puts Moxen on your PATH: a
+# marker-guarded `export PATH` line in the profile for your shell (zsh:
+# ~/.zshrc, bash on macOS: ~/.bash_profile, which login shells read; sh:
+# ~/.profile), added once and never duplicated. Other shells get instructions
+# instead of a write. Set MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke
+# test does). MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step against $HOME,
+# for tests. Linux and Intel Macs have no build; Windows uses install.ps1 instead.
 #
 # Everything runs inside main, called on the last line, so a truncated download
 # defines nothing runnable and installs nothing.
@@ -86,14 +87,6 @@ main() {
   tmp="$(mktemp -d -t moxen-install.XXXXXX)"
   trap 'rm -rf "$tmp"' EXIT INT TERM
 
-  if ! command -v bun >/dev/null 2>&1; then
-    echo "Bun is missing, installing it first (https://bun.sh)..."
-    curl -fsSL -o "$tmp/bun-install.sh" https://bun.sh/install || fail "the Bun download failed."
-    bash "$tmp/bun-install.sh" || fail "the Bun install failed."
-    export PATH="$HOME/.bun/bin:$PATH"
-    command -v bun >/dev/null 2>&1 || fail "bun is still missing after its install."
-  fi
-
   echo "Downloading ${tag} (${archive})..."
   curl -fsSL -o "$tmp/$archive" "https://github.com/${REPO}/releases/download/${tag}/${archive}" || fail "could not download ${archive}."
   curl -fsSL -o "$tmp/$checksum" "https://github.com/${REPO}/releases/download/${tag}/${checksum}" || fail "could not download ${checksum}."
@@ -104,8 +97,13 @@ main() {
   echo "Unpacking..."
   tar -xzf "$tmp/$archive" -C "$tmp" || fail "could not unpack ${archive}."
 
+  # A macOS download is quarantined, and a quarantined executable is killed on
+  # launch: clear it from the unpacked release. A missing xattr is not fatal;
+  # without it the first run may still need a manual allowance.
+  xattr -dr com.apple.quarantine "$tmp/$base" 2>/dev/null || true
+
   echo "Installing..."
-  bun "$tmp/$base/dist/cli/index.js" self-update --install || fail "self-update --install failed."
+  "$tmp/$base/moxen" self-update --install || fail "self-update --install failed."
 
   add_moxen_to_path
 
