@@ -128,6 +128,12 @@ starts a full run without a proposal. `--research-models` accepts the model
 entries as a JSON object. Omitted role models inherit the lead's model and
 effort, and become the run's fixed defaults; a role tool cannot override them.
 `--mode review` starts a reviewer for the PR or branch in the prompt.
+A delegated child runs in the parent's permission mode unless `--permission`
+names one at most the parent's (`approval-required`, `auto-accept-edits`, `auto`,
+`full-access`; `auto` and `full-access` count as equal for the ceiling, so an
+Auto parent may delegate a Full-access child that runs with real Full access,
+without the checks Auto would apply — that is intended): asking for
+more than the parent's is refused, never quietly lowered.
 Existing calls and CLI JSON envelopes are unchanged.
 
 ### Research run view
@@ -646,7 +652,15 @@ A follow-up, a delegated task, and a thread continued in a new one keeps its
 source thread's selection unless the request overrides it, and never falls
 back to the settings or the installation default. The continuation's model
 request is how a handoff changes models; anything it does not name stays the
-source's.
+source's. A delegated child's permission mode is capped at its parent's:
+omitted it inherits the parent's, and asking for more is refused
+(`RUNTIME_MODE_ESCALATION`), never lowered — so a child delegating further
+is capped by its own mode in turn. `auto` and `full-access` count as equal
+for the ceiling, so an Auto parent may delegate a Full-access child that runs
+with real Full access, without the checks Auto would apply — that is
+intended. The ceiling applies when the task is delegated: lowering a parent
+later does not change running children or what they may delegate further.
+`thread.runtime-mode.set` is the user's own control and isn't capped.
 
 ## Modes: Build, Research, Orchestrate and Review
 
@@ -845,6 +859,20 @@ input and this process holds the session, and is only recorded otherwise
 a live session, and the steer succeeding, not a list of providers). A steer
 never starts a second provider run.
 
+Handing the steer over is not its arrival: a provider can drop a message on
+the way in (seen on Claude, when a steer landed while the turn's first
+message was still being taken). So a steer counts as delivered when the
+provider confirms it reached the conversation — Claude echoes every
+streamed message's id on the reply frames and result of the turn that
+consumes it — and whatever is still unconfirmed when the turn settles goes
+out again, each as a queued turn of its own. Notifications are therefore
+at-least-once and never silently lost. Interrupting a turn redelivers its
+pending steers even where no echo could confirm them — our own interrupt
+ended the turn with the CLI queue — so an interrupted steer can arrive
+twice. A provider with no arrival signal keeps push-means-delivered on
+turns that end any other way, and a steer on a session that dies with its
+process goes out again when the orphaned turn is recovered.
+
 ### Messaging a delegated task (`task_send`)
 
 A thread can message a task it delegated, to correct or redirect it instead of
@@ -854,7 +882,9 @@ as a user turn headed "Message from the thread that delegated this task (not fro
 the user)", stored with `origin: "task-message"`, and the task's instructions say
 what that header means. The result's `outcome` reports what really happened:
 
-- `steered`: the running turn received it and reads it at its next step.
+- `steered`: the running turn took it and reads it at its next step. If the
+  turn ends without it reaching the conversation, it is sent again as its
+  own turn.
 - `queued`: the task is busy and its driver cannot take input mid-turn here (no
   `steerTurn`, or no live session in this process), so the message waits and
   runs as the task's next turn. The task has not read it; do not assume it acts

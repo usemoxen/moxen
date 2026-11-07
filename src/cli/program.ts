@@ -233,6 +233,7 @@ interface ThreadDelegateCommandOptions extends PromptOptions {
   model?: string;
   speedMode?: SpeedMode;
   thinkingEffort?: string;
+  runtimeMode?: RuntimeMode;
   wait?: boolean;
   timeoutMs?: string;
   dryRun?: boolean;
@@ -1587,6 +1588,7 @@ threads
       .choices(["standard", "fast"]),
   )
   .option("--thinking-effort <effort>", "Model-specific reasoning/thinking effort override.")
+  .addOption(new Option("--permission, --runtime-mode <mode>", "Permission/access level for the child thread (at most the parent's).").choices(["approval-required", "auto-accept-edits", "auto", "full-access"]))
   .addOption(new Option("--mode <mode>", "Build (default); research runs a single read-only researcher; review runs a code reviewer.").choices(["build", "research", "review"]))
   .option("--research-size <researchers,critics>", "Start a full Research run with this user-chosen size: 1–8 researchers, 1 or 3 critics and one finalizer.")
   .option("--research-models <json>", "Role model defaults: a JSON object keyed by researcher, critic and finalizer, each with provider, model and thinkingEffort. Requires --research-size.")
@@ -1618,6 +1620,7 @@ threads
         ...(options.model ? { model: options.model } : {}),
         ...(options.speedMode ? { speedMode: options.speedMode } : {}),
         ...(options.thinkingEffort ? { thinkingEffort: options.thinkingEffort } : {}),
+        ...(options.runtimeMode ? { runtimeMode: options.runtimeMode } : {}),
         ...(options.wait === false ? { wait: false } : {}),
         ...(rawTimeout !== undefined && rawTimeout.length > 0 ? { timeoutMs: Number(rawTimeout) } : {}),
         ...(options.open ? { openMode: options.open } : {}),
