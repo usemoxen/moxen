@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { UpdateCheck, UpdateResult } from "../../../core/selfupdate/vocabulary.js";
-import { IDLE, downloadFraction, reduceUpdate, stageRows, updateActions, updateEventFromFrame, type UpdateEvent, type UpdateView } from "../update.js";
+import { IDLE, downloadFraction, reduceUpdate, restartRequiredFromFrame, stageRows, updateActions, updateEventFromFrame, type UpdateEvent, type UpdateView } from "../update.js";
 
 const check = (overrides: Partial<UpdateCheck> = {}): UpdateCheck => ({
   install: { version: "0.1.0", kind: "release", folder: "/app", target: { os: "macos", arch: "arm64" } },
@@ -51,6 +51,13 @@ describe("update view", () => {
     expect(updateEventFromFrame(frame)).toEqual({ type: "progress", commandId: "c", progress: { stage: "downloading", bytes: 1, total: 2 } });
     expect(updateEventFromFrame({ kind: "synchronized" })).toBeNull();
     expect(updateEventFromFrame({ kind: "event", event: { type: "other", payload: {} } })).toBeNull();
+  });
+
+  it("reads a server restart notice from a shell frame and nothing else", () => {
+    const frame = { kind: "event", event: { type: "app.server-restart-required", payload: { version: "0.2.0", from: "0.1.0" } } };
+    expect(restartRequiredFromFrame(frame)).toEqual({ version: "0.2.0", from: "0.1.0" });
+    expect(restartRequiredFromFrame({ kind: "synchronized" })).toBeNull();
+    expect(restartRequiredFromFrame({ kind: "event", event: { type: "app.update-progress", payload: {} } })).toBeNull();
   });
 });
 

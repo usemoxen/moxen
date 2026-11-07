@@ -10,7 +10,7 @@ import {
   sendTurn,
   settleThread as settleStoredThread,
 } from "../../../core/threads/threads.js";
-import { testHarness, type TestHarness } from "../../../core/testing/harness.js";
+import { testHarness, type TestHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
 import { openThreadStore } from "../../../core/threads/store.js";
 import {
   cancelTask,
@@ -490,8 +490,8 @@ describe("thread lifecycle", () => {
 });
 
 describe("send delivery modes", () => {
-  async function busyHarness() {
-    const harness = await testHarness();
+  async function busyHarness(options: TestHarnessOptions = {}) {
+    const harness = await testHarness(options);
     await seedProject(harness);
     await seedThread(harness);
     await sendTurn(harness.store, "thread-existing", { prompt: "First" });
@@ -551,7 +551,11 @@ describe("send delivery modes", () => {
   });
 
   it("restarts by interrupting before sending", async () => {
-    const harness = await busyHarness();
+    // Parked: the new turn must still be `running` when it is read, but with
+    // a completing driver the background runner settles it first whenever
+    // the read lands late (flaked once on macOS CI). Parked turns never
+    // settle on their own, so `running` is the stable state, not a transient.
+    const harness = await busyHarness({ leaveTurnsRunning: true });
 
     const result = await sendThreadMessage(harness.config, {
       threadId: "thread-existing",

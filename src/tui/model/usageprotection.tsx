@@ -47,7 +47,7 @@ export function usageQueueStatus(entry: UsageQueueEntry, now: number): { phase: 
 
 export function usageProtectionNotices(
   state: QueryResults["usage.protection"],
-  act: (command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel" }) => void,
+  act: (command: { type: "usage.wrap"; provider: string } | { type: "usage.queue"; threadId: string; direction: "first" | "last" | "cancel"; notifyParent?: boolean }) => void,
   now: number,
   providers: readonly ProviderSummary[] | null = null,
 ): Notice[] {

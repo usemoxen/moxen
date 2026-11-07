@@ -16,6 +16,7 @@ import { HoverButton } from "../../ui/hoverbutton.js";
 import { LoadingScreen } from "../../ui/loadingscreen.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { NoticeBanner, Pager, type Notice } from "../../ui/noticebanner.js";
+import { ProblemsModal } from "../../features/problems/problemsModal.js";
 import { DateTimeModal } from "../../ui/datetimemodal.js";
 import { RenameModal } from "../../ui/renamemodal.js";
 import { SearchField } from "../../ui/searchfield.js";
@@ -234,6 +235,58 @@ export const UI_GALLERY: GalleryEntry[] = [
     element: () => (
       <Stage width={70} height={12}>
         <RenameModal initialTitle="Neural Radiance Cache viability" screenWidth={70} screenHeight={12} left={6} top={2} width={58} height={7} onSubmit={noop} onClose={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-problems-modal-narrow",
+    group: "ui",
+    title: "ProblemsModal, narrow",
+    width: 64,
+    height: 24,
+    settleMs: 250,
+    element: () => (
+      <Stage width={64} height={24}>
+        <ProblemsModal
+          rows={[
+            { key: "ledger", kind: "ledger-line", message: "Line 7 is not valid JSON and was skipped; the rest still loads.", location: "/Users/someone/.moxen/threads/demo/messages.jsonl:7", copyText: "/Users/someone/.moxen/threads/demo/messages.jsonl", quarantineId: "ledger" },
+            { key: "stuck", kind: "turn-ownerless", message: "Turn turn-9 is running but no process owns it, so nothing will ever settle it. Stop the turn.", location: "/Users/someone/.moxen/threads/demo/turns.jsonl", copyText: "/Users/someone/.moxen/threads/demo/turns.jsonl", stop: { threadId: "demo", turnId: "turn-9" } },
+            { key: "config:speedMode", kind: "config", message: "speedMode must be standard or fast.", location: "speedMode", copyText: "config.json", resetKey: "speedMode" },
+          ]}
+          screenWidth={44}
+          screenHeight={24}
+          onClose={noop}
+          onQuarantine={noop}
+          onReset={noop}
+          onStop={noop}
+          onCopy={noop}
+        />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-problems-modal",
+    group: "ui",
+    title: "ProblemsModal",
+    width: 100,
+    height: 20,
+    settleMs: 250,
+    element: () => (
+      <Stage width={100} height={20}>
+        <ProblemsModal
+          rows={[
+            { key: "ledger", kind: "ledger-line", message: "Line 7 is not valid JSON and was skipped; the rest still loads.", location: "messages.jsonl:7", copyText: "messages.jsonl", quarantineId: "ledger" },
+            { key: "stuck", kind: "turn-ownerless", message: "Turn turn-9 is running but no process owns it, so nothing will ever settle it. Stop the turn.", location: "turns.jsonl", copyText: "turns.jsonl", stop: { threadId: "demo", turnId: "turn-9" } },
+            { key: "config:speedMode", kind: "config", message: "speedMode must be standard or fast.", location: "speedMode", copyText: "config.json", resetKey: "speedMode" },
+          ]}
+          screenWidth={100}
+          screenHeight={20}
+          onClose={noop}
+          onQuarantine={noop}
+          onReset={noop}
+          onStop={noop}
+          onCopy={noop}
+        />
       </Stage>
     ),
   },

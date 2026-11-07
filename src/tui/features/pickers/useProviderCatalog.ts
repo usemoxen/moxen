@@ -7,8 +7,9 @@ import {
   displayRuntimeMode,
   runtimeModeChoicesForProvider,
 } from "../../../core/catalog/permissions.js";
+import { rebaseContinueSelection } from "../../model/continue.js";
 import type { ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../../core/types.js";
-import { defaultEffortChoice, displayEffort, displayModelName, isEffortDescriptor } from "../../model/display.js";
+import { displayEffort, displayModelName } from "../../model/display.js";
 import { providerColor } from "../../theme.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PickerName } from "./pickerTypes.js";
@@ -176,34 +177,11 @@ export function useProviderCatalog(params: {
 
   /**
    * Switching models keeps the effort-style options that still exist on the
-   * new model; dropping them would silently reset the effort knob.
+   * new model; dropping them would silently reset the effort knob. Shared
+   * with the continue modal so the two cannot disagree.
    */
-  const buildModelSelection = (choice: { instanceId: string; model: string }): ModelSelection => {
-    const catalogModel = providers
-      ?.find((provider) => provider.instanceId === choice.instanceId)
-      ?.models.find((model) => model.slug === choice.model);
-    const kept = (effectiveModelSelection?.options ?? []).filter(
-      (option) =>
-        typeof option.value === "boolean" ||
-        catalogModel?.efforts.some((effort) => effort.id === option.id) === true,
-    );
-    // Enforced effort default: effort knobs missing from the kept options
-    // land on the descriptor default, so sends carry a real value and the
-    // footer never reads blank. Non-effort descriptors stay unset.
-    const defaults: ProviderOptionSelection[] = [];
-    for (const descriptor of catalogModel?.efforts ?? []) {
-      if (!isEffortDescriptor(descriptor.id)) continue;
-      if (kept.some((option) => option.id === descriptor.id)) continue;
-      const value = defaultEffortChoice(descriptor);
-      if (value !== null) defaults.push({ id: descriptor.id, value });
-    }
-    const options = [...kept, ...defaults];
-    return {
-      instanceId: choice.instanceId,
-      model: choice.model,
-      ...(options.length > 0 ? { options } : {}),
-    };
-  };
+  const buildModelSelection = (choice: { instanceId: string; model: string }): ModelSelection =>
+    rebaseContinueSelection(effectiveModelSelection, providers, choice);
 
   const pickModel = (choice: { instanceId: string; model: string }, forDraft = false) => {
     const selection = buildModelSelection(choice);
@@ -303,7 +281,6 @@ export function useProviderCatalog(params: {
     permissionChoices,
     modelColor,
     labelFor,
-    buildModelSelection,
     openModelPicker,
     openEffortPicker,
     openPermissionPicker,

@@ -73,6 +73,8 @@ import type {
   MergeStrategy,
 } from "../core/forge/forge.js";
 import type { Diagnosis } from "../core/diagnostics/doctor.js";
+import type { StoreProblem } from "../core/threads/problems.js";
+import type { ConfigProblem } from "../core/config.js";
 import type { ExperienceSnapshot } from "../core/experience/experience.js";
 import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
 import type { StatsRange, UsageStats } from "../core/usage/stats.js";
@@ -198,12 +200,12 @@ export type CommandBody =
       readonly scheduleReason?: "user" | "usage-reset";
     }
   /** Interrupts the running turn — or, given a queued turn's id, cancels that queued message. */
-  | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string }
+  | { readonly type: "thread.turn.interrupt"; readonly threadId: string; readonly turnId?: string; readonly notifyParent?: boolean }
   | { readonly type: "usage.wrap"; readonly provider: string }
   | { readonly type: "thread.protect"; readonly threadId: string }
-  | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy }
+  | { readonly type: "queue.edit"; readonly threadId: string; readonly turnId: string; readonly action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit"; readonly policy?: QueuePolicy; readonly notifyParent?: boolean }
   | { readonly type: "handoff.submit"; readonly threadId: string; readonly requestId: string; readonly summary: string }
-  | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel" }
+  | { readonly type: "usage.queue"; readonly threadId: string; readonly direction: "first" | "last" | "cancel"; readonly notifyParent?: boolean }
   /** `stop`: end the family's running work first instead of refusing to settle past it. */
   | { readonly type: "thread.settle"; readonly threadId: string; readonly reason?: string; readonly stop?: boolean }
   | { readonly type: "thread.unsettle"; readonly threadId: string; readonly reason?: string }
@@ -270,7 +272,14 @@ export type CommandBody =
   | ({ readonly type: "skills.enabled.set"; readonly projectId?: string; readonly enabled: boolean } & SkillAddress)
   | ({ readonly type: "skills.providers.set"; readonly projectId?: string; readonly providers: readonly McpProviderKind[] } & SkillAddress)
   | ({ readonly type: "skills.remove"; readonly projectId?: string } & SkillAddress)
-  | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * Move a reported bad record aside into the store's quarantine folder —
+   * never deleted — and repair the source (a ledger loses only the bad
+   * line). Resolves from the server's own problem log by id, so a client
+   * can never name an arbitrary path.
+   */
+  | { readonly type: "store.quarantine"; readonly id: string }
+  | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string; readonly notifyParent?: boolean }
   /**
    * Settle a task the caller delegated (moxen's `task_settle`), through the
    * same path as `threads settle`. `stop` ends running work first; a running
@@ -471,6 +480,7 @@ export interface CommandResults {
   "skills.enabled.set": Accepted;
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
+  "store.quarantine": { readonly movedTo: string };
   "thread.task.cancel": CancelledTask;
   "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
@@ -551,6 +561,13 @@ export type Query =
       readonly lastTurn?: boolean;
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * The live delegation that made this thread a task, if any: which thread
+   * it reports to and whether it notifies. Lets a client cancelling an
+   * automatic continue ask before telling the parent. Null for threads that
+   * are nobody's task.
+   */
+  | { readonly type: "thread.delegation"; readonly threadId: string }
   | { readonly type: "research.run"; readonly threadId: string }
   /**
    * The thread behind a live OpenCode session: which thread's tools and
@@ -580,6 +597,13 @@ export type Query =
   | ({ readonly type: "skills.manage.read"; readonly projectId?: string } & SkillAddress)
   /** Binaries, git, store and stored-credential presence on the machine running the sessions. */
   | { readonly type: "doctor" }
+  /**
+   * Bad records readers skipped — corrupt thread records and ledger lines,
+   * stuck turns — with their locations. Read-only; the TUI warns from it,
+   * `doctor` reports it. Config entries that failed to parse ride on
+   * `config.read` instead, beside the file that holds them.
+   */
+  | { readonly type: "store.problems" }
   /** Skills and slash commands one provider resolves for a working directory. */
   | { readonly type: "skills.list"; readonly instanceId: string; readonly cwd: string }
   /** Background work running in a thread's live session; `live: false` when no session runs here. */
@@ -742,6 +766,7 @@ export interface QueryResults {
   "thread.inspect": { readonly project: StoredProject | null; readonly thread: ThreadInspection };
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
+  "thread.delegation": { readonly parentThreadId: string; readonly notify: boolean } | null;
   "research.run": ResearchRunView | null;
   "opencode.session-thread": {
     readonly threadId: string;
@@ -757,6 +782,7 @@ export interface QueryResults {
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
   doctor: Diagnosis;
+  "store.problems": { readonly problems: readonly StoreProblem[] };
   "skills.list": SkillInventory;
   "image-generation.availability": { readonly available: boolean; readonly reason: string | null };
   "skills.manage.list": { readonly skills: readonly ManagedSkill[]; readonly roots: SkillRoots };
@@ -790,7 +816,7 @@ export interface QueryResults {
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
   "experience.read": ExperienceSnapshot;
-  "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig };
+  "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig; readonly problems: readonly ConfigProblem[] };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
   "app.update.check": UpdateCheck;
@@ -841,6 +867,16 @@ export type ShellFrame =
   | {
       readonly kind: "event";
       readonly event: { readonly type: "app.update-progress"; readonly payload: { readonly commandId: string | null; readonly progress: UpdateProgress } };
+    }
+  /**
+   * An update or rollback has landed: the running server is stale and needs
+   * a restart. Broadcast to every shell subscriber (not just the client that
+   * started it, which already follows the progress above); new clients learn
+   * it from the hello instead.
+   */
+  | {
+      readonly kind: "event";
+      readonly event: { readonly type: "app.server-restart-required"; readonly payload: { readonly version: string; readonly from: string | null } };
     };
 
 export type ThreadFrame =
@@ -1100,9 +1136,9 @@ export function decodeCommand(value: unknown): Command {
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
         ...optionalEnum(record, "ifBusy", ["reject", "inject"] as const, type),
         ...optionalEnum(record, "delivery", ["auto", "steer", "restart", "queue"] as const, type),
-        ...optionalBoolean(record, "wakeSettled"),
+        ...optionalBoolean(record, "wakeSettled", type),
         ...optionalString(record, "handoffNote"),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "wait", type),
         ...optionalString(record, "scheduledFor"),
         ...optionalEnum(record, "scheduleReason", ["user", "usage-reset"] as const, type),
       };
@@ -1113,17 +1149,18 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         ...(asString(record.turnId) ? { turnId: asString(record.turnId) as string } : {}),
+        ...optionalBoolean(record, "notifyParent", type),
       };
     case "usage.wrap":
       return { ...meta, type, provider: requireField(record.provider, type, "provider") };
     case "thread.protect":
       return { ...meta, type, threadId: threadId() };
     case "queue.edit":
-      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}) };
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent", type) };
     case "handoff.submit":
       return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
-      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const) };
+      return { ...meta, type, threadId: threadId(), direction: requireEnum(record.direction, type, "direction", ["first", "last", "cancel"] as const), ...optionalBoolean(record, "notifyParent", type) };
     case "thread.settle":
       return {
         ...meta,
@@ -1222,7 +1259,7 @@ export function decodeCommand(value: unknown): Command {
           exitCode: 2,
         });
       }
-      return { ...meta, type, threadId: threadId(), turnCount, ...optionalBoolean(record, "restoreFiles") };
+      return { ...meta, type, threadId: threadId(), turnCount, ...optionalBoolean(record, "restoreFiles", type) };
     }
     case "app.update.apply":
     case "app.update.rollback":
@@ -1240,9 +1277,9 @@ export function decodeCommand(value: unknown): Command {
         ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type) } : {}),
         ...decodeModelRequest(record, type),
-        ...optionalBoolean(record, "dryRun"),
-        ...optionalBoolean(record, "scratch"),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "dryRun", type),
+        ...optionalBoolean(record, "scratch", type),
+        ...optionalBoolean(record, "wait", type),
       };
     case "skills.import":
       return { ...meta, type, ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), from: requireField(record.from, type, "from") };
@@ -1257,6 +1294,8 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeSkillAddress(record, type), providers: parseSkillProviders(record.providers) };
     case "skills.remove":
       return { ...meta, type, ...decodeSkillAddress(record, type) };
+    case "store.quarantine":
+      return { ...meta, type, id: requireField(record.id, type, "id") };
     case "thread.image.generate":
       return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
     case "research.role.start":
@@ -1281,12 +1320,12 @@ export function decodeCommand(value: unknown): Command {
         ...optionalString(record, "idempotencyKey"),
         ...decodeModelRequest(record, type),
         ...optionalEnum(record, "runtimeMode", RUNTIME_MODES, type),
-        ...optionalBoolean(record, "wait"),
+        ...optionalBoolean(record, "wait", type),
         ...optionalNumber(record, "timeoutMs", type),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
         ...optionalEnum(record, "isolation", ["shared", "worktree"] as const, type),
-        ...optionalBoolean(record, "notify"),
-        ...optionalBoolean(record, "fork"),
+        ...optionalBoolean(record, "notify", type),
+        ...optionalBoolean(record, "fork", type),
         ...(record.research === undefined ? {} : { research: decodeResearchPlan(record.research) }),
         ...(record.researchProposal === undefined ? {} : { researchProposal: decodeResearchPlan(record.researchProposal) }),
         // A delegated task runs in Build, Research or Review — never Orchestrate, which the operation refuses.
@@ -1298,6 +1337,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
+        ...optionalBoolean(record, "notifyParent", type),
       };
     case "thread.task.settle":
       return {
@@ -1305,8 +1345,8 @@ export function decodeCommand(value: unknown): Command {
         type,
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
-        ...optionalBoolean(record, "stop"),
-        ...optionalBoolean(record, "removeWorktree"),
+        ...optionalBoolean(record, "stop", type),
+        ...optionalBoolean(record, "removeWorktree", type),
       };
     case "thread.task.send":
       return {
@@ -1315,7 +1355,7 @@ export function decodeCommand(value: unknown): Command {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
         message: requireField(record.message, type, "message"),
-        ...optionalBoolean(record, "wake"),
+        ...optionalBoolean(record, "wake", type),
       };
     case "thread.task.ask":
       return {
@@ -1351,7 +1391,7 @@ export function decodeCommand(value: unknown): Command {
         cwd: requireField(record.cwd, type, "cwd"),
         ...optionalEnum(record, "workspaceMode", ["repo", "folder"] as const, type),
         ...optionalEnum(record, "projectPolicy", ["create", "existing"] as const, type),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
       };
     case "memory.save":
       return {
@@ -1391,7 +1431,7 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeMemoryAddress(record) };
     case "memory.embeddings.setup":
     case "memory.embeddings.rebuild":
-      return { ...meta, type, ...decodeMemoryAddress(record), ...optionalBoolean(record, "all") };
+      return { ...meta, type, ...decodeMemoryAddress(record), ...optionalBoolean(record, "all", type) };
     case "memory.embeddings.unload":
       return { ...meta, type };
     case "model.visibility.set":
@@ -1455,7 +1495,7 @@ export function decodeCommand(value: unknown): Command {
         ...optionalString(record, "body"),
         ...optionalString(record, "targetBranch"),
         ...optionalString(record, "sourceBranch"),
-        ...optionalBoolean(record, "draft"),
+        ...optionalBoolean(record, "draft", type),
       };
     case "forge.request.comment":
       return {
@@ -1472,7 +1512,7 @@ export function decodeCommand(value: unknown): Command {
         threadId: requireThreadId(record.threadId),
         number: requireNumber(record.number, type, "number"),
         ...optionalEnum(record, "strategy", ["merge", "squash", "rebase"] as const, type),
-        ...optionalBoolean(record, "deleteBranch"),
+        ...optionalBoolean(record, "deleteBranch", type),
       };
     case "remote.pairing.start":
     case "remote.pairing.cancel":
@@ -1480,7 +1520,7 @@ export function decodeCommand(value: unknown): Command {
     case "remote.device.revoke":
       return { ...meta, type, deviceId: requireField(record.deviceId, type, "deviceId") };
     case "experience.update":
-      return { ...meta, type, ...optionalBoolean(record, "completeOnboarding"), ...optionalString(record, "seenRelease") };
+      return { ...meta, type, ...optionalBoolean(record, "completeOnboarding", type), ...optionalString(record, "seenRelease") };
     case "settings.set":
       return {
         ...meta,
@@ -1520,7 +1560,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         profileId: requireField(record.profileId, type, "profileId"),
         ...(asString(record.model) !== null ? { model: asString(record.model)! } : {}),
-        ...optionalBoolean(record, "dryRun"),
+        ...optionalBoolean(record, "dryRun", type),
       };
     case "provider.update":
       return {
@@ -1551,9 +1591,13 @@ function decodeSkillAddress(record: Record<string, unknown>, type: string): Skil
   return { ...optionalString(record, "projectId"), source: requireEnum(record.source, type, "source", SKILL_SOURCES), folder: requireField(record.folder, type, "folder") };
 }
 
-function optionalBoolean<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: boolean } {
+function optionalBoolean<K extends string>(record: Record<string, unknown>, key: K, command: string): { [P in K]?: boolean } {
   const value = record[key];
-  return (typeof value === "boolean" ? { [key]: value } : {}) as { [P in K]?: boolean };
+  if (value === undefined) return {} as { [P in K]?: boolean };
+  if (typeof value !== "boolean") {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} ${key} must be true or false.`, { exitCode: 2 });
+  }
+  return { [key]: value } as { [P in K]?: boolean };
 }
 
 /** A required whole number — a PR number that arrived as text is refused. */
@@ -1684,7 +1728,7 @@ export function decodeQuery(value: unknown): Query {
         // Validated by the read itself, whose error names the CLI flag
         // that `--json` consumers already match on.
         ...(typeof record.view === "string" ? { view: record.view as ThreadReadView } : {}),
-        ...optionalBoolean(record, "lastTurn"),
+        ...optionalBoolean(record, "lastTurn", type),
       };
     case "research.proposals":
     case "research.run":
@@ -1702,6 +1746,8 @@ export function decodeQuery(value: unknown): Query {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
       };
+    case "thread.delegation":
+      return { type, threadId: requireThreadId(record.threadId) };
     case "thread.turn.await":
       return {
         type,
@@ -1730,6 +1776,7 @@ export function decodeQuery(value: unknown): Query {
     case "remote.devices":
     case "settings.read":
     case "experience.read":
+    case "store.problems":
     case "config.read":
     case "provider.latest":
     case "app.update.check":

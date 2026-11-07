@@ -119,6 +119,19 @@ describe("toThreadEnvelope", () => {
 });
 
 describe("row projections", () => {
+  it("reads a turn with an unknown status as unknown, not completed", () => {
+    const strange = turn({ id: "t9", status: "bogus" as StoredTurn["status"] });
+    expect(toThreadEnvelope(thread(), [strange]).latestTurn).toMatchObject({ turnId: "t9", state: "unknown" });
+  });
+
+  it("does not report idle while an unknown or ownerless turn is open", () => {
+    const strange = turn({ id: "t9", status: "bogus" as StoredTurn["status"] });
+    expect(toThreadEnvelope(thread(), [strange]).session).toMatchObject({ status: "running", activeTurnId: "t9" });
+    const { owner: _dropped, ...ownerless } = turn({ id: "t8", status: "running" });
+    expect(toThreadEnvelope(thread(), [ownerless]).session).toMatchObject({ status: "running", activeTurnId: "t8" });
+    expect(toThreadEnvelope(thread(), []).session).toMatchObject({ status: "idle", activeTurnId: null });
+  });
+
   it("maps messages, activities, and checkpoints", () => {
     expect(
       toMessageEnvelope({ id: "m", threadId: "t", turnId: "u", role: "assistant", text: "x", createdAt: "c" }),

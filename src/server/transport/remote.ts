@@ -4,10 +4,12 @@
  *
  * Requests are matched to responses by id. A dropped connection rejects
  * whatever was in flight with `SERVER_DISCONNECTED` — a command may or may
- * not have run, and only the caller can decide whether to retry it — but
- * subscriptions survive: the client reconnects and re-subscribes, and
- * because every subscription opens with a full snapshot, the subscriber
- * is back in sync on the first frame, with nothing to replay.
+ * not have run, and only the caller can decide whether to retry it — and
+ * the client starts reconnecting, with or without subscriptions: a one-shot
+ * wait (`send --wait`) retries its read behind the reconnect, which is safe
+ * because the read follows the ledger. Every subscription re-subscribes on
+ * the new socket, and because each opens with a full snapshot, the
+ * subscriber is back in sync on the first frame, with nothing to replay.
  *
  * A server can also die without closing the socket: frozen, its machine
  * asleep, the network gone. So connecting and the hello have a deadline,
@@ -19,6 +21,7 @@ import net from "node:net";
 import tls from "node:tls";
 
 import { CliError } from "../../core/errors.js";
+import { buildIdentity, describeBuildMismatch, type BuildInfo } from "../../core/build.js";
 import type { ClientApi } from "../api.js";
 import type {
   CommandOf,
@@ -85,12 +88,20 @@ export interface RemoteConnectionOptions {
   /** Reconnect and re-subscribe after the server goes away (default true). */
   readonly reconnect?: boolean;
   /**
+   * Accept a hello from another local build as a limited connection, which
+   * reports its mismatch on `buildMismatch` and only lets `shutdown`
+   * through: what `server stop`, `server status` and the autostart check
+   * use, so stopping the old server keeps working. Never for paired
+   * servers, which cannot stop the server anyway.
+   */
+  readonly allowBuildMismatch?: boolean;
+  /**
    * Reach a server on another machine over TLS (`./remoteaccess.ts`)
    * instead of the local endpoint, which then only labels it.
    */
   readonly tls?: RemoteTlsTarget;
-  /** Sent with `protocol` in every hello: a remote socket's `pair` or `device`. */
-  readonly hello?: Omit<HelloParams, "protocol">;
+  /** Sent with `protocol` and the client's build in every hello: a remote socket's `pair` or `device`. */
+  readonly hello?: Omit<HelloParams, "protocol" | "build" | "buildDisplay">;
   /** Liveness while connected (default 5s / 15s); `false` turns it off. */
   readonly heartbeat?: Heartbeat | false;
   /** Deadline for the socket to connect, and again for the hello (default 10s). */
@@ -109,7 +120,7 @@ export interface RemoteTlsTarget {
 }
 
 /** Hello refusals no retry can fix: reconnecting stops and subscribers hear it. */
-const FATAL_HELLO_CODES = new Set(["REMOTE_DEVICE_REFUSED", "REMOTE_KEY_MISMATCH", "REMOTE_NOT_PAIRED", "PROTOCOL_MISMATCH"]);
+const FATAL_HELLO_CODES = new Set(["REMOTE_DEVICE_REFUSED", "REMOTE_KEY_MISMATCH", "REMOTE_NOT_PAIRED", "PROTOCOL_MISMATCH", "BUILD_MISMATCH"]);
 
 export class RemoteConnection implements ClientApi {
   private socket: net.Socket | null = null;
@@ -125,6 +136,13 @@ export class RemoteConnection implements ClientApi {
   /** Set when this side drops a silent socket: why, for what its pending requests hear. */
   private dropReason: string | null = null;
   helloResult: HelloResult | null = null;
+  /**
+   * Set when the server greeted from another build (local sockets only, and
+   * only with `allowBuildMismatch`): the mismatch to refuse with. Every
+   * request but `shutdown` is rejected with it, so stopping the old server
+   * keeps working while nothing else silently runs against it.
+   */
+  buildMismatch: CliError | null = null;
   /** Over TLS: the pin of the key the server presented. */
   peerFingerprint: string | null = null;
 
@@ -159,7 +177,7 @@ export class RemoteConnection implements ClientApi {
     return this.options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
   }
 
-  private async open(): Promise<void> {
+  private async open(): Promise<net.Socket> {
     const socket = this.options.tls ? await this.openTls(this.options.tls) : await this.openLocal();
     socket.setEncoding("utf8");
     const reader = new LineReader();
@@ -171,12 +189,47 @@ export class RemoteConnection implements ClientApi {
     socket.once("close", () => this.onClose(socket));
     this.socket = socket;
     // A frozen server still accepts the connection; only the hello shows it is not answering.
+    // Unref'd, so a client closed mid-hello does not hold the event loop up
+    // to the deadline: `close()` already rejected what the hello parked.
     const helloDeadline = setTimeout(() => {
       this.dropReason = `it accepted the connection but did not answer within ${seconds(this.connectTimeoutMs)}`;
       socket.destroy();
     }, this.connectTimeoutMs);
+    helloDeadline.unref?.();
     try {
-      this.helloResult = (await this.request("hello", { ...this.options.hello, protocol: PROTOCOL_VERSION })) as HelloResult;
+      // The hello carries this client's build: two builds never share a
+      // server, and the check runs again on every reconnect.
+      const own = buildIdentity();
+      const result = (await this.request("hello", {
+        ...this.options.hello,
+        protocol: PROTOCOL_VERSION,
+        build: own.id,
+        buildDisplay: own.display,
+      })) as HelloResult;
+      this.helloResult = result;
+      if (result.build !== own.id) {
+        const server: BuildInfo = {
+          id: typeof result.build === "string" ? result.build : "unknown",
+          display:
+            typeof result.buildDisplay === "string" && result.buildDisplay.length > 0
+              ? result.buildDisplay
+              : "an older moxen that does not report its build",
+          version: "unknown",
+          kind: "source",
+          revision: null,
+        };
+        this.buildMismatch = new CliError("BUILD_MISMATCH", describeBuildMismatch({ server, client: own, remote: this.options.tls !== undefined }), {
+          details: { endpoint: this.endpoint, server: server.id, client: own.id },
+        });
+        if (!this.options.allowBuildMismatch) {
+          // A refused hello leaves nothing usable: drop it before closing,
+          // so `onClose` does not take the dead socket for a live one and
+          // start the reconnect over behind this throw.
+          this.socket = null;
+          socket.destroy();
+          throw this.buildMismatch;
+        }
+      }
     } catch (cause) {
       // A refused hello leaves nothing usable: close it, so a reconnect
       // starts over rather than taking the dead socket for a live one.
@@ -188,8 +241,13 @@ export class RemoteConnection implements ClientApi {
     } finally {
       clearTimeout(helloDeadline);
     }
-    this.startHeartbeat(socket);
-    for (const subscription of this.subscriptions) await this.resubscribe(subscription);
+    // A limited connection (another build's server, kept only to stop it)
+    // needs no liveness: every request but `shutdown` is already refused.
+    if (this.buildMismatch === null) this.startHeartbeat(socket);
+    if (this.buildMismatch === null) {
+      for (const subscription of this.subscriptions) await this.resubscribe(subscription);
+    }
+    return socket;
   }
 
   /**
@@ -227,7 +285,7 @@ export class RemoteConnection implements ClientApi {
 
   /** `candidate`, or `SERVER_UNAVAILABLE` if it has not connected by the deadline. */
   private connectDeadline<T extends net.Socket>(candidate: T, reject: (cause: unknown) => void): ReturnType<typeof setTimeout> {
-    return setTimeout(() => {
+    const timer = setTimeout(() => {
       candidate.destroy();
       reject(
         new CliError("SERVER_UNAVAILABLE", `No moxen server answered at ${this.endpoint} within ${seconds(this.connectTimeoutMs)}.`, {
@@ -235,6 +293,9 @@ export class RemoteConnection implements ClientApi {
         }),
       );
     }, this.connectTimeoutMs);
+    // A slow hello must not hold a one-shot command's loop open past its answer.
+    timer.unref?.();
+    return timer;
   }
 
   private openLocal(): Promise<net.Socket> {
@@ -325,8 +386,25 @@ export class RemoteConnection implements ClientApi {
 
   /** Like `request`, but the id is known before any reply can arrive. */
   private send(method: Method, params?: unknown): { id: number | null; response: Promise<unknown> } {
+    // A limited connection (another build's server, kept only to stop it)
+    // lets nothing else through: running against the wrong build silently
+    // would be worse than refusing loudly.
+    if (this.buildMismatch !== null && method !== "shutdown") {
+      return { id: null, response: Promise.reject(this.buildMismatch) };
+    }
     const socket = this.socket;
     if (this.closed || socket === null || socket.destroyed) {
+      // The server went away between requests: come back in the background
+      // while the caller decides whether to ask again (a `send --wait`
+      // retry does). Never from a refusal no retry can fix — but an
+      // abandoned link (`failed` without a fatal code) kicks anew.
+      const refused = this.link.status === "failed" && FATAL_HELLO_CODES.has(this.link.code);
+      if (!this.closed && this.socket === null && this.options.reconnect !== false && !refused) {
+        if (this.link.status !== "reconnecting") {
+          this.setLink({ status: "reconnecting", since: Date.now(), attempts: 0, reason: "the connection closed" });
+        }
+        void this.reconnect();
+      }
       return {
         id: null,
         response: Promise.reject(
@@ -360,7 +438,10 @@ export class RemoteConnection implements ClientApi {
     for (const pending of inFlight) {
       pending.reject(new CliError("SERVER_DISCONNECTED", message, { details: { endpoint: this.endpoint } }));
     }
-    if (!this.closed && this.options.reconnect !== false && this.subscriptions.size > 0) {
+    // A one-shot request has no subscription to keep the link honest, but
+    // its failure is still the link going down: reconnect while it may come
+    // back, whether or not anyone subscribed.
+    if (!this.closed && this.options.reconnect !== false && (this.subscriptions.size > 0 || inFlight.length > 0)) {
       const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
       const attempts = this.link.status === "reconnecting" ? this.link.attempts : 0;
       this.setLink({ status: "reconnecting", since, attempts, reason: dropped === null ? "the connection closed" : dropped });
@@ -372,10 +453,36 @@ export class RemoteConnection implements ClientApi {
     this.reconnecting ??= (async () => {
       let delay = RECONNECT_MIN_MS;
       let attempts = 0;
-      while (!this.closed && this.socket === null && this.subscriptions.size > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
+      // A reconnecting link keeps the loop alive past the last
+      // subscription: a one-shot wait may still be retrying behind it.
+      while (!this.closed && this.socket === null && (this.subscriptions.size > 0 || this.link.status === "reconnecting")) {
+        await new Promise<void>((resolve) => {
+          // Never the reason a one-shot command stays alive: the caller's
+          // own wait holds the loop while it still wants the answer.
+          const timer = setTimeout(resolve, delay);
+          timer.unref?.();
+        });
         try {
-          await this.open();
+          const socket = await this.open();
+          if (this.closed) {
+            // `close()` ran mid-open: the socket it ended is not (or no
+            // longer) this one, so destroy what the open left behind, stop
+            // its heartbeat, and leave the link (and its listeners, which
+            // `close()` cleared) alone.
+            this.stopHeartbeat();
+            socket.destroy();
+            if (this.socket === socket) this.socket = null;
+            return;
+          }
+          if (this.buildMismatch !== null) {
+            // The server restarted from another build while this client was
+            // away: rechecking the build fails the link rather than running
+            // against it. Nulled first so `onClose` (from the destroy) does
+            // not start the loop over behind this throw.
+            this.socket = null;
+            socket.destroy();
+            throw this.buildMismatch;
+          }
           this.setLink({ status: "connected" });
         } catch (cause) {
           if (cause instanceof CliError && FATAL_HELLO_CODES.has(cause.code)) {
@@ -387,6 +494,17 @@ export class RemoteConnection implements ClientApi {
           const since = this.link.status === "reconnecting" ? this.link.since : Date.now();
           this.setLink({ status: "reconnecting", since, attempts, reason: cause instanceof Error ? cause.message : String(cause) });
           delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+        }
+        // Nobody waits on this link: stop dialling. A later `send()` kicks a
+        // fresh reconnect while the link says it stopped trying.
+        if (this.subscriptions.size === 0 && this.pending.size === 0) {
+          if (this.link.status === "reconnecting") {
+            // Nulled before the listeners hear it: a listener's `send()`
+            // must kick a fresh reconnect rather than join the one ending here.
+            this.reconnecting = null;
+            this.setLink({ status: "failed", reason: this.link.reason, code: "SERVER_DISCONNECTED" });
+          }
+          return;
         }
       }
     })().finally(() => {
@@ -478,6 +596,18 @@ export class RemoteConnection implements ClientApi {
     this.closed = true;
     this.stopHeartbeat();
     this.linkListeners.clear();
+    // Everything parked rejects, as on a drop: against a silent server the
+    // socket's own close may never settle them (and `onClose` will not see
+    // them — the socket is nulled below). `SERVER_DISCONNECTED` is what a
+    // drop already reports, so callers see nothing new.
+    for (const pending of [...this.pending.values()]) {
+      pending.reject(
+        new CliError("SERVER_DISCONNECTED", "The connection to the moxen server is closed.", {
+          details: { endpoint: this.endpoint },
+        }),
+      );
+    }
+    this.pending.clear();
     this.subscriptions.clear();
     this.socket?.end();
     this.socket = null;

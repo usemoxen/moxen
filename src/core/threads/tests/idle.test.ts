@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { CliConfig } from "../../types.js";
 import { durationMs, forgetSession, sessionTtlFor, setIdleClock, sweepIdleSessions, touchSession, trackSession, type IdleDriver } from "../idle.js";
+import { onThreadFailure } from "../failures.js";
 import type { ThreadStore } from "../store.js";
 import type { StoredTurn } from "../types.js";
 
@@ -29,6 +30,7 @@ function world(turns: Partial<StoredTurn>[] = []) {
 
 const drivers: IdleDriver[] = [];
 afterEach(() => {
+  onThreadFailure(null);
   for (const driver of drivers.splice(0)) forgetSession(driver, "t1");
   now = 0;
 });
@@ -97,5 +99,31 @@ describe("ending idle sessions", () => {
     now = 120_000;
     expect(await sweepIdleSessions()).toEqual([]);
     expect(w.unwatched()).toBe(1);
+  });
+
+  it("keeps watching a session whose liveness probe fails, and retries it on the next sweep", async () => {
+    const failures: string[] = [];
+    onThreadFailure((area, message) => failures.push(`${area}: ${message}`));
+    let probe: "fail" | "gone" | "live" = "fail";
+    const stopped: string[] = [];
+    const driver: IdleDriver = {
+      hasSession: () => (probe === "fail" ? Effect.fail(new Error("probe blew up")) : Effect.succeed(probe === "live")),
+      stopSession: (threadId) => Effect.sync(() => void stopped.push(threadId)),
+    };
+    drivers.push(driver);
+    const store = { readTurns: async () => [] as StoredTurn[] } as unknown as ThreadStore;
+    let unwatched = 0;
+    trackSession(driver, "t1", { store, ttlMs: 60_000, unwatch: () => void (unwatched += 1) });
+    // A failed probe says nothing about the session: the watcher stays, and the failure is reported.
+    now = 120_000;
+    expect(await sweepIdleSessions()).toEqual([]);
+    expect(unwatched).toBe(0);
+    expect(stopped).toEqual([]);
+    expect(failures.join("\n")).toContain("probe blew up");
+    // The next sweep retries the probe: a confirmed-dead session is unwatched then.
+    probe = "gone";
+    now = 180_000;
+    expect(await sweepIdleSessions()).toEqual([]);
+    expect(unwatched).toBe(1);
   });
 });

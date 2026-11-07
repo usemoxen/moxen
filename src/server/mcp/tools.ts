@@ -269,12 +269,13 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   },
   {
     name: "task_cancel",
-    description: "Stop a delegated task that is still running. Its thread and worktree are kept. Pass taskIds (several) to stop more than one: each task's outcome is reported separately, and one bad id does not stop the others.",
+    description: "Stop a delegated task that is still running. Its thread and worktree are kept. Pass taskIds (several) to stop more than one: each task's outcome is reported separately, and one bad id does not stop the others. Cancelling a task that waits on a usage-limit continue also ends that continue and tells the parent, unless notifyParent is false.",
     inputSchema: {
       type: "object",
       properties: {
         taskId: { type: "string", description: "One delegated task to stop. Not with taskIds." },
         taskIds: { type: "array", items: { type: "string" }, description: "Several delegated tasks to stop, each reported separately. Not with taskId." },
+        notifyParent: { type: "boolean", description: "Tell the parent thread when a pending automatic continue is cancelled (default true)." },
       },
       required: [],
       additionalProperties: false,
@@ -806,7 +807,7 @@ export function checkTodos(raw: readonly unknown[]): { plan: Array<{ step: strin
   return { plan, note };
 }
 
-const TERMINAL: ReadonlySet<DelegatedTaskStatus> = new Set(["completed", "failed", "interrupted"]);
+const TERMINAL: ReadonlySet<DelegatedTaskStatus> = new Set(["completed", "failed", "interrupted", "cancelled"]);
 
 export interface ToolResult {
   readonly text: string;
@@ -949,16 +950,18 @@ export async function callMoxenTool(
       case "memory_delete":
         return ok(await api.dispatch({ type: "memory.delete", threadId: parentThreadId, name: argString(args, "name", true)!, scope: argString(args, "scope", true)! as "project" }));
       case "task_cancel": {
+        if (args.notifyParent !== undefined && typeof args.notifyParent !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "notifyParent must be true or false.");
+        const notifyParent = args.notifyParent === false ? { notifyParent: false } : {};
         const ids = cancelIds(args);
         if (args.taskIds === undefined) {
-          const cancelled = await cancelOne(api, parentThreadId, ids[0]!);
+          const cancelled = await cancelOne(api, parentThreadId, ids[0]!, notifyParent);
           return ok({ taskId: ids[0], cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
         }
         const tasks: Array<Record<string, unknown>> = [];
         let firstFailure: unknown;
         for (const taskId of ids) {
           try {
-            const cancelled = await cancelOne(api, parentThreadId, taskId);
+            const cancelled = await cancelOne(api, parentThreadId, taskId, notifyParent);
             tasks.push({ taskId, cancelRequested: cancelled.interruptRequested, status: cancelled.task.status });
           } catch (cause) {
             firstFailure ??= cause;
@@ -1514,8 +1517,8 @@ function cancelIds(args: Record<string, unknown>): string[] {
   return [single];
 }
 
-async function cancelOne(api: ClientApi, parentThreadId: string, taskId: string) {
-  return await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId });
+async function cancelOne(api: ClientApi, parentThreadId: string, taskId: string, notify?: { readonly notifyParent?: boolean }) {
+  return await api.dispatch({ type: "thread.task.cancel", parentThreadId, taskId, ...notify });
 }
 
 /** A failure as a batch entry carries it: the code the handler would have answered with, never a protocol error. */

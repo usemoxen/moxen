@@ -95,9 +95,9 @@ describe("settings schema", () => {
     expect(reloaded.ui?.backdrop).toBe("off");
   });
 
-  it("drops a section field a newer build wrote, instead of failing the load", () => {
+  it("keeps a section field a newer build wrote, so a save does not drop it", () => {
     const reloaded = normalizeConfig({ ...DEFAULT_CONFIG, git: { historyLimit: 30, somethingNew: true } });
-    expect(reloaded.git).toEqual({ historyLimit: 30 });
+    expect(reloaded.git).toEqual({ historyLimit: 30, somethingNew: true });
   });
 
   it("rejects a section that is not an object", () => {

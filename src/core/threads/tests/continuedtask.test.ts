@@ -3,12 +3,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
+import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { continueThread, flushTaskNotifications, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  resetUsageLimitsForTests();
+});
 
 async function world() {
   const harness = await testHarness();
@@ -140,6 +144,132 @@ describe("an orchestrator continued in a new thread", () => {
 
   it("adds no note when no task is running", () => {
     expect(runningTasksNote([])).toBe("");
+  });
+});
+
+describe("a limited thread continued in a new one", () => {
+  async function limitedSource(w: Awaited<ReturnType<typeof world>>) {
+    const source = await w.make("limited work");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt }]);
+    await w.store.appendLedger(source.id, "activity", { id: "limit", threadId: source.id, turnId: turn.id, kind: "usage.limit", summary: "Usage limit reached", payload: { provider: "codex", rateLimitType: null, label: "Session", resetsAt }, createdAt: w.store.nowIso() });
+    await completeTurn(w.store, source.id, turn.id, { text: "Stopped at the limit." });
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt, order: 1, phase: "waiting", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    return { source, resetsAt };
+  }
+
+  it("inherits the hold for the reset: waiting, with the first turn as its recovery and the limit marker", async () => {
+    const w = await world();
+    const { source, resetsAt } = await limitedSource(w);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    const first = (await w.store.readTurns(continued.threadId))[0]!;
+    // Held for the reset, not released: the first turn is the recovery entry.
+    expect(first).toMatchObject({ status: "queued", scheduledFor: at });
+    expect(destination.usagePause).toMatchObject({ provider: "codex", resetsAt, phase: "waiting", recoveryTurnId: first.id });
+    // The limit marker travels along, so the new thread shows the block from the start.
+    expect((await w.store.readActivities(continued.threadId)).find((activity) => activity.kind === "usage.limit")).toMatchObject({
+      summary: "Usage limit reached",
+      payload: { provider: "codex", label: "Session", resetsAt },
+    });
+  });
+
+  it("holds a task notification on the continued thread without spending a turn", async () => {
+    const w = await world();
+    const { source } = await limitedSource(w);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: continued.threadId, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const finished = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, finished.id, { text: "Done." });
+    await queueTaskNotification(w.ctx, continued.threadId, child.id);
+    await flushTurnRunners();
+    // Held durably, not run into the wall: nothing is running, no turn spent.
+    expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
+    expect(await w.store.readTurns(continued.threadId)).toHaveLength(1);
+    expect((await w.store.readMessages(continued.threadId)).some((message) => message.origin === "task-notification")).toBe(false);
+    const batches = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, unknown[]>;
+    expect(batches[continued.threadId]).toHaveLength(1);
+
+    // Once the hold lifts and the reset lapses, the notice is delivered instead of waiting forever.
+    await w.store.withThreadLock(continued.threadId, async () => {
+      const current = (await w.store.readThreadRecord(continued.threadId))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: null });
+    });
+    resetUsageLimitsForTests();
+    await flushTaskNotifications(w.ctx, continued.threadId);
+    await flushTurnRunners();
+    expect((await w.store.readMessages(continued.threadId)).some((message) => message.origin === "task-notification")).toBe(true);
+  });
+
+  it("an immediate continue of an unpaused thread still starts its first turn at once, with no hold", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    await flushTurnRunners();
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    expect(destination.usagePause).toBeUndefined();
+    expect((await w.store.readActivities(continued.threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+    expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
+  });
+
+  it("does not inherit the hold on a different provider: the scheduled turn waits for nothing", async () => {
+    const w = await world();
+    const { source } = await limitedSource(w);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, {
+      threadId: source.id,
+      scheduledFor: at,
+      modelSelection: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
+    });
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    // The codex limit does not apply to the claude thread: no hold, no marker —
+    // just the scheduled turn, which admission runs at its time.
+    expect(destination.usagePause).toBeUndefined();
+    expect((await w.store.readTurns(continued.threadId))[0]).toMatchObject({ status: "queued", scheduledFor: at });
+    expect((await w.store.readActivities(continued.threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+  });
+
+  it("does not inherit a hold whose reset already passed", async () => {
+    const w = await world();
+    const { source } = await limitedSource(w);
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({
+        ...current,
+        usagePause: { ...current.usagePause!, resetsAt: new Date(Date.now() - 60_000).toISOString() },
+        updatedAt: w.store.nowIso(),
+      });
+    });
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    expect(destination.usagePause).toBeUndefined();
+    expect((await w.store.readTurns(continued.threadId))[0]).toMatchObject({ status: "queued", scheduledFor: at });
+    expect((await w.store.readActivities(continued.threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+  });
+
+  it("does not inherit a hold when no limit stands any more", async () => {
+    const w = await world();
+    const { source } = await limitedSource(w);
+    resetUsageLimitsForTests();
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+    const destination = (await w.store.readThreadRecord(continued.threadId))!;
+    expect(destination.usagePause).toBeUndefined();
+    expect((await w.store.readTurns(continued.threadId))[0]).toMatchObject({ status: "queued", scheduledFor: at });
+    expect((await w.store.readActivities(continued.threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
   });
 });
 

@@ -96,12 +96,25 @@ export async function cliClient(config: CliConfig, drivers?: TurnDriverFactories
   return await openClient();
 }
 
+const AWAIT_RETRY_DELAY_MS = 500;
+/**
+ * How many times `awaitTurn` re-asks after a dropped connection: a server
+ * restart takes seconds, while a server that never returns must still end
+ * the command with a clear error rather than hang it.
+ */
+const AWAIT_MAX_RETRIES = 60;
+
 /**
  * Block until a turn settles. A one-shot CLI is often the only process
  * running the turn, so returning early would strand it `running`; Ctrl-C
  * interrupts the turn (keeping the thread) and exits 130.
  */
-export async function awaitTurn(client: ClientApi, threadId: string, turnId: string): Promise<void> {
+export async function awaitTurn(
+  client: ClientApi,
+  threadId: string,
+  turnId: string,
+  options: { readonly retryDelayMs?: number; readonly maxRetries?: number } = {},
+): Promise<void> {
   const onSigint = (): void => {
     void client
       .dispatch({ type: "thread.turn.interrupt", threadId })
@@ -109,8 +122,22 @@ export async function awaitTurn(client: ClientApi, threadId: string, turnId: str
       .finally(() => process.exit(130));
   };
   process.once("SIGINT", onSigint);
+  const retryDelayMs = options.retryDelayMs ?? AWAIT_RETRY_DELAY_MS;
+  const maxRetries = options.maxRetries ?? AWAIT_MAX_RETRIES;
   try {
-    await client.query({ type: "thread.turn.await", threadId, turnId });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await client.query({ type: "thread.turn.await", threadId, turnId });
+        return;
+      } catch (cause) {
+        // Asking again is safe: the await follows the ledger, so a settled
+        // turn reports its status and a running one keeps waiting. Anything
+        // but a dropped connection fails the command at once, and a server
+        // that never returns ends it with the disconnect after the bound.
+        if (!(cause instanceof CliError) || cause.code !== "SERVER_DISCONNECTED" || attempt >= maxRetries) throw cause;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
   } finally {
     process.removeListener("SIGINT", onSigint);
   }

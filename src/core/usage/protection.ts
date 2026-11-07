@@ -3,7 +3,7 @@ import { CliError } from "../errors.js";
 import { readStatus } from "../git/history.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
-import { startTurn, editWorkQueue, flushTaskNotifications, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
+import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCancelled, queueTaskPauseNotification, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
@@ -124,7 +124,7 @@ export class UsageProtection {
     });
   }
 
-  reorder(threadId: string, direction: "first" | "last" | "cancel"): Promise<void> {
+  reorder(threadId: string, direction: "first" | "last" | "cancel", notifyParent = true): Promise<void> {
     return this.serialize(async () => {
       const ctx = await this.context();
       const rows = await this.rows(ctx);
@@ -133,8 +133,10 @@ export class UsageProtection {
       if (direction === "cancel") {
         if (row.thread.usagePause.forced) throw new CliError("THREAD_PROTECTED", "Send a message to end manual protection.");
         // Cancellation removes automatic recovery, not a request to start work now.
+        // A delegated task is marked cancelled and its parent told, unless asked not to.
         if (row.thread.usagePause.phase === "wrapping") await this.stop(ctx, row);
-        if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, "remove");
+        if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, "remove", undefined, notifyParent);
+        else await noteAutoContinueCancelled(ctx, threadId, { notifyParent });
         await this.pause(ctx, threadId, null);
       } else {
         if (row.thread.usagePause.recoveryTurnId) await editWorkQueue(ctx, threadId, row.thread.usagePause.recoveryTurnId, direction);
@@ -346,6 +348,7 @@ export class UsageProtection {
 
   private async begin(ctx: OperationContext, rows: UsageRow[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
     const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
+    const heldBefore = new Set(rows.filter(({ thread }) => thread.usagePause).map(({ thread }) => thread.id));
     const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
       || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
       : windows.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
@@ -380,6 +383,14 @@ export class UsageProtection {
     for (const row of eligible) {
       const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
       if (pause) await this.ensureRecovery(ctx, row.thread.id, pause);
+    }
+    // Delegated children that just paused for usage tell their parents now,
+    // with the expected resume time; the normal report still arrives when
+    // the task finishes. Already-held threads told theirs when they paused.
+    for (const row of eligible) {
+      if (heldBefore.has(row.thread.id)) continue;
+      const pause = (await ctx.store.readThreadRecord(row.thread.id).catch(() => null))?.usagePause;
+      if (pause && !pause.forced) await queueTaskPauseNotification(ctx, row.thread.id, pause.resetsAt ?? null).catch(() => undefined);
     }
   }
 
@@ -496,7 +507,12 @@ export class UsageProtection {
           busy.add(pause.provider);
         }
         else if (row.turns.at(-1)?.status === "failed") await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting", error: "Recovery failed. Inspect the thread before continuing." });
-        else await this.pause(ctx, row.thread.id, null);
+        else {
+          await this.pause(ctx, row.thread.id, null);
+          // The hold released: notices queued while the thread could not
+          // receive them go out now, together as one message.
+          await flushTaskNotifications(ctx, row.thread.id).catch(() => undefined);
+        }
       }
       if (pause.phase === "wrapping") {
         const exhausted = usageLimitsSnapshot(now)[pause.provider]?.windows.some((window) => window.usedPercent >= 97) === true;
