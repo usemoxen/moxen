@@ -41,12 +41,19 @@ it is parked on. So exactly one process runs moxen: the server. It owns
 the store, the config, the keychain entries Moxen keeps and every
 provider session, and serves `ClientApi` over a named pipe (unix socket
 elsewhere). Every client reaches every session, and turns outlive the
-client that started them.
+client that started them. The store has one owning build, recorded beside
+it (`server.lock`): a second server on the same files is refused outright,
+and a lock from a crashed server is taken over once its process is gone,
+not left behind.
 
 Clients never change anything themselves. The TUI and every CLI command
 connect to this machine's server, starting it in the background when none
 is running (`moxen server start` runs it in the foreground instead), or
-to a paired server on another machine (below). They never fall back to
+to a paired server on another machine (below). A client that finds a
+running server from another build refuses it rather than starting a new
+one over it — that would kill its running work. Stopping it
+(`moxen server stop` works against any build) is the person's call; the
+next command then starts one from this build. They never fall back to
 running moxen in-process — that is for the server and for tests only — and
 `MOXEN_SERVER=direct`, which used to ask for it, is refused. Reads of the
 server's files go through it too: the live diff overlay's git and file
@@ -64,9 +71,17 @@ server on another file (`SERVER_CONFIG_MISMATCH`, also for a server too old
 to say) rather than reading or writing a config nobody asked for. The old
 config location is brought over by the server when it starts.
 
-The wire opens with a protocol-version handshake. A client newer than a
-long-running server is refused rather than guessed at: restart the server
-after upgrading.
+The wire opens with a handshake: first the protocol version, then the
+build identity — a release's version and platform, or a source checkout's
+version and commit (baked into the bundle when built, read from git when
+run from source, so a stale `dist/` and its checkout count as different
+builds). A client from another build is refused outright, on local and
+remote connections alike, naming both builds and what to do next; every
+reconnect rechecks it, so a server restarted from another build stops its
+clients instead of serving them stale. After an update or rollback lands,
+the server broadcasts that it needs a restart to every connected client
+(and says so on later hellos): running threads and connected clients keep
+their version until then, and nothing restarts by itself.
 
 A server can be lost without its socket closing — frozen, its machine
 asleep, the network gone — so the client keeps a heartbeat: it pings

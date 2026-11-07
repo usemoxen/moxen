@@ -15,7 +15,8 @@ import { openThreadStore, type ThreadStore } from "../store.js";
 import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
 import type { StoredTurn } from "../types.js";
 import { retitleThread, type OperationContext } from "../operations.js";
-import { driverForInstance, ensureDriverSession, executeTurn, watchDriverSession, type TurnDriver } from "../execute.js";
+import { driverForInstance, ensureDriverSession, executeTurn, subscribeDriverThread, watchDriverSession, type TurnDriver } from "../execute.js";
+import { onThreadFailure } from "../failures.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { settleRuns } from "../../testing/turns.js";
 import { rmTempAsync } from "../../testing/tmp.js";
@@ -759,7 +760,10 @@ describe("provider-side interruptions", () => {
       await backgroundStarted(watching.queue, thread.id, "native-busy-1", "native news");
       const wake = await queuedWakeUp(store, thread.id);
       expect(wake.queue).toMatchObject({ wakeUp: true, requestId: "native-turn:native-busy-1" });
-      expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
+      // The wake-up message is appended after the turn row: wait for it rather than racing the write.
+      await vi.waitFor(async () => {
+        expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
+      }, { timeout: 10_000 });
       // The winner was never touched: still running, session never interrupted or closed.
       expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
       expect(watching.interrupt).not.toHaveBeenCalled();
@@ -889,7 +893,10 @@ describe("provider-side interruptions", () => {
     await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go", modelSelection });
     // The turn is over; only the session watcher still hears the stop.
     await Effect.runPromise(Queue.offer((driver as unknown as { queue: Queue.Queue<ProviderRuntimeEvent> }).queue, subagent("stopped")));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The watcher records it on its own chain: wait for the row, not a fixed sleep.
+    await vi.waitFor(async () => {
+      expect((await store.readActivities(thread.id)).filter((row) => row.kind === "subagent")).toHaveLength(2);
+    }, { timeout: 10_000 });
 
     const rows = (await store.readActivities(thread.id)).filter((row) => row.kind === "subagent");
     // Once each: mid-turn the runner records it and the watcher stands aside.
@@ -1038,5 +1045,77 @@ describe("a turn that fails while a limit stands", () => {
     ]);
     const { store, threadId } = await failingTurn();
     expect((await store.readActivities(threadId)).some((activity) => activity.kind === "usage.limit")).toBe(false);
+  });
+});
+
+describe("driver event pump", () => {
+  it("isolates a throwing subscriber so the other subscribers keep their events, and reports it", async () => {
+    const failures: string[] = [];
+    const stopSink = onThreadFailure((area, message) => failures.push(`${area}: ${message}`));
+    cleanup.push(async () => { stopSink(); });
+    const queue = await Effect.runPromise(Queue.unbounded<ProviderRuntimeEvent>());
+    cleanup.push(async () => { await Effect.runPromise(Queue.shutdown(queue)); });
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "completed", text: "", usage: null, error: null }),
+      streamEvents: Stream.fromQueue(queue),
+    };
+    const event = (text: string): ProviderRuntimeEvent => ({
+      type: "message.part.updated", provider: "codex", threadId: "thread-1", turnId: "d-1", messageId: "m", text,
+    });
+    const stopThrowing = subscribeDriverThread(driver, "thread-1", () => { throw new Error("subscriber blew up"); });
+    cleanup.push(async () => { stopThrowing(); });
+    const kept: string[] = [];
+    const stopKeeping = subscribeDriverThread(driver, "thread-1", (incoming) => {
+      if (incoming.type === "message.part.updated") kept.push(incoming.text);
+    });
+    cleanup.push(async () => { stopKeeping(); });
+    await Effect.runPromise(Queue.offer(queue, event("one")));
+    await Effect.runPromise(Queue.offer(queue, event("two")));
+    // The throw on "one" must not cost the survivor "one", "two" or anything later.
+    await expect.poll(() => kept).toEqual(["one", "two"]);
+    expect(failures.join("\n")).toContain("subscriber blew up");
+  });
+
+  it("reports an abort-time interruptTurn failure instead of dropping it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-abort-interrupt-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const failures: string[] = [];
+    const stopSink = onThreadFailure((area, message) => failures.push(`${area}: ${message}`));
+    cleanup.push(async () => { stopSink(); });
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Abort",
+      modelSelection: { instanceId: "codex", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await sendTurn(store, thread.id, { prompt: "go" });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.fail(new CliError("INTERRUPT_FAILED", "session already gone")),
+      awaitTurn: async () => {
+        entered();
+        await gate;
+        return { status: "interrupted", text: "", usage: null, error: null };
+      },
+      streamEvents: Stream.never,
+    };
+    const run = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await started;
+    await interruptTurn(store, thread.id, turn.id);
+    release();
+    await run;
+    await expect.poll(() => failures.join("\n")).toContain("interruptTurn for thread");
+    expect(failures.join("\n")).toContain("session already gone");
   });
 });

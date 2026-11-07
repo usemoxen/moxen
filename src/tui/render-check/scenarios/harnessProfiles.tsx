@@ -365,19 +365,26 @@ export async function runHarnessProfiles(): Promise<void> {
   const mcp = setup.captureCharFrame();
   console.log("--- add an MCP server ---");
   console.log(mcp);
-  for (const expected of ["Add an MCP server", "Filesystem", "Fetch", "GitHub", "Brave Search", "Exa Search", "Playwright", "Custom"]) {
+  for (const expected of ["Add an MCP server", "Brave Search", "Exa Search", "Playwright", "Custom"]) {
     if (!mcp.includes(expected)) fail(`the MCP presets are missing "${expected}"`);
   }
+  for (const gone of ["Filesystem", "GitHub", "mcp-server-fetch", "mcp-server-git"]) {
+    if (mcp.includes(gone)) fail(`a removed MCP preset still shows "${gone}"`);
+  }
+  // Playwright fills in its command: two steps down from Brave Search. It takes
+  // no key, so picking it names the server right away; the saved command
+  // is the assertion that the preset filled it in.
+  await act(async () => setup.mockInput.pressArrow("down"));
+  await act(async () => setup.mockInput.pressArrow("down"));
+  await settle();
+  if (!setup.captureCharFrame().includes("● Playwright")) fail("arrow keys did not reach the Playwright preset");
   await act(async () => setup.mockInput.pressEnter());
   await settle();
-  if (!setup.captureCharFrame().includes("server-filesystem")) fail("the Filesystem preset did not fill in its command");
+  if (!setup.captureCharFrame().includes("Name this server")) fail("picking the preset did not lead to naming the server");
   await act(async () => setup.mockInput.pressEnter());
   await settle();
-  if (!setup.captureCharFrame().includes("Name this server")) fail("the command step did not lead to naming the server");
-  await act(async () => setup.mockInput.pressEnter());
-  await settle();
-  const mcpSaved = written.find((entry) => entry.key === "mcpServers[filesystem]");
-  if (mcpSaved === undefined || JSON.parse(mcpSaved.value).command !== "npx" || JSON.parse(mcpSaved.value).args?.[0] !== "-y") fail(`the MCP server was saved wrong: ${JSON.stringify(written.slice(-2))}`);
-  if (!mcpTested.includes("filesystem")) fail("the new MCP server was not connected to list its tools");
+  const mcpSaved = written.find((entry) => entry.key === "mcpServers[playwright]");
+  if (mcpSaved === undefined || JSON.parse(mcpSaved.value).command !== "npx" || (JSON.parse(mcpSaved.value).args ?? []).join(" ") !== "-y @playwright/mcp@latest") fail(`the MCP server was saved wrong: ${JSON.stringify(written.slice(-2))}`);
+  if (!mcpTested.includes("playwright")) fail("the new MCP server was not connected to list its tools");
   setup.renderer.destroy();
 }

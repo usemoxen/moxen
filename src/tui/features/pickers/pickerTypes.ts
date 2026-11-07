@@ -5,6 +5,7 @@
 export type PickerName =
   | "model"
   | "effort"
+  | "continue"
   | "permission"
   | "diff-turn"
   | "command"

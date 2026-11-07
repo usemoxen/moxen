@@ -17,6 +17,7 @@ import { runSidebarStability } from "./scenarios/sidebarStability.js";
 import { runPermissions } from "./scenarios/permissions.js";
 import { runDiffPanel } from "./scenarios/diffPanel.js";
 import { runCommandPalette } from "./scenarios/commandPalette.js";
+import { runContinueModal, runContinueModalLimited, runContinueModalRetry, runContinueModalSpanish } from "./scenarios/continueModal.js";
 import { runThreadSearch } from "./scenarios/threadSearch.js";
 import { runMessageActions } from "./scenarios/messageActions.js";
 import { runTimelineAndAnswers } from "./scenarios/timelineAndAnswers.js";
@@ -67,6 +68,7 @@ import { runExperience } from "./scenarios/experience.js";
 import { runUpdateScreen } from "./scenarios/updateScreen.js";
 import { runModalInput } from "./scenarios/modalInput.js";
 import { runWorkQueueModal } from "./scenarios/workQueue.js";
+import { runCancelAutoContinueModal } from "./scenarios/cancelAutoContinue.js";
 import { runResearchRun } from "./scenarios/researchRun.js";
 import { runNewThreadResearch } from "./scenarios/newThreadResearch.js";
 import { runSendGate } from "./scenarios/sendGate.js";
@@ -117,6 +119,10 @@ export async function runWalkthrough(): Promise<void> {
   await runLifecycleRows(setup);
   await runBackgroundWork(setup);
   await runProviderInterruptions(setup);
+  await runContinueModal();
+  await runContinueModalLimited();
+  await runContinueModalRetry();
+  await runContinueModalSpanish();
   // Independent render with its own deferred client (not part of the shared
   // walkthrough above): runs last so its extra renderer cannot perturb the
   // timing-sensitive assertions of the shared scenarios.
@@ -168,6 +174,7 @@ export async function runWalkthrough(): Promise<void> {
   await runUpdateScreen();
   await runModalInput();
   await runWorkQueueModal();
+  await runCancelAutoContinueModal();
   await runResearchRun();
   await runNewThreadResearch();
   await runSendGate();

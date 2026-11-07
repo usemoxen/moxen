@@ -122,7 +122,8 @@ describe("thread_continue: continuing your own thread", () => {
       const continued = await t.keep(t.orchestrator, { summary: "Follow-up work remains." });
       expect(continued.isError).toBe(false);
       const threadId = continued.json!.threadId as string;
-      await expect.poll(async () => (await t.store.readTurns(threadId)).map((turn) => turn.status)).toEqual(["completed"]);
+      // The new turn runs in the background; a loaded runner needs more than the one-second default.
+      await expect.poll(async () => (await t.store.readTurns(threadId)).map((turn) => turn.status), { timeout: 10_000 }).toEqual(["completed"]);
     } finally {
       await t.connection.close();
     }

@@ -72,7 +72,7 @@ anything is installed, that running threads and connected clients keep their ver
 the Moxen server restarts and that nothing restarts by itself. `u` installs, `r` (twice) goes
 back to the previous version, `c` checks again. An update shows each stage, with the
 download's progress; closing the screen does not cancel it, and reopening shows where it is.
-When it ends the screen says a restart is needed. A failure says why and that your running
+When it ends the screen says a restart is needed, and every other connected client gets the same notice. A failure says why and that your running
 version is untouched. If the connection to the server drops mid-update the screen says it lost
 track and offers to check again. A source checkout is told to update with git, and a paired
 server's versions are shown with no way to install: both are changed on the machine itself.

@@ -49,12 +49,18 @@ export type ServerMessage =
   | { readonly subscription: number; readonly error: WireError };
 
 /**
- * A local socket sends `protocol` alone. A remote one (TLS, see
+ * A local socket sends `protocol` and its build. A remote one (TLS, see
  * `./remoteaccess.ts`) must also say who it is: `pair` once, with the code
  * the server showed, and `device` every time after.
+ *
+ * `build` is the client's build identity (`core/build.ts`): a mismatch
+ * with the server's is refused outright, so two builds never share a
+ * server. A client too old to send one is refused the same way.
  */
 export interface HelloParams {
   readonly protocol: number;
+  readonly build: string;
+  readonly buildDisplay: string;
   readonly pair?: { readonly code: string; readonly deviceName: string };
   readonly device?: { readonly id: string; readonly token: string };
 }
@@ -63,6 +69,11 @@ export interface HelloResult {
   readonly protocol: number;
   readonly server: "moxen";
   readonly pid: number;
+  /** The server's build identity: a client from another build is refused. */
+  readonly build: string;
+  readonly buildDisplay: string;
+  /** True once an update or rollback has landed: the running server is stale. */
+  readonly restartRequired: boolean;
   /** Remote sockets: the server's name (its host), for the client's list of servers. */
   readonly serverName?: string;
   /** Local sockets: the config file the server runs on, so a client asking for another can refuse. */

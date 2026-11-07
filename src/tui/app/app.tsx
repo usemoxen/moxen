@@ -24,6 +24,7 @@ import { useExperience } from "../features/experience/useExperience.js";
 import { StatsModal } from "../features/stats/statsmodal.js";
 import { UpdateModal } from "../features/update/updatemodal.js";
 import { useAppUpdate } from "../features/update/useAppUpdate.js";
+import { restartRequiredFromFrame } from "../model/update.js";
 import { GitFooter, GitTab } from "../features/gitpanel/gitpanel.js";
 import type { ActiveServer } from "../features/remote/server.js";
 import { useRemote } from "../features/remote/useRemote.js";
@@ -44,12 +45,16 @@ import { describeScheduled } from "../model/schedule.js";
 import { useProblems } from "../features/problems/useProblems.js";
 import { ProblemsModal } from "../features/problems/problemsModal.js";
 import { WorkQueueModal } from "../features/queue/queuemodal.js";
+import { CancelAutoContinueModal, useAutoContinueCancel } from "../features/queue/cancelmodal.js";
 import type { QueuePolicy } from "../features/queue/useWorkQueue.js";
 import { subagentRun, subagentState, subagentTitle, useSubagentView } from "../features/subagentview/useSubagentView.js";
 import { useGitPanel } from "../features/gitpanel/useGitPanel.js";
 import { useProviderVersions } from "../features/settings/useProviderVersions.js";
 import { longThreadConfigFromSnapshot, uiFromSnapshot, useSettings } from "../features/settings/useSettings.js";
 import { PickerModal, type PickerBody, type PickerSlider } from "../features/pickers/pickermodal.js";
+import { ContinueModal } from "../features/continue/continuemodal.js";
+import { continueScheduledFor, continueSelectionsEqual } from "../model/continue.js";
+import { USAGE_CONTINUE_GRACE_MS } from "../../core/threads/views.js";
 import { useThreadSearch } from "../features/search/useThreadSearch.js";
 import { useSidebarSearch } from "../features/sidebar/useSidebarSearch.js";
 import { DateTimeModal } from "../ui/datetimemodal.js";
@@ -329,12 +334,11 @@ export function App({
   /** Delete-thread two-step confirm: first pick arms, second pick dispatches. */
   const [deleteArmed, setDeleteArmed] = useState(false);
   /**
-   * The thread a "continue on another model" pick continues: set when the
-   * palette row opens the model picker, read when a model is picked. While
-   * set, the model picker lists every provider (a handoff can cross
-   * providers) instead of locking to the open thread's one.
+   * The thread a "continue in a new thread" modal continues, with the draft
+   * selection it opened on. Null while the modal is closed; the draft starts
+   * as the thread's own selection, so enter at once continues unchanged.
    */
-  const [continueOnModel, setContinueOnModel] = useState<string | null>(null);
+  const [continueDraft, setContinueDraft] = useState<{ sourceId: string; selection: ModelSelection } | null>(null);
   /**
    * Whether the server accepts a general `thread.delete`. Starts assumed and
    * flips permanently off for the session on the first rejection — the row
@@ -444,6 +448,10 @@ export function App({
       {},
       (item) => {
         appUpdate.onFrame(item);
+        // Another client's update landed: the running server is stale.
+        // Upserted by id, so the notice stays one toast no matter how many
+        // frames carry it, until the server restarts and it stops arriving.
+        if (restartRequiredFromFrame(item) !== null) toasts.push("moxen:update", "warn", t("update.beforeInstall"));
         setShell((current) => applyShellFrame(current, item));
       },
       (cause) => setError(String(cause).slice(0, 120)),
@@ -664,7 +672,7 @@ export function App({
     setPickerFilter("");
     setDeleteArmed(false);
     setRevertArmed(false);
-    setContinueOnModel(null);
+    setContinueDraft(null);
     markModalDismissed();
     setFocus(returnFocus);
   };
@@ -1279,9 +1287,12 @@ export function App({
     scrollPane(chatScrollRef.current, key.name);
   });
 
+  // Cancelling a delegated task's automatic continue asks whether its parent
+  // hears about it; the modal below owns that choice.
+  const autoCancel = useAutoContinueCancel(client);
   // Stopped by a plan usage limit: a banner over the composer says when it
   // resets and offers (or shows) the continue for then.
-  const usageBanner = useUsageLimitBanner({ client, threadState, openThreadId, now, setError, openThread: setOpenThreadId });
+  const usageBanner = useUsageLimitBanner({ client, threadState, openThreadId, now, setError, openThread: setOpenThreadId, requestAutoCancel: autoCancel.request });
   const queued = useQueuedPanel({ client, threadState, threadId: openThreadId, setError });
   const sideQuestion = useSideQuestion(client, openThreadId);
   // Tasks and Queued share the slot over the composer and page like the
@@ -1382,7 +1393,6 @@ export function App({
     permissionChoices,
     modelColor,
     labelFor,
-    buildModelSelection,
     openModelPicker,
     openEffortPicker,
     openPermissionPicker,
@@ -1725,7 +1735,18 @@ export function App({
   }
   const threadProtection = threadState.thread?.protection ?? selected?.protection;
   if (threadProtection !== undefined) notices.push(threadProtectionNotice(threadProtection));
-  notices.push(...usageProtectionNotices(usageProtection.state, usageProtection.act, now, providers));
+  // Cancelling a recovery on a delegated task asks whether its parent hears about it.
+  const protectionAct: typeof usageProtection.act = (command) => {
+    if (command.type === "usage.queue" && command.direction === "cancel") {
+      const entry = usageProtection.state.queue.find((row) => row.threadId === command.threadId);
+      autoCancel.request(command.threadId, entry?.title ?? command.threadId, (notifyParent) =>
+        usageProtection.act({ ...command, ...(notifyParent ? {} : { notifyParent: false }) }),
+      );
+      return;
+    }
+    usageProtection.act(command);
+  };
+  notices.push(...usageProtectionNotices(usageProtection.state, protectionAct, now, providers));
   if (usageProtection.error) notices.push({ key: "usage-error", glyph: "!", glyphColor: COLOR.danger, title: usageProtection.error, detail: null, actions: [] });
   if (usageBanner.banner !== null) {
     const banner = usageBanner.banner;
@@ -1764,9 +1785,10 @@ export function App({
               // Read together: continue [at reset | in a new thread].
               ...(banner.resetsAt === null ? [] : [{ label: t("app.continue_at_reset_681f"), fg: COLOR.accent, onClick: usageBanner.scheduleContinue }]),
               // A fresh context instead of resuming a long one: the handoff
-              // carries the work, and waits for the reset if it has not come.
+              // carries the work. The modal holds it for the reset on this
+              // provider, or starts it at once on another.
               // Only once the assistant has said something to hand over.
-              ...(lastAssistantMessage === null ? [] : [{ label: t("app.in_a_new_thread_b710"), fg: COLOR.accent, onClick: usageBanner.continueInNewThread }]),
+              ...(lastAssistantMessage === null ? [] : [{ label: t("app.in_a_new_thread_b710"), fg: COLOR.accent, onClick: () => openContinueModal() }]),
               { label: t("action.dismiss"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: usageBanner.dismiss },
             ],
     });
@@ -1798,7 +1820,7 @@ export function App({
         </text>
       ),
       actions: [
-        { label: t("action.handOff"), fg: COLOR.accent, onClick: usageBanner.continueInNewThread },
+        { label: t("action.handOff"), fg: COLOR.accent, onClick: () => openContinueModal() },
         { label: t("action.notNow"), fg: COLOR.dim, hoverFg: COLOR.text, onClick: () => setDismissedHandoffKey(handoffKey) },
       ],
     });
@@ -1829,16 +1851,51 @@ export function App({
   const noticePager = useNoticePager(notices.map((notice) => notice.key));
 
   /**
-   * A model picked for "continue on another model": the handoff goes to a
-   * new thread on that model (effort options included), which then opens.
-   * The delegation rows move with it, so the new thread owns the tasks.
+   * The continue modal for the open thread: provider, model and effort
+   * preselected to its own. The delegation rows move with the handoff, so
+   * the new thread owns the tasks.
    */
-  const continueThreadOnModel = (choice: { instanceId: string; model: string }) => {
-    const sourceId = continueOnModel;
-    if (sourceId === null) return;
-    setContinueOnModel(null);
+  const openContinueModal = () => {
+    const sourceId = selected?.id ?? openThreadId;
+    const selection = selected?.modelSelection;
+    if (sourceId === null || selection === undefined) return;
+    setContinueDraft({ sourceId, selection });
+    setPickerFilter("");
+    setPicker("continue");
+    setFocus("chat");
+  };
+  /**
+   * The modal's choice, confirmed: an untouched draft dispatches exactly
+   * like today's continue (no `modelSelection`), so the same-provider hold
+   * for a usage-limit reset still applies. On another provider it starts at
+   * once — the old provider's allowance is not its own. The draft stays
+   * until the server accepts, so a rejection keeps the modal open with the
+   * choice intact for retry instead of stranding the user in the picker.
+   */
+  const confirmContinueThread = (choice: ModelSelection) => {
+    const draft = continueDraft;
+    if (draft === null) return;
+    const current = selected?.modelSelection;
+    // Same provider by instance id. A cross-instance continue on the same
+    // usage account (two Harness profiles, say) still reads as another
+    // provider and starts at once: comparing by usage account would need
+    // `usageKeyForInstance` from `core/usage/limits`, which is a domain
+    // operation outside the client-shared kernel, so the layering test
+    // forbids the import and the server owns that accounting instead.
+    const sameProvider = current !== undefined && current.instanceId === choice.instanceId;
+    const scheduledFor = continueScheduledFor({
+      resetsAt: usageBanner.banner?.resetsAt ?? null,
+      sameProvider,
+      now: Date.now(),
+      graceMs: USAGE_CONTINUE_GRACE_MS,
+    });
     void client
-      .dispatch({ type: "thread.continue", threadId: sourceId, modelSelection: buildModelSelection(choice) })
+      .dispatch({
+        type: "thread.continue",
+        threadId: draft.sourceId,
+        ...(current !== undefined && continueSelectionsEqual(current, choice) ? {} : { modelSelection: choice }),
+        ...(scheduledFor === undefined ? {} : { scheduledFor }),
+      })
       .then((result) => {
         closePicker("chat");
         setOpenThreadId(result.threadId);
@@ -2265,34 +2322,17 @@ export function App({
               {
                 key: "thread:continue",
                 label: t("app.continue_in_a_new_6599"),
-                // Same project, model and checkout; a handoff written from
-                // this thread. Held for the reset while a usage limit stands.
-                // Nothing to hand over until the assistant has replied.
+                // Same project and checkout; a handoff written from this
+                // thread. The modal offers the provider, model and effort,
+                // preselected to this thread's own. Held for the reset while
+                // a usage limit stands on the same provider. Nothing to hand
+                // over until the assistant has replied.
                 ...(lastAssistantMessage === null
                   ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
                   : {
                       meta: usageBanner.banner?.resetsAt ? t("app.after_the_reset_2abf") : t("app.fresh_context_a387"),
                       onPick: () => {
-                        closePicker("chat");
-                        usageBanner.continueInNewThread();
-                      },
-                    }),
-              },
-              {
-                key: "thread:continue-model",
-                label: t("app.continue_on_another_model_7d2e"),
-                // Same project and checkout, but the model is picked first: a
-                // handoff to another provider when this one's allowance is out.
-                // Nothing to hand over until the assistant has replied.
-                ...(lastAssistantMessage === null
-                  ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
-                  : {
-                      meta: t("app.pick_the_model_first_3c8b"),
-                      onPick: () => {
-                        setContinueOnModel(selected?.id ?? openThreadId);
-                        setPickerFilter("");
-                        setPicker("model");
-                        setFocus("chat");
+                        openContinueModal();
                       },
                     }),
               },
@@ -2500,13 +2540,12 @@ export function App({
     const current = effectiveModelSelection;
     // A thread that hasn't started yet has no provider to lock to — offer
     // every *enabled* provider, grouped into sections so browsing them stays
-    // sane. A "continue on another model" pick lists them all too: a handoff
-    // can cross providers. Disabled instances still report their models over
-    // getConfig, but selecting them fails, so they are hidden (same as the
-    // desktop picker). Hidden models (`providerModelPreferences`) are skipped
-    // except the current one, which stays marked so a since-hidden selection
-    // still reads.
-    if (creating || continueOnModel !== null) {
+    // sane. Disabled instances still report their models over getConfig, but
+    // selecting them fails, so they are hidden (same as the desktop picker).
+    // Hidden models (`providerModelPreferences`) are skipped except the
+    // current one, which stays marked so a since-hidden selection still
+    // reads.
+    if (creating) {
       return {
         kind: "list",
         sections: offerableProviders(providers)
@@ -2531,10 +2570,7 @@ export function App({
               label: model.name,
               ...modelRowDetail(model, pinned === undefined ? model.isDefault === true : model.slug === pinned),
               selected: current?.instanceId === provider.instanceId && current?.model === model.slug,
-              onPick: () =>
-                continueOnModel !== null
-                  ? continueThreadOnModel({ instanceId: provider.instanceId, model: model.slug })
-                  : pickModel({ instanceId: provider.instanceId, model: model.slug }),
+              onPick: () => pickModel({ instanceId: provider.instanceId, model: model.slug }),
             })),
           })),
       };
@@ -2560,7 +2596,7 @@ export function App({
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, continueOnModel, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**
@@ -3462,6 +3498,24 @@ export function App({
           onClose={sideQuestion.close}
         />
       ) : null}
+      {autoCancel.pending === null ? null : (
+        <CancelAutoContinueModal
+          title={autoCancel.pending.title}
+          screenWidth={width}
+          screenHeight={height}
+          onNotify={() => {
+            const pending = autoCancel.pending;
+            autoCancel.close();
+            pending?.cancel(true);
+          }}
+          onSilent={() => {
+            const pending = autoCancel.pending;
+            autoCancel.close();
+            pending?.cancel(false);
+          }}
+          onBack={autoCancel.close}
+        />
+      )}
       {picker === null || picker === "onboarding" ? null : picker === "rename" ? (
         <RenameModal
           initialTitle={selected === null ? "" : String(selected.title ?? "")}
@@ -3690,6 +3744,16 @@ export function App({
           width={backgroundGeometry.width}
           height={backgroundGeometry.height}
           onClose={() => closePicker(paletteReturnFocus)}
+        />
+      ) : picker === "continue" && continueDraft !== null ? (
+        <ContinueModal
+          providers={providers}
+          initial={continueDraft.selection}
+          resetsAt={usageBanner.banner?.resetsAt ?? null}
+          screenWidth={width}
+          screenHeight={height}
+          onConfirm={confirmContinueThread}
+          onClose={() => closePicker("chat")}
         />
       ) : (
         <PickerModal
