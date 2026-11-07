@@ -1134,6 +1134,12 @@ describe("steer redelivery at settle", () => {
       takeUnconfirmedSteers: () => pending.splice(0),
     };
     await executeTurn({ store, driver, threadId: thread.id, storeTurnId: first.turn.id, prompt: "go" });
+    // The redelivery copy runs in the background — promotion never blocks
+    // the settling runner — so flush it before teardown: the rmdir below
+    // races its ledger writes and checkpoint capture otherwise (EBUSY on
+    // Windows, where an in-use directory cannot go away).
+    await flushTurnRunners();
+    expect((await store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["interrupted", "interrupted"]);
     expect((await store.readMessages(thread.id)).filter((row) => row.text === "task settled")).toHaveLength(2);
     expect((await store.readActivities(thread.id)).filter((row) => row.kind === "steer.redelivered")).toHaveLength(1);
   });
