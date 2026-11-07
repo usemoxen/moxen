@@ -1973,6 +1973,35 @@ describe("DirectConnection settings", () => {
       await connection.close();
     }
   });
+
+  it("keeps keys it does not know when settings.set rewrites the file", async () => {
+    // A newer build's keys at every level survive a save from this build.
+    const harness = await testHarness();
+    const configPath = path.join(harness.root, "unknowns-config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        futureTop: 1,
+        ui: { backdrop: "off", futureSection: "keep" },
+        providers: { harness: { profiles: [{ id: "local", baseUrl: "http://localhost:8080", futureProfile: "keep", models: [{ id: "m" }] }] } },
+        mcpServers: { docs: { command: "docs-mcp", futureServer: "keep" } },
+      }),
+      "utf8",
+    );
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, configPath });
+    try {
+      await connection.dispatch({ type: "settings.set", key: "git.historyLimit", value: "120" });
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toMatchObject({
+        futureTop: 1,
+        ui: { backdrop: "off", futureSection: "keep" },
+        git: { historyLimit: 120 },
+        providers: { harness: { profiles: [{ id: "local", futureProfile: "keep" }] } },
+        mcpServers: { docs: { command: "docs-mcp", futureServer: "keep" } },
+      });
+    } finally {
+      await connection.close();
+    }
+  });
 });
 
 describe("DirectConnection harness profiles", () => {

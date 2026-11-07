@@ -153,9 +153,9 @@ describe("quirks", () => {
     expect(dropped.chatTemplateKwargs).toEqual({});
   });
 
-  it("rejects a known override with the wrong type and ignores unknown ones", () => {
+  it("rejects a known override with the wrong type and keeps unknown ones", () => {
     expect(() => parseQuirkOverrides({ systemRole: "robot" }, "q")).toThrow(/systemRole/);
     expect(() => parseQuirkOverrides({ systemFirstOnly: "yes" }, "q")).toThrow(/true or false/);
-    expect(parseQuirkOverrides({ futureFlag: 1, systemRole: "developer" }, "q")).toEqual({ systemRole: "developer" });
+    expect(parseQuirkOverrides({ futureFlag: 1, systemRole: "developer" }, "q")).toEqual({ futureFlag: 1, systemRole: "developer" });
   });
 });
