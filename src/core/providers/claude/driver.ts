@@ -60,7 +60,13 @@ import type {
   SideQuestionInput,
   UnconfirmedSteer,
 } from "../spi.js";
-import { dropTurnWaiter } from "../spi.js";
+import {
+  parkTurnWaiter,
+  settleAndPublishTurn,
+  terminalTurnEvent,
+  type TerminalTurnStatus,
+  type TurnWaiters,
+} from "../turnsettle.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { mcpSignature, type McpServerSpec } from "../../mcp.js";
 import {
@@ -119,6 +125,8 @@ export interface ClaudeDriverOptions {
   readonly transport?: ClaudeTransport;
   readonly sessionApi?: ClaudeSessionApi;
   readonly usageProbeTimeoutMs?: number;
+  /** Bound on the `interrupt()` wait in `closeSession`; see `stopTimeoutMs`. */
+  readonly stopTimeoutMs?: number;
   /**
    * The `agent-skills` mod to load into every session (see `skillsmod.ts`).
    * Null leaves sessions as they were; production passes `locateSkillsMod()`.
@@ -254,7 +262,7 @@ interface ClaudeSession {
   parkedInputs: Map<string, ParkedRequest & { input: Record<string, unknown> }>;
   sessionAllows: Set<string>;
   transcript: TranscriptTurn[];
-  waiters: Map<TurnId, Array<{ resolve: (outcome: DriverTurnOutcome) => void; reject: (cause: unknown) => void }>>;
+  waiters: TurnWaiters<DriverTurnOutcome>;
   usage: UsageTotals;
   compacted: boolean;
   turnsSinceCompaction: number;
@@ -406,6 +414,13 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   private readonly transport: ClaudeTransport;
   private readonly sessionApi: ClaudeSessionApi;
   private readonly usageProbeTimeoutMs: number;
+  /**
+   * How long `closeSession` waits for the CLI to answer `interrupt()`
+   * before carrying on to `close()` anyway. A hung process must not hold
+   * the turn's waiters or the sessions queued behind it in `stopAll`;
+   * kept small so shutdown stays prompt.
+   */
+  private readonly stopTimeoutMs: number;
   private readonly skillsMod: SkillsMod | null;
   private readonly sessions = new Map<ThreadId, ClaudeSession>();
   /**
@@ -435,6 +450,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SdkTransport();
     this.sessionApi = options.sessionApi ?? new SdkSessionApi();
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
     this.skillsMod = options.skillsMod ?? null;
   }
 
@@ -877,39 +893,70 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
   }
 
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_SPAWN_FAILED", `Could not stop the Claude session for thread ${threadId}`, async () => {
+    this.attempt("CLAUDE_STOP_FAILED", `Could not stop the Claude session for thread ${threadId}`, async () => {
       const session = this.sessions.get(threadId);
       if (!session) return;
       await this.closeSession(session, "session-stopped");
     });
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_SPAWN_FAILED", "Could not stop Claude sessions", async () => {
-      for (const session of [...this.sessions.values()]) {
-        await this.closeSession(session, "session-stopped");
-      }
+    this.attempt("CLAUDE_STOP_FAILED", "Could not stop Claude sessions", async () => {
+      // Concurrently: a session hung in `interrupt()` must not hold the
+      // rest from reaching `close()`.
+      await Promise.all([...this.sessions.values()].map((session) => this.closeSession(session, "session-stopped")));
     });
 
   private async closeSession(session: ClaudeSession, reason: string): Promise<void> {
     if (session.closed) return;
     session.closed = true;
     this.denyParked(session, "Session ended.");
+    // Settle before the interrupt wait, not after it and not in the pump:
+    // the pump skips its own settle once the session is closed, and a hung
+    // process must not hold the turn's waiters. Settling is guarded on the
+    // transcript, so a result the pump settled first is never published twice.
+    this.settleOpenTurn(session, "interrupted", "Session ended.");
     try {
-      await session.query.interrupt();
+      await this.interruptForClose(session);
+      // An interactive interrupt only stops the turn; close terminates the
+      // transport too, including background work and later notifications.
+      session.query.close?.();
+    } finally {
+      session.input.close();
+      // A session that started after this stop began owns the thread now:
+      // its teardown, not this stale one's, removes and reports it.
+      if (this.sessions.get(session.threadId) === session) {
+        this.sessions.delete(session.threadId);
+        this.publish({
+          type: "thread.state.changed",
+          provider: "claude",
+          threadId: session.threadId,
+          state: reason,
+        });
+      }
+    }
+  }
+
+  /**
+   * Best-effort interrupt for a session going away, bounded so `close()`
+   * below is always reached even when the process never answers.
+   * The timer is unref'd and cleared: it never holds the process open and
+   * never fires after an interrupt that answered in time.
+   */
+  private async interruptForClose(session: ClaudeSession): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        session.query.interrupt(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.stopTimeoutMs);
+          timer.unref();
+        }),
+      ]);
     } catch {
       // Best effort: the process may already be gone.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    // An interactive interrupt only stops the turn; close terminates the
-    // transport too, including background work and later notifications.
-    session.query.close?.();
-    session.input.close();
-    this.sessions.delete(session.threadId);
-    this.publish({
-      type: "thread.state.changed",
-      provider: "claude",
-      threadId: session.threadId,
-      state: reason,
-    });
   }
 
   readonly listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
@@ -1062,45 +1109,40 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         details: { threadId, turnId },
       });
     }
-    return await new Promise<DriverTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
-      const list = session.waiters.get(turnId) ?? [];
-      list.push(waiter);
-      session.waiters.set(turnId, list);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          dropTurnWaiter(session.waiters.get(turnId) ?? [], waiter);
-          reject(
-            new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
-              details: { threadId, turnId },
-            }),
-          );
-        },
-        { once: true },
-      );
+    return await parkTurnWaiter({
+      waiters: session.waiters,
+      turnId,
+      signal,
+      onAbort: () =>
+        new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, {
+          details: { threadId, turnId },
+        }),
     });
   }
 
-  private settleOpenTurn(session: ClaudeSession, status: DriverTurnStatus, detail: string): void {
-    const open = session.transcript.find((turn) => turn.status === "running");
-    if (open) {
-      open.outputAtEnd = session.usage.output;
-      open.status = status;
-      open.error = status === "completed" ? null : detail;
-      if (status !== "completed") open.text = open.text || detail;
-    }
-    const waiters = open ? (session.waiters.get(open.id) ?? []) : [];
-    if (open) session.waiters.delete(open.id);
-    const outcome: DriverTurnOutcome = {
+  private settleOpenTurn(session: ClaudeSession, status: TerminalTurnStatus, detail: string, expectedTurn?: TranscriptTurn, raw?: unknown): void {
+    settleAndPublishTurn({
+      open: expectedTurn ?? session.transcript.find((turn) => turn.status === "running"),
+      waiters: session.waiters,
       status,
-      text: open?.text ?? "",
-      usage: session.usage,
-      turnOutputTokens: open ? session.usage.output - open.outputAtStart : 0,
-      ...(open?.generationDurationMs ? { generation: { characters: open.generationCharacters ?? 0, durationMs: open.generationDurationMs } } : {}),
-      error: open?.error ?? detail,
-    };
-    for (const waiter of waiters) waiter.resolve(outcome);
+      apply: (turn) => {
+        turn.outputAtEnd = session.usage.output;
+        turn.status = status;
+        turn.error = status === "completed" ? null : detail;
+        if (status !== "completed") turn.text = turn.text || detail;
+        const outcome: DriverTurnOutcome = {
+          status,
+          text: turn.text,
+          usage: session.usage,
+          turnOutputTokens: session.usage.output - turn.outputAtStart,
+          ...(turn.generationDurationMs ? { generation: { characters: turn.generationCharacters ?? 0, durationMs: turn.generationDurationMs } } : {}),
+          error: turn.error,
+        };
+        return outcome;
+      },
+      publish: (event) => this.publish(event),
+      event: (turnId) => terminalTurnEvent("claude", session.threadId, turnId, status, raw),
+    });
   }
 
   // -- permissions --------------------------------------------------------
@@ -2009,25 +2051,14 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       raw: { costUsd: cost },
     });
     if (message.subtype === "success") {
-      this.publish({
-        type: "turn.completed",
-        provider: "claude",
-        threadId: session.threadId,
-        turnId: open?.id ?? "unknown",
-      });
+      // Settling publishes `turn.completed`; the terminal event is the
+      // settle's, so an interrupt racing this result cannot publish twice.
       this.settleOpenTurn(session, "completed", "");
       return;
     }
     session.pendingText = null;
     const errorText = extractResultError(message, stopFailure);
-    this.publish({
-      type: "turn.failed",
-      provider: "claude",
-      threadId: session.threadId,
-      turnId: session.transcript.find((turn) => turn.status === "running")?.id ?? "unknown",
-      raw: { subtype: message.subtype, error: errorText },
-    });
-    this.settleOpenTurn(session, "failed", errorText);
+    this.settleOpenTurn(session, "failed", errorText, undefined, { subtype: message.subtype, error: errorText });
   }
 
   private handleRateLimit(session: ClaudeSession, info: SDKRateLimitInfo | undefined): void {

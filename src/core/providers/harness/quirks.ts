@@ -182,7 +182,7 @@ export function parseQuirkOverrides(raw: unknown, label: string): Partial<ModelQ
     const id = input.toolCallId;
     if (typeof id !== "object" || id === null || Array.isArray(id)) throw new CliError("INVALID_CONFIG", `${label}.toolCallId must be an object.`);
     const fields = id as Record<string, unknown>;
-    const parsed: { maxLength?: number; exactLength?: number; alphanumericOnly?: boolean } = {};
+    const parsed: Record<string, unknown> = {};
     for (const key of ["maxLength", "exactLength"] as const) {
       const value = fields[key];
       if (value === undefined) continue;
@@ -195,8 +195,13 @@ export function parseQuirkOverrides(raw: unknown, label: string): Partial<ModelQ
       if (typeof fields.alphanumericOnly !== "boolean") throw new CliError("INVALID_CONFIG", `${label}.toolCallId.alphanumericOnly must be true or false.`);
       parsed.alphanumericOnly = fields.alphanumericOnly;
     }
+    // A newer build's extra tool-call constraints stay in the file untouched.
+    for (const [key, value] of Object.entries(fields)) if (!(key in parsed)) parsed[key] = value;
     out.toolCallId = parsed;
   }
+  // Unknown quirks are a newer build's: kept verbatim so a save does not drop them.
+  const known = new Set([...BOOLEANS, ...Object.keys(ENUMS), "effortParam", "effortKwarg", "chatTemplateKwargs", "toolCallId"]);
+  for (const [key, value] of Object.entries(input)) if (!known.has(key)) out[key] = value;
   return out as Partial<ModelQuirks>;
 }
 

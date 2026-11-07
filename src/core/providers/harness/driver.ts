@@ -25,6 +25,9 @@ import path from "node:path";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import type { Done } from "effect/Cause";
+
+import { abortRace, withinMs } from "../timeout.js";
 
 import { CliError } from "../../errors.js";
 import { isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
@@ -92,6 +95,22 @@ export interface HarnessDriverOptions {
   readonly connectMcp?: ConnectMcp;
   /** The home directory whose skill folders count as the user's own. */
   readonly home?: string;
+  /** How long a stop waits for an in-flight start before abandoning it (default 1 s, well under the server's per-driver stop budget). */
+  readonly stopWaitMs?: number;
+}
+
+/** How long a stop waits for an in-flight start before abandoning it (see `stopWaitMs`). */
+const STOP_WAIT_MS = 1_000;
+
+/** An `openSession` still running: a stop waits for it, bounded, then abandons it. */
+interface PendingStart {
+  readonly promise: Promise<ProviderSession>;
+  /** A stop is waiting on this start: whatever it registers will be closed, so a joiner starts fresh instead. */
+  stopping: boolean;
+  /** Fired on abandon so joiners on a wedged start go fresh at once instead of hanging on the zombie entry. */
+  readonly aborter: AbortController;
+  /** The session this start registered, once it has: a stop closes only its own start's session. */
+  session?: HarnessSession;
 }
 
 interface HarnessTurn {
@@ -104,7 +123,7 @@ interface HarnessTurn {
   readonly reasoningStarted: Set<string>;
   /** What the turn's subagents used, which the loop's own totals do not include. */
   readonly subagentUsage: { input: number; cacheRead: number; output: number; thinking: number };
-  readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void }>;
+  readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }>;
 }
 
 export interface HarnessTurnOutcome {
@@ -203,7 +222,7 @@ function summarizeArguments(raw: string): string {
 const WAKE_DEBOUNCE_MS = 600;
 const MAX_WAKES_IN_A_ROW = 6;
 /** How long a stop waits for a session's MCP servers to finish closing before going on without them. */
-const MCP_CLOSE_WAIT_MS = 5_000;
+const MCP_CLOSE_WAIT_MS = 2_000;
 /** How much of a finished task's output goes into the message that tells the model. */
 const NOTE_OUTPUT_CHARS = 3500;
 
@@ -243,11 +262,12 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private readonly transport: TurnConfig["transport"] | undefined;
   private readonly sleep: TurnConfig["sleep"] | undefined;
   private readonly sessions = new Map<ThreadId, HarnessSession>();
-  /** Sessions being started (their MCP servers are connecting): a second start for the thread waits for the first. */
-  private readonly starting = new Map<ThreadId, Promise<ProviderSession>>();
+  /** Starts in flight, by thread: a stop waits for the start bounded, then abandons it. */
+  private readonly starting = new Map<ThreadId, PendingStart>();
   private readonly connectMcp: ConnectMcp | undefined;
   private readonly home: string | undefined;
-  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+  private readonly stopWaitMs: number;
+  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent, Done>());
   /** Titles being made, by session id, so a second ask waits for the first instead of paying for another request. */
   private readonly titling = new Map<string, Promise<string | null>>();
   /** Automatic title attempts that made nothing, by session id; after a few the session is left untitled until asked again. */
@@ -261,6 +281,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     this.sleep = options.sleep;
     this.connectMcp = options.connectMcp;
     this.home = options.home;
+    this.stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS;
   }
 
   /** Profiles and compaction settings are read on every use, so an edit reaches the next turn of a running session. */
@@ -307,20 +328,55 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   readonly startSession = (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, CliError> =>
     this.attempt("HARNESS_START_FAILED", `Could not start a harness session for thread ${input.threadId}`, async () => {
-      const existing = this.sessions.get(input.threadId);
-      if (existing && !existing.closed) return this.describe(existing);
-      const pending = this.starting.get(input.threadId);
-      if (pending) return await pending;
-      const started = this.openSession(input);
-      this.starting.set(input.threadId, started);
-      try {
-        return await started;
-      } finally {
-        this.starting.delete(input.threadId);
+      // `fresh` skips the live check once: a joiner whose start a stop
+      // overlapped must not return the session that stop is closing.
+      let fresh = false;
+      for (;;) {
+        const existing = this.sessions.get(input.threadId);
+        if (existing && !existing.closed && !fresh) return this.describe(existing);
+        fresh = false;
+        // A start in flight is not in `sessions` yet: a second start for the
+        // thread waits for the first instead of opening a second session.
+        const pending = this.starting.get(input.threadId);
+        if (!pending) {
+          const aborter = new AbortController();
+          const started = this.openSession(input, aborter.signal);
+          const entry: PendingStart = {
+            promise: started.then((session) => {
+              entry.session = session;
+              return this.describe(session);
+            }),
+            stopping: false,
+            aborter,
+          };
+          this.starting.set(input.threadId, entry);
+          try {
+            return await entry.promise;
+          } finally {
+            if (this.starting.get(input.threadId) === entry) this.starting.delete(input.threadId);
+          }
+        }
+        // Join the in-flight start. A stop may have overlapped it
+        // (`stopping`): whatever it registered is being closed, so loop and
+        // start fresh instead of handing back a dead session — including when
+        // the stop abandoned it and the join fails with that.
+        try {
+          await abortRace(pending.promise, pending.aborter.signal);
+        } catch (cause) {
+          if (!pending.stopping) throw cause;
+          fresh = true;
+          continue;
+        }
+        if (pending.stopping) {
+          fresh = true;
+          continue;
+        }
+        const joined = this.sessions.get(input.threadId);
+        if (joined && !joined.closed) return this.describe(joined);
       }
     });
 
-  private async openSession(input: ProviderSessionStartInput): Promise<ProviderSession> {
+  private async openSession(input: ProviderSessionStartInput, signal: AbortSignal): Promise<HarnessSession> {
     const sessionId = input.resumeCursor && /^[A-Za-z0-9_-]+$/.test(input.resumeCursor) ? input.resumeCursor : `hs_${randomUUID()}`;
     const transcript = HarnessTranscript.open(HarnessTranscript.pathFor(this.sessionsDir, sessionId));
     const interactionMode = input.interactionMode ?? "default";
@@ -381,8 +437,16 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
           if (guidance !== "") transcript.append({ role: "system", content: `This session now has tools from MCP servers. ${guidance}` });
         }
       }
+      // A stop that gave up waiting abandons the start: fail instead of
+      // registering a session nobody owns (the `catch` below closes the
+      // pool). Checked on the captured signal (not the map: an abandon
+      // deletes the entry, and a fresh start may have replaced it), and
+      // synchronous with the `set`, so no stop can slip between them.
+      if (signal.aborted) {
+        throw new Error(`Start for thread ${input.threadId} was abandoned by a stop.`);
+      }
       this.sessions.set(input.threadId, session);
-      return this.describe(session);
+      return session;
     } catch (error) {
       await mcp.close();
       throw error;
@@ -812,7 +876,10 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       ...(outcome.error ? { raw: { error: outcome.error } } : {}),
     });
     const waiters = turn.waiters.splice(0);
-    for (const waiter of waiters) waiter.resolve(outcome);
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(outcome);
+    }
     // Something may have ended after the model's last request: tell it now rather than at its next turn.
     this.scheduleWake(session);
   }
@@ -824,16 +891,17 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     if (turn.status !== "running") return { status: turn.status, text: turn.text, usage: turn.usage, error: turn.error };
     if (signal?.aborted === true) throw new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, { details: { threadId, turnId } });
     return await new Promise<HarnessTurnOutcome>((resolve, reject) => {
-      const waiter = { resolve, reject };
+      const waiter: { resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void } = { resolve, reject };
       turn.waiters.push(waiter);
-      signal?.addEventListener(
-        "abort",
-        () => {
+      if (signal) {
+        const onAbort = (): void => {
           dropTurnWaiter(turn.waiters, waiter);
           reject(new CliError("TURN_ABORTED", `Turn ${turnId} was aborted before settling.`, { details: { threadId, turnId } }));
-        },
-        { once: true },
-      );
+        };
+        waiter.signal = signal;
+        waiter.onAbort = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   }
 
@@ -1395,28 +1463,55 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   // -- stopping ------------------------------------------------------------------
 
+  /**
+   * Give up on a wedged start: wake its joiners at once and delete the map
+   * entry so later starts go fresh instead of hanging on the zombie. The
+   * late start closes its own pool instead of registering (see `openSession`).
+   */
+  private abandonStart(threadId: ThreadId, entry: PendingStart): void {
+    entry.aborter.abort();
+    if (this.starting.get(threadId) === entry) this.starting.delete(threadId);
+  }
+
+  /**
+   * Wait for in-flight starts, at most `stopWaitMs`: a wedged MCP connect
+   * must not hang a stop. Unsettled entries stay registered, so the caller
+   * can abandon exactly those.
+   */
+  private async awaitStarts(starts: ReadonlyArray<PendingStart>): Promise<void> {
+    if (starts.length === 0) return;
+    await withinMs(Promise.allSettled(starts.map((start) => start.promise)), this.stopWaitMs);
+  }
+
   readonly stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
     this.attempt("HARNESS_STOP_FAILED", `Could not stop the harness session for thread ${threadId}`, async () => {
-      // A start in flight is not in `sessions` yet: take over its outcome
-      // first, then stop what it made. Otherwise it resolves live after this
-      // returns, with a pool nobody closes.
-      const pending = this.starting.get(threadId);
-      if (pending) {
-        try {
-          await pending;
-        } catch {
-          // The start failed: nothing it made to stop.
-        }
+      // A start in flight is not in `sessions` yet: wait for its outcome
+      // bounded, then stop what it made. On timeout the start is abandoned:
+      // its late resolution closes its pool instead of registering.
+      const entry = this.starting.get(threadId);
+      if (entry) {
+        // Marked before waiting: a joiner resolving alongside this stop
+        // starts fresh, since whatever this start registers is closed below.
+        entry.stopping = true;
+        await this.awaitStarts([entry]);
+        // Still registered means still unsettled (the wrapper deletes on
+        // settle); a start that settled just in time is stopped below.
+        if (this.starting.get(threadId) === entry) this.abandonStart(threadId, entry);
       }
       const session = this.sessions.get(threadId);
       if (!session || session.closed) return;
+      // A stop that overlapped a start closes only that start's session: a
+      // joiner's fresh start that already replaced it is not this stop's.
+      if (entry?.session && session !== entry.session) return;
       session.closed = true;
       if (session.wakeTimer) clearTimeout(session.wakeTimer);
       const turn = this.openTurn(session);
       turn?.controller.abort();
       this.keepSteering(session);
       if (turn) this.settle(session, turn, { status: "interrupted", text: "", error: "Session stopped.", usage: null });
-      this.sessions.delete(threadId);
+      // A successor may have registered while the close was awaited: delete
+      // only the session this stop closed.
+      if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
       // The servers' processes end with the session; the signals go out now, the wait is only for the tidy-up.
       session.background.stopAll();
       await this.closeMcp(session);
@@ -1424,19 +1519,44 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
   readonly stopAll = (): Effect.Effect<void, CliError> =>
     this.attempt("HARNESS_STOP_FAILED", "Could not stop the harness driver", async () => {
-      const pendings = [...this.starting.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
-      for (const session of this.sessions.values()) {
+      // Starts in flight are not in `sessions` yet: wait for the outcomes
+      // bounded, then stop what they made. Timed-out starts are abandoned:
+      // their late resolutions close their pools instead of registering.
+      const entries = [...this.starting.entries()];
+      if (entries.length > 0) {
+        for (const [, entry] of entries) entry.stopping = true;
+        await this.awaitStarts(entries.map(([, entry]) => entry));
+        for (const [threadId, entry] of entries) {
+          if (this.starting.get(threadId) === entry) this.abandonStart(threadId, entry);
+        }
+      }
+      // Closes run in parallel: sequential per-session closes would stack the
+      // close budget once per session.
+      const stopping = [...this.sessions.values()];
+      for (const session of stopping) {
         session.closed = true;
         if (session.wakeTimer) clearTimeout(session.wakeTimer);
         const turn = this.openTurn(session);
         turn?.controller.abort();
         this.keepSteering(session);
         if (turn) this.settle(session, turn, { status: "interrupted", text: "", error: "Driver stopped.", usage: null });
-        session.background.stopAll();
-        await this.closeMcp(session);
       }
-      this.sessions.clear();
+      await Promise.allSettled(
+        stopping.map(async (session) => {
+          session.background.stopAll();
+          await this.closeMcp(session);
+        }),
+      );
+      // A session registered while the closes were awaited is not this
+      // stop's: delete only the sessions this stop closed.
+      for (const session of stopping) {
+        if (this.sessions.get(session.threadId) === session) this.sessions.delete(session.threadId);
+      }
+      // Signal completion on the event stream: buffered events are still
+      // delivered, the stream then ends so the pump in `threads/execute.ts`
+      // releases its fiber instead of waiting on a driver that is gone.
+      // Offers after this return false and are dropped, never a crash.
+      Effect.runSync(Queue.end(this.queue));
     });
 
   /**

@@ -183,13 +183,19 @@ function parseEntry(name: string, raw: unknown, source: string): McpServerEntry 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw invalid(where, "must be an object.");
   const input = raw as Record<string, unknown>;
   const routing = parseRouting(input, where);
+  const KNOWN = new Set(["type", "command", "args", "url", "env", "headers", "providers", "disabledTools", "disabled"]);
+  const unknownOf = (): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(input)) if (!KNOWN.has(key)) out[key] = value;
+    return out;
+  };
   const type = input.type ?? (typeof input.url === "string" && input.command === undefined ? "http" : "stdio");
   if (type === "http") {
     if (typeof input.url !== "string" || !/^https?:\/\//.test(input.url)) {
       throw invalid(where, "url must be an http(s) URL.");
     }
     const headers = stringRecord(input.headers, where, "headers");
-    return { type: "http", url: input.url, ...(Object.keys(headers).length > 0 ? { headers } : {}), ...routing };
+    return { type: "http", url: input.url, ...(Object.keys(headers).length > 0 ? { headers } : {}), ...routing, ...unknownOf() };
   }
   if (type !== "stdio") throw invalid(where, "type must be stdio or http.");
   if (typeof input.command !== "string" || input.command.trim().length === 0) {
@@ -204,6 +210,7 @@ function parseEntry(name: string, raw: unknown, source: string): McpServerEntry 
     ...(input.args !== undefined ? { args: input.args as string[] } : {}),
     ...(Object.keys(env).length > 0 ? { env } : {}),
     ...routing,
+    ...unknownOf(),
   };
 }
 

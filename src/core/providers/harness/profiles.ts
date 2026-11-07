@@ -57,7 +57,7 @@ function parseModel(raw: unknown, label: string): HarnessModelConfig {
   const input = raw as Record<string, unknown>;
   const id = optionalString(input, "id", label);
   if (!id) fail(`${label}.id`, "is required.");
-  const model: HarnessModelConfig = { id };
+  const model = { id } as HarnessModelConfig & Record<string, unknown>;
   const contextWindow = optionalPositiveInt(input, "contextWindow", label);
   if (contextWindow !== undefined) model.contextWindow = contextWindow;
   const maxOutput = optionalPositiveInt(input, "maxOutput", label);
@@ -74,6 +74,10 @@ function parseModel(raw: unknown, label: string): HarnessModelConfig {
     if (efforts.length > 0) model.efforts = efforts;
   }
   if (input.probed !== undefined) model.probed = parseProbed(input.probed, `${label}.probed`);
+  // A newer build's extra model fields stay in the file untouched.
+  for (const [key, value] of Object.entries(input)) {
+    if (!(key in model)) (model as Record<string, unknown>)[key] = value;
+  }
   return model;
 }
 
@@ -82,13 +86,16 @@ function parseProbed(raw: unknown, label: string): HarnessProbedConfig {
   const input = raw as Record<string, unknown>;
   const at = optionalString(input, "at", label);
   if (at === undefined || Number.isNaN(Date.parse(at))) fail(`${label}.at`, "must be a date and time.");
-  const probed: HarnessProbedConfig = { at, quirks: parseQuirkOverrides(input.quirks, `${label}.quirks`) };
+  const probed = { at, quirks: parseQuirkOverrides(input.quirks, `${label}.quirks`) } as HarnessProbedConfig & Record<string, unknown>;
   const contextWindow = optionalPositiveInt(input, "contextWindow", label);
   if (contextWindow !== undefined) probed.contextWindow = contextWindow;
   const slots = optionalPositiveInt(input, "slots", label);
   if (slots !== undefined) probed.slots = slots;
   const templateHash = optionalString(input, "templateHash", label);
   if (templateHash !== undefined) probed.templateHash = templateHash;
+  for (const [key, value] of Object.entries(input)) {
+    if (!(key in probed)) (probed as Record<string, unknown>)[key] = value;
+  }
   return probed;
 }
 
@@ -123,7 +130,7 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
   const models = input.models.map((entry, index) => parseModel(entry, `${here}.models[${index}]`));
   if (new Set(models.map((model) => model.id)).size !== models.length) fail(`${here}.models`, "lists a model twice.");
 
-  const profile: HarnessProfileConfig = { id, apiFormat, baseUrl, models };
+  const profile = { id, apiFormat, baseUrl, models } as HarnessProfileConfig & Record<string, unknown>;
   const title = optionalString(input, "label", here);
   if (title !== undefined) profile.label = title;
   if (apiKeyEnv !== undefined) profile.apiKeyEnv = apiKeyEnv;
@@ -131,7 +138,7 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
   if (input.sampling !== undefined) {
     if (typeof input.sampling !== "object" || input.sampling === null || Array.isArray(input.sampling)) fail(`${here}.sampling`, "must be an object.");
     const raw = input.sampling as Record<string, unknown>;
-    const sampling: NonNullable<HarnessProfileConfig["sampling"]> = {};
+    const sampling: Record<string, unknown> = {};
     const temperature = optionalNumber(raw, "temperature", `${here}.sampling`, 0, 5);
     const topP = optionalNumber(raw, "topP", `${here}.sampling`, 0, 1);
     const topK = optionalNumber(raw, "topK", `${here}.sampling`, 0, 100_000);
@@ -140,7 +147,8 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
     if (topP !== undefined) sampling.topP = topP;
     if (topK !== undefined) sampling.topK = topK;
     if (minP !== undefined) sampling.minP = minP;
-    if (Object.keys(sampling).length > 0) profile.sampling = sampling;
+    for (const [key, value] of Object.entries(raw)) if (!(key in sampling)) sampling[key] = value;
+    if (Object.keys(sampling).length > 0) profile.sampling = sampling as NonNullable<HarnessProfileConfig["sampling"]>;
   }
   const slots = optionalPositiveInt(input, "slots", here);
   if (slots !== undefined) profile.slots = slots;
@@ -157,7 +165,7 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
     if (typeof input.compaction !== "object" || input.compaction === null || Array.isArray(input.compaction)) fail(`${here}.compaction`, "must be an object.");
     const raw = input.compaction as Record<string, unknown>;
     const label = `${here}.compaction`;
-    const compaction: NonNullable<HarnessProfileConfig["compaction"]> = {};
+    const compaction: Record<string, unknown> = {};
     if (raw.auto !== undefined) {
       if (typeof raw.auto !== "boolean") fail(`${label}.auto`, "must be true or false.");
       compaction.auto = raw.auto;
@@ -170,13 +178,14 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
     if (keep !== undefined) compaction.keepRecentTokens = keep;
     const effort = optionalString(raw, "effort", label);
     if (effort !== undefined) compaction.effort = effort;
-    if (Object.keys(compaction).length > 0) profile.compaction = compaction;
+    for (const [key, value] of Object.entries(raw)) if (!(key in compaction)) compaction[key] = value;
+    if (Object.keys(compaction).length > 0) profile.compaction = compaction as NonNullable<HarnessProfileConfig["compaction"]>;
   }
   if (input.loopGuard !== undefined) {
     if (typeof input.loopGuard !== "object" || input.loopGuard === null || Array.isArray(input.loopGuard)) fail(`${here}.loopGuard`, "must be an object.");
     const raw = input.loopGuard as Record<string, unknown>;
     const label = `${here}.loopGuard`;
-    const guard: NonNullable<HarnessProfileConfig["loopGuard"]> = {};
+    const guard: Record<string, unknown> = {};
     const warn = optionalPositiveInt(raw, "repeatWarn", label);
     if (warn !== undefined) guard.repeatWarn = warn;
     const stop = optionalPositiveInt(raw, "repeatStop", label);
@@ -189,7 +198,8 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
       if (typeof flag !== "boolean") fail(`${label}.${name}`, "must be true or false.");
       guard[name] = flag;
     }
-    if (Object.keys(guard).length > 0) profile.loopGuard = guard;
+    for (const [key, value] of Object.entries(raw)) if (!(key in guard)) guard[key] = value;
+    if (Object.keys(guard).length > 0) profile.loopGuard = guard as NonNullable<HarnessProfileConfig["loopGuard"]>;
   }
   if (input.titles !== undefined) {
     if (typeof input.titles !== "boolean") fail(`${here}.titles`, "must be true or false.");
@@ -206,6 +216,10 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
   }
   const append = optionalString(input, "systemPromptAppend", here);
   if (append !== undefined) profile.systemPromptAppend = append;
+  // A newer build's extra profile fields stay in the file untouched.
+  for (const [key, value] of Object.entries(input)) {
+    if (!(key in (profile as Record<string, unknown>))) (profile as Record<string, unknown>)[key] = value;
+  }
   return profile;
 }
 
@@ -240,6 +254,11 @@ function tabLine(config: HarnessProviderConfig | undefined): { tokens: number } 
   if (config?.autoCompactTokens !== undefined) return { tokens: config.autoCompactTokens };
   if (config?.autoCompactPercent !== undefined) return { fraction: Math.min(0.95, Math.max(0.3, config.autoCompactPercent / 100)) };
   return null;
+}
+
+/** Parse one harness profile on its own, so a lenient load can keep the good ones and report the bad one by index. */
+export function parseHarnessProfile(raw: unknown, index: number): HarnessProfileConfig {
+  return parseProfile(raw, `providers.harness.profiles[${index}]`);
 }
 
 /** Validate `providers.harness` from the config file. Undefined when it holds no profiles. */

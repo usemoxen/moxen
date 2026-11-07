@@ -1,17 +1,20 @@
 import { useKeyboard } from "@opentui/react";
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
-import { previewPlacement, type Rect } from "../../model/imagethumb.js";
+import { previewPlacement, type LoadedImage, type Rect } from "../../model/imagethumb.js";
 import { SURFACE } from "../../theme.js";
 import { useModalOpen } from "../../ui/modalopen.js";
+import { Placeholder } from "./imagefallback.js";
 import { useImageViewer } from "./imageviewer.js";
 
 /** The image the pointer is over, and where its item is on screen. */
 export interface ImagePreview {
   /** The attachment's id: only the item that showed a preview can hide it. */
   id: string;
-  bytes: Uint8Array;
-  size: { width: number; height: number };
+  /** Said in the fallback when the image cannot be drawn. */
+  label: string;
+  /** The shared display copy, or null when the decoder cannot read the image. */
+  display: LoadedImage | null;
   anchor: Rect;
 }
 
@@ -71,11 +74,43 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
   useEffect(() => {
     if (modalOpen) clearImagePreview();
   }, [modalOpen]);
+  const [drawFailed, setDrawFailed] = useState(false);
+  useEffect(() => {
+    setDrawFailed(false);
+  }, [preview]);
   // Typing or a key-driven scroll moves what the preview is anchored to.
   useKeyboard(() => clearImagePreview());
 
   if (preview === null || modalOpen || viewing) return null;
-  const placed = previewPlacement(preview.size, preview.anchor, { width: screenWidth, height: screenHeight });
+  // Nothing drawable (over the native ceiling, or corrupt), or a draw that
+  // failed after the probe: a bordered line saying so instead of a blank box.
+  // The verdict arrives with the preview; this layer never probes itself.
+  if (preview.display === null || drawFailed) {
+    const columns = Math.max(8, Math.min(preview.label.length + 24, screenWidth - 2));
+    const outerWidth = columns + 2;
+    const outerHeight = 3;
+    const onTop = preview.anchor.y >= outerHeight;
+    return (
+      <box
+        style={{
+          position: "absolute",
+          left: Math.max(0, Math.min(preview.anchor.x, screenWidth - outerWidth)),
+          top: onTop ? preview.anchor.y - outerHeight : preview.anchor.y + preview.anchor.height,
+          width: outerWidth,
+          height: outerHeight,
+          zIndex: 15,
+        }}
+        border
+        borderStyle="rounded"
+        borderColor={SURFACE.borderFocus}
+        backgroundColor={SURFACE.raised}
+        selectable={false}
+      >
+        <Placeholder label={preview.label} state="unusable" />
+      </box>
+    );
+  }
+  const placed = previewPlacement(preview.display.size, preview.anchor, { width: screenWidth, height: screenHeight });
   if (placed === null) return null;
   return (
     <box
@@ -86,7 +121,7 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
       backgroundColor={SURFACE.raised}
       selectable={false}
     >
-      <image source={preview.bytes} fit="fit" style={{ width: placed.columns, height: placed.rows }} />
+      <image source={preview.display.bytes} onError={() => setDrawFailed(true)} fit="fit" style={{ width: placed.columns, height: placed.rows }} />
     </box>
   );
 }

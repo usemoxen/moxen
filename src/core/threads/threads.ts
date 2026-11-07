@@ -20,6 +20,7 @@ import type {
   RuntimeMode,
 } from "../types.js";
 import { ThreadStore } from "./store.js";
+import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
   CreateThreadInput,
   ReadView,
@@ -72,6 +73,30 @@ export function threadStatus(thread: StoredThread, now: number = Date.now()): Th
 
 export function openTurn(turns: StoredTurn[]): StoredTurn | null {
   return turns.find((turn) => turn.status === "running") ?? null;
+}
+
+/**
+ * The turn that makes the thread live: the running one, else one with a
+ * status no build writes (it never settles on its own, so nothing may start
+ * or promote past it). Ownerless running turns are running, so the first
+ * branch covers them.
+ */
+export function liveTurn(turns: StoredTurn[]): StoredTurn | null {
+  return openTurn(turns) ?? turns.find((turn) => !isKnownTurnStatus(turn.status)) ?? null;
+}
+
+/** A turns ledger problem hiding rows of this thread, if one is reported. */
+function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
+  const file = store.turnsFile(threadId);
+  return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
+}
+
+function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
+  return new CliError(
+    "TURNS_LEDGER_CORRUPT",
+    `Thread ${threadId} may have an active turn hidden in an unreadable ledger line (${problem.file}${problem.line === undefined ? "" : `:${problem.line}`}). Move the bad line aside first — the TUI warning offers it, or remove the line by hand — then retry.`,
+    { exitCode: 4, details: { threadId, problemId: problem.id } },
+  );
 }
 
 /**
@@ -330,6 +355,8 @@ export async function sendTurn(
     }
 
     let turns = await store.readTurns(threadId);
+    const hidden = hiddenTurnsProblem(store, threadId);
+    if (hidden) throw unreadableTurnsError(threadId, hidden);
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
       if (existing) {
@@ -343,6 +370,14 @@ export async function sendTurn(
       }
     }
     let running = openTurn(turns);
+    const stuck = running === null ? liveTurn(turns) : null;
+    if (stuck !== null) {
+      throw new CliError(
+        "THREAD_BUSY",
+        `Thread ${threadId} has a turn that will never settle (status ${JSON.stringify(stuck.status)}). Stop it before sending.`,
+        { exitCode: 4, details: { threadId, turnId: stuck.id } },
+      );
+    }
     // A message sent to a running turn does not carry a mode of its own (`/research` is for a prompt that starts one).
     if (running && !manualContinuation && input.interactionMode !== undefined) throw modeLocked(threadId);
 
@@ -455,8 +490,14 @@ export async function sendTurn(
     // the new message waits behind it — visibly queued, never swallowed. A
     // message ending usage protection is the exception: it releases the hold
     // and runs first, as protection promises.
+    //
+    // The same oldest-first rule covers a due held turn (a continue set for
+    // a usage-limit reset, or a message held behind one, whose time has
+    // come): the new message queues behind it rather than overtaking it, and
+    // rides along in its turn when model and mode match. Usage-control turns
+    // (wrap-up and other maintenance) are exempt: they run past holds by design.
     const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
-      && turns.some((turn) => turn.status === "queued" && turn.heldAtSettle === true && !turn.queue);
+      && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
     let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
@@ -606,11 +647,21 @@ export async function startBackgroundTurn(
     // Re-checked inside the lock: the wait above runs before it, so two
     // concurrent starts (or a send that won the race) would otherwise both
     // record a running turn.
-    if (openTurn(await store.readTurns(threadId))) {
+    const live = liveTurn(await store.readTurns(threadId));
+    if (live !== null && live.status === "running") {
       throw new CliError(
         "THREAD_BUSY",
         "The thread has an active turn. Retry when idle or use ifBusy inject.",
         { details: { threadId } },
+      );
+    }
+    const unreadable = hiddenTurnsProblem(store, threadId);
+    if (unreadable) throw unreadableTurnsError(threadId, unreadable);
+    if (live !== null) {
+      throw new CliError(
+        "THREAD_BUSY",
+        `Thread ${threadId} has a turn that will never settle (status ${JSON.stringify(live.status)}). Stop it before starting background work.`,
+        { exitCode: 4, details: { threadId, turnId: live.id } },
       );
     }
     const turn: StoredTurn = {
@@ -660,6 +711,36 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * What a thread's turns show that will never settle on their own: a status
+ * no build writes (a hand edit, a newer build), or a running turn no
+ * process owns and no live run holds. The fix for either is stopping the
+ * turn; the poll reports them through `replaceTurnProblems`.
+ */
+export function turnProblems(store: ThreadStore, threadId: string, turns: StoredTurn[]): Array<Omit<StoreProblem, "id">> {
+  const file = store.turnsFile(threadId);
+  const problems: Array<Omit<StoreProblem, "id">> = [];
+  for (const turn of turns) {
+    if (!isKnownTurnStatus(turn.status)) {
+      problems.push({
+        kind: "turn-status",
+        threadId,
+        turnId: turn.id,
+        file,
+        message: `Turn ${turn.id} has a status no build writes (${JSON.stringify(turn.status)}): it shows as unknown and will never settle on its own. Stop the turn to clear it.`,
+      });
+    } else if (turn.status === "running" && !store.isTracked(turn.id) && !turn.owner) {
+      problems.push({
+        kind: "turn-ownerless",
+        threadId,
+        turnId: turn.id,
+        file,
+        message: `Turn ${turn.id} is running but no process owns it, so nothing will ever settle it. Stop the turn.`,
+      });
+    }
+  }
+  return problems;
+}
 /**
  * Whether nothing will ever settle this running turn: no run in this
  * process holds it, and the process that owned it — on this machine —
@@ -972,6 +1053,19 @@ export function isHeldTurn(turn: StoredTurn, now: number = Date.now()): boolean 
   return turn.status === "queued" && typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) > now;
 }
 
+/**
+ * A held turn whose time has come (or that never had one): a continue set
+ * for a usage-limit reset, or a message held behind one, now due. A new send
+ * queues behind these oldest-first rather than overtaking them.
+ */
+function isDueHeldTurn(turn: StoredTurn, now: number): boolean {
+  return (
+    turn.status === "queued" &&
+    (turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") &&
+    !isHeldTurn(turn, now)
+  );
+}
+
 function sameModel(left: StoredTurn, right: StoredTurn): boolean {
   return left.modelSelection?.instanceId === right.modelSelection?.instanceId && left.modelSelection?.model === right.modelSelection?.model;
 }
@@ -987,9 +1081,14 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * before it even sees the second. Their turns never ran, so they are dropped
  * and their messages move onto `next`. A message for another model or mode, or one
  * still waiting for a later time, keeps its own turn.
+ *
+ * A continue set for a usage-limit reset batches the same way even though it
+ * carries its automatic wait: that queue holds no conditions of its own, so
+ * the folded messages ride the same reset. Any other queue-carrying turn (a
+ * wake-up, a handoff, a held entry) keeps its own turn, as before.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
-  if (next.queue) return;
+  if (next.queue && next.scheduleReason !== "usage-reset") return;
   const batch = turns.filter(
     (turn) =>
       turn.id !== next.id &&
@@ -1033,20 +1132,142 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
   };
 }
 
+/**
+ * A held turn settle may start once its time has come: a continue set for a
+ * usage-limit reset, or a message held behind one. Queue-carrying turns stay
+ * owned by the admission path — their conditions, holds and sequence need
+ * the queue's view — except a bare automatic wait: no conditions, not held
+ * or removed, not sequential, running here rather than alongside other
+ * entries. Anything else queued (a wake-up, a handoff, a held entry) waits
+ * for admission like before.
+ */
+function settleStartsHeldTurn(turn: StoredTurn): boolean {
+  if (turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold") return false;
+  const queue = turn.queue;
+  if (!queue) return true;
+  return (
+    queue.automatic === true &&
+    queue.wakeUp !== true &&
+    queue.summaryFor === undefined &&
+    queue.continuation === "same-thread" &&
+    queue.held !== true &&
+    queue.removed !== true &&
+    queue.sequential !== true &&
+    queue.conditions.length === 0
+  );
+}
+
+/**
+ * An automatic continue settle may cancel but never promote: a handoff
+ * summary stays owned by the admission path, while a bare automatic wait due
+ * here is stale when the work resumed. A wake-up may also carry a merged
+ * notification — the riders check below decides that.
+ */
+function settleCancelsStaleTurn(turn: StoredTurn): boolean {
+  if (turn.scheduleReason !== "usage-reset") return false;
+  const queue = turn.queue;
+  if (queue && (queue.automatic !== true || queue.summaryFor !== undefined)) return false;
+  return true;
+}
+
+/**
+ * Whether this queued turn is a stale automatic continue: due, and a turn
+ * ran to completion after it came due, so the thread's work already resumed
+ * and the scheduled nudge would fire as a pointless turn. Only a completed
+ * turn counts — one that failed or was interrupted did not resume anything.
+ * Wake-up riders are not considered here; callers check `wakeUpHasRiders`.
+ */
+export function isStaleContinueTurn(turns: readonly StoredTurn[], turn: StoredTurn, instant: number): boolean {
+  if (turn.status !== "queued" || !settleCancelsStaleTurn(turn) || isHeldTurn(turn, instant)) return false;
+  return continueStale(turns, turn, instant);
+}
+
+/**
+ * Whether a stale-candidate wake-up turn carries another delivery's message:
+ * a native task edge merges its report into the queued wake-up rather than
+ * losing either. Cancelling that turn would drop the report, so a turn with
+ * riders is never stale — it still has something to say.
+ */
+export function wakeUpHasRiders(messages: readonly StoredMessage[], turn: StoredTurn): boolean {
+  return messages.some((message) => message.turnId === turn.id && message.id !== turn.messageId);
+}
+
+/**
+ * Whether an automatic continue after a usage limit is stale: a turn ran to
+ * completion after it came due, so the thread's work already resumed and the
+ * scheduled nudge would fire as a pointless turn. Only a completed turn
+ * counts — one that failed or was interrupted did not resume anything.
+ */
+function continueStale(turns: readonly StoredTurn[], turn: StoredTurn, instant: number): boolean {
+  if (turn.scheduleReason !== "usage-reset") return false;
+  // Due from its scheduled time, or from creation when it has none.
+  const due = turn.scheduledFor !== undefined && turn.scheduledFor !== null ? Date.parse(turn.scheduledFor) : Date.parse(turn.createdAt);
+  if (!Number.isFinite(due) || due > instant) return false;
+  return turns.some(
+    (other) =>
+      other.id !== turn.id &&
+      other.status === "completed" &&
+      Date.parse(other.startedAt ?? other.createdAt) > due,
+  );
+}
+
+/** Caller must hold the thread lock. Take back a stale automatic continue before it runs. */
+async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, turn: StoredTurn, now: string): Promise<void> {
+  await store.updateTurn(threadId, turn.id, { status: "interrupted", updatedAt: now, completedAt: now });
+  await store.appendLedger(threadId, "activity", {
+    id: store.newId(),
+    threadId,
+    turnId: turn.id,
+    kind: "turn.interrupted",
+    summary: turn.id,
+    // Taken back before it ran: clients drop it from the transcript rather
+    // than show a turn that never happened.
+    payload: { beforeStart: true },
+    createdAt: now,
+  });
+  store.emit(threadId, "turn-interrupted");
+}
+
 async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
   if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
-  const turns = await store.readTurns(threadId);
-  if (openTurn(turns)) return;
+  let turns = await store.readTurns(threadId);
+  // A live turn blocks promotion: a running one, an ownerless one, or one
+  // with a status no build writes. So does a turns ledger hiding rows.
+  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
+  if (admittedId === undefined) {
+    // A stale automatic continue never fires: the thread's work already
+    // resumed, so the scheduled nudge is taken back before it runs. Done
+    // before candidacy so batching below never folds a cancelled turn in.
+    let stale = false;
+    let messages: readonly StoredMessage[] | null = null;
+    for (const turn of turns) {
+      if (!isStaleContinueTurn(turns, turn, instant)) continue;
+      if (turn.queue?.wakeUp === true) {
+        messages ??= await store.readMessages(threadId);
+        if (wakeUpHasRiders(messages, turn)) continue;
+      }
+      await cancelStaleContinueLocked(store, threadId, turn, now);
+      stale = true;
+    }
+    if (stale) turns = await store.readTurns(threadId);
+  }
   const threadHeld = admittedId === undefined && threadStatus(thread, instant) !== "active";
   const next = turns.find((turn) => {
     if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
     if (admittedId) return turn.id === admittedId;
-    if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     if (threadHeld) return false;
+    // A held turn whose time has come starts after the running turn settles,
+    // oldest first like any queued turn — but never while the limit stands.
+    // (The usage-protection tick and the schedule timer admit queue-carrying
+    // turns with their conditions; settle only takes bare automatic waits.)
+    if (settleStartsHeldTurn(turn)) {
+      return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+    }
+    if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     // Plain turns never pass through the admission path, so their one
     // admission check lives here: `queueAdmission` — and the Work queue
     // display built on it — blocks any non-automatic turn on an exhausted
@@ -1131,7 +1352,7 @@ export async function holdStrandedPromotions(store: ThreadStore, rawThreadId: st
  * Start the thread's scheduled turn that has come due, if the thread is free:
  * promoted to `running` (owned by this process) and returned for the caller
  * to run. Null when nothing is due, or a turn is already running — that
- * turn's settle promotes it instead.
+ * turn's settle promotes the due held turn instead (see `promoteQueuedLocked`).
  */
 export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string, admittedId?: string, summary = false): Promise<StoredTurn | null> {
   const threadId = requireThreadId(rawThreadId);
@@ -1268,8 +1489,19 @@ export async function interruptTurn(
     const turns = await store.readTurns(threadId);
     const target = turnId
       ? (turns.find((turn) => turn.id === turnId) ?? null)
-      : (openTurn(turns) ?? null);
-    if (!target || (target.status !== "running" && target.status !== "queued")) {
+      : liveTurn(turns);
+    // A turn with a status no build writes is stuck by definition: stopping
+    // it is the fix, so it stops like a running one.
+    if (!target) {
+      // The row is hidden in a skipped line, but this process runs the turn:
+      // abort the run. Anything else is for the quarantine, not a stop.
+      if (turnId !== undefined && store.isTracked(turnId)) {
+        store.abortRunning(turnId);
+        return { thread, turn: null, interrupted: true };
+      }
+      return { thread, turn: null, interrupted: false };
+    }
+    if (isKnownTurnStatus(target.status) && target.status !== "running" && target.status !== "queued") {
       return { thread, turn: target, interrupted: false };
     }
     // Whether a run in this process will take the turn this promotes: the
@@ -1351,14 +1583,16 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
       if (id === threadId) requireNotArchived(thread, "change settlement state");
       if (thread.archivedAt != null || thread.deletedAt != null) continue;
       members.push(thread);
-      const running = openTurn(await store.readTurns(id)) !== null;
+      const running = liveTurn(await store.readTurns(id)) !== null;
       if (running || thread.hasPendingApprovals || thread.hasPendingUserInput) blocked.push({ id, running, thread });
     }
     if (blocked.length > 0 && options.stop === true) {
       for (const entry of blocked) {
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
-          if (turn.status === "running" || turn.status === "queued") await interruptTurnLocked(store, entry.thread, turn, now);
+          if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
+            await interruptTurnLocked(store, entry.thread, turn, now);
+          }
         }
         const index = members.findIndex((member) => member.id === entry.id);
         if (index !== -1) members[index] = { ...members[index]!, hasPendingApprovals: false, hasPendingUserInput: false };

@@ -249,6 +249,15 @@ describe("probe results in a profile", () => {
     expect(mergeProbed(previous, report({ images: "native" }, "bbb")).quirks).toEqual({ images: "native" });
   });
 
+  it("keeps a newer build's probed fields through a probe save, the way a plain settings.set does", () => {
+    const report = (quirks: Record<string, unknown>): ProbeReport => ({ profileId: "p", model: "m", at: "2026-10-15T00:00:00.000Z", checks: [], quirks, server: {}, notes: [], stopped: null });
+    const previous = { ...base, quirks: { systemFirstOnly: true, futureQuirk: 1 }, futureProbed: "keep" };
+    const merged = mergeProbed(previous, report({ images: "native" })) as unknown as Record<string, unknown>;
+    expect(merged.futureProbed).toBe("keep");
+    expect((merged.quirks as Record<string, unknown>).futureQuirk).toBe(1);
+    expect((merged.quirks as Record<string, unknown>).images).toBe("native");
+  });
+
   it("refuses a profile field that is a key, by name and without looking at the value", () => {
     const secret = "sk-live-do-not-print";
     for (const field of ["apiKey", "token", "headers"]) {
