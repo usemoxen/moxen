@@ -881,7 +881,6 @@ export async function saveConfig(configPath: string, config: CliConfig, skipped:
   // test setup, before any file mock registers, and a static edge would pin
   // the atomic write to the real filesystem for the whole test run.
   const { writeAtomic } = await import("./infra/atomic.js");
-
   let next = config as unknown as Record<string, unknown>;
   let current: string | null = null;
   try {
@@ -922,8 +921,17 @@ function applySkipped(config: Record<string, unknown>, skipped: readonly Skipped
   return config;
 }
 
-function parseSkippedPath(path: string): Array<string | number> {
-  const segments: Array<string | number> = [];
+/**
+ * A path segment: a dot-separated object key, a bracketed list index, or a
+ * bracketed list id (`profiles[lab]`). Dots and brackets are not
+ * interchangeable: `mcpServers.lab` addresses a map entry, while
+ * `profiles[lab]` addresses one element of a list, and re-applying a
+ * skipped entry must rebuild the shape the path names.
+ */
+type SkippedSegment = string | number | { readonly id: string };
+
+function parseSkippedPath(path: string): SkippedSegment[] {
+  const segments: SkippedSegment[] = [];
   for (const part of path.split(".")) {
     const match = /^([^\[]+?)(?:\[([^\]]+)\])?$/.exec(part);
     const name = match?.[1];
@@ -935,10 +943,17 @@ function parseSkippedPath(path: string): Array<string | number> {
     const raw = match[2];
     if (raw !== undefined) {
       const index = Number(raw);
-      segments.push(Number.isInteger(index) && String(index) === raw ? index : raw);
+      segments.push(Number.isInteger(index) && String(index) === raw ? index : { id: raw });
     }
   }
   return segments;
+}
+
+/** Whether two path segments address the same entry: a bracketed id matches its bare name. */
+function sameSegment(left: SkippedSegment | undefined, right: SkippedSegment | undefined): boolean {
+  if (typeof left === "object" && left !== null) return typeof right === "object" && right !== null ? right.id === left.id : right === left.id;
+  if (typeof right === "object" && right !== null) return right.id === left;
+  return left === right;
 }
 
 /**
@@ -951,11 +966,13 @@ function parseSkippedPath(path: string): Array<string | number> {
 export function configKeyCoversPath(key: string, skippedPath: string): boolean {
   const wanted = parseSkippedPath(key);
   const actual = parseSkippedPath(skippedPath);
-  return wanted.length <= actual.length && wanted.every((segment, index) => actual[index] === segment);
+  return wanted.length <= actual.length && wanted.every((segment, index) => sameSegment(segment, actual[index]));
 }
 
-function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string | number>, value: unknown): void {
+function setPathIfAbsent(root: Record<string, unknown>, segments: SkippedSegment[], value: unknown): void {
   const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
+  const elementId = (element: unknown): unknown =>
+    typeof element === "object" && element !== null ? (element as Record<string, unknown>).id : undefined;
   let node: Record<string, unknown> | unknown[] = root;
   for (let index = 0; index < segments.length - 1; index += 1) {
     const segment = segments[index]!;
@@ -963,7 +980,7 @@ function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string |
     if (typeof segment === "number") {
       if (!Array.isArray(node)) return;
       if (segment >= node.length) {
-        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" ? [] : {};
+        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" || typeof next === "object" ? [] : {};
         node.push(fresh);
         node = fresh;
       } else {
@@ -971,12 +988,19 @@ function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string |
         if (typeof child !== "object" || child === null) return;
         node = child as Record<string, unknown> | unknown[];
       }
+    } else if (typeof segment === "object") {
+      // A bracketed id addresses one list element: follow it when the list
+      // already holds that entry, and never invent one mid-path.
+      if (!Array.isArray(node)) return;
+      const found = node.find((element) => elementId(element) === segment.id);
+      if (typeof found !== "object" || found === null) return;
+      node = found as Record<string, unknown> | unknown[];
     } else {
       if (typeof node !== "object" || node === null || Array.isArray(node)) return;
       const record = node as Record<string, unknown>;
       const child = record[segment];
       if (child === undefined) {
-        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" ? [] : {};
+        const fresh: Record<string, unknown> | unknown[] = typeof next === "number" || typeof next === "object" ? [] : {};
         record[segment] = fresh;
         node = fresh;
       } else {
@@ -987,11 +1011,11 @@ function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string |
   }
   const leaf = segments[segments.length - 1];
   if (leaf === undefined) return;
-  if (Array.isArray(node) && typeof leaf === "string") {
-    // A list entry by id (`providers.harness.profiles[x]`): already carried
-    // under that id, or superseded by a good entry the user wrote — either
-    // way nothing is appended.
-    const carried = node.some((element) => typeof element === "object" && element !== null && (element as Record<string, unknown>).id === leaf);
+  if (Array.isArray(node) && (typeof leaf === "string" || typeof leaf === "object")) {
+    // A list entry by id: already carried under that id, or superseded by a
+    // good entry the user wrote — either way nothing is appended.
+    const id = typeof leaf === "string" ? leaf : leaf.id;
+    const carried = node.some((element) => elementId(element) === id);
     if (!carried) node.push(value);
     return;
   }
@@ -1003,7 +1027,7 @@ function setPathIfAbsent(root: Record<string, unknown>, segments: Array<string |
     } else {
       node.push(value);
     }
-  } else {
+  } else if (typeof leaf === "string") {
     if (typeof node !== "object" || node === null || Array.isArray(node)) return;
     if ((node as Record<string, unknown>)[leaf] === undefined) (node as Record<string, unknown>)[leaf] = value;
   }

@@ -177,6 +177,38 @@ describe("config", () => {
     expect((await loadConfig(file)).skipped).toEqual([]);
   });
 
+  it("keeps unknown keys and skipped entries together through a load, edit, and save", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-"));
+    const file = path.join(dir, "config.json");
+    const written = {
+      provider: "mine",
+      speedMode: "turbo",
+      futureTop: { nested: [1, 2, 3] },
+      ui: { theme: "moxen", futureSection: "keep-me" },
+      providers: { harness: { profiles: [{ id: "broken" }] } },
+    };
+    writeFileSync(file, JSON.stringify(written, null, 2));
+    const loaded = await loadConfig(file);
+    // Both problems are reported, and the unknown keys ride along untouched.
+    expect(loaded.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    expect((loaded.fileConfig as unknown as Record<string, unknown>).futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((loaded.fileConfig.ui as unknown as Record<string, unknown>).futureSection).toBe("keep-me");
+    // A known edit, saved the way the server saves it: unknown keys stay,
+    // the skipped raws ride along, and a backup is written.
+    const edited = setConfigValue(loaded.fileConfig, "provider", "theirs");
+    const kept = loaded.skipped.filter((entry) => !configKeyCoversPath("provider", entry.path));
+    await saveConfig(file, edited, kept);
+    const reread = await loadConfig(file);
+    expect(reread.config.provider).toBe("theirs");
+    expect(reread.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(onDisk.futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((onDisk.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect(onDisk.speedMode).toBe("turbo");
+    expect(((onDisk.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles).toEqual([{ id: "broken" }]);
+    expect(readdirSync(dir).sort()).toEqual(["config.json", "config.json.bak.1"]);
+  });
+
   it("matches a set key against the skipped entries it covers", () => {
     expect(configKeyCoversPath("speedMode", "speedMode")).toBe(true);
     expect(configKeyCoversPath("ui", "ui.theme")).toBe(true);
@@ -360,6 +392,34 @@ describe("config keeps unknown keys", () => {
     const names = readdirSync(dir).sort();
     expect(names).toEqual(["config.json", "config.json.bak.1", "config.json.bak.2", "config.json.bak.3", "config.json.bak.4", "config.json.bak.5"]);
     expect(JSON.parse(readFileSync(path.join(dir, "config.json.bak.5"), "utf8")).sessionTtl).toBe("3m");
+  });
+
+  it("keeps skipped entries and unknown keys together through a load, edit, and save", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-roundtrip-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({
+      futureTop: { nested: [1, 2, 3] },
+      speedMode: "turbo",
+      ui: { theme: "moxen", futureSection: "keep-me" },
+      providers: { harness: { profiles: [{ id: "broken" }] } },
+    }, null, 2));
+    const loaded = await loadConfig(file);
+    expect(loaded.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
+    expect((loaded.fileConfig as unknown as Record<string, unknown>).futureTop).toEqual({ nested: [1, 2, 3] });
+    // Edit a known key the way the server does: fileConfig through
+    // setConfigValue, skipped filtered by the edited key, then saved.
+    const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+    const kept = loaded.skipped.filter((entry) => !configKeyCoversPath("ui.theme", entry.path));
+    await saveConfig(file, edited, kept);
+    expect(readdirSync(dir).sort()).toEqual(["config.json", "config.json.bak.1"]);
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(onDisk.futureTop).toEqual({ nested: [1, 2, 3] });
+    expect((onDisk.ui as Record<string, unknown>).futureSection).toBe("keep-me");
+    expect((onDisk.ui as Record<string, unknown>).theme).toBe("dracula");
+    expect(onDisk.speedMode).toBe("turbo");
+    expect(((onDisk.providers as Record<string, unknown>).harness as Record<string, unknown>).profiles).toEqual([{ id: "broken" }]);
+    const reread = await loadConfig(file);
+    expect(reread.problems.map((entry) => entry.path).sort()).toEqual(["providers.harness.profiles[broken]", "speedMode"]);
   });
 });
 
