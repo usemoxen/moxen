@@ -11,6 +11,7 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { buildKnowledge } from "./build-knowledge.js";
+import { readGitRevision } from "../src/core/build.js";
 
 // Absolute paths throughout, so the build does not depend on the caller's cwd.
 const root = join(import.meta.dir, "..");
@@ -42,7 +43,10 @@ const result = await Bun.build({
   splitting: true,
   minify: true,
   sourcemap: "linked",
-  define: { "process.env.NODE_ENV": '"production"' },
+  // The commit this bundle was built from: the server and the client compare
+  // it on hello, so a stale `dist/` and the checkout it came from refuse
+  // each other instead of sharing a server. Read from the files, never git.
+  define: { "process.env.NODE_ENV": '"production"', __MOXEN_BUILD_REVISION__: JSON.stringify(readGitRevision(root) ?? "unknown") },
   naming: { entry: "[dir]/[name].[ext]", chunk: "chunks/[name]-[hash].[ext]", asset: "assets/[name]-[hash].[ext]" },
   // Native libraries are located on disk at runtime: leave them to node_modules.
   external: ["@opentui/core-*"],

@@ -18,7 +18,7 @@
  *   effort picker) works unmodified.
  */
 import path from "node:path";
-import { appendFile } from "node:fs/promises";
+import { appendFile, open, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { importManagedSkill, listManagedSkills, readManagedSkill, removeManagedSkill, saveManagedSkill, setManagedSkillEnabled, setManagedSkillProviders, type SkillRoots } from "../core/skills/management.js";
 import { excludedSkills } from "../core/skills/discovery.js";
@@ -91,6 +91,7 @@ import { readAttachment, readImageFile, workspaceGit, workspaceRead } from "./wo
 import { createScratchDir, ensureScratchProject, removeScratchDir } from "../core/projects/scratch.js";
 import { diffCheckpointRange, diffCheckpointStat } from "../core/checkpoints/git.js";
 import { CliError } from "../core/errors.js";
+import { buildIdentity } from "../core/build.js";
 import {
   archiveThread,
   createThread,
@@ -115,6 +116,7 @@ import {
   type TurnDriverFactories,
 } from "../core/threads/execute.js";
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
+import { onThreadFailure } from "../core/threads/failures.js";
 import {
   armPendingScheduledTurns,
   recoverTaskNotifications,
@@ -154,6 +156,9 @@ import {
   runDueScheduledTurn,
   queueAgentMessage,
   startTurn,
+  delegationInfo,
+  flushTaskNotifications,
+  noteAutoContinueCancelled,
   type BuiltinMcpOptions,
   type OperationContext,
   type StartedTurn,
@@ -208,6 +213,17 @@ const PRUNE_INTERVAL_MS = 6 * 3_600_000;
  */
 const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
 
+/**
+ * Bound for every driver's `stopAll` inside `close()`: shutdown (SIGTERM,
+ * `server stop`) must not hang on one stuck driver, nor starve the rest
+ * behind it. Every driver is still asked — all stops start together — only
+ * the wait is bounded. A stop slower than this loses the race (its late
+ * completion is dropped, never awaited) and shutdown resolves without it,
+ * so the server process exits on schedule; a stuck driver is left for the
+ * process exit to reap rather than shut down cleanly.
+ */
+const CLOSE_DRIVER_TIMEOUT_MS = 5_000;
+
 /** Config writes in flight, by resolved file: two writers to one file queue, others run together. */
 const configWrites = new Map<string, Promise<unknown>>();
 
@@ -255,6 +271,60 @@ function abortableRun(run: Promise<void>, signal: AbortSignal | undefined): Prom
   });
 }
 
+/** The file beside the threads recording which build's server owns the store. */
+const STORE_LOCK_FILE = "server.lock";
+
+interface StoreLock {
+  readonly build: string;
+  readonly display: string;
+  readonly pid: number;
+  readonly startedAt: string;
+}
+
+/**
+ * Stores claimed by a connection in this process. The lock file below
+ * guards across processes; this guards the same process, where the pid
+ * check would wave a second owner through (in-process mode is the server
+ * and tests only — production never claims twice).
+ */
+const claimedStores = new Map<string, { token: string; display: string; pid: number }>();
+
+/** Whether a pid names a live process. Portable: no shell, no `ps`, no signal sent. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // A process that exists but cannot be signalled is still alive; only a
+    // missing process (`ESRCH`) is gone. Matches `core/selfupdate/update.ts`.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The store's lock as it stands: null when no claim is recorded, or it cannot be read. */
+export async function readStoreLock(storeRoot: string): Promise<StoreLock | null> {
+  const raw = await readFile(path.join(storeRoot, STORE_LOCK_FILE), "utf8").catch(() => null);
+  if (raw === null) return null;
+  try {
+    const lock = JSON.parse(raw) as Partial<StoreLock>;
+    if (typeof lock.pid !== "number" || typeof lock.build !== "string") return null;
+    return {
+      build: lock.build,
+      display: typeof lock.display === "string" ? lock.display : lock.build,
+      pid: lock.pid,
+      startedAt: typeof lock.startedAt === "string" ? lock.startedAt : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a starting server may take the store: no lock, or its holder is gone (or this process). */
+export async function storeLockGone(storeRoot: string): Promise<boolean> {
+  const lock = await readStoreLock(storeRoot);
+  return lock === null || lock.pid === process.pid || !processAlive(lock.pid);
+}
+
 export type { TurnDriverFactories } from "../core/threads/execute.js";
 
 export interface DirectConnectionOptions {
@@ -262,6 +332,8 @@ export interface DirectConnectionOptions {
   readonly drivers?: TurnDriverFactories;
   readonly shellPollMs?: number;
   readonly threadPollMs?: number;
+  /** Bound for every driver's `stopAll` inside `close()`; defaults to `CLOSE_DRIVER_TIMEOUT_MS` (tests pass milliseconds). */
+  readonly closeDriverTimeoutMs?: number;
   /** Provider source override (tests); defaults to probing the live providers. */
   readonly providers?: () => Promise<ProviderSummary[]>;
   /** Catalog source override (tests); defaults to the providers above, reshaped. */
@@ -291,6 +363,10 @@ export class DirectConnection implements ClientApi {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
   private readonly usageFailures = new Set<string>();
+  /** Detached core failures already written to the server log, by line: a subscriber that throws on every event must not fill the disk. */
+  private readonly threadFailures = new Set<string>();
+  /** Removes this connection's detached-failure sink; set in the constructor, run in `close`. */
+  private readonly stopThreadFailureSink: () => void;
   private readonly usageSubscriptions: Array<() => void> = [];
   private readonly storeRoot: string;
   private readonly embeddingRuntime: EmbeddingRuntime;
@@ -302,6 +378,7 @@ export class DirectConnection implements ClientApi {
   private readonly factories: TurnDriverFactories;
   private readonly shellPollMs: number;
   private readonly threadPollMs: number;
+  private readonly closeDriverTimeoutMs: number;
   private readonly catalog: () => Promise<ConfigPayload>;
   private readonly providers: () => Promise<ProviderSummary[]>;
   private readonly loadConfig: () => Promise<CliConfig>;
@@ -318,9 +395,15 @@ export class DirectConnection implements ClientApi {
   private readonly rollbackApp: (options: UpdateOptions) => Promise<RollbackResult>;
   /** Shell subscribers, who are told where an update is. */
   private readonly updateListeners = new Set<(frame: ShellFrame) => void>();
+  /** Poll intervals with a live subscription; `close()` clears them all. */
+  private readonly pollTimers = new Set<ReturnType<typeof setInterval>>();
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
+  /** Set once an update or rollback has landed: the running code is stale. */
+  private restartPending = false;
+  /** Distinguishes this connection's claim from another's in the same process. */
+  private readonly claimToken = randomUUID();
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
   private closed = false;
@@ -342,6 +425,7 @@ export class DirectConnection implements ClientApi {
     this.harnessFetch = options.harnessFetch;
     this.shellPollMs = options.shellPollMs ?? 1500;
     this.threadPollMs = options.threadPollMs ?? 750;
+    this.closeDriverTimeoutMs = options.closeDriverTimeoutMs ?? CLOSE_DRIVER_TIMEOUT_MS;
     this.providers = options.providers ?? (async () => {
       // A config that cannot be read must not hide the providers that need none of it.
       const providers = await this.readConfigFile().then((read) => read.config.providers, () => undefined);
@@ -377,6 +461,24 @@ export class DirectConnection implements ClientApi {
     this.runProviderUpdate = options.updateProvider ?? ((provider, binaryPath) => updateProvider(provider, binaryPath === undefined ? {} : { binaryPath }));
     this.builtinMcpServers =
       options.builtinMcpServers === undefined ? async (threadId, serverOptions) => [await this.moxenToolsFor(threadId, serverOptions?.delegated === true, serverOptions?.webFetch !== false, serverOptions?.memory ?? "write")] : options.builtinMcpServers;
+    // Detached core failures (a throwing event subscriber, an abort-time
+    // interrupt, a failed idle probe) have no caller to return them to:
+    // they land in the server log, where the usage tick's own failures go.
+    this.stopThreadFailureSink = onThreadFailure((area, message) => {
+      void this.logThreadFailure(area, message);
+    });
+  }
+
+  /**
+   * One detached core failure in the server log. Each distinct line once,
+   * like the usage tick's failures: a subscriber that throws on every
+   * event is one bug, not one line per event.
+   */
+  private async logThreadFailure(area: string, message: string): Promise<void> {
+    const key = `${area}: ${message}`;
+    if (this.threadFailures.has(key)) return;
+    this.threadFailures.add(key);
+    await appendFile(path.join(this.storeRoot, "server.log"), `${new Date().toISOString()} ${key}\n`, "utf8").catch(() => undefined);
   }
 
   /** Where a memory request points: the thread's project, the project named, or neither (global alone). */
@@ -727,6 +829,79 @@ export class DirectConnection implements ClientApi {
     return await this.storePromise;
   }
 
+  /** Whether an update or rollback has landed since this server started. */
+  get serverRestartRequired(): boolean {
+    return this.restartPending;
+  }
+
+  /**
+   * Take ownership of the store root for this process. The endpoint refuses
+   * a second server on it, but two servers on different endpoints (or a
+   * second checkout) can still open one store, where the per-thread
+   * in-process locks protect nothing — so the store has one owning build,
+   * recorded beside it. A live owner is refused, naming its build and pid;
+   * a lock from a dead process is taken over. `close()` releases the claim.
+   */
+  async claimStore(): Promise<ThreadStore> {
+    const store = await this.store();
+    const file = path.join(this.storeRoot, STORE_LOCK_FILE);
+    const own = buildIdentity();
+    // Another connection in this process already owns it: refused without
+    // touching the file, which stays that owner's to release.
+    const known = claimedStores.get(this.storeRoot);
+    if (known && known.token !== this.claimToken) {
+      throw new CliError(
+        "STORE_OWNED",
+        `This store is owned by ${known.display} (process ${known.pid}); this server runs ${own.display}. Stop that server first, then start this one.`,
+        { details: { storeRoot: this.storeRoot, owner: { display: known.display, pid: known.pid }, current: { build: own.id, pid: process.pid } } },
+      );
+    }
+    const contents = `${JSON.stringify({ build: own.id, display: own.display, pid: process.pid, startedAt: new Date().toISOString() })}\n`;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const handle = await open(file, "wx");
+        await handle.writeFile(contents);
+        await handle.close();
+        claimedStores.set(this.storeRoot, { token: this.claimToken, display: own.display, pid: process.pid });
+        return store;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      const raw = await readFile(file, "utf8").catch(() => null);
+      let lock: Partial<StoreLock> | null = null;
+      try {
+        lock = raw === null ? null : (JSON.parse(raw) as Partial<StoreLock>);
+      } catch {
+        lock = null;
+      }
+      const holder = typeof lock?.pid === "number" ? lock.pid : null;
+      if (holder !== null && holder !== process.pid && processAlive(holder)) {
+        const owner = typeof lock?.display === "string" && lock.display.length > 0 ? lock.display : "another server";
+        throw new CliError(
+          "STORE_OWNED",
+          `This store is owned by ${owner} (process ${holder}); this server runs ${own.display}. Stop that server first, then start this one.`,
+          { details: { storeRoot: this.storeRoot, owner: lock, current: { build: own.id, pid: process.pid } } },
+        );
+      }
+      // Stale (its process is gone), corrupt, or this process's own: take it over.
+      await rm(file, { force: true }).catch(() => undefined);
+    }
+    throw new CliError("STORE_OWNED", `Another moxen server just took the store at ${this.storeRoot}; stop it first, then start this one.`, {
+      details: { storeRoot: this.storeRoot },
+    });
+  }
+
+  /** Release the store claim, so the next server starts without meeting a stale lock. */
+  private async releaseStore(): Promise<void> {
+    // Only the owner releases: a refused second claimant shares this
+    // process's pid, so pid alone cannot tell its close from the owner's —
+    // without this, its close deletes the live owner's lock file.
+    const owned = claimedStores.get(this.storeRoot)?.token === this.claimToken;
+    if (!owned) return;
+    claimedStores.delete(this.storeRoot);
+    await rm(path.join(this.storeRoot, STORE_LOCK_FILE), { force: true }).catch(() => undefined);
+  }
+
   private schedulingStarted = false;
   private mcpHttp: McpHttpServer | null = null;
   private readonly dueRunning = new Set<string>();
@@ -947,10 +1122,12 @@ export class DirectConnection implements ClientApi {
       if (!stopped && !this.closed) onItem({ kind: "synchronized" });
     });
     const timer = setInterval(() => void poll(), this.shellPollMs);
+    this.pollTimers.add(timer);
     return () => {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      this.pollTimers.delete(timer);
       this.updateListeners.delete(onUpdateFrame);
       for (const threadId of answering) {
         const count = (this.researchResponders.get(threadId) ?? 1) - 1;
@@ -1123,9 +1300,11 @@ export class DirectConnection implements ClientApi {
       void poll();
       void ensureBridge();
     }, this.threadPollMs);
+    this.pollTimers.add(timer);
     return () => {
       stopped = true;
       clearInterval(timer);
+      this.pollTimers.delete(timer);
       unsubscribeBridge?.();
     };
   }
@@ -1184,6 +1363,19 @@ export class DirectConnection implements ClientApi {
     return { onProgress, runningVersions: async () => [readInstall().version] };
   }
 
+  /**
+   * After an update or rollback lands, every shell subscriber is told the
+   * server needs a restart: the running code is stale, and only the client
+   * that started it follows the progress. New clients learn it from the
+   * hello (or hit another build's mismatch); this reaches the ones already
+   * connected.
+   */
+  private announceRestart(version: string, from: string | null): void {
+    this.restartPending = true;
+    const frame: ShellFrame = { kind: "event", event: { type: "app.server-restart-required", payload: { version, from } } };
+    for (const listener of this.updateListeners) listener(frame);
+  }
+
   async dispatch<T extends CommandType>(command: CommandOf<T>, options?: { signal?: AbortSignal }): Promise<CommandResult<T>> {
     if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
     const decoded = decodeCommand(command);
@@ -1229,9 +1421,19 @@ export class DirectConnection implements ClientApi {
         return await this.threadCreate(command);
       case "thread.turn.start":
         return await this.turnStart(command, signal);
-      case "thread.turn.interrupt":
-        await interruptTurn(await this.store(), command.threadId, command.turnId);
+      case "thread.turn.interrupt": {
+        const store = await this.store();
+        // Cancelling a queued usage-reset continue ends the automatic
+        // continue, not a running turn: a delegated task is marked cancelled
+        // and its parent told, unless asked not to.
+        const turns = await store.readTurns(command.threadId).catch(() => []);
+        const target = command.turnId === undefined ? null : (turns.find((turn) => turn.id === command.turnId) ?? null);
+        const result = await interruptTurn(store, command.threadId, command.turnId);
+        if (result.interrupted && target !== null && target.status === "queued" && target.scheduleReason === "usage-reset") {
+          await noteAutoContinueCancelled(await this.context(), command.threadId, { notifyParent: command.notifyParent }).catch(() => undefined);
+        }
         return accepted;
+      }
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -1239,16 +1441,18 @@ export class DirectConnection implements ClientApi {
         await this.usageProtection.protect(command.threadId);
         return accepted;
       case "queue.edit":
-        await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy);
+        await editWorkQueue(await this.context(), command.threadId, command.turnId, command.action, command.policy, command.notifyParent);
         return accepted;
       case "handoff.submit":
         await submitHandoff(await this.context(), command.threadId, command.requestId, command.summary);
         return accepted;
       case "usage.queue":
-        await this.usageProtection.reorder(command.threadId, command.direction);
+        await this.usageProtection.reorder(command.threadId, command.direction, command.notifyParent ?? true);
         return accepted;
       case "thread.settle":
         await settleThread(await this.store(), command.threadId, command.stop === true ? { stop: true } : {});
+        // A settle can release notices queued while the thread was held; they go out now, together.
+        await flushTaskNotifications(await this.context(), command.threadId).catch(() => undefined);
         return accepted;
       case "thread.unsettle":
         await unsettleThread(await this.store(), command.threadId);
@@ -1296,10 +1500,16 @@ export class DirectConnection implements ClientApi {
       case "thread.permission.respond":
         await this.permissionRespond(command.threadId, command.requestId, command.decision);
         return accepted;
-      case "app.update.apply":
-        return await this.updateApp(this.updateOptions(command.commandId));
-      case "app.update.rollback":
-        return await this.rollbackApp(this.updateOptions(command.commandId));
+      case "app.update.apply": {
+        const result = await this.updateApp(this.updateOptions(command.commandId));
+        if (result.action === "updated") this.announceRestart(result.version, result.from);
+        return result;
+      }
+      case "app.update.rollback": {
+        const result = await this.rollbackApp(this.updateOptions(command.commandId));
+        this.announceRestart(result.version, result.from);
+        return result;
+      }
       case "thread.handover": {
         const { type: _type, commandId: _id, wait, ...request } = command;
         const result = await handover(await this.context(), request);
@@ -1345,7 +1555,7 @@ export class DirectConnection implements ClientApi {
         return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
       }
       case "thread.task.cancel":
-        return await cancelTask(await this.context(), command.parentThreadId, command.taskId);
+        return await cancelTask(await this.context(), command.parentThreadId, command.taskId, { notifyParent: command.notifyParent });
       case "thread.task.settle":
         return await settleTask(await this.context(), command.parentThreadId, command.taskId, {
           ...(command.stop === true ? { stop: true } : {}),
@@ -2065,6 +2275,8 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.status":
         return await describeTask(ctx, query.parentThreadId, query.taskId);
+      case "thread.delegation":
+        return await delegationInfo(ctx, query.threadId);
       case "research.run":
         return await readResearchRun(ctx, query.threadId);
       case "opencode.session-thread": {
@@ -2301,7 +2513,10 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.stopThreadFailureSink();
     for (const entry of this.researchProposals.values()) entry.answer(null);
+    for (const timer of this.pollTimers) clearInterval(timer);
+    this.pollTimers.clear();
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
     this.usageProtection.close();
     for (const unsubscribe of this.usageSubscriptions) unsubscribe();
@@ -2314,14 +2529,30 @@ export class DirectConnection implements ClientApi {
     if (this.schedulingStarted) onScheduledTurnDue(null);
     await this.mcpHttp?.close().catch(() => undefined);
     this.mcpHttp = null;
-    for (const driver of this.ownedDrivers) {
-      try {
-        await Effect.runPromise(driver.stopAll?.() ?? Effect.void);
-      } catch {
-        // Best effort: servers may already be gone.
-      }
-    }
+    // Every stop starts before any is awaited, so one stuck driver cannot
+    // starve the rest; each then races its own deadline, so one stuck
+    // driver cannot hang shutdown either.
+    await Promise.allSettled(
+      [...this.ownedDrivers].map(async (driver) => {
+        const stopping = (async () => {
+          await Effect.runPromise(driver.stopAll?.() ?? Effect.void);
+        })().catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), this.closeDriverTimeoutMs);
+          timer.unref?.();
+        });
+        try {
+          await Promise.race([stopping, deadline]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }),
+    );
     this.ownedDrivers.clear();
+    // The store is free for the next server: without this a fast restart
+    // would meet this process's own lock and have to take it over.
+    await this.releaseStore().catch(() => undefined);
   }
 }
 

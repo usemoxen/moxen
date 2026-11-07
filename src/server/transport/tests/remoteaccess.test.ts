@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { createTlsKey, keyFingerprint, tlsIdentity } from "../certificate.js";
+import { buildIdOf, buildIdentity } from "../../../core/build.js";
 import { DeviceRegistry, type TokenStore } from "../devices.js";
 import { classifyAddress, RemoteAccess, remoteAddresses, type RemoteAddress } from "../remoteaccess.js";
 import { RemoteConnection } from "../remote.js";
@@ -54,7 +55,10 @@ async function remoteAccess(connection: Partial<ConstructorParameters<typeof Dir
   return { remote, fingerprint: identity.fingerprint };
 }
 
-const hello = (extra: object = {}) => ({ id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, ...extra } });
+const hello = (extra: object = {}) => {
+  const own = buildIdentity();
+  return { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: own.id, buildDisplay: own.display, ...extra } };
+};
 
 /** Pair a device through a real remote hello; its id and token. */
 async function paired(remote: RemoteAccess, port: number, fingerprint: string): Promise<{ id: string; token: string }> {
@@ -171,14 +175,35 @@ describe("remote access listener", () => {
     const { remote, fingerprint } = await remoteAccess();
     const port = await freePort();
     await remote.apply({ enabled: true, port });
+    const own = buildIdentity();
     const { replies } = await exchange(port, fingerprint, [
-      { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION } },
+      { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: own.id, buildDisplay: own.display } },
       { id: 2, method: "query", params: { type: "projects.list" } },
     ]);
     expect(replies.find((reply) => reply.id === 1)).toMatchObject({ error: { code: "REMOTE_NOT_PAIRED" } });
     const wrong = await exchange(port, fingerprint, [hello({ device: { id: "nobody", token: "nothing" } })]);
     expect(wrong.replies[0]).toMatchObject({ error: { code: "REMOTE_DEVICE_REFUSED" } });
     expect(replies.find((reply) => reply.id === 2)).toMatchObject({ error: { code: "PROTOCOL_HELLO_REQUIRED" } });
+  });
+
+  it("refuses a remote hello from another build before pairing, naming both builds", async () => {
+    const { remote, fingerprint } = await remoteAccess();
+    const port = await freePort();
+    await remote.apply({ enabled: true, port });
+    const own = buildIdentity();
+    const other = buildIdOf({ kind: "source", version: own.version, revision: "e".repeat(40) });
+    const { code } = remote.startPairing();
+    const { replies, socket } = await exchange(port, fingerprint, [
+      { id: 1, method: "hello", params: { protocol: PROTOCOL_VERSION, build: other.id, buildDisplay: other.display, pair: { code, deviceName: "new laptop" } } },
+    ]);
+    socket.destroy();
+    expect(replies[0]).toMatchObject({ error: { code: "BUILD_MISMATCH" } });
+    const message = ((replies[0] as Record<string, unknown>).error as { message: string }).message;
+    expect(message).toContain(own.display);
+    expect(message).toContain(other.display);
+    expect(message).toContain("its own machine");
+    // The pairing code was never spent on the mismatch.
+    expect((await remote.listDevices())).toEqual([]);
   });
 
   it("pairs with a code once, then admits the device by its token alone", async () => {

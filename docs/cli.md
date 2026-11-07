@@ -214,7 +214,7 @@ redacts `env` and `headers` values.
 `env` and `headers` values are secrets: set through `moxen config set` or the settings page, each goes to the
 OS keychain and the file keeps a `keychain:<name>` reference, which is read when a session starts (a value
 written into the file by hand is used as it is). Adding a well-known server in the settings page (Brave Search,
-Exa Search, GitHub…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
+Exa Search…) asks for its key and fills in the command; `mcpRunner` (`npx` by default, or `bunx`,
 `pnpm`, `yarn`) is what starts the npm ones. Exa uses its hosted server, so it installs nothing and takes the
 key as the `x-api-key` header.
 
@@ -320,14 +320,19 @@ a remote server, commands that resolve a project from a folder need
 `--cwd` with a path on the server (or `--no-project`): `REMOTE_CWD_REQUIRED`
 otherwise. `moxen --json doctor` reports `checks.server.mode: "remote"` with
 the server's name and key fingerprint. `server status` and `server stop`
-manage this machine's server only and refuse `--server`.
+manage this machine's server only and refuse `--server`; `server status`
+also reports the server's build and whether it needs a restart after an
+update, and `server stop` works against any build, which is how a server
+from another build is stopped.
 
 Errors worth knowing: `REMOTE_PAIRING_REFUSED` (wrong, used or expired
 code — show a new one), `REMOTE_DEVICE_REFUSED` (revoked, or the token is
 gone — pair again), `REMOTE_KEY_MISMATCH` (the server presented a different
 key than the one paired: reinstalled, or not the server you think — pair
-again only if you know why), `SERVER_UNAVAILABLE` (not running, remote
-access off, or a firewall in the way).
+again only if you know why), `BUILD_MISMATCH` (client and server are
+different builds — the message names both: stop the server and start again
+from this build, on the server's own machine for a paired one),
+`SERVER_UNAVAILABLE` (not running, remote access off, or a firewall in the way).
 
 ## Commands
 
@@ -426,7 +431,10 @@ prints each stage on stderr as it goes (checking, downloading with how much,
 verifying, unpacking, testing, switching, done); with `--json` stdout holds only
 the final envelope. The server sends the stages as `app.update-progress` shell
 events tagged with the command's `commandId`, which only the CLI that asked for
-them reads. A paired remote client is refused both commands by the server's
+them reads. When the update lands it also broadcasts
+`app.server-restart-required` to every shell subscriber — the TUI shows it as
+a notice — and later hellos say a restart is due, so every client is told.
+A paired remote client is refused both commands by the server's
 transport with `REMOTE_LOCAL_ONLY`, whatever it sends. It downloads the platform's archive and its `.sha256` from GitHub over https (no
 credential is sent; a release missing either file is refused), checks the
 archive's SHA-256 before unpacking, and unpacks into a temp folder inside
@@ -444,7 +452,8 @@ is already the latest exits 0 and writes nothing. A source checkout
 (`SELF_UPDATE_NOT_INSTALLED`, which says to run `--install`) and a second update
 running at once (`SELF_UPDATE_BUSY`) are refused before anything changes; with
 `--server` it exits 2 with `SELF_UPDATE_REMOTE` (before anything is sent; the server refuses it too). It restarts nothing: threads
-that are running keep their version until the moxen server restarts. `--json`
+that are running keep their version until the moxen server restarts, and every
+client connected at the time is told so. `--json`
 data: `{ action: "updated" | "already-current", version, from, previous, folder,
 current, warnings }`.
 

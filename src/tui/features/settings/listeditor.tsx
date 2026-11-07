@@ -386,7 +386,7 @@ export function ListEditor({
             void Promise.resolve(saved).then((ok) => ok !== false && onTest(clean));
           }, freeName(preset?.name ?? "server", taken));
         // A well-known server is not asked for its command: Moxen fills it in (the command is under the server's Connection settings), and asks for the key it takes.
-        if (preset !== undefined && preset.askTarget !== true && target !== "") {
+        if (preset !== undefined && target !== "") {
           const secret = preset.secret;
           if (secret === undefined) return save(target);
           return ask(
@@ -403,7 +403,7 @@ export function ListEditor({
           preset?.needs === undefined ? t("le.commandHelp") : t("le.commandNeedsHelp", { needs: preset.needs }),
           (text) => text.trim() !== "" && save(text.trim()),
           target,
-          "npx -y @modelcontextprotocol/server-filesystem .",
+          "npx -y @playwright/mcp@latest",
         );
       },
     });

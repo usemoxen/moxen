@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # One run per commit: a PR branch would otherwise run twice (once for the
+  # push, once for the pull_request). Merges to main still run, as does any
+  # direct push to main; a branch with no PR yet gets its run when the PR opens.
   push:
+    branches: [main]
   pull_request:
 
 # A newer push to the same branch makes the older run pointless.

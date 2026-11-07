@@ -123,6 +123,8 @@ export async function runImageThumbs(): Promise<void> {
   await runViewer(png);
   runShrink();
   await runReplyImage(png);
+  await runUndrawable();
+  await runLoadingRow();
   await runUiBlock(png);
   await runImageOps();
   await runUiData();
@@ -471,6 +473,195 @@ async function runUiBlock(png: Buffer): Promise<void> {
   if (lines().filter((line) => line.includes("▀")).length < 6) fail("the block's images are not drawn as text cells under a modal");
   await act(async () => setOpen(false));
   await settle(300);
+}
+
+/**
+ * An image that cannot be drawn never leaves a blank block: one over the
+ * display cap is drawn from a smaller copy, one the native decoder rejects
+ * (over its ~25 megapixel ceiling, or corrupt) collapses to one clickable
+ * line that opens the viewer, where the original bytes still open externally.
+ */
+async function runUndrawable(): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const width = 80;
+  const height = 44;
+  const solid = (width: number, height: number): Buffer => {
+    const pixels = new Uint8Array(width * height * 4).fill(180);
+    return Buffer.from(encodeRgbaPng(width, height, pixels, width * 4, false));
+  };
+  // A PNG header stating a size, then garbage: the header reads, the decode fails.
+  const headered = (width: number, height: number): Buffer => {
+    const header = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
+    header.writeUInt32BE(width, 16);
+    header.writeUInt32BE(height, 20);
+    return Buffer.concat([header, Buffer.from("this is not image data".repeat(64))]);
+  };
+  // Over the display cap but decodable: drawn from a smaller copy. Small on
+  // purpose — the downscale path is the same at any size, and the render
+  // harness shares its machine with every other check.
+  const huge = solid(4500, 1000);
+  // Past the native ceiling, as a real 8192×4096 photo would be: no decoder
+  // available can shrink it, so it keeps the fallback line either way.
+  const overCeiling = headered(8192, 4096);
+  const corrupt = headered(200, 100);
+  const urlOf = (bytes: Buffer): string => `data:image/png;base64,${bytes.toString("base64")}`;
+  const urls: Record<string, string> = {
+    "/tmp/huge.png": urlOf(huge),
+    "/tmp/ceiling.png": urlOf(overCeiling),
+    "/tmp/corrupt.png": urlOf(corrupt),
+  };
+  let opened = 0;
+  function Harness() {
+    const viewed = useImageViewer();
+    return (
+      <ReplyImageReaderContext.Provider
+        value={async (path) => {
+          const dataUrl = urls[path];
+          if (dataUrl === undefined) throw new Error("IMAGE_NOT_FOUND");
+          return { mimeType: "image/png", dataUrl };
+        }}
+      >
+        <AttachmentReaderContext.Provider
+          value={async () => ({ mimeType: "image/png", dataUrl: urlOf(corrupt) })}
+        >
+          <box style={{ flexDirection: "column", width, height }} backgroundColor={SURFACE.base}>
+            {viewed === null ? (
+              <>
+                <MessageBody
+                  entry={{ text: "Huge:\n![huge](/tmp/huge.png)\nOver the ceiling:\n![ceiling](/tmp/ceiling.png)\nCorrupt:\n![corrupt](/tmp/corrupt.png)\nDone.", streaming: false, message: null } as never}
+                  homeDir={undefined}
+                  background={SURFACE.base}
+                />
+                <AttachmentRow attachmentId="broken" label="broken.png" sizeBytes={corrupt.length} background={SURFACE.base} />
+              </>
+            ) : (
+              <ImageViewer image={viewed} onClose={closeImageViewer} onOpenExternally={() => (opened += 1)} />
+            )}
+          </box>
+          <ImagePreviewLayer screenWidth={width} screenHeight={height} />
+        </AttachmentReaderContext.Provider>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
+  const settle = async (ms: number) => {
+    for (let waited = 0; waited < ms; waited += 25) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await setup.flush();
+      });
+    }
+  };
+  const frame = () => setup.captureCharFrame();
+  const rows = () => frame().split("\n");
+  // No timers: microtasks and paints drain, but the verdicts stay pending
+  // behind their yield, so this frame is what precedes every verdict.
+  const flushOnly = async () => {
+    for (let pass = 0; pass < 5; pass += 1) {
+      await act(async () => {
+        await setup.flush();
+      });
+    }
+  };
+  await settle(1500);
+  console.log("--- undrawable images: a smaller copy, two one-line fallbacks ---");
+  console.log(frame());
+  if (rows().filter((line) => line.includes("█")).length < 6) fail("an image over the display cap is not drawn from a smaller copy");
+  if (frame().includes("huge (could not be drawn)")) fail("a decodable image collapsed to its fallback line");
+  for (const label of ["ceiling (could not be drawn)", "corrupt (could not be drawn)"]) {
+    if (!frame().includes(label)) fail(`an undrawable image did not collapse to one line (${label})`);
+  }
+  // The two fallbacks are one line each: no rows reserved for a picture that never comes.
+  if (rows().filter((line) => line.includes("▀")).length !== 0) fail("an undrawable image reserved rows");
+
+  // Hovering a corrupt attachment shows the same fallback instead of a broken preview.
+  const attachmentRow = rows().findIndex((line) => line.includes("▣ broken.png"));
+  if (attachmentRow === -1) fail("the corrupt attachment row did not render");
+  if (frame().includes("broken.png (could not be drawn)")) fail("the fallback showed before any hover");
+  await act(async () => setup.mockMouse.moveTo(4, attachmentRow));
+  await settle(400);
+  console.log("--- undrawable images: hovering a corrupt attachment ---");
+  console.log(frame());
+  if (!frame().includes("broken.png (could not be drawn)") || !rows().some((line) => line.includes("╭"))) fail("hovering a corrupt attachment showed no fallback");
+  await act(async () => setup.mockMouse.moveTo(width - 2, 0));
+  await settle(300);
+  if (frame().includes("broken.png (could not be drawn)")) fail("the fallback stayed after the pointer left the item");
+
+  // A fallback line opens the viewer on the original bytes: header, fallback canvas, open externally.
+  const corruptRow = rows().findIndex((line) => line.includes("corrupt (could not be drawn)"));
+  await act(async () => setup.mockMouse.click(4, corruptRow));
+  await settle(800);
+  console.log("--- undrawable images: the viewer on a corrupt image ---");
+  console.log(frame());
+  if (!frame().includes("▣ corrupt") || !frame().includes("200×100")) fail("the fallback line did not open the viewer with the image's header");
+  if (!frame().includes("(could not be drawn)")) fail("the viewer drew no fallback in its canvas");
+  if (!frame().includes("open externally")) fail("the viewer lost its header over an undrawable image");
+  const openRow = rows().findIndex((line) => line.includes("open externally"));
+  await act(async () => setup.mockMouse.click(rows()[openRow]!.indexOf("open externally") + 2, openRow));
+  await settle(200);
+  if (opened !== 1) fail("the viewer did not open the original bytes externally");
+  await act(async () => setup.mockInput.pressEscape());
+  await settle(400);
+  if (frame().includes("open externally")) fail("Esc left the viewer open");
+  // Back on the transcript without settling: the cached verdicts restore the
+  // fallbacks at once, so a known-undrawable image never reserves rows again.
+  await flushOnly();
+  console.log("--- undrawable images: back on the transcript, verdicts cached ---");
+  console.log(frame());
+  for (const label of ["ceiling (could not be drawn)", "corrupt (could not be drawn)"]) {
+    if (!frame().includes(label)) fail(`a cached verdict did not restore its fallback line at once (${label})`);
+  }
+
+  // The downscaled image opens the viewer on its original size.
+  const hugeRow = rows().findIndex((line) => line.includes("huge"));
+  await act(async () => setup.mockMouse.click(4, hugeRow));
+  await settle(800);
+  if (!frame().includes("4500×1000")) fail("the viewer did not open the downscaled image at its original size");
+  closeImageViewer();
+}
+
+/** While an image's verdict is unknown, the transcript shows a one-line loading row, never a blank reserved block. */
+async function runLoadingRow(): Promise<void> {
+  resetModalOpen();
+  closeImageViewer();
+  const width = 60;
+  const height = 12;
+  function Harness() {
+    return (
+      <ReplyImageReaderContext.Provider
+        value={() => new Promise<never>(() => {})}
+      >
+        <box style={{ flexDirection: "column", width, height }} backgroundColor={SURFACE.base}>
+          <MessageBody
+            entry={{ text: "Slow:\n![slow](/tmp/slow.png)\nDone.", streaming: false, message: null } as never}
+            homeDir={undefined}
+            background={SURFACE.base}
+          />
+        </box>
+      </ReplyImageReaderContext.Provider>
+    );
+  }
+  const setup = await testRender(<Harness />, { width, height, exitOnCtrlC: false });
+  const frame = () => setup.captureCharFrame();
+  // Timer-free: paints drain, but a verdict that never comes stays unknown.
+  for (let pass = 0; pass < 8; pass += 1) {
+    await act(async () => {
+      await setup.flush();
+    });
+  }
+  console.log("--- undrawable images: verdict unknown ---");
+  console.log(frame());
+  if (!frame().includes("▣ slow")) fail("no one-line loading row while the verdict is unknown");
+  if (frame().includes("█")) fail("a picture drew before its verdict came");
+  // Still unknown after more flushes: the row stands, nothing reserved.
+  for (let pass = 0; pass < 8; pass += 1) {
+    await act(async () => {
+      await setup.flush();
+    });
+  }
+  if (!frame().includes("▣ slow") || frame().includes("█")) fail("the loading row did not stand while the verdict stayed unknown");
 }
 
 /** A `w`×`h` PNG, `left` on its left half and `right` on its right. */

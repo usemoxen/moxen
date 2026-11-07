@@ -9,6 +9,7 @@ import { formatBytes } from "../../model/message.js";
 import { COLOR, SURFACE } from "../../theme.js";
 import type { Rect } from "../../model/imagethumb.js";
 import { clearImagePreview } from "./imagepreview.js";
+import { Placeholder } from "./imagefallback.js";
 import { FIT_VIEW, imageGeometry, panImage, zoomImage, type ImageViewport } from "../../model/imageviewport.js";
 import { isModalOpen } from "../../ui/modalopen.js";
 
@@ -19,6 +20,8 @@ export const ImageSetContext = createContext<Map<string, ViewedImage> | null>(nu
 export interface ViewedImage extends LoadedImage {
   label: string;
   sizeBytes: number | null;
+  /** The shared display verdict, known when the transcript or a row drew it: the canvas skips its own probe then. */
+  undrawable: boolean;
 }
 
 let current: ViewedImage | null = null;
@@ -139,6 +142,14 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
   const resolution = renderer.resolution;
   const cellAspect = resolution === null ? 2 : (resolution.height / renderer.terminalHeight) / (resolution.width / renderer.terminalWidth);
   const geometry = imageGeometry(image.size, canvas, view, cellAspect);
+  // The original bytes are drawn, however big: zooming wants their pixels.
+  // The verdict arrives with the image when the transcript or a row drew it;
+  // a draw that still fails (an image only a token or a block opener holds)
+  // collapses through `onError` instead of a render-time probe.
+  const [drawFailed, setDrawFailed] = useState(false);
+  useEffect(() => {
+    setDrawFailed(false);
+  }, [image]);
   const changeView = (update: (value: ImageViewport) => ImageViewport) => {
     setView((value) => imageGeometry(image.size, canvas, update(imageGeometry(image.size, canvas, value, cellAspect).view), cellAspect).view);
   };
@@ -213,7 +224,13 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
           zoom(event.scroll.direction === "up" ? 1.25 : 0.8);
           event.stopPropagation();
         }}>
-        <image source={image.bytes} fit="fill" style={{ position: "absolute", left: geometry.left, top: geometry.top, width: geometry.width, height: geometry.height }} />
+        {image.undrawable || drawFailed ? (
+          <box style={{ flexGrow: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>
+            <Placeholder label={image.label} state="unusable" />
+          </box>
+        ) : (
+          <image source={image.bytes} onError={() => setDrawFailed(true)} fit="fill" style={{ position: "absolute", left: geometry.left, top: geometry.top, width: geometry.width, height: geometry.height }} />
+        )}
       </box>
     </box>
   );

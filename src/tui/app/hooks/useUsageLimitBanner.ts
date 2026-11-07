@@ -31,14 +31,15 @@ export function useUsageLimitBanner(params: {
   setError: (message: string) => void;
   /** Opens a thread by id — where "continue in a new thread" lands you. */
   openThread?: (threadId: string) => void;
+  /** Cancelling the continue of a delegated task asks about notifying its parent first. */
+  requestAutoCancel: (threadId: string, title: string, cancel: (notifyParent: boolean) => void) => void;
 }): {
   banner: UsageLimitBanner | null;
   scheduleContinue: () => void;
-  continueInNewThread: () => void;
   cancelContinue: () => void;
   dismiss: () => void;
 } {
-  const { client, threadState, openThreadId, now, setError, openThread } = params;
+  const { client, threadState, openThreadId, now, setError, openThread, requestAutoCancel } = params;
   const [dismissedKey, setDismissedKey] = useState<string | null>(null);
   const limit = useMemo(() => detectUsageLimit(threadState, now), [threadState, now]);
   const pending = (threadState.thread?.queuedTurns ?? []).find((queued) => queued.scheduleReason === "usage-reset") ?? null;
@@ -74,28 +75,16 @@ export function useUsageLimitBanner(params: {
   const cancelContinue = () => {
     const turnId = banner?.continueTurnId ?? null;
     if (openThreadId === null || turnId === null) return;
-    void client
-      .dispatch({ type: "thread.turn.interrupt", threadId: openThreadId, turnId })
-      .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
-  };
-  /**
-   * Carry on in a fresh thread rather than this one: the same project,
-   * model and checkout, opened with a handoff written from this thread.
-   * While the limit still stands, the handoff waits for the reset (the
-   * account is the same one); once it has passed, it goes at once.
-   */
-  const continueInNewThread = () => {
-    if (openThreadId === null) return;
-    const resetsAt = banner?.resetsAt ?? null;
-    const scheduledFor =
-      resetsAt !== null && resetsAt.getTime() > Date.now()
-        ? new Date(resetsAt.getTime() + USAGE_CONTINUE_GRACE_MS).toISOString()
-        : undefined;
-    void client
-      .dispatch({ type: "thread.continue", threadId: openThreadId, ...(scheduledFor ? { scheduledFor } : {}) })
-      .then((result) => openThread?.(result.threadId))
-      .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+    const threadId = openThreadId;
+    const title = threadState.thread?.title ?? threadId;
+    // A delegated task's parent hears about the cancellation unless the
+    // modal says otherwise; anything else cancels straight through.
+    requestAutoCancel(threadId, title, (notifyParent) => {
+      void client
+        .dispatch({ type: "thread.turn.interrupt", threadId, turnId, ...(notifyParent ? {} : { notifyParent: false }) })
+        .catch((cause: unknown) => setError(String(cause).slice(0, 120)));
+    });
   };
   const dismiss = () => setDismissedKey(banner?.key ?? null);
-  return { banner, scheduleContinue, continueInNewThread, cancelContinue, dismiss };
+  return { banner, scheduleContinue, cancelContinue, dismiss };
 }

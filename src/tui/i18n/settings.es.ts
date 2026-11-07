@@ -359,7 +359,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Servers": "Servidores",
   "MCP servers every thread can use. A project's moxen.json can add to or remove from this list.": "Servidores MCP que puede usar cualquier hilo. El moxen.json de un proyecto puede añadir o quitar de esta lista.",
   "Run packages with": "Ejecutar paquetes con",
-  "What starts an npm package when you add a well-known server (Brave Search, Exa, GitHub…). It is written into the server's command: servers you already have, and ones you type yourself, are left as they are.": "Con qué se arranca un paquete de npm cuando añades un servidor conocido (Brave Search, Exa, GitHub…). Se escribe en el comando del servidor: los que ya tienes y los que escribes tú se quedan como están.",
+  "What starts an npm package when you add a well-known server (Brave Search, Exa…). It is written into the server's command: servers you already have, and ones you type yourself, are left as they are.": "Con qué se arranca un paquete de npm cuando añades un servidor conocido (Brave Search, Exa…). Se escribe en el comando del servidor: los que ya tienes y los que escribes tú se quedan como están.",
   "npx": "npx",
   "Comes with Node.": "Viene con Node.",
   "bunx": "bunx",

@@ -27,6 +27,8 @@ async function shellOf(connection: DirectConnection): Promise<ShellState> {
 }
 
 describe("the research run as the shell carries it", () => {
+  // Two role turns plus the shell sync, each with its own ten-second poll:
+  // a loaded runner does not fit in the twenty-second default.
   it("shows a real run: the lead's row stands for the run, its roles have none, and each slot has a state", async () => {
     const harness = await testHarness();
     const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
@@ -59,7 +61,7 @@ describe("the research run as the shell carries it", () => {
       expect(rows.find((row) => row.thread.id === lead.child.id)?.research).toBe(true);
       expect(rows.find((row) => row.thread.id === parent.threadId)?.research).toBe(false);
     } finally { await connection.close(); }
-  });
+  }, 60_000);
 
   it("shows a role that is still working as working, and a user's own thread as the lead of its run", async () => {
     const harness = await testHarness({ leaveTurnsRunning: true });
