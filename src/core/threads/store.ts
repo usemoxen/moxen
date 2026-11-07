@@ -296,10 +296,10 @@ export class ThreadStore {
    * one bad record warns rather than failing the whole store.
    *
    * Not a fence between writers: the re-read and the write are two steps,
-   * and two builds sharing one store could still interleave them. They never
-   * do through moxen itself — exactly one server process owns the store
-   * (its `server.lock` refuses a second) — so this is a backstop for a
-   * marker swapped under a running build, not a lock.
+   * and two builds sharing one store could still interleave them. While its
+   * `server.lock` names a live owner a second server is refused at startup;
+   * a missing, corrupt, or stale lock is taken over, so this stays a backstop
+   * for a swapped marker, not a fence.
    */
   private async assertStoreWriteable(): Promise<void> {
     await readStoreVersion(this.root);
