@@ -322,8 +322,25 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
           send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
           break;
         }
-        send({ id, result: null });
-        context.shutdown();
+        // The reply must be on the wire before the server stops: stopping
+        // destroys this socket, which drops a reply still being flushed
+        // (Windows named-pipe writes complete asynchronously, so an
+        // immediate destroy can eat the reply `server stop` waits for).
+        // The socket's own close stops the server too, for a client that
+        // is already gone.
+        if (!socket.destroyed) {
+          let stopping = false;
+          const stop = (): void => {
+            if (!stopping) {
+              stopping = true;
+              context.shutdown();
+            }
+          };
+          socket.write(encode({ id, result: null }), stop);
+          socket.once("close", stop);
+        } else {
+          context.shutdown();
+        }
         break;
       default:
         send({ id, error: toWireError(new CliError("UNKNOWN_METHOD", `Unknown method ${method}.`)) });

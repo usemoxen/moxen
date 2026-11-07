@@ -43,9 +43,12 @@ async function fakeStatusServer(answerQueries: boolean): Promise<{
     const reader = new LineReader();
     socket.on("data", (chunk: string) => {
       for (const line of reader.push(chunk)) {
-        const message = JSON.parse(line) as { id: number; method: string };
+        const message = JSON.parse(line) as { id: number; method: string; params?: { build?: unknown; buildDisplay?: unknown } };
         if (message.method === "hello") {
-          socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1 } }));
+          // Echo the client's build back: this fake stands in for any
+          // server, and the test's subject is the heartbeat, not the
+          // handshake (a real mismatch would be BUILD_MISMATCH).
+          socket.write(encode({ id: message.id, result: { protocol: PROTOCOL_VERSION, server: "moxen", pid: 1, build: message.params?.build, buildDisplay: message.params?.buildDisplay } }));
         } else if (message.method === "query") {
           seen += 1;
           markSeen();
