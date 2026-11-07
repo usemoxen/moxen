@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "../../../threads/requestactivity.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
-import { HarnessDriver, type HarnessDriverOptions } from "../driver.js";
 import type { McpClient } from "../mcpclient.js";
+import { HarnessDriver, type HarnessDriverOptions } from "../driver.js";
 import type { ChatRequest } from "../transport/chat.js";
 import type { ModelEvent } from "../types.js";
 
@@ -59,6 +59,15 @@ async function until(events: ProviderRuntimeEvent[], predicate: (event: Provider
   }
 }
 
+/** Wait for a condition that no event array carries (an MCP connect starting). */
+async function waitForConnect(check: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for the connect");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 const run = <A>(effect: Effect.Effect<A, unknown>) => Effect.runPromise(effect);
 const answer = (text: string): ModelEvent[] => [{ type: "reasoning.delta", text: "hmm" }, { type: "text.delta", text }, { type: "usage", usage: { inputTokens: 50, outputTokens: 5, cachedInputTokens: 20, reasoningTokens: 1 } }, { type: "finish", reason: "stop" }];
 
@@ -95,6 +104,214 @@ describe("HarnessDriver", () => {
     expect(types).toEqual(expect.arrayContaining(["reasoning.updated", "reasoning.delta", "message.part.updated", "token-usage.updated", "turn.completed"]));
     expect(events.filter((event) => event.type === "reasoning.updated").map((event) => (event as { status: string }).status)).toEqual(["running", "completed"]);
     await expect(driver.contextUsage("t1")).resolves.toMatchObject({ usedTokens: 55, maxTokens: 262144 });
+  });
+
+  it("awaitTurn removes its abort listener when the turn settles", async () => {
+    const { driver } = driverWith([answer("hi")]);
+    await start(driver);
+    const { turnId } = await run(driver.sendTurn({ threadId: "t1", prompt: "hi" }));
+    const removed: unknown[][] = [];
+    const signal = {
+      aborted: false,
+      addEventListener: () => undefined,
+      removeEventListener: (...args: unknown[]) => void removed.push(args),
+    } as unknown as AbortSignal;
+    await driver.awaitTurn("t1", turnId, signal);
+    expect(removed).toHaveLength(1);
+    expect(removed[0]?.[0]).toBe("abort");
+  });
+
+  it("stopAll ends the event stream instead of leaving it hanging", async () => {
+    const { driver } = driverWith([]);
+    await start(driver);
+    await run(driver.stopAll());
+    await Effect.runPromise(Stream.runCollect(driver.streamEvents));
+  });
+
+  it("a stop does not wait forever for a wedged start, and the late start leaves nothing live", async () => {
+    let release!: (cause: unknown) => void;
+    const gate = new Promise<never>((_, reject) => {
+      release = reject;
+    });
+    let connects = 0;
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      stopWaitMs: 20,
+      connectMcp: () => {
+        connects += 1;
+        return gate;
+      },
+    });
+    const starting = run(
+      driver.startSession({
+        threadId: "t1",
+        workingDirectory: work,
+        modelSelection: selection,
+        mcpServers: [{ name: "wedged", type: "stdio", command: "wedged", args: [], env: {} }],
+      }),
+    );
+    await waitForConnect(() => connects > 0);
+    await run(driver.stopSession("t1"));
+    release(new Error("wedged"));
+    await expect(starting).rejects.toThrow();
+    expect(await run(driver.hasSession("t1"))).toBe(false);
+  });
+
+  it("a start joining a pending start that a stop closes starts fresh", async () => {
+    let release!: (cause: unknown) => void;
+    const gate = new Promise<never>((_, reject) => {
+      release = reject;
+    });
+    let connects = 0;
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      connectMcp: () => {
+        connects += 1;
+        return gate;
+      },
+    });
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    const starting = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    await waitForConnect(() => connects > 0);
+    const joined = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    const stopping = run(driver.stopSession("t1"));
+    // The pool reports a problem instead of hanging: both starts finish, the
+    // stop closes the first, and the join starts fresh on the same pool shape.
+    release(new Error("wedged"));
+    await starting;
+    await stopping;
+    await joined;
+    expect(await run(driver.hasSession("t1"))).toBe(true);
+  });
+
+  it("stopAll does not clear a session registered during its closes", async () => {
+    const stub = {
+      tools: [],
+      dropped: 0,
+      alive: true,
+      call: async () => {
+        throw new Error("nope");
+      },
+      // Never resolves: the stop waits out the close budget while the successor registers.
+      close: () => new Promise<void>(() => {}),
+    };
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      connectMcp: () => Promise.resolve(stub as unknown as McpClient),
+    });
+    await start(driver, { mcpServers: servers });
+    const stopping = run(driver.stopAll());
+    // Registered while the stop's closes are still waiting out the hung pool.
+    await run(
+      driver.startSession({ threadId: "t2", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    await stopping;
+    expect(await run(driver.hasSession("t2"))).toBe(true);
+  });
+
+  it("a join on a start abandoned by a stop starts fresh", async () => {
+    let release!: (cause: unknown) => void;
+    const gate = new Promise<never>((_, reject) => {
+      release = reject;
+    });
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    let connects = 0;
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      stopWaitMs: 20,
+      connectMcp: () => {
+        connects += 1;
+        return gate;
+      },
+    });
+    const starting = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void starting.catch(() => undefined);
+    await waitForConnect(() => connects > 0);
+    const joined = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void joined.catch(() => undefined);
+    await run(driver.stopSession("t1"));
+    release(new Error("wedged"));
+    await expect(starting).rejects.toThrow();
+    await joined;
+    expect(await run(driver.hasSession("t1"))).toBe(true);
+  });
+
+  it("stopAll with many stalled starts resolves instead of hanging", async () => {
+    const gate = new Promise<never>(() => {});
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      connectMcp: () => gate,
+    });
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    for (const n of [1, 2, 3, 4, 5]) {
+      void run(
+        driver.startSession({ threadId: `t${n}`, workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+      ).catch(() => undefined);
+    }
+    const t0 = Date.now();
+    await run(driver.stopAll());
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    for (const n of [1, 2, 3, 4, 5]) expect(await run(driver.hasSession(`t${n}`))).toBe(false);
+  });
+
+  it("a start after an abandoned start does not hang on the zombie entry", async () => {
+    let release!: (cause: unknown) => void;
+    const gate = new Promise<never>((_, reject) => {
+      release = reject;
+    });
+    const servers = [{ name: "slow", type: "stdio" as const, command: "slow", args: [], env: {} }];
+    let connects = 0;
+    const driver = new HarnessDriver({
+      config,
+      sessionsDir: path.join(dir, "sessions"),
+      home: dir,
+      sleep: async () => {},
+      stopWaitMs: 20,
+      connectMcp: () => {
+        connects += 1;
+        return gate;
+      },
+    });
+    const starting = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void starting.catch(() => undefined);
+    await waitForConnect(() => connects > 0);
+    await run(driver.stopSession("t1"));
+    // The zombie entry is gone: a later start connects fresh instead of hanging on it.
+    const second = run(
+      driver.startSession({ threadId: "t1", workingDirectory: work, modelSelection: selection, mcpServers: servers }),
+    );
+    void second.catch(() => undefined);
+    await waitForConnect(() => connects === 2);
+    release(new Error("wedged"));
+    await expect(starting).rejects.toThrow();
+    await second;
+    expect(await run(driver.hasSession("t1"))).toBe(true);
   });
 
   it("publishes a tool call in the shape the activity ledger reads", async () => {
