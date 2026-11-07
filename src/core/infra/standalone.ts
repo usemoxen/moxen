@@ -27,8 +27,8 @@ export function isStandaloneExecutable(): boolean {
  * The executable's own first arguments, one per internal mode. A child
  * process is the same binary re-run with one of these: the daemon a client
  * autostarts, the MCP server a provider session launches, and the embedding
- * worker the server owns. Each is a single argument so the mode's own
- * argument parsing (`process.argv.slice(2)`) keeps working.
+ * worker the server owns. Each is a single argument consumed here; the mode
+ * receives only the user arguments after it.
  */
 export const STANDALONE_DAEMON_ARG = "--moxen-internal-daemon";
 export const STANDALONE_MCP_ARG = "--moxen-internal-mcp";
