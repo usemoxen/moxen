@@ -58,7 +58,7 @@ try {
   const remove = flagValue("--remove");
   if (remove) rmSync(path.join(folder, remove), { recursive: true, force: true });
 
-  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
+  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "dist/verify-memory-embeddings.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
     assert.ok(existsSync(path.join(folder, ...entry.split("/"))), `${entry} is missing from the archive`);
   }
 
