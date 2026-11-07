@@ -254,12 +254,11 @@ try {
   mkdirSync(workdir);
   const launch = (args: readonly string[] = ["--version"]) => {
     if (process.platform === "win32") {
-      // /s strips the outer quotes of the command line, so the constructed
-      // line ends in one: without it cmd removes the quote after the launcher
-      // path instead and glues the first argument onto the command name.
-      // Verbatim arguments stop Node adding backslash-escapes cmd does not read.
-      const line = `"${[`""${first.launcher}"`, ...args].join(" ")}"`;
-      const result = spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", line], { encoding: "utf8", cwd: workdir, env: installEnv, timeout: 120_000, windowsVerbatimArguments: true });
+      // Run the launcher directly: Bun/Node route .cmd files through cmd.exe
+      // with correct quoting themselves. Hand-built `cmd /d /s /c` lines
+      // misquote spaced paths (the /s quote-stripping glues the first
+      // argument onto the command or splits at the space).
+      const result = spawnSync(first.launcher, [...args], { encoding: "utf8", cwd: workdir, env: installEnv, timeout: 120_000 });
       if (result.error) throw result.error;
       return result;
     }
