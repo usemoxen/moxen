@@ -12,9 +12,13 @@ import { namedPipe, probe } from "../src/server/transport/endpoint.js";
 import { startEmbeddingsHeartbeat } from "../src/server/embeddingsHeartbeat.js";
 
 // `--dist <dir>` checks another bundle (an unpacked release archive's `dist/`) instead of the checkout's.
+// `--workdir <dir>` keeps the validation state (config, socket, downloaded runtime) somewhere else instead of
+// `.moxen/embedding-validation` beside the script: the smoke test points it at its scratch folder so a run
+// against an unpacked archive leaves that folder alone.
 const distFlag = process.argv.indexOf("--dist");
 const dist = path.resolve(distFlag >= 0 && process.argv[distFlag + 1] ? process.argv[distFlag + 1]! : path.join(import.meta.dir, "..", "dist"));
-const root = path.resolve(import.meta.dir, "..", ".moxen", "embedding-validation");
+const workdirFlag = process.argv.indexOf("--workdir");
+const root = path.resolve(workdirFlag >= 0 && process.argv[workdirFlag + 1] ? process.argv[workdirFlag + 1]! : path.join(import.meta.dir, "..", ".moxen", "embedding-validation"));
 await mkdir(root, { recursive: true });
 const config = path.join(root, "config.json");
 await writeFile(config, JSON.stringify({ memoryEmbeddings: false }));

@@ -4,8 +4,9 @@
  *   bun scripts/smoke-release.ts <archive> [--embeddings] [--remove <path inside the archive folder>]
  *
  * It checks the folder layout, that the bundle reports the version in `package.json`, and that the native
- * OpenTUI package loads from the unpacked folder. `--embeddings` also runs `verify-memory-embeddings.ts` against
- * the unpacked daemon. `--remove` deletes a path first, to prove the check fails when something is missing.
+ * OpenTUI package loads from the unpacked folder. `--embeddings` also runs the archive's own bundled
+ * `dist/verify-memory-embeddings.js` against the unpacked daemon (never the checkout's source script, whose
+ * build identity the daemon refuses). `--remove` deletes a path first, to prove the check fails when something is missing.
  * Without any network it also checks `scripts/release-notes.ts` names this archive above the changelog,
  * `install.sh` refuses platforms with no build on every runner (Git Bash provides its `sh`), and `install.ps1`
  * does on Windows.
@@ -57,7 +58,7 @@ try {
   const remove = flagValue("--remove");
   if (remove) rmSync(path.join(folder, remove), { recursive: true, force: true });
 
-  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
+  for (const entry of ["dist/cli/index.js", "dist/server/daemon.js", "dist/server/mcp/entry.js", "dist/verify-memory-embeddings.js", "mods/agent-skills", "package.json", RELEASE_MARKER, "README.md", "LICENSE", "node_modules"]) {
     assert.ok(existsSync(path.join(folder, ...entry.split("/"))), `${entry} is missing from the archive`);
   }
 
@@ -126,7 +127,12 @@ try {
   }
 
   if (args.includes("--embeddings")) {
-    const verify = spawnSync(process.execPath, [path.join(checkout, "scripts", "verify-memory-embeddings.ts"), "--dist", path.join(folder, "dist")], { stdio: "inherit", cwd: scratch, env: process.env });
+    // The archive's own bundled client, so both sides carry the archive's
+    // release identity (the checkout's source client is refused with
+    // BUILD_MISMATCH). The workdir keeps the validation state in the scratch
+    // folder: the installer copies the archive folder whole, and must not
+    // carry downloaded model weights into the install.
+    const verify = spawnSync(process.execPath, [path.join(folder, "dist", "verify-memory-embeddings.js"), "--dist", path.join(folder, "dist"), "--workdir", path.join(scratch, "embedding-validation")], { stdio: "inherit", cwd: scratch, env: process.env });
     assert.equal(verify.status, 0, "memory embeddings failed against the archive");
     console.log("ok: memory embeddings");
   }
