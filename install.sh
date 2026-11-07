@@ -5,21 +5,65 @@
 #
 # It finds the latest release, checks the archive against its `.sha256` (and
 # stops on a mismatch), clears the download quarantine macOS puts on the
-# executable, runs `self-update --install`, and says how to put Moxen on your
-# PATH. Linux and Intel Macs have no build; Windows uses install.ps1 instead.
+# executable, runs `self-update --install`, and puts Moxen on your PATH: a
+# marker-guarded `export PATH` line in the profile for your shell (zsh:
+# ~/.zshrc, bash on macOS: ~/.bash_profile, which login shells read; sh:
+# ~/.profile), added once and never duplicated. Other shells get instructions
+# instead of a write. Set MOXEN_INSTALL_NO_PATH=1 to skip that step (the smoke
+# test does). MOXEN_INSTALL_PATH_ONLY=1 runs only the PATH step against $HOME,
+# for tests. Linux and Intel Macs have no build; Windows uses install.ps1 instead.
 #
 # Everything runs inside main, called on the last line, so a truncated download
 # defines nothing runnable and installs nothing.
 set -eu
 
-REPO="usemoxen/moxen"
-
-fail() {
-  echo "install: $1" >&2
-  exit 1
-}
-
 main() {
+  REPO="usemoxen/moxen"
+
+  fail() {
+    echo "install: $1" >&2
+    exit 1
+  }
+
+  # Puts ~/.moxen/app/bin on PATH by appending a marker-guarded snippet to the
+  # profile for the user's shell. Idempotent: a profile already holding the
+  # marker is left alone. Prints what changed and how to undo it.
+  add_moxen_to_path() {
+    if [ "${MOXEN_INSTALL_NO_PATH:-}" = "1" ]; then
+      echo "Skipping the PATH step (MOXEN_INSTALL_NO_PATH=1)."
+      return 0
+    fi
+    [ -n "${HOME:-}" ] || fail "HOME is not set, so no shell profile can be updated."
+    moxen_bin="$HOME/.moxen/app/bin"
+    moxen_marker=">>> moxen installer"
+    moxen_shell="$(basename "${SHELL:-}")"
+    case "$moxen_shell" in
+      zsh) moxen_profile="$HOME/.zshrc" ;;
+      # macOS terminals run login shells, which read .bash_profile, not .bashrc.
+      bash) moxen_profile="$HOME/.bash_profile" ;;
+      sh | dash | ksh) moxen_profile="$HOME/.profile" ;;
+      *)
+        echo "Your shell is '${SHELL:-unknown}': add $moxen_bin to your PATH by hand"
+        echo "(for bash or zsh, append: export PATH=\"$moxen_bin:\$PATH\")."
+        return 0
+        ;;
+    esac
+    if [ -f "$moxen_profile" ] && grep -qF "$moxen_marker" "$moxen_profile"; then
+      echo "PATH step already done: $moxen_profile holds the Moxen snippet."
+    else
+      # A leading blank line in case the profile has no trailing newline.
+      printf '\n# %s: puts Moxen on PATH; delete this block to undo.\nexport PATH="$HOME/.moxen/app/bin:$PATH"\n# <<< moxen installer <<<\n' "$moxen_marker" >>"$moxen_profile"
+      echo "Added Moxen to PATH in $moxen_profile."
+    fi
+    echo "To undo, delete the '# $moxen_marker' block from $moxen_profile."
+    echo "Open a new terminal (or run: export PATH=\"$moxen_bin:\$PATH\") so this shell picks it up."
+  }
+
+  if [ "${MOXEN_INSTALL_PATH_ONLY:-}" = "1" ]; then
+    add_moxen_to_path
+    return 0
+  fi
+
   case "$(uname -s)" in
     Darwin) ;;
     MINGW* | MSYS* | CYGWIN* | Windows_NT) fail "this script is for macOS; on Windows run install.ps1 instead." ;;
@@ -61,13 +105,15 @@ main() {
   echo "Installing..."
   "$tmp/$base/moxen" self-update --install || fail "self-update --install failed."
 
+  add_moxen_to_path
+
   trap - EXIT INT TERM
   rm -rf "$tmp"
 
   echo ""
-  echo "Installed ${tag}. The installer above said how to put Moxen on your PATH;"
-  echo "open a new terminal (or export PATH first), then run: moxen tui"
+  echo "Installed ${tag} (PATH step above)."
+  echo "Open a new terminal, then run: moxen"
   echo "To update later, run: moxen self-update"
 }
 
-main
+main "$@"

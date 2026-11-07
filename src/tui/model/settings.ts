@@ -2,6 +2,7 @@ import { driverKindOfInstance, type CliConfig } from "../../core/types.js";
 import { configuredModel } from "../../core/catalog/selection.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { updateState, versionNumber, type UpdatableProvider } from "../../core/catalog/update.js";
+import type { UpdateView } from "./update.js";
 import type { SettingDescriptor, SettingEffective, SettingEnds, SettingKind, SettingSection, SettingValue, SettingView } from "../../core/configschema.js";
 import { defaultEffortId, describeEffort } from "./display.js";
 import { numberLabel } from "./numberlabel.js";
@@ -594,6 +595,55 @@ export function providerVersionLine(check: ProviderCheckView | undefined, latest
     return { version, status: t("settings.update.current", { latest: latest.latest ?? "", channel }), tone: "ok", button: t("settings.update.buttonCurrent"), settled: true };
   }
   return { ...base, version, status: t("settings.update.cannotCheck"), tone: "muted" };
+}
+
+/** Where the Moxen install stands, for the General tab's card: the installed version against the latest available. */
+export interface MoxenVersionLine {
+  /** The installed version, or null while no check has answered. */
+  readonly version: string | null;
+  /** One sentence on where it stands: the update screen says the rest. */
+  readonly status: string;
+  readonly tone: "ok" | "warn" | "update" | "muted";
+  /** The card's only action opens the update screen, so it always reads the same. */
+  readonly button: string;
+}
+
+/**
+ * The card's line for the updater's state. A state past a check names what
+ * the check found in the update screen's own words, so the card and the
+ * screen never disagree; anything older than that is the screen's to show.
+ */
+export function moxenVersionLine(view: UpdateView): MoxenVersionLine {
+  const button = t("settings.moxen.button");
+  switch (view.phase) {
+    case "idle":
+      return { version: null, status: t("settings.moxen.openToCheck"), tone: "muted", button };
+    case "checking":
+      return { version: null, status: t("settings.update.checkingLatest"), tone: "muted", button };
+    case "ready": {
+      const check = view.check;
+      if (check.status === "available") return { version: check.install.version, status: t("settings.moxen.available", { latest: check.latest?.version ?? "" }), tone: "update", button };
+      if (check.status === "up-to-date") return { version: check.install.version, status: t("update.upToDate"), tone: "ok", button };
+      if (check.status === "no-release") return { version: check.install.version, status: t("update.noRelease"), tone: "muted", button };
+      return { version: check.install.version, status: t("update.unavailable", { reason: check.reason ?? t("update.unknownReason") }), tone: "warn", button };
+    }
+    case "unreachable":
+      return { version: null, status: t("update.unreachable", { message: view.message }), tone: "warn", button };
+    case "running": {
+      const version = view.check?.install.version ?? view.progress?.version ?? null;
+      return { version, status: view.op === "apply" ? t("update.running") : t("update.runningRollback"), tone: "update", button };
+    }
+    case "finished": {
+      if (view.op === "rollback") return { version: view.result.version, status: t("update.rolledBack", { version: view.result.version, from: view.result.from ?? "" }), tone: "ok", button };
+      return view.result.action === "already-current"
+        ? { version: view.result.version, status: t("update.alreadyCurrent", { version: view.result.version }), tone: "ok", button }
+        : { version: view.result.version, status: t("update.installedNow", { version: view.result.version }), tone: "ok", button };
+    }
+    case "failed":
+      return { version: view.check?.install.version ?? null, status: view.message, tone: "warn", button };
+    case "lost":
+      return { version: view.check?.install.version ?? null, status: t("update.lost"), tone: "warn", button };
+  }
 }
 
 /** The "Per model" row: every model with its four overrides, read from the four settings beside it, and what its Compaction can be. */

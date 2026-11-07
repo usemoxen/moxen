@@ -11,6 +11,11 @@
  * Without any network it also checks `scripts/release-notes.ts` names this archive above the changelog,
  * `install.sh` refuses platforms with no build on every runner (Git Bash provides its `sh`), and `install.ps1`
  * does on Windows.
+ * The installers' PATH step runs here too, without any download: with MOXEN_INSTALL_PATH_ONLY=1 only that
+ * step runs, against a fake HOME (sh) or a throwaway user-environment value (ps1, Windows only), and the test
+ * asserts the snippet/value outcome and that a second run duplicates nothing. With MOXEN_INSTALL_NO_PATH=1
+ * (which the smoke run never sets for itself) the step writes nothing: the fake HOME stays empty and the
+ * developers' real profiles (and the real user Path on Windows) are byte-for-byte untouched.
  * It also installs the unpacked release into a throwaway store and starts it through the launcher (see below),
  * runs a real command through the launcher so the installed executable autostarts its own daemon, then
  * updates that install to a copy of the archive that reports a higher version (the core function, in-process,
@@ -131,6 +136,46 @@ try {
   assert.ok(!installSh.includes("bun.sh/install"), "install.sh still bootstraps Bun");
   assert.ok(installSh.includes('/moxen" self-update --install'), "install.sh does not install through the executable");
   console.log("ok: install.sh installs the executable with nothing else");
+  // The PATH step on its own, against a fake HOME inside the scratch folder: it picks the profile for the
+  // shell, appends one marker-guarded snippet, and never duplicates it. Anything else it would write must be
+  // under HOME too, so the developers' real profiles prove nothing escaped: they are read before and after.
+  const fakeHome = path.join(scratch, "fake home");
+  mkdirSync(fakeHome, { recursive: true });
+  const realProfiles = [".zshrc", ".bashrc", ".profile", ".bash_profile"].map((name) => path.join(os.homedir(), name));
+  const realBefore = new Map(realProfiles.map((file) => [file, existsSync(file) ? readFileSync(file, "utf8") : null]));
+  const pathOnlyEnv = (home: string, shell: string): NodeJS.ProcessEnv => ({ ...process.env, MOXEN_INSTALL_PATH_ONLY: "1", HOME: home, SHELL: shell });
+  const applyPath = (home: string, shell: string, extra: NodeJS.ProcessEnv = {}) => {
+    const applied = run("sh", [path.join(checkout, "install.sh")], { env: { ...pathOnlyEnv(home, shell), ...extra } });
+    assert.equal(applied.status, 0, `install.sh PATH step failed: ${applied.stderr}`);
+    return `${applied.stdout}${applied.stderr}`;
+  };
+  applyPath(fakeHome, "/bin/zsh");
+  const zshrc = readFileSync(path.join(fakeHome, ".zshrc"), "utf8");
+  assert.ok(zshrc.includes(">>> moxen installer"), "install.sh wrote no snippet to ~/.zshrc");
+  assert.ok(zshrc.includes('export PATH="$HOME/.moxen/app/bin:$PATH"'), "install.sh snippet does not export the bin folder");
+  assert.match(applyPath(fakeHome, "/bin/zsh"), /already done/, "install.sh did not notice its snippet");
+  assert.equal((readFileSync(path.join(fakeHome, ".zshrc"), "utf8").match(/>>> moxen installer/g) ?? []).length, 1, "install.sh duplicated its snippet");
+  applyPath(fakeHome, "/bin/bash");
+  // Bash on macOS runs as a login shell, which reads ~/.bash_profile, not ~/.bashrc.
+  const bashProfile = path.join(fakeHome, ".bash_profile");
+  assert.ok(readFileSync(bashProfile, "utf8").includes(">>> moxen installer"), "install.sh wrote no snippet to ~/.bash_profile");
+  assert.ok(!existsSync(path.join(fakeHome, ".bashrc")), "install.sh wrote ~/.bashrc for bash instead of ~/.bash_profile");
+  applyPath(fakeHome, "/bin/bash");
+  assert.equal((readFileSync(bashProfile, "utf8").match(/>>> moxen installer/g) ?? []).length, 1, "install.sh duplicated its snippet in ~/.bash_profile");
+  // A shell with no supported profile gets instructions, not a write.
+  const fishHome = path.join(scratch, "fish home");
+  mkdirSync(fishHome);
+  assert.match(applyPath(fishHome, "/usr/bin/fish"), /by hand/, "install.sh gave fish no manual instructions");
+  assert.deepEqual(readdirSync(fishHome), [], "install.sh wrote a profile for fish");
+  // The smoke skip: a fresh fake HOME stays empty.
+  const skippedHome = path.join(scratch, "skipped home");
+  mkdirSync(skippedHome);
+  assert.match(applyPath(skippedHome, "/bin/zsh", { MOXEN_INSTALL_NO_PATH: "1" }), /MOXEN_INSTALL_NO_PATH/, "install.sh did not say it skipped the PATH step");
+  assert.deepEqual(readdirSync(skippedHome), [], "install.sh wrote under MOXEN_INSTALL_NO_PATH");
+  for (const [file, before] of realBefore) {
+    assert.equal(existsSync(file) ? readFileSync(file, "utf8") : null, before, `${file} changed outside the scratch folder`);
+  }
+  console.log("ok: install.sh PATH step applies once per shell and skips under MOXEN_INSTALL_NO_PATH");
   if (process.platform === "win32") {
     // A wrong architecture refuses before any download.
     const refused = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(checkout, "install.ps1")], { env: { ...process.env, PROCESSOR_ARCHITECTURE: "ARM64" } });
@@ -141,6 +186,35 @@ try {
     assert.ok(installPs1.includes("moxen.exe"), "install.ps1 does not install through the executable");
     assert.ok(!installPs1.includes("bun.sh/install"), "install.ps1 still bootstraps Bun");
     console.log("ok: install.ps1 installs the executable with nothing else");
+    // The PATH step against a throwaway user-environment value, never the real Path.
+    const testValue = "MoxenSmokeTestPath";
+    const psValue = (name: string): string => {
+      const got = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `if ($null -eq [Environment]::GetEnvironmentVariable('${name}', 'User')) { '' } else { [Environment]::GetEnvironmentVariable('${name}', 'User') }`], { env: process.env });
+      assert.equal(got.status, 0, `reading the ${name} value failed: ${got.stderr}`);
+      return got.stdout.trim();
+    };
+    const userPathBefore = psValue("Path");
+    assert.equal(psValue(testValue), "", "a previous smoke run left its test value behind");
+    const expectedBin = path.win32.join(process.env.USERPROFILE ?? "", ".moxen", "app", "bin").toLowerCase();
+    const applyPs = (extra: NodeJS.ProcessEnv = {}) =>
+      run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(checkout, "install.ps1")], { env: { ...process.env, MOXEN_INSTALL_PATH_ONLY: "1", MOXEN_INSTALL_TEST_VALUE: testValue, ...extra } });
+    const firstPs = applyPs();
+    assert.equal(firstPs.status, 0, `install.ps1 PATH step failed: ${firstPs.stderr}`);
+    const stateAfterFirst = psValue(testValue);
+    assert.ok(stateAfterFirst.split(";").some((entry) => entry.trim().toLowerCase() === expectedBin), "install.ps1 did not add the bin folder to the test value");
+    const rerunPs = applyPs();
+    assert.equal(rerunPs.status, 0, `install.ps1 PATH rerun failed: ${rerunPs.stderr}`);
+    assert.match(`${rerunPs.stdout}${rerunPs.stderr}`, /already done/, "install.ps1 did not notice its entry");
+    assert.equal(psValue(testValue).split(";").filter((entry) => entry.trim().toLowerCase() === expectedBin).length, 1, "install.ps1 duplicated its entry");
+    const skippedPs = applyPs({ MOXEN_INSTALL_NO_PATH: "1" });
+    assert.equal(skippedPs.status, 0, `install.ps1 skip failed: ${skippedPs.stderr}`);
+    assert.match(`${skippedPs.stdout}${skippedPs.stderr}`, /MOXEN_INSTALL_NO_PATH/, "install.ps1 did not say it skipped the PATH step");
+    assert.equal(psValue(testValue), stateAfterFirst, "install.ps1 wrote under MOXEN_INSTALL_NO_PATH");
+    assert.equal(psValue("Path"), userPathBefore, "install.ps1 touched the real user Path");
+    const cleanup = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `[Environment]::SetEnvironmentVariable('${testValue}', $null, 'User')`], { env: process.env });
+    assert.equal(cleanup.status, 0, `removing the test value failed: ${cleanup.stderr}`);
+    assert.equal(psValue(testValue), "", "the test value was not removed");
+    console.log("ok: install.ps1 PATH step applies once and skips under MOXEN_INSTALL_NO_PATH");
   }
 
   if (args.includes("--embeddings")) {

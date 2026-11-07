@@ -67,6 +67,7 @@ describe("release notes", () => {
     expect(notes).toContain("xattr -d com.apple.quarantine");
     expect(notes).toContain("self-update --install");
     expect(notes).toContain("PATH");
+    expect(notes).toContain("MOXEN_INSTALL_NO_PATH");
   });
 
   it("puts the install steps above the changelog and keeps the changelog as it is", () => {

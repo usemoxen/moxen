@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { BARE_NO_TTY_HINT, decideBareInvocation } from "./bare.js";
 import { standaloneMode } from "../core/infra/standalone.js";
 import { runStandaloneMode } from "../server/standalone.js";
 
@@ -8,8 +9,15 @@ import { runStandaloneMode } from "../server/standalone.js";
 // Anything else is the CLI.
 const mode = standaloneMode();
 if (mode === null) {
+  // Bare `moxen` opens the TUI; anything else is parsed as CLI args.
+  const decision = decideBareInvocation(process.argv.slice(2), process.stdout.isTTY === true);
   const { program } = await import("./program.js");
-  await program.parseAsync(process.argv);
+  if (decision.kind === "help") {
+    process.stdout.write(program.helpInformation());
+    process.stderr.write(`${BARE_NO_TTY_HINT}\n`);
+    process.exit(2);
+  }
+  await program.parseAsync(decision.kind === "tui" ? [process.argv[0]!, process.argv[1]!, ...decision.argv] : process.argv);
   process.exit(process.exitCode ?? 0);
 }
 // The daemon returns and stays alive on the server's handles; the others exit by themselves.

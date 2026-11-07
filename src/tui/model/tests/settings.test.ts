@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
+import type { UpdateCheck } from "../../../core/selfupdate/vocabulary.js";
 import { describeSettings, restartRequired, settingDescriptor, SETTINGS } from "../../../core/configschema.js";
 import { DEFAULT_CONFIG, normalizeConfig } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
 import { uiFromSnapshot } from "../../features/settings/useSettings.js";
-import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
+import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, moxenVersionLine, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
+import type { UpdateView } from "../update.js";
 
 function provider(instanceId: string, models: Array<{ slug: string; name: string; efforts?: string[]; hidden?: boolean }>, enabled = true): ProviderSummary {
   return {
@@ -184,6 +186,59 @@ describe("provider updates on the settings page", () => {
     expect(providerVersionLine(check({ installed: false, ok: false, version: null })).status).toContain("Not found");
     expect(providerVersionLine(check({ version: "weird output" })).status).toBe("Could not read its version.");
     expect(providerVersionLine(undefined)).toMatchObject({ version: null, status: "Checking…", tone: "muted" });
+  });
+});
+
+describe("the Moxen update card on the settings page", () => {
+  const updateCheck = (overrides: Partial<UpdateCheck> = {}): UpdateCheck => ({
+    install: { version: "0.1.4", kind: "release", folder: "/apps/moxen", target: { os: "macos", arch: "arm64" } },
+    status: "available",
+    reason: null,
+    latest: { version: "0.2.0", tag: "v0.2.0", url: "https://example.test/v0.2.0", notes: "", archive: null, checksum: null },
+    updatable: true,
+    ...overrides,
+  });
+  const ready = (check: UpdateCheck = updateCheck()): UpdateView => ({ phase: "ready", check });
+
+  it("sends for the update screen while nothing is known, and always offers the same way in", () => {
+    expect(moxenVersionLine({ phase: "idle" })).toEqual({
+      version: null,
+      status: "Open the update screen to check for a newer version.",
+      tone: "muted",
+      button: "[ View update ]",
+    });
+    expect(moxenVersionLine({ phase: "checking" })).toMatchObject({ version: null, tone: "muted", button: "[ View update ]" });
+    expect(moxenVersionLine({ phase: "checking" }).status).toBe("Checking for a newer version…");
+    expect(moxenVersionLine(ready()).button).toBe("[ View update ]");
+  });
+
+  it("names the installed version against what the check found, in the screen's own words", () => {
+    expect(moxenVersionLine(ready())).toMatchObject({ version: "0.1.4", status: "0.2.0 is available.", tone: "update" });
+    expect(moxenVersionLine(ready(updateCheck({ status: "up-to-date", updatable: false })))).toMatchObject({ version: "0.1.4", status: "You have the latest release.", tone: "ok" });
+    expect(moxenVersionLine(ready(updateCheck({ status: "no-release", latest: null })))).toMatchObject({ version: "0.1.4", status: "No release has been published yet.", tone: "muted" });
+    expect(moxenVersionLine(ready(updateCheck({ status: "unavailable", latest: null, reason: "offline" })))).toMatchObject({
+      version: "0.1.4",
+      status: "Couldn’t check for updates: offline. Your Moxen is unchanged.",
+      tone: "warn",
+    });
+    expect(moxenVersionLine(ready(updateCheck({ status: "unavailable", latest: null })))).toMatchObject({ tone: "warn" });
+    expect(moxenVersionLine({ phase: "unreachable", message: "gone" })).toMatchObject({ version: null, tone: "warn" });
+  });
+
+  it("follows an update past the check, keeping the installed version in view", () => {
+    const running = moxenVersionLine({ phase: "running", op: "apply", commandId: "c", progress: { stage: "downloading", version: "0.2.0" }, check: null });
+    expect(running).toMatchObject({ version: "0.2.0", tone: "update" });
+    expect(moxenVersionLine({ phase: "running", op: "rollback", commandId: "c", progress: null, check: updateCheck() }).status).toBe("Going back to the previous version.");
+    const done = (result: UpdateView & { phase: "finished" }): ReturnType<typeof moxenVersionLine> => moxenVersionLine(result);
+    expect(done({ phase: "finished", op: "apply", result: { action: "updated", version: "0.2.0", from: "0.1.4", previous: "0.1.4", folder: "/f", current: "/c", warnings: [] }, check: null }))
+      .toMatchObject({ version: "0.2.0", status: "Moxen 0.2.0 is installed.", tone: "ok" });
+    expect(done({ phase: "finished", op: "apply", result: { action: "already-current", version: "0.2.0", from: "0.1.4", previous: null, folder: "/f", current: "/c", warnings: [] }, check: null }).status)
+      .toBe("Moxen 0.2.0 is already the current version. Nothing was changed.");
+    expect(done({ phase: "finished", op: "rollback", result: { action: "rolled-back", version: "0.1.4", from: "0.2.0", previous: "0.2.0", folder: "/f", current: "/c", warnings: [] }, check: null }).status)
+      .toBe("Went back to Moxen 0.1.4. 0.2.0 is kept, so you can return to it.");
+    expect(moxenVersionLine({ phase: "failed", op: "apply", code: "SELF_UPDATE_BUSY", message: "Another moxen self-update is running.", check: updateCheck() }))
+      .toMatchObject({ version: "0.1.4", status: "Another moxen self-update is running.", tone: "warn" });
+    expect(moxenVersionLine({ phase: "lost", op: "apply", commandId: "c", check: updateCheck() })).toMatchObject({ version: "0.1.4", tone: "warn" });
   });
 });
 

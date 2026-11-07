@@ -23,10 +23,11 @@ irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 ```
 
 Either script fetches the latest release's archive, checks it against its
-`.sha256` and refuses a mismatch, then runs `self-update --install` and says
-how to put Moxen on your PATH. Nothing else needs installing: each release
+`.sha256` and refuses a mismatch, then runs `self-update --install` and puts
+Moxen on your PATH: a marker-guarded `export PATH` snippet on macOS, the user
+Path on Windows. Nothing else needs installing: each release
 holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support
-files. Linux and Intel Macs have no build yet. The one-liners download the scripts
+files, and needs no Bun. Linux and Intel Macs have no build yet. The one-liners download the scripts
 from the release itself, so they work from the next release on; until then,
 follow the by-hand steps below.
 
@@ -45,7 +46,8 @@ Check the download against its `.sha256` first (`shasum -a 256 -c <file>.sha256`
 (`xattr -d com.apple.quarantine moxen-<version>-macos-arm64/moxen`) or the first run is killed on launch.
 `self-update --install` copies the release to
 `~/.moxen/app/versions/<version>/`, records it in `~/.moxen/app/current`, writes a `moxen` launcher (`moxen.cmd` on
-Windows) in `~/.moxen/app/bin`, and prints how to put that folder on your PATH. It edits no shell profile. Run
+Windows) in `~/.moxen/app/bin`, and prints how to put that folder on your PATH. It edits no shell profile (the
+one-line installers above do that step for you). Run
 it again any time: an installed version is left as it is. After that you can delete the unpacked folder, and `moxen`
 starts the version `current` names. The builds are not signed or notarized.
 
@@ -96,6 +98,10 @@ Every example below assumes `moxen` resolves that way. This package is not publi
 ```bash
 moxen tui
 ```
+
+Bare `moxen` opens the TUI too; `moxen --help` opens help, and anything else
+after `moxen` is a CLI command with args (see below). Without an interactive
+terminal, bare `moxen` prints help plus a hint instead of launching.
 
 Opens the interactive client: sidebar with your threads, the live transcript with per-turn diffs,
 and a composer with model/effort pickers, image attachments, and an external-editor shortcut.

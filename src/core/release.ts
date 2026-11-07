@@ -144,7 +144,7 @@ export function releaseInstallNotes(version: string): string {
     `irm ${releaseAssetUrl(tag, INSTALL_SCRIPT_WINDOWS)} | iex`,
     "```",
     "",
-    "The script downloads this release's archive and `.sha256`, refuses a checksum mismatch, runs `self-update --install`, and says how to put Moxen on your PATH. It installs nothing else: each archive holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support files, and needs no Bun. Linux and Intel Macs have no build and are refused with a message.",
+    "The script downloads this release's archive and `.sha256`, refuses a checksum mismatch, runs `self-update --install`, and puts Moxen on your PATH: a snippet in your shell profile on macOS, the user Path on Windows (set `MOXEN_INSTALL_NO_PATH=1` to skip). It installs nothing else: each archive holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support files, and needs no Bun. Linux and Intel Macs have no build and are refused with a message.",
     "",
     `By hand instead, download \`${macosArchive}\` and \`${macosChecksum}\` (macOS)`,
     `or \`${windowsArchive}\` and \`${windowsChecksum}\` (Windows) from this release,`,

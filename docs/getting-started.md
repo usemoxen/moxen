@@ -78,14 +78,19 @@ irm https://github.com/usemoxen/moxen/releases/latest/download/install.ps1 | iex
 ```
 
 Either script fetches the latest release, checks the download against its
-`.sha256` and refuses a mismatch, then runs `self-update --install` and says
-how to put Moxen on your PATH. Nothing else needs installing: each release
-holds a standalone `moxen` executable (`moxen.exe` on Windows) and its support
-files.
+`.sha256` and refuses a mismatch, then runs `self-update --install` and puts
+Moxen on your PATH (a snippet in your shell profile on macOS, the user Path
+on Windows; `MOXEN_INSTALL_NO_PATH=1` skips that step). Nothing else needs
+installing: each release holds a standalone `moxen` executable (`moxen.exe`
+on Windows) and its support files, and needs no Bun.
 Linux and Intel Macs have no build yet. The one-liners download the scripts
 from the release itself, so they work from the next release on; until then,
 use the by-hand steps in the [README](../README.md#from-a-release).
 Every GitHub release carries the same steps in its notes.
+
+Bare `moxen` opens the TUI; `moxen --help` opens help; anything else after
+`moxen` is a CLI command with args. Without an interactive terminal, bare
+`moxen` prints help plus a hint instead of launching.
 
 ## Updating Moxen
 
