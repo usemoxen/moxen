@@ -1,9 +1,14 @@
 # Providers
 
 Moxen drives three provider runtimes through their own CLIs, and runs a fourth
-itself. Each CLI driver is a thin adapter over one runtime: no shared layers,
-no host services, only our own root types plus type-level imports, so drivers
-stay dependency-clean.
+itself. Each driver is a thin adapter over one runtime implementing the shared
+`ProviderAdapter` contract (`core/providers/spi.ts` — the contract itself
+imports only our own root types plus type-level `effect` modules, without the
+upstream reference's Layers or host services). A driver otherwise imports
+shared core modules freely, runtime imports included (`effect`, `threads/store.js`,
+`skills/discovery.js`, even the Harness's tool implementations for Codex) —
+but never reaches upward into the server or a client
+(`src/tests/layering.test.ts` pins this).
 
 | # | Provider | Transport | Auth |
 |---|---|---|---|

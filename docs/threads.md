@@ -642,7 +642,7 @@ which is safe because a conversation's copy is frozen when it begins.
 
 One rule, most specific first, the same for `moxen handover`, `moxen threads create` and a thread started from the TUI (`resolveModelSelection` in `core/catalog/selection.ts`; the TUI marks the same model as the default in its picker):
 
-- **Provider:** the request, then the project's stored default, then the global Provider, then the installation default (Claude Code when it is installed, or `MOXEN_DEFAULT_MODEL`). A project's own default beats the global Provider.
+- **Provider:** the request, then the project's stored default, then the global Provider, then the installation default (`MOXEN_DEFAULT_MODEL` pins it outright when set; otherwise Claude Code when it is installed). A project's own default beats the global Provider.
 - **Model:** the request; the project's model when the thread is on the project's provider; the provider tab's Model; the global Model, only when the global Provider is this provider (a model belongs to one provider, so with no global Provider the global Model is ignored and the settings page says so); then the installation default's model when it is on this provider. A provider with none of these asks for `--model`.
 - **Effort:** the request, the provider tab's Effort, then the global Effort. With no global Provider, the page offers only the levels every provider's model takes.
 - **Permissions:** the request, the provider tab's Permissions, then the global one.
@@ -980,7 +980,7 @@ unchanged either way.
 
 ### Where a delegated task works
 
-`delegate` defaults to a worktree: the child gets its own checkout on a new
+The `delegate` tool defaults to a worktree (`threads delegate` on the CLI defaults to `shared` instead): the child gets its own checkout on a new
 branch cut from the parent's, so two agents never edit the same files at
 once. The branch is read from the parent's checkout, even when the parent
 thread's record names none (threads the TUI creates record none). A
