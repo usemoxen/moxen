@@ -1172,7 +1172,7 @@ function settleCancelsStaleTurn(turn: StoredTurn): boolean {
 
 /**
  * Whether this queued turn is a stale automatic continue: due, and a turn
- * ran to completion after it came due, so the thread's work already resumed
+ * ran to completion at or after it came due, so the thread's work already resumed
  * and the scheduled nudge would fire as a pointless turn. Only a completed
  * turn counts — one that failed or was interrupted did not resume anything.
  * Wake-up riders are not considered here; callers check `wakeUpHasRiders`.
@@ -1194,7 +1194,7 @@ export function wakeUpHasRiders(messages: readonly StoredMessage[], turn: Stored
 
 /**
  * Whether an automatic continue after a usage limit is stale: a turn ran to
- * completion after it came due, so the thread's work already resumed and the
+ * completion at or after it came due, so the thread's work already resumed and the
  * scheduled nudge would fire as a pointless turn. Only a completed turn
  * counts — one that failed or was interrupted did not resume anything.
  */
@@ -1207,7 +1207,11 @@ function continueStale(turns: readonly StoredTurn[], turn: StoredTurn, instant: 
     (other) =>
       other.id !== turn.id &&
       other.status === "completed" &&
-      Date.parse(other.startedAt ?? other.createdAt) > due,
+      // At-or-after, not strictly after: ledger timestamps resolve to the
+      // millisecond, so a turn sent after waiting for the due time can share
+      // its millisecond — and that is still a resume (MXN-325). A strict `>`
+      // missed the take-back there and fired the pointless turn.
+      Date.parse(other.startedAt ?? other.createdAt) >= due,
   );
 }
 
