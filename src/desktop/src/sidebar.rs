@@ -1,17 +1,98 @@
 use crate::{
-    theme::{self, color, space},
+    theme::{self, color},
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
-
 actions!(sidebar, [PreviousThread, NextThread]);
-
-pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let threads = workspace.source.list_threads();
+pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let threads = w.source.list_threads();
+    let mut rows = div().flex_1().px(px(8.)).pt(px(4.));
+    for (i, t) in threads.iter().enumerate() {
+        if t.settled && !w.settled_open {
+            continue;
+        }
+        if w.group != 0 && (i == 0 || i == 2) {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .pt(px(16.))
+                    .pb(px(6.))
+                    .child(
+                        div()
+                            .rounded(px(3.))
+                            .px(px(4.))
+                            .text_size(px(10.))
+                            .font_family(theme::MONO)
+                            .bg(color(if i == 0 { "label-2" } else { "label-6" }))
+                            .text_color(color("on-ink"))
+                            .child(if i == 0 { "T3" } else { "MT" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(t.project.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(color("ink-2"))
+                            .child("2"),
+                    ),
+            );
+        }
+        if w.group == 2 && t.project != threads[w.selected].project {
+            continue;
+        }
+        rows = rows.child(
+            div()
+                .id(("thread", i))
+                .h(px(if t.depth > 0 { 26. } else { theme::ROW }))
+                .ml(px(t.depth as f32 * 23.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(6.))
+                .border_l_2()
+                .border_color(color(if w.selected == i { "live" } else { "ground" }))
+                .when(w.selected == i, |s| s.bg(color("sunk")))
+                .text_size(px(if t.depth > 0 { 12.5 } else { 13.5 }))
+                .cursor_pointer()
+                .hover(|s| s.bg(color("sunk")))
+                .child(
+                    div()
+                        .text_color(color(t.status.token()))
+                        .child(t.status.glyph()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .when(t.depth > 0, |s| s.text_color(color("ink-2")))
+                        .child(t.title.clone()),
+                )
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(11.5))
+                        .text_color(color("ink-2"))
+                        .child(t.activity.clone()),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    window.focus(&this.sidebar_focus, cx);
+                    this.select(i, cx);
+                })),
+        );
+    }
     div()
         .id("sidebar")
         .key_context("Sidebar")
-        .track_focus(&workspace.sidebar_focus)
+        .track_focus(&w.sidebar_focus)
         .w(px(theme::SIDEBAR))
         .h_full()
         .flex_shrink_0()
@@ -31,75 +112,75 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         }))
         .child(
             div()
-                .p(px(space(5)))
-                .text_size(px(theme::BODY))
-                .child("Moxen Agent"),
+                .p(px(12.))
+                .pb(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .border_1()
+                                .border_color(color("rule"))
+                                .rounded(px(8.))
+                                .bg(color("raised"))
+                                .text_size(px(13.))
+                                .line_height(px(14.))
+                                .px(px(10.))
+                                .py(px(2.))
+                                .text_color(color("ink-2"))
+                                .child("⌕  Jump to thread or action  ⌘K"),
+                        )
+                        .child(div().w(px(24.)).child("↗")),
+                )
+                .child(
+                    div().flex().rounded(px(8.)).bg(color("sunk")).children(
+                        ["All", "Projects", "This project"]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                div()
+                                    .id(("group", i))
+                                    .flex_1()
+                                    .text_center()
+                                    .text_size(px(12.))
+                                    .rounded(px(6.))
+                                    .when(w.group == i, |s| s.bg(color("ground")))
+                                    .cursor_pointer()
+                                    .child(s)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.group = i;
+                                        cx.notify();
+                                    }))
+                            }),
+                    ),
+                ),
         )
+        .child(rows)
         .child(
             div()
-                .px(px(space(4)))
-                .pb(px(space(3)))
-                .text_size(px(theme::META))
+                .border_t_1()
+                .border_color(color("rule"))
+                .p(px(12.))
+                .text_size(px(13.))
                 .text_color(color("ink-2"))
-                .child("MOXEN / THREADS"),
-        )
-        .child(
-            uniform_list(
-                "threads",
-                threads.len(),
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .map(|i| {
-                            let t = &threads[i];
-                            div()
-                                .id(i)
-                                .h(px(theme::ROW))
-                                .px(px(space(3)))
-                                .py(px(space(2)))
-                                .border_l_2()
-                                .border_color(color(if this.selected == i {
-                                    "live"
-                                } else {
-                                    "ground"
-                                }))
-                                .bg(color(if this.selected == i { "sunk" } else { "ground" }))
-                                .hover(|s| s.bg(color("sunk")))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    window.focus(&this.sidebar_focus, cx);
-                                    this.select(i, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(space(2)))
-                                        .child(div().text_color(color(t.status.token())).child("●"))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .text_size(px(theme::BODY))
-                                                .truncate()
-                                                .child(t.title.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .pl(px(space(4)))
-                                        .text_size(px(theme::META))
-                                        .text_color(color("ink-2"))
-                                        .child(t.model.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .pl(px(space(4)))
-                                        .text_size(px(theme::META))
-                                        .text_color(color("ink-2"))
-                                        .child(t.activity.clone()),
-                                )
-                        })
-                        .collect()
-                }),
-            )
-            .flex_1(),
+                .child(
+                    div()
+                        .id("settled-toggle")
+                        .flex()
+                        .justify_between()
+                        .child("›  Settled")
+                        .child(threads.iter().filter(|t| t.settled).count().to_string())
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settled_open = !this.settled_open;
+                            cx.notify();
+                        })),
+                )
+                .child(div().pt(px(8.)).child("⚙  Settings")),
         )
 }

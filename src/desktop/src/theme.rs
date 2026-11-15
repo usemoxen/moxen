@@ -23,24 +23,15 @@ pub fn color(name: &str) -> Hsla {
     rgb(u32::from_str_radix(hex, 16).unwrap()).into()
 }
 
-pub fn space(index: usize) -> f32 {
-    TOKENS["spacing"]["tokens"][index - 1]["value"]
-        .as_str()
-        .unwrap()
-        .trim_end_matches("px")
-        .parse()
-        .unwrap()
-}
-
-pub const SIDEBAR: f32 = 288.;
+pub const SIDEBAR: f32 = 272.;
+pub const INSPECTOR: f32 = 420.;
+pub const MONO: &str = "Atkinson Hyperlegible Mono";
 pub const READING: f32 = 720.;
-pub const ROW: f32 = 88.;
+pub const ROW: f32 = 30.;
 pub const BODY: f32 = 15.;
 pub const FONT: &str = "Atkinson Hyperlegible Next";
-pub const META: f32 = 12.;
 pub const LINE: f32 = 24.;
-pub const COMPOSER: f32 = 144.;
+pub const COMPOSER: f32 = 48.;
 pub const CURSOR: f32 = 2.;
-pub const RADIUS: f32 = 8.;
-pub const WIDTH: f32 = 1200.;
-pub const HEIGHT: f32 = 800.;
+pub const WIDTH: f32 = 1440.;
+pub const HEIGHT: f32 = 900.;

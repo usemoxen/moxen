@@ -14,12 +14,36 @@ pub struct Workspace {
     pub composers: Vec<Entity<Composer>>,
     pub lists: Vec<ListState>,
     pub expanded: HashSet<(ThreadId, usize)>,
+    pub inspector_open: bool,
+    pub tasks_open: bool,
+    pub picker_open: bool,
+    pub model: usize,
+    pub effort: usize,
+    pub group: usize,
+    pub tab: usize,
+    pub search: Entity<Composer>,
+    pub folded: HashSet<ThreadId>,
+    pub settled_open: bool,
+    pub inspector_width: f32,
+    pub resizing_inspector: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
     pub fn new(demo: bool, window: &Window, cx: &mut Context<Self>) -> Self {
-        let source = Box::new(MockSource::new());
+        let source = Box::new(MockSource::preview());
         let mut subscriptions = vec![];
+        let search = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.placeholder = "Search models";
+            c.surface = "raised";
+            c.height = 26.;
+            c
+        });
+        subscriptions.push(
+            cx.subscribe(&search, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
         let composers = source
             .list_threads()
             .iter()
@@ -49,15 +73,25 @@ impl Workspace {
             })
             .collect();
         if demo {
+            let message_count = source.messages(0).len();
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 #[cfg(feature = "render-harness")]
-                capture(cx, "expanded-tool.png");
+                capture(cx, "vs-mockup.png");
+                let _ = this.update(cx, |this, cx| {
+                    this.picker_open = false;
+                    this.expanded.insert((0, 3));
+                    this.lists[0].splice(3..4, 1);
+                    cx.notify();
+                });
+                #[cfg(feature = "render-harness")]
+                capture(cx, "steps.png");
                 println!("demo: expanded tool ready");
                 cx.background_executor()
                     .timer(Duration::from_secs(12))
                     .await;
                 this.update_in(cx, |this, window, cx| {
+                    this.stop(cx);
                     this.composers[0]
                         .clone()
                         .update(cx, |c, cx| c.demo_send(window, cx));
@@ -69,28 +103,38 @@ impl Workspace {
                 let _ = this.update(cx, |this, cx| this.select(2, cx));
                 cx.background_executor().timer(Duration::from_secs(4)).await;
                 let _ = this.update(cx, |this, cx| {
-                    assert_eq!(this.source.messages(0).len(), 8);
+                    assert_eq!(this.source.messages(0).len(), message_count + 2);
                     assert_eq!(
                         this.source.list_threads()[0].status,
                         crate::model::Status::Idle
                     );
-                    assert_eq!(this.source.messages(2).len(), 6);
+                    assert_eq!(this.source.messages(2).len(), message_count);
                     this.select(0, cx);
                 });
                 println!("demo: input, thread switch and completed reply verified");
-                #[cfg(feature = "render-harness")]
-                capture(cx, "completed-reply.png");
             })
             .detach();
         }
         Self {
             source,
+            folded: HashSet::new(),
+            settled_open: false,
+            inspector_width: theme::INSPECTOR,
+            resizing_inspector: false,
+            search,
+            inspector_open: true,
+            tasks_open: true,
+            picker_open: demo,
+            model: 1,
+            effort: 1,
+            group: 1,
+            tab: 1,
             selected: 0,
             sidebar_focus: cx.focus_handle(),
             composers,
             lists,
             expanded: if demo {
-                HashSet::from([(0, 2)])
+                HashSet::from([(0, 3)])
             } else {
                 HashSet::new()
             },
@@ -99,6 +143,14 @@ impl Workspace {
     }
     pub fn select(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         self.selected = id;
+        cx.notify();
+    }
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.source.stop(self.selected);
+        self.composers[self.selected].update(cx, |c, cx| {
+            c.enabled = true;
+            cx.notify();
+        });
         cx.notify();
     }
     fn send(&mut self, id: ThreadId, text: String, cx: &mut Context<Self>) {
@@ -122,7 +174,10 @@ impl Workspace {
                     .update(cx, |this, cx| {
                         this.source
                             .stream_word(id, reply.message, &word, i + 1 == count);
-                        if i + 1 == count {
+                        if i + 1 == count
+                            && this.source.list_threads()[id].status
+                                != crate::model::Status::Running
+                        {
                             this.composers[id].update(cx, |c, cx| {
                                 c.enabled = true;
                                 cx.notify();
@@ -164,10 +219,49 @@ impl Render for Workspace {
             .font_family(theme::FONT)
             .size_full()
             .flex()
+            .flex_col()
+            .bg(color("ground"))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if this.resizing_inspector {
+                    this.inspector_width =
+                        f32::from(window.viewport_size().width - event.position.x)
+                            .clamp(420., 800.);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.resizing_inspector = false;
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::title_bar::ToggleInspector, _, cx| {
+                    this.inspector_open = !this.inspector_open;
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::title_bar::ToggleTasks, _, cx| {
+                    this.tasks_open = !this.tasks_open;
+                    this.inspector_open = true;
+                    cx.notify();
+                }),
+            )
             .text_size(px(theme::BODY))
             .line_height(px(theme::LINE))
             .text_color(color("ink"))
-            .child(crate::sidebar::render(self, cx))
-            .child(crate::thread_view::render(self, cx))
+            .child(crate::title_bar::render(self, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(crate::sidebar::render(self, cx))
+                    .child(crate::thread_view::render(self, cx))
+                    .when(self.inspector_open, |s| {
+                        s.child(crate::inspector::render(self, cx))
+                    }),
+            )
     }
 }

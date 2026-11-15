@@ -1,4 +1,4 @@
-use crate::theme::{self, color, space};
+use crate::theme::{self, color};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -10,10 +10,14 @@ actions!(
     ]
 );
 pub struct Submitted(pub String);
+pub struct Changed;
 
 pub struct Composer {
     pub focus: FocusHandle,
     pub enabled: bool,
+    pub placeholder: &'static str,
+    pub height: f32,
+    pub surface: &'static str,
     text: String,
     selection: Range<usize>,
     marked: Option<Range<usize>>,
@@ -21,6 +25,7 @@ pub struct Composer {
     bounds: Option<Bounds<Pixels>>,
 }
 impl EventEmitter<Submitted> for Composer {}
+impl EventEmitter<Changed> for Composer {}
 impl Focusable for Composer {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -31,12 +36,18 @@ impl Composer {
         Self {
             focus: cx.focus_handle(),
             enabled: true,
+            placeholder: "Steer the agent. ⌘↵ queues it for after this turn.",
+            height: theme::COMPOSER,
+            surface: "ground",
             text: String::new(),
             selection: 0..0,
             marked: None,
             layout: vec![],
             bounds: None,
         }
+    }
+    pub fn text(&self) -> &str {
+        &self.text
     }
     pub fn demo_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "Show a safe streaming reply.", window, cx);
@@ -201,6 +212,7 @@ impl EntityInputHandler for Composer {
     }
     fn unmark_text(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
+        cx.emit(Changed);
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -218,6 +230,7 @@ impl EntityInputHandler for Composer {
         self.text.replace_range(r.clone(), text);
         self.selection = r.start + text.len()..r.start + text.len();
         self.marked = None;
+        cx.emit(Changed);
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -268,12 +281,8 @@ impl Render for Composer {
             .key_context("Composer")
             .track_focus(&self.focus)
             .w_full()
-            .h(px(theme::COMPOSER))
-            .p(px(space(4)))
-            .bg(color("raised"))
-            .border_1()
-            .border_color(color("edge"))
-            .rounded(px(theme::RADIUS))
+            .h(px(self.height))
+            .bg(color(self.surface))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::newline))
@@ -297,7 +306,7 @@ impl Render for Composer {
                     move |bounds, window, cx| {
                         entity.update(cx, |this, _| {
                             let display = if this.text.is_empty() {
-                                "Message this thread…"
+                                this.placeholder
                             } else {
                                 &this.text
                             };
