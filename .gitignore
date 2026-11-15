@@ -11,3 +11,4 @@ notes/
 /shots/
 /release/
 *.bak.*
+/src/desktop/target/
