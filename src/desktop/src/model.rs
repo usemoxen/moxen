@@ -74,6 +74,7 @@ pub struct InspectorData {
 }
 
 pub trait ThreadSource {
+    fn file_diff(&self, id: ThreadId, file: usize) -> Vec<DiffLine>;
     fn queued(&self, id: ThreadId) -> &[String];
     fn take_queued(&mut self, id: ThreadId) -> Option<String>;
     fn inspector(&self, id: ThreadId) -> InspectorData;
@@ -82,4 +83,11 @@ pub trait ThreadSource {
     fn send_message(&mut self, id: ThreadId, text: String) -> Option<Reply>;
     fn stop(&mut self, id: ThreadId);
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);
+}
+
+pub struct DiffLine {
+    pub old: &'static str,
+    pub new: &'static str,
+    pub sign: &'static str,
+    pub text: &'static str,
 }

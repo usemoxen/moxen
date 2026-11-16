@@ -276,7 +276,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                         .justify_between()
                                         .child(
                                             div()
-                                                .text_color(color("ink-2"))
+                                                .id("attach").disabled("Attachments are unavailable in this preview")
                                                 .child(ui::icon("paperclip", "ink-2")),
                                         )
                                         .child(

@@ -106,6 +106,8 @@ pub fn render(
         .when(open, |s| {
             s.child(
                 div()
+                    .id(("step-output", index))
+                    .overflow_y_scroll()
                     .ml(px(25.))
                     .my(px(4.))
                     .pl(px(14.))
@@ -117,7 +119,7 @@ pub fn render(
                     .when(thought, |s| s.italic())
                     .child(output)
                     .with_animation(("step-reveal", index), ui::reveal(), |s, v| {
-                        s.opacity(v).mt(px(4. * v))
+                        s.opacity(v).max_h(px(240. * v))
                     }),
             )
         })

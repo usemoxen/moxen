@@ -145,6 +145,44 @@ fn tool(name: &str, summary: &str, output: &str) -> Message {
     }
 }
 impl ThreadSource for MockSource {
+    fn file_diff(&self, _: ThreadId, file: usize) -> Vec<DiffLine> {
+        let files = [
+            vec![
+                ("", "1", "+", "#[test]"),
+                ("", "2", "+", "fn escape_restores_trigger() {"),
+                ("", "3", "+", "    let mut picker = Picker::new();"),
+                ("", "4", "+", "    picker.open();"),
+                ("", "5", "+", "    picker.dismiss();"),
+                ("", "6", "+", "    assert!(picker.trigger_focused());"),
+                ("", "7", "+", "}"),
+            ],
+            vec![
+                ("26", "26", " ", "fn open_picker(&mut self) {"),
+                ("27", "", "-", "    self.picker_open = true;"),
+                ("", "27", "+", "    self.open_picker(window, cx);"),
+                ("", "28", "+", "    self.search.focus(window, cx);"),
+                ("28", "29", " ", "}"),
+            ],
+            vec![
+                ("8", "8", " ", "struct Workspace {"),
+                ("", "9", "+", "    model_focus: FocusHandle,"),
+                ("9", "10", " ", "    selected: ThreadId,"),
+                ("10", "11", " ", "}"),
+            ],
+        ];
+        files
+            .into_iter()
+            .nth(file)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(old, new, sign, text)| DiffLine {
+                old,
+                new,
+                sign,
+                text,
+            })
+            .collect()
+    }
     fn queued(&self, id: ThreadId) -> &[String] {
         &self.queues[id]
     }

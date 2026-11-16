@@ -158,9 +158,37 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .flex()
                     .gap(px(12.))
                     .child("5a7bee1")
-                    .child(ui::icon("copy", "ink-2"))
-                    .child(ui::icon("external-link", "ink-2"))
-                    .child(ui::icon("maximize", "ink-2")),
+                    .child(
+                        div()
+                            .id("copy-sha")
+                            .control("Copy commit SHA")
+                            .rounded(px(3.))
+                            .child(ui::icon("copy", "ink-2"))
+                            .on_click(|_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string("5a7bee1".into()))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("open-forge")
+                            .disabled("No remote for this preview commit")
+                            .child(ui::icon("external-link", "ink-2")),
+                    )
+                    .child(
+                        div()
+                            .id("widen-diff")
+                            .control("Widen inspector")
+                            .rounded(px(3.))
+                            .child(ui::icon("maximize", "ink-2"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_width = if this.inspector_width > theme::INSPECTOR {
+                                    theme::INSPECTOR
+                                } else {
+                                    620.
+                                };
+                                cx.notify();
+                            })),
+                    ),
             ),
     )
     .child(
@@ -192,7 +220,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             .items_center()
                             .justify_center()
                             .text_size(px(9.))
-                            .type_scale("title")
+                            .font_weight(FontWeight::BOLD)
                             .child("AM"),
                     )
                     .child(data.author),
@@ -273,7 +301,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                 cx.notify();
                             })),
                     )
-                    .when(open, |s| s.child(crate::diff::render(i)))
+                    .when(open, |s| {
+                        s.child(crate::diff::render(i, w.source.file_diff(w.selected, i)))
+                    })
             }),
     )
 }

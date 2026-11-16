@@ -70,12 +70,27 @@ pub trait TypeScale: Styled + Sized {
 impl<T: Styled> TypeScale for T {}
 
 pub fn float_shadow() -> Vec<gpui::BoxShadow> {
-    // shadow-float, dark: 0 12px 32px rgba(0,0,0,.55). The rule is drawn by the surface.
+    let value = TOKENS["shadow"]["tokens"][0]["value"]["dark"]
+        .as_str()
+        .unwrap();
+    let (geometry, rgba) = value.split_once("rgba(").expect("shadow-float rgba");
+    let lengths: Vec<f32> = geometry
+        .split_whitespace()
+        .map(|v| v.trim_end_matches("px").parse().unwrap())
+        .collect();
+    let channels: Vec<f32> = rgba
+        .split(')')
+        .next()
+        .unwrap()
+        .split(',')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    let tint = rgb(((channels[0] as u32) << 16) | ((channels[1] as u32) << 8) | channels[2] as u32);
     vec![gpui::BoxShadow {
         inset: false,
-        color: gpui::rgba(0x0000008c).into(),
-        offset: gpui::point(gpui::px(0.), gpui::px(12.)),
-        blur_radius: gpui::px(32.),
+        color: Hsla::from(tint).opacity(channels[3]),
+        offset: gpui::point(gpui::px(lengths[0]), gpui::px(lengths[1])),
+        blur_radius: gpui::px(lengths[2]),
         spread_radius: gpui::px(0.),
     }]
 }
