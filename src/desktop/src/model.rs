@@ -49,16 +49,27 @@ pub struct Thread {
     pub settled: bool,
     pub started_at: Option<std::time::Instant>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     User {
         text: String,
     },
-    Assistant(String),
+    Assistant {
+        text: String,
+        /// When it was written, as the header shows it ("Thu 09:38").
+        at: String,
+    },
+    /// One step of the agent's run: a command, a read, an edit, a thought or
+    /// another tool call.
     Tool {
+        /// `command`, `read`, `edit`, `thought` or `tool`.
         name: String,
         summary: String,
         output: String,
+        /// The right-hand column: how long it took, lines read, or lines changed.
+        meta: String,
+        failed: bool,
+        running: bool,
     },
 }
 pub struct Reply {
@@ -109,7 +120,9 @@ pub trait ThreadSource {
     fn take_queued(&mut self, id: ThreadId) -> Option<String>;
     fn inspector(&self, id: ThreadId) -> InspectorData;
     fn list_threads(&self) -> Vec<Thread>;
-    fn messages(&self, id: ThreadId) -> Vec<Message>;
+    fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>>;
+    /// The thread the window is showing: a live source follows its transcript.
+    fn focus(&mut self, _id: ThreadId) {}
     fn send_message(&mut self, id: ThreadId, text: String) -> Option<Reply>;
     fn stop(&mut self, id: ThreadId);
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);

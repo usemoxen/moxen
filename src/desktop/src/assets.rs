@@ -37,6 +37,7 @@ const ASSETS: &[(&str, &[u8])] = &[
         "state-running",
         include_bytes!("../icons/state-running.svg"),
     ),
+    ("wrench", include_bytes!("../icons/wrench.svg")),
     ("x", include_bytes!("../icons/x.svg")),
 ];
 impl AssetSource for DesktopAssets {

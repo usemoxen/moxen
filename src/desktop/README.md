@@ -2,10 +2,10 @@
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
 server and lists the user's real projects and threads, live. Everything else in
-the window (transcripts, the inspector, sending, the model picker) is still the
-mock fixtures, which are shown only with `--mock` or in a demo stage; with the
-real server those parts are left out rather than shown with made-up numbers.
-Each is its own issue under MXN-30.
+the window (the inspector, sending, the model picker) is still the mock
+fixtures, which are shown only with `--mock` or in a demo stage; with the real
+server those parts are left out rather than shown with made-up numbers. Each is
+its own issue under MXN-30.
 
 ## The server connection
 
@@ -20,6 +20,17 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   server's own build from the greeting (a local socket is greeted even on a
   mismatch) and presents it on a second socket. The protocol version is the
   compatibility check.
+- A thread's transcript is read over its own `subscribeThread` subscription for
+  the thread on screen (`ThreadSource::focus`), dropped when another is opened.
+  `transcript.rs` projects messages and activities into rows: a tool call's
+  `started` and `completed` activities pair by `toolCallId` into one step
+  (command, read, search, edit, thought or generic tool, with its duration or
+  line counts), and live `thread.message-sent` / `thread.reasoning-delta` text
+  extends the row until the next snapshot. The rules follow the TUI
+  (`src/tui/model/activity.ts`) for the common tools; the TUI's richer views
+  (todos, tasks, questions, memory, web, image) show as generic tool rows for now.
+  A run of consecutive steps folds under one summary row; finished runs start
+  folded, the last stays open while it ends the conversation.
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs

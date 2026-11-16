@@ -9,6 +9,24 @@ use gpui::{prelude::*, *};
 /// Space between turns in the transcript (the mockup's column gap).
 const TURN_GAP: f32 = 22.;
 
+/// The run of steps `index` belongs to: where it starts and how many steps it
+/// has. A message that is not a step is a run of its own, of length 1.
+pub fn run_of(messages: &[Message], index: usize) -> (usize, usize) {
+    let is_step = |i: usize| matches!(messages.get(i), Some(Message::Tool { .. }));
+    if !is_step(index) {
+        return (index, 1);
+    }
+    let mut start = index;
+    while start > 0 && is_step(start - 1) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while is_step(end) {
+        end += 1;
+    }
+    (start, end - start)
+}
+
 /// "Ran 3 commands, read 3 files, edited 1 file": the folded run's summary.
 pub fn run_summary(messages: &[Message]) -> String {
     let count = |kind: &str| {
@@ -21,14 +39,27 @@ pub fn run_summary(messages: &[Message]) -> String {
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = vec![];
     let (ran, read, edited) = (count("command"), count("read"), count("edit"));
+    let (searched, used) = (count("search"), count("tool"));
     if ran > 0 {
         parts.push(format!("ran {}", plural(ran, "command", "commands")));
     }
     if read > 0 {
         parts.push(format!("read {}", plural(read, "file", "files")));
     }
+    if searched > 0 {
+        parts.push(format!("searched {}", plural(searched, "time", "times")));
+    }
     if edited > 0 {
         parts.push(format!("edited {}", plural(edited, "file", "files")));
+    }
+    if used > 0 {
+        parts.push(format!("used {}", plural(used, "tool", "tools")));
+    }
+    if parts.is_empty() {
+        parts.push(format!(
+            "thought {}",
+            plural(count("thought"), "time", "times")
+        ));
     }
     let mut text = parts.join(", ");
     if let Some(first) = text.get_mut(0..1) {
@@ -43,10 +74,9 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
     let thread = w.source.list_threads()[id].clone();
     let running = thread.status == Status::Running;
     let messages = w.source.messages(id);
-    let summary: SharedString = run_summary(&messages).into();
     let last_reply = messages
         .iter()
-        .rposition(|m| matches!(m, Message::Assistant(_)));
+        .rposition(|m| matches!(m, Message::Assistant { .. }));
     let entity = cx.entity();
     let state = w.lists[id].clone();
     let model = thread.model.clone();
@@ -63,16 +93,25 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
             div().flex_1().min_h_0().overflow_hidden().child(
                 list(state, move |index, window, cx| {
                     let this = entity.read(cx);
-                    let folded = this.folded.contains(&id);
-                    if folded && index > 2 && matches!(messages[index], Message::Tool { .. }) {
+                    let Some(current) = messages.get(index) else {
+                        return div().into_any_element();
+                    };
+                    // A run of steps folds under one summary row, at its first step.
+                    let (start, len) = run_of(&messages, index);
+                    let is_first = matches!(current, Message::Tool { .. }) && index == start;
+                    let folded = matches!(current, Message::Tool { .. })
+                        && this.run_folded(id, start, len, messages.len());
+                    if folded && !is_first {
                         return div().into_any_element();
                     }
-                    let shown = ui::progress(this.unfolded_at.get(&id).copied(), 150, window);
+                    let summary: SharedString = run_summary(&messages[start..start + len]).into();
+                    let shown =
+                        ui::progress(this.unfolded_at.get(&(id, start)).copied(), 150, window);
                     let open = this
                         .expanded
                         .get(&(id, index))
                         .map(|at| ui::progress(Some(*at), 150, window));
-                    let body = match messages[index].clone() {
+                    let body = match current.clone() {
                         Message::User { text } => div()
                             .flex()
                             .flex_col()
@@ -89,7 +128,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     .child(text),
                             )
                             .into_any_element(),
-                        Message::Assistant(text) => div()
+                        Message::Assistant { text, at } => div()
                             .flex()
                             .flex_col()
                             .gap(px(8.))
@@ -110,7 +149,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             .font_family(theme::MONO)
                                             .text_size(px(12.))
                                             .text_color(color("ink-2"))
-                                            .child("Thu 09:38"),
+                                            .child(at),
                                     )
                                     .when(running && Some(index) == last_reply, |s| {
                                         let seconds =
@@ -148,8 +187,11 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                             name,
                             summary: target,
                             output,
+                            meta,
+                            failed,
+                            running: step_running,
                         } => div()
-                            .when(index == 2, |s| {
+                            .when(is_first, |s| {
                                 let fold = entity.clone();
                                 s.pt(px(10.))
                                     .child(
@@ -176,14 +218,23 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             .child(summary.clone())
                                             .on_click(move |_, _, cx| {
                                                 fold.update(cx, |this, cx| {
-                                                    if !this.folded.remove(&id) {
-                                                        this.folded.insert(id);
-                                                        this.unfolded_at.remove(&id);
-                                                    } else {
-                                                        this.unfolded_at
-                                                            .insert(id, std::time::Instant::now());
+                                                    if !this.fold_toggled.remove(&(id, start)) {
+                                                        this.fold_toggled.insert((id, start));
                                                     }
-                                                    this.lists[id].splice(2..11, 9);
+                                                    if this.run_folded(
+                                                        id,
+                                                        start,
+                                                        len,
+                                                        this.source.messages(id).len(),
+                                                    ) {
+                                                        this.unfolded_at.remove(&(id, start));
+                                                    } else {
+                                                        this.unfolded_at.insert(
+                                                            (id, start),
+                                                            std::time::Instant::now(),
+                                                        );
+                                                    }
+                                                    this.lists[id].splice(start..start + len, len);
                                                     cx.notify();
                                                 })
                                             }),
@@ -196,9 +247,12 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                         name,
                                         summary: target,
                                         output,
+                                        meta,
+                                        failed,
+                                        running: step_running,
                                         id,
                                         index,
-                                        shown: if index == 2 { 1. } else { shown },
+                                        shown: if is_first { 1. } else { shown },
                                         open,
                                     },
                                     entity.clone(),
@@ -206,7 +260,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                             })
                             .into_any_element(),
                     };
-                    let tool = matches!(messages[index], Message::Tool { .. });
+                    let tool = matches!(current, Message::Tool { .. });
                     div()
                         .w_full()
                         .px(px(28.))
@@ -577,5 +631,33 @@ mod tests {
             super::run_summary(&source.messages(0)),
             "Ran 3 commands, read 3 files, edited 1 file"
         );
+    }
+    #[test]
+    fn steps_between_messages_form_one_run() {
+        use crate::model::Message::{Assistant, Tool, User};
+        let step = || Tool {
+            name: "command".into(),
+            summary: String::new(),
+            output: String::new(),
+            meta: String::new(),
+            failed: false,
+            running: false,
+        };
+        let messages = vec![
+            User {
+                text: String::new(),
+            },
+            step(),
+            step(),
+            Assistant {
+                text: String::new(),
+                at: String::new(),
+            },
+            step(),
+        ];
+        assert_eq!(super::run_of(&messages, 2), (1, 2));
+        assert_eq!(super::run_of(&messages, 4), (4, 1));
+        // A message that is not a step is a run of its own.
+        assert_eq!(super::run_of(&messages, 3), (3, 1));
     }
 }

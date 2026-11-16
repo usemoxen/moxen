@@ -15,6 +15,7 @@ mod steps;
 mod theme;
 mod thread_view;
 mod title_bar;
+mod transcript;
 mod ui;
 mod usage;
 mod wire;

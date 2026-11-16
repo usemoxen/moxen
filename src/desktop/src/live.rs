@@ -12,6 +12,7 @@ use crate::{
     model::{
         Connection, DiffLine, InspectorData, Message, Reply, Status, Thread, ThreadId, ThreadSource,
     },
+    transcript::{self, Row},
     wire::{Wire, WireError},
 };
 use serde_json::Value;
@@ -21,7 +22,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// One live thread as the sidebar orders it.
@@ -182,7 +183,7 @@ pub fn parse_iso_ms(text: &str) -> Option<i64> {
     Some(((days * 24 + hour) * 60 + minute - offset_minutes) * 60_000 + whole * 1000 + millis)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as i64)
@@ -223,7 +224,7 @@ pub fn project_badge(title: &str) -> String {
 
 // -- reading a snapshot -------------------------------------------------------
 
-fn text<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+pub(crate) fn text<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut at = value;
     for key in path {
         at = at.get(key)?;
@@ -231,7 +232,7 @@ fn text<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     at.as_str()
 }
 
-fn ms(value: &Value, path: &[&str]) -> Option<i64> {
+pub(crate) fn ms(value: &Value, path: &[&str]) -> Option<i64> {
     text(value, path).and_then(parse_iso_ms)
 }
 
@@ -319,13 +320,32 @@ fn is_listed(thread: &Value) -> bool {
 }
 
 struct Slot {
+    uuid: String,
     thread: Thread,
     stamp_ms: Option<i64>,
     present: bool,
 }
 
+/// What is known of one thread's conversation.
+#[derive(Default)]
+struct Transcript {
+    rows: Vec<Row>,
+    /// `rows` as the window reads them, rebuilt when they change.
+    messages: Option<Arc<Vec<Message>>>,
+}
+
 #[derive(Default)]
 struct State {
+    /// The open connection, while there is one.
+    wire: Option<Arc<Wire>>,
+    /// The thread whose conversation is followed, and which watcher follows it.
+    focused: Option<ThreadId>,
+    watch: u64,
+    /// The thread and connection the running watcher belongs to.
+    watching: Option<(ThreadId, u64)>,
+    /// Counts connections, so a watcher of a closed one is replaced.
+    wire_epoch: u64,
+    transcripts: HashMap<ThreadId, Transcript>,
     connection: Option<Connection>,
     slots: Vec<Slot>,
     ids: HashMap<String, ThreadId>,
@@ -371,6 +391,7 @@ impl State {
                 started_at: None,
             };
             let slot = Slot {
+                uuid: uuid.to_string(),
                 thread: value,
                 stamp_ms: stamp_of(thread, status),
                 present: true,
@@ -454,19 +475,117 @@ impl ServerSource {
     }
 }
 
-fn session(endpoint: &str, shared: &Shared) -> Result<(), WireError> {
+fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
     let (wire, _hello) = Wire::connect(endpoint)?;
-    let frames = wire.subscribe_shell()?;
-    for frame in frames {
-        let frame = frame?;
-        if frame["kind"] == "snapshot" {
-            shared.update(|state| {
-                state.apply(&frame["snapshot"]);
-                state.connection = Some(Connection::Live);
-            });
+    let wire = Arc::new(wire);
+    let subscription = wire.subscribe_shell()?;
+    shared.update(|state| {
+        state.wire_epoch += 1;
+        state.wire = Some(wire.clone());
+    });
+    // A thread opened before the connection existed starts being followed now.
+    follow(shared);
+    let ended = (|| {
+        for frame in subscription.frames.iter() {
+            let frame = frame?;
+            if frame["kind"] == "snapshot" {
+                shared.update(|state| {
+                    state.apply(&frame["snapshot"]);
+                    state.connection = Some(Connection::Live);
+                });
+                follow(shared);
+            }
         }
+        Ok(())
+    })();
+    shared.update(|state| {
+        state.wire = None;
+        // Ends the open thread's watcher.
+        state.watch += 1;
+    });
+    ended
+}
+
+/// Starts following the focused thread's conversation, ending any watcher
+/// for another thread (or an earlier connection). Does nothing while the
+/// thread is already followed or there is no connection.
+fn follow(shared: &Arc<Shared>) {
+    let (wire, id, uuid, token) = {
+        let mut state = shared.state.lock().expect("live state");
+        let (Some(wire), Some(id)) = (state.wire.clone(), state.focused) else {
+            return;
+        };
+        let Some(uuid) = state.slots.get(id).map(|slot| slot.uuid.clone()) else {
+            return;
+        };
+        if state.watching == Some((id, state.wire_epoch)) {
+            return;
+        }
+        state.watching = Some((id, state.wire_epoch));
+        state.watch += 1;
+        (wire, id, uuid, state.watch)
+    };
+    let shared = shared.clone();
+    let _ = std::thread::Builder::new()
+        .name("moxen-thread".into())
+        .spawn(move || watch(&shared, &wire, id, &uuid, token));
+}
+
+/// One thread's subscription: a snapshot replaces its rows, and live text
+/// deltas extend them until the next snapshot. Ends when another watcher
+/// takes over or the connection does, which drops the subscription.
+fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64) {
+    let Ok(subscription) = wire.subscribe_thread(uuid) else {
+        return;
+    };
+    loop {
+        if shared.state.lock().expect("live state").watch != token {
+            return;
+        }
+        let frame = match subscription.frames.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        };
+        // `synchronized` and other frames carry nothing to draw.
+        let known = match frame["kind"].as_str() {
+            Some("snapshot") => true,
+            Some("event") => matches!(
+                frame["event"]["type"].as_str(),
+                Some("thread.message-sent" | "thread.reasoning-delta")
+            ),
+            _ => false,
+        };
+        if !known {
+            continue;
+        }
+        shared.update(|state| {
+            let entry = state.transcripts.entry(id).or_default();
+            if frame["kind"] == "snapshot" {
+                entry.rows = transcript::project(&frame["snapshot"]["thread"]);
+            } else {
+                let payload = &frame["event"]["payload"];
+                if frame["event"]["type"] == "thread.message-sent" {
+                    let message = &payload["message"];
+                    if text(message, &["role"]) == Some("assistant") {
+                        transcript::append(
+                            &mut entry.rows,
+                            text(message, &["id"]).unwrap_or_default(),
+                            text(message, &["text"]).unwrap_or_default(),
+                            transcript::created_ms(message),
+                        );
+                    }
+                } else {
+                    transcript::append_thought(
+                        &mut entry.rows,
+                        text(payload, &["toolCallId"]).unwrap_or_default(),
+                        text(payload, &["text"]).unwrap_or_default(),
+                    );
+                }
+            }
+            entry.messages = None;
+        });
     }
-    Ok(())
 }
 
 impl ThreadSource for ServerSource {
@@ -514,10 +633,29 @@ impl ThreadSource for ServerSource {
             })
             .collect()
     }
-    // Transcripts, sending and the inspector arrive with their own issues; a
-    // real thread shows none of them yet.
-    fn messages(&self, _: ThreadId) -> Vec<Message> {
-        vec![]
+    // Sending and the inspector arrive with their own issues; a real thread
+    // shows none of them yet.
+    fn messages(&self, id: ThreadId) -> Arc<Vec<Message>> {
+        let mut state = self.shared.state.lock().expect("live state");
+        let Some(transcript) = state.transcripts.get_mut(&id) else {
+            return Arc::new(vec![]);
+        };
+        transcript
+            .messages
+            .get_or_insert_with(|| {
+                Arc::new(
+                    transcript
+                        .rows
+                        .iter()
+                        .map(|row| row.message.clone())
+                        .collect(),
+                )
+            })
+            .clone()
+    }
+    fn focus(&mut self, id: ThreadId) {
+        self.shared.update(|state| state.focused = Some(id));
+        follow(&self.shared);
     }
     fn queued(&self, _: ThreadId) -> &[String] {
         &[]

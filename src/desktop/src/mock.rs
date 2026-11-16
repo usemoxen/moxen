@@ -110,7 +110,7 @@ impl MockSource {
             .collect();
         let messages = threads.iter().map(|t| vec![
             Message::User { text: format!("Please investigate: {}. Keep the change focused and verify the result.", t.title) },
-            Message::Assistant("I traced the event from the control to its view state. The state updates correctly; I’m checking the layout and keyboard path before changing the presentation.".into()),
+            Message::Assistant{ text: "I traced the event from the control to its view state. The state updates correctly; I’m checking the layout and keyboard path before changing the presentation.".into(), at: "Thu 09:38".into() },
             tool("read", "src/model_picker.rs", "124 lines · src/model_picker.rs\n\nfn open_picker(&mut self) {\n    self.picker_open = true;\n    self.search.focus();\n}"),
             tool("thought", "Keep focus inside the picker until a selection is made.", "Opening a picker should put focus in search. Escape returns focus to the trigger; choosing a model should preserve the draft and effort. I’ll verify each path independently."),
             tool("command", "cargo test model_picker", "running 3 tests\ntest opens_with_search_focus ... ok\ntest escape_restores_trigger ... ok\ntest selection_preserves_draft ... ok\n\n3 passed; 0 failed"),
@@ -138,10 +138,23 @@ impl MockSource {
     }
 }
 fn tool(name: &str, summary: &str, output: &str) -> Message {
+    let meta = match name {
+        "thought" => "6s",
+        "command" => "3.4s",
+        "edit" => "+5 −1",
+        _ => output
+            .lines()
+            .next()
+            .and_then(|line| line.split(" · ").next())
+            .unwrap_or("551 lines"),
+    };
     Message::Tool {
         name: name.into(),
         summary: summary.into(),
         output: output.into(),
+        meta: meta.into(),
+        failed: false,
+        running: false,
     }
 }
 impl ThreadSource for MockSource {
@@ -205,8 +218,8 @@ impl ThreadSource for MockSource {
     fn list_threads(&self) -> Vec<Thread> {
         self.threads.clone()
     }
-    fn messages(&self, id: ThreadId) -> Vec<Message> {
-        self.messages[id].clone()
+    fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>> {
+        std::sync::Arc::new(self.messages[id].clone())
     }
     fn send_message(&mut self, id: ThreadId, text: String) -> Option<Reply> {
         if text.trim().is_empty() {
@@ -221,7 +234,10 @@ impl ThreadSource for MockSource {
         self.threads[id].activity = "now".into();
         self.messages[id].push(Message::User { text });
         let message = self.messages[id].len();
-        self.messages[id].push(Message::Assistant(String::new()));
+        self.messages[id].push(Message::Assistant {
+            text: String::new(),
+            at: "Thu 09:38".into(),
+        });
         self.running[id] = Some(message);
         Some(Reply { message, words: "The keyboard path is verified. Search receives focus on open, selection preserves the draft, and Escape returns to the trigger. The targeted tests pass; I’m checking the native window next.".split_inclusive(' ').map(str::to_string).collect() })
     }
@@ -229,7 +245,7 @@ impl ThreadSource for MockSource {
         if self.running[id] != Some(message) {
             return;
         }
-        if let Message::Assistant(text) = &mut self.messages[id][message] {
+        if let Message::Assistant { text, .. } = &mut self.messages[id][message] {
             text.push_str(word);
         }
         if finished {
@@ -258,9 +274,13 @@ mod tests {
         source.stream_word(0, old.message, "stale", true);
         assert_eq!(source.list_threads()[0].status, Status::Running);
         assert!(source.list_threads()[0].started_at.is_some());
-        assert!(matches!(&source.messages(0)[old.message],Message::Assistant(s) if s.is_empty()));
+        assert!(
+            matches!(&source.messages(0)[old.message],Message::Assistant{text: s, ..} if s.is_empty())
+        );
         source.stream_word(0, new.message, "new", true);
-        assert!(matches!(&source.messages(0)[new.message],Message::Assistant(s) if s=="new"));
+        assert!(
+            matches!(&source.messages(0)[new.message],Message::Assistant{text: s, ..} if s=="new")
+        );
     }
     #[test]
     fn running_send_queues_without_mutating_another_thread() {

@@ -44,8 +44,13 @@ pub struct Workspace {
     pub group: usize,
     pub tab: usize,
     pub search: Entity<Composer>,
-    pub folded: HashSet<ThreadId>,
-    pub unfolded_at: HashMap<ThreadId, Instant>,
+    /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
+    pub fold_toggled: HashSet<(ThreadId, usize)>,
+    pub unfolded_at: HashMap<(ThreadId, usize), Instant>,
+    /// The transcript each thread's list was last sized for (live sources only).
+    shown: HashMap<ThreadId, std::sync::Arc<Vec<crate::model::Message>>>,
+    /// The thread the source was last told to follow.
+    focused: Option<ThreadId>,
     pub picker_at: Option<Instant>,
     pub inspector_at: Option<Instant>,
     pub tips: Tips,
@@ -170,8 +175,10 @@ impl Workspace {
         let mut this = Self {
             expanded_files: HashSet::new(),
             source,
-            folded: HashSet::new(),
+            fold_toggled: HashSet::new(),
             unfolded_at: HashMap::new(),
+            shown: HashMap::new(),
+            focused: None,
             picker_at: None,
             inspector_at: None,
             tips: Tips {
@@ -227,11 +234,13 @@ impl Workspace {
         }
         while self.lists.len() < count {
             let id = self.lists.len();
+            let messages = self.source.messages(id);
             self.lists.push(ListState::new(
-                self.source.messages(id).len(),
+                messages.len(),
                 ListAlignment::Top,
                 px(theme::HEIGHT),
             ));
+            self.shown.insert(id, messages);
         }
         let listed = self.source.order(false);
         if !self.chosen && !listed.is_empty() {
@@ -250,6 +259,47 @@ impl Workspace {
         {
             self.selected = first;
         }
+        if !listed.is_empty() && self.focused != Some(self.selected) {
+            self.focused = Some(self.selected);
+            self.source.focus(self.selected);
+        }
+        self.sync_transcript();
+    }
+    /// Resizes the open thread's list to a live transcript that changed:
+    /// everything from the first changed row is measured again, and a reader
+    /// who is at the end stays there as it grows. The mock changes its list
+    /// itself, so it is left alone.
+    fn sync_transcript(&mut self) {
+        if self.source.preview() || self.selected >= self.lists.len() {
+            return;
+        }
+        let id = self.selected;
+        let now = self.source.messages(id);
+        let Some(before) = self.shown.get(&id).cloned() else {
+            return;
+        };
+        if std::sync::Arc::ptr_eq(&before, &now) {
+            return;
+        }
+        let common = before
+            .iter()
+            .zip(now.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let list = &self.lists[id];
+        // Following the end: the first thing seen, or one of the last rows on screen.
+        let following = before.is_empty() || list.logical_scroll_top().item_ix + 8 >= before.len();
+        list.splice(common..before.len(), now.len() - common);
+        if following {
+            list.scroll_to_end();
+        }
+        self.shown.insert(id, now);
+    }
+    /// Whether a run of `len` steps starting at `start` shows only its summary.
+    /// Finished runs fold; the last run of the thread stays open while it is
+    /// the end of the conversation. A click flips either.
+    pub fn run_folded(&self, id: ThreadId, start: usize, len: usize, total: usize) -> bool {
+        (start + len != total) != self.fold_toggled.contains(&(id, start))
     }
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.source.retry();

@@ -73,6 +73,46 @@ struct Shared {
     close: Box<dyn Fn() + Send + Sync>,
 }
 
+impl Shared {
+    fn send(&self, id: u64, method: &str, params: Option<Value>) -> Result<(), WireError> {
+        let mut message = json!({ "id": id, "method": method });
+        if let Some(params) = params {
+            message["params"] = params;
+        }
+        let mut line = message.to_string();
+        line.push('\n');
+        let mut writer = self.writer.lock().expect("wire writer");
+        writer
+            .write_all(line.as_bytes())
+            .and_then(|_| writer.flush())
+            .map_err(|cause| WireError::local("CONNECTION_CLOSED", cause.to_string()))
+    }
+}
+
+/// One open subscription. Dropping it tells the server to stop sending.
+pub struct Subscription {
+    id: u64,
+    shared: Arc<Shared>,
+    /// Frames as the server sends them, and a final error; the channel ends
+    /// when the connection does.
+    pub frames: Receiver<Result<Value, WireError>>,
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.shared
+            .subscriptions
+            .lock()
+            .expect("wire subscriptions")
+            .remove(&self.id);
+        if self.shared.open.load(Ordering::SeqCst) {
+            let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
+            let _ = self
+                .shared
+                .send(id, "unsubscribe", Some(json!({ "subscription": self.id })));
+        }
+    }
+}
+
 /// A live connection. Dropping it closes the socket and ends its subscriptions.
 pub struct Wire {
     shared: Arc<Shared>,
@@ -209,17 +249,7 @@ impl Wire {
     }
 
     fn send(&self, id: u64, method: &str, params: Option<Value>) -> Result<(), WireError> {
-        let mut message = json!({ "id": id, "method": method });
-        if let Some(params) = params {
-            message["params"] = params;
-        }
-        let mut line = message.to_string();
-        line.push('\n');
-        let mut writer = self.shared.writer.lock().expect("wire writer");
-        writer
-            .write_all(line.as_bytes())
-            .and_then(|_| writer.flush())
-            .map_err(|cause| WireError::local("CONNECTION_CLOSED", cause.to_string()))
+        self.shared.send(id, method, params)
     }
 
     /// Sends one request and waits for its answer.
@@ -278,24 +308,16 @@ impl Wire {
 
     /// Opens the shell subscription. Frames (and a final error) arrive on the
     /// receiver, which ends when the connection does.
-    pub fn subscribe_shell(&self) -> Result<Receiver<Result<Value, WireError>>, WireError> {
+    pub fn subscribe_shell(&self) -> Result<Subscription, WireError> {
         self.subscribe("subscribeShell", json!({}))
     }
 
     /// Opens one thread's subscription.
-    #[allow(dead_code)]
-    pub fn subscribe_thread(
-        &self,
-        thread_id: &str,
-    ) -> Result<Receiver<Result<Value, WireError>>, WireError> {
+    pub fn subscribe_thread(&self, thread_id: &str) -> Result<Subscription, WireError> {
         self.subscribe("subscribeThread", json!({ "threadId": thread_id }))
     }
 
-    fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Receiver<Result<Value, WireError>>, WireError> {
+    fn subscribe(&self, method: &str, params: Value) -> Result<Subscription, WireError> {
         let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
         let (items, frames) = mpsc::channel();
         let (reply, answer) = mpsc::channel();
@@ -333,7 +355,11 @@ impl Wire {
                 .remove(&id);
             return Err(error);
         }
-        Ok(frames)
+        Ok(Subscription {
+            id,
+            shared: self.shared.clone(),
+            frames,
+        })
     }
 }
 
@@ -495,8 +521,9 @@ mod tests {
         });
         let (wire, hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
         assert_eq!(hello.build, "build-1");
-        let frames = wire.subscribe_shell().expect("subscribe");
-        let frame = frames
+        let subscription = wire.subscribe_shell().expect("subscribe");
+        let frame = subscription
+            .frames
             .recv_timeout(Duration::from_secs(5))
             .expect("frame")
             .expect("ok");
