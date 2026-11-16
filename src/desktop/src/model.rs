@@ -73,7 +73,37 @@ pub struct InspectorData {
     pub files: Vec<(String, String)>,
 }
 
+/// Whether the source has reached the Moxen server. The mock is always live.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Connection {
+    Connecting,
+    Live,
+    /// The server could not be reached, or hung up; the text says why.
+    Failed(String),
+}
+
 pub trait ThreadSource {
+    /// Thread ids in sidebar order. With `by_project` a project's threads are
+    /// contiguous, projects newest first. Gone threads are left out; their ids
+    /// stay valid for the life of the source. The mock's fixtures are already
+    /// in order.
+    fn order(&self, _by_project: bool) -> Vec<ThreadId> {
+        (0..self.list_threads().len()).collect()
+    }
+    /// Whether the transcript, inspector and status line are fixtures. A live
+    /// source leaves out what it cannot yet fill rather than show made-up numbers.
+    fn preview(&self) -> bool {
+        true
+    }
+    fn connection(&self) -> Connection {
+        Connection::Live
+    }
+    /// Changes whenever the source's data does, so the window knows to redraw.
+    fn revision(&self) -> u64 {
+        0
+    }
+    /// Reconnects after a failure.
+    fn retry(&mut self) {}
     fn file_diff(&self, id: ThreadId, file: usize) -> Vec<DiffLine>;
     fn queued(&self, id: ThreadId) -> &[String];
     fn take_queued(&mut self, id: ThreadId) -> Option<String>;

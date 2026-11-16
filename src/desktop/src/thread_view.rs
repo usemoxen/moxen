@@ -423,7 +423,7 @@ fn composer(
                             s.child(crate::model_picker::render(w, window, cx))
                         }),
                 )
-                .child(status_line(cx)),
+                .when(w.source.preview(), |s| s.child(status_line(cx))),
         )
 }
 

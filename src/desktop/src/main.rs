@@ -1,7 +1,9 @@
 mod assets;
 mod composer;
+mod connection;
 mod diff;
 mod inspector;
+mod live;
 mod mock;
 mod model;
 mod model_picker;
@@ -13,6 +15,7 @@ mod thread_view;
 mod title_bar;
 mod ui;
 mod usage;
+mod wire;
 mod workspace;
 
 use gpui::*;

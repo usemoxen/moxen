@@ -1,5 +1,6 @@
 use crate::{
     composer::{Composer, Submitted},
+    live::ServerSource,
     mock::MockSource,
     model::{ThreadId, ThreadSource},
     theme::{self, color},
@@ -26,6 +27,8 @@ pub struct Tips {
 pub struct Workspace {
     pub source: Box<dyn ThreadSource>,
     pub selected: ThreadId,
+    /// Set once a thread has been picked by default, so a later snapshot does not move the selection.
+    chosen: bool,
     pub sidebar_focus: FocusHandle,
     pub composers: Vec<Entity<Composer>>,
     pub lists: Vec<ListState>,
@@ -54,7 +57,16 @@ pub struct Workspace {
 }
 impl Workspace {
     pub fn new(demo: bool, window: &Window, cx: &mut Context<Self>) -> Self {
-        let source = Box::new(MockSource::preview());
+        // The real server, unless the window is a demo stage (the `live` stage
+        // looks at the real server) or asked for the fixtures with `--mock`.
+        let stage = std::env::args().nth(2);
+        let mock =
+            (demo && stage.as_deref() != Some("live")) || std::env::args().any(|a| a == "--mock");
+        let source: Box<dyn ThreadSource> = if mock {
+            Box::new(MockSource::preview())
+        } else {
+            Box::new(ServerSource::connect(crate::wire::default_endpoint()))
+        };
         let mut subscriptions = vec![];
         let search = cx.new(|cx| {
             let mut c = Composer::new(cx);
@@ -69,46 +81,29 @@ impl Workspace {
                 cx.notify()
             }),
         );
-        let composers = source
-            .list_threads()
-            .iter()
-            .map(|thread| {
-                let id = thread.id;
-                let composer = cx.new(Composer::new);
-                subscriptions.push(
-                    cx.subscribe(&composer, |_, _, _: &crate::composer::Changed, cx| {
-                        cx.notify()
-                    }),
-                );
-                subscriptions.push(
-                    cx.subscribe(&composer, move |this, _, event: &Submitted, cx| {
-                        this.send(id, event.0.clone(), cx)
-                    }),
-                );
-                composer
-            })
-            .collect();
-        let lists = source
-            .list_threads()
-            .iter()
-            .map(|t| {
-                ListState::new(
-                    source.messages(t.id).len(),
-                    ListAlignment::Top,
-                    px(theme::HEIGHT),
-                )
-            })
-            .collect();
+        // Redraws when the source's data changes, and each second while a turn
+        // runs so its timer counts.
         cx.spawn(async move |this, cx| {
+            let mut seen = None;
+            let mut ticks = 0u32;
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                ticks = (ticks + 1) % 10;
                 if this
                     .update(cx, |this, cx| {
-                        if this
-                            .source
-                            .list_threads()
-                            .iter()
-                            .any(|t| t.started_at.is_some())
+                        let revision = this.source.revision();
+                        if seen != Some(revision) {
+                            seen = Some(revision);
+                            this.sync_threads(cx);
+                            cx.notify();
+                        } else if ticks == 0
+                            && this
+                                .source
+                                .list_threads()
+                                .iter()
+                                .any(|t| t.started_at.is_some())
                         {
                             cx.notify();
                         }
@@ -172,7 +167,7 @@ impl Workspace {
             })
             .detach();
         }
-        Self {
+        let mut this = Self {
             expanded_files: HashSet::new(),
             source,
             folded: HashSet::new(),
@@ -200,12 +195,65 @@ impl Workspace {
             group: 1,
             tab: 1,
             selected: 0,
+            chosen: false,
             sidebar_focus: cx.focus_handle(),
-            composers,
-            lists,
+            composers: vec![],
+            lists: vec![],
             expanded: HashMap::new(),
             _subscriptions: subscriptions,
+        };
+        this.sync_threads(cx);
+        this
+    }
+    /// Gives every thread the source lists a composer and a transcript list,
+    /// and keeps the selection on a thread that is still listed. Threads only
+    /// ever appear: the source keeps a gone thread's id.
+    pub fn sync_threads(&mut self, cx: &mut Context<Self>) {
+        let count = self.source.list_threads().len();
+        while self.composers.len() < count {
+            let id = self.composers.len();
+            let composer = cx.new(Composer::new);
+            self._subscriptions.push(
+                cx.subscribe(&composer, |_, _, _: &crate::composer::Changed, cx| {
+                    cx.notify()
+                }),
+            );
+            self._subscriptions.push(
+                cx.subscribe(&composer, move |this, _, event: &Submitted, cx| {
+                    this.send(id, event.0.clone(), cx)
+                }),
+            );
+            self.composers.push(composer);
         }
+        while self.lists.len() < count {
+            let id = self.lists.len();
+            self.lists.push(ListState::new(
+                self.source.messages(id).len(),
+                ListAlignment::Top,
+                px(theme::HEIGHT),
+            ));
+        }
+        let listed = self.source.order(false);
+        if !self.chosen && !listed.is_empty() {
+            // The first row the sidebar shows, not a settled thread behind
+            // its closed section.
+            let threads = self.source.list_threads();
+            let top = self
+                .source
+                .order(true)
+                .into_iter()
+                .find(|&i| !threads[i].settled);
+            self.selected = top.unwrap_or(listed[0]);
+            self.chosen = true;
+        } else if !listed.contains(&self.selected)
+            && let Some(&first) = listed.first()
+        {
+            self.selected = first;
+        }
+    }
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        self.source.retry();
+        cx.notify();
     }
     pub fn select(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         self.selected = id;
@@ -319,6 +367,9 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.source.order(false).is_empty() {
+            return crate::connection::render(self, cx).into_any_element();
+        }
         let viewport = f32::from(window.viewport_size().width);
         let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
         let slide = crate::ui::progress(self.inspector_at, 160, window);
@@ -412,7 +463,7 @@ impl Render for Workspace {
                     .flex()
                     .child(crate::sidebar::render(self, window, cx))
                     .child(crate::thread_view::render(self, window, cx))
-                    .when(shown > 0., |s| {
+                    .when(shown > 0. && self.source.preview(), |s| {
                         // Slides in from the window's right edge: the pane
                         // keeps its width and the clip around it grows.
                         s.child(
@@ -431,5 +482,6 @@ impl Render for Workspace {
             .when(self.palette_open, |s| {
                 s.child(crate::palette::render(self, cx))
             })
+            .into_any_element()
     }
 }

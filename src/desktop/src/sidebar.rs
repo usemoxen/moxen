@@ -1,5 +1,6 @@
 use crate::ui::{self, Control};
 use crate::{
+    model::{Thread, ThreadId},
     theme::{self, color},
     workspace::Workspace,
 };
@@ -30,18 +31,49 @@ fn meta(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Two letters for a project's badge: the initials of its first two words.
+/// Two letters for a project's badge: the initials of its first two words,
+/// or for a one-word name the TUI's chip (`projectBadge`).
 fn badge(project: &str) -> String {
-    project
+    let words: Vec<char> = project
         .split(['-', '_', ' '])
         .filter_map(|word| word.chars().next())
         .take(2)
-        .collect::<String>()
-        .to_uppercase()
+        .collect();
+    if words.len() == 2 {
+        words.into_iter().collect::<String>().to_uppercase()
+    } else {
+        crate::live::project_badge(project)
+    }
+}
+
+/// The threads the sidebar lists, in order: grouped or flat, without settled
+/// ones while that section is closed, and in "This project" only the
+/// selected thread's project.
+pub fn visible(w: &Workspace, threads: &[Thread]) -> Vec<ThreadId> {
+    let project = threads.get(w.selected).map(|t| t.project.as_str());
+    w.source
+        .order(w.group != 0)
+        .into_iter()
+        .filter(|&i| {
+            let t = &threads[i];
+            (!t.settled || w.settled_open) && (w.group != 2 || Some(t.project.as_str()) == project)
+        })
+        .collect()
+}
+
+/// Moves the selection `step` rows through what the sidebar lists.
+fn step(w: &mut Workspace, step: isize, cx: &mut Context<Workspace>) {
+    let threads = w.source.list_threads();
+    let listed = visible(w, &threads);
+    let at = listed.iter().position(|&i| i == w.selected).unwrap_or(0) as isize;
+    if let Some(&next) = listed.get((at + step).clamp(0, listed.len() as isize - 1) as usize) {
+        w.select(next, cx);
+    }
 }
 
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let threads = w.source.list_threads();
+    let listed = w.source.order(false);
     let mut rows = div()
         .id("thread-scroll")
         .flex_1()
@@ -54,13 +86,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .flex_col();
     let mut projects: Vec<&str> = vec![];
     let mut nested: Option<Div> = None;
-    for (i, t) in threads.iter().enumerate() {
-        if t.settled && !w.settled_open {
-            continue;
-        }
-        if w.group == 2 && t.project != threads[w.selected].project {
-            continue;
-        }
+    for i in visible(w, &threads) {
+        let t = &threads[i];
         if t.depth == 0
             && let Some(group) = nested.take()
         {
@@ -70,8 +97,9 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             let first = projects.is_empty();
             let label = ["label-2", "label-6", "label-4", "label-3"][projects.len() % 4];
             projects.push(&t.project);
-            let count = threads
+            let count = listed
                 .iter()
+                .map(|&o| &threads[o])
                 .filter(|o| o.project == t.project && o.depth == 0 && !o.settled)
                 .count();
             rows = rows.child(
@@ -165,15 +193,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .bg(color("ground"))
         .border_r_1()
         .border_color(color("rule"))
-        .on_action(cx.listener(|this, _: &PreviousThread, _, cx| {
-            this.select(this.selected.saturating_sub(1), cx)
-        }))
-        .on_action(cx.listener(|this, _: &NextThread, _, cx| {
-            this.select(
-                (this.selected + 1).min(this.source.list_threads().len() - 1),
-                cx,
-            )
-        }))
+        .on_action(cx.listener(|this, _: &PreviousThread, _, cx| step(this, -1, cx)))
+        .on_action(cx.listener(|this, _: &NextThread, _, cx| step(this, 1, cx)))
         .child(
             div()
                 .pt(px(12.))
@@ -270,7 +291,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         )
                         .child(div().flex_1().child("Settled"))
                         .child(meta(
-                            threads.iter().filter(|t| t.settled).count().to_string(),
+                            listed
+                                .iter()
+                                .filter(|&&i| threads[i].settled)
+                                .count()
+                                .to_string(),
                         ))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settled_open = !this.settled_open;

@@ -1,7 +1,33 @@
-# Moxen Agent — native desktop mockup
+# Moxen Agent — native desktop
 
-A standalone Rust/GPUI client using **mock data only**. It does not read local
-threads, start Moxen, connect to the server, or contact a provider.
+A standalone Rust/GPUI client. By default it connects to this machine's Moxen
+server and lists the user's real projects and threads, live. Everything else in
+the window (transcripts, the inspector, sending, the model picker) is still the
+mock fixtures, which are shown only with `--mock` or in a demo stage; with the
+real server those parts are left out rather than shown with made-up numbers.
+Each is its own issue under MXN-30.
+
+## The server connection
+
+`wire.rs` speaks the server's newline-delimited JSON protocol
+(`src/server/transport/wire.ts`) over its local endpoint: `MOXEN_SERVER_ENDPOINT`,
+else `~/.moxen/server.sock`. `live.rs` is the `ThreadSource` over the shell
+subscription; its ordering, nesting and status rules follow the TUI's sidebar
+(`src/tui/model/sidebar.ts`, `shell.ts`). The desktop adds no server surface.
+
+- The server refuses a client from another build. The desktop is not built
+  from the same code, so it asks once with a placeholder build, reads the
+  server's own build from the greeting (a local socket is greeted even on a
+  mismatch) and presents it on a second socket. The protocol version is the
+  compatibility check.
+- With no server running the window says so and offers Retry. It does not
+  start the server (a later issue).
+- macOS and Linux (unix sockets) only. The Windows named pipe needs
+  overlapped I/O (a blocked read on a synchronous handle stalls a write), which
+  is not written; the connection fails with an explanatory message there.
+  Windows was not run.
+- `cargo run -- --mock` shows the fixtures; `--demo live` is the screenshot stage
+  for the real server.
 
 ## Run and check
 
@@ -47,6 +73,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   same tip while they hold keyboard focus, since GPUI hides hover tooltips in
   keyboard mode.
 - Cmd+Q quits. Nothing persists after exit.
+
+The interaction below describes the mock window (`--mock`).
 
 New-thread creation, attachments, settings, access selection, commit history,
 real usage, queued-send execution and forge actions are not wired to a
@@ -111,7 +139,7 @@ pull request and history; Git files and counts are a shortened fixture.
 ## Implementation and design assets
 
 `ThreadSource` remains the data boundary for thread/transcript and inspector
-fixtures. `mock.rs` owns the source; no frontend data access was added.
+data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
 
 - `workspace.rs`: selection, per-thread UI state, subscriptions and timers.
 - `title_bar.rs`, `sidebar.rs`, `inspector.rs`: window regions and controls.
