@@ -1,8 +1,11 @@
 use crate::{
-    composer::{Composer, Submitted},
+    composer::{Composer, Queued, Submitted},
     live::ServerSource,
     mock::MockSource,
-    model::{ThreadId, ThreadSource},
+    model::{
+        Delivery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES, Reply, Status, ThreadId,
+        ThreadSource,
+    },
     theme::{self, color},
 };
 use gpui::{prelude::*, *};
@@ -14,6 +17,14 @@ use std::{
 /// The turn keeps at least this width; the inspector gives way first.
 const MIN_TURN: f32 = 480.;
 const MIN_INSPECTOR: f32 = 320.;
+
+/// The menu open over the composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dropdown {
+    Project,
+    Access,
+    Mode,
+}
 
 /// Focus handles for toolbar controls that show a tip under keyboard focus.
 pub struct Tips {
@@ -31,6 +42,18 @@ pub struct Workspace {
     chosen: bool,
     pub sidebar_focus: FocusHandle,
     pub composers: Vec<Entity<Composer>>,
+    /// Drafting a thread: the transcript and the thread's composer give way to
+    /// the new-thread composer and its choices.
+    pub creating: bool,
+    pub new_composer: Entity<Composer>,
+    /// The project a new thread starts in (a project id), until one is picked.
+    pub new_project: Option<String>,
+    /// The access chosen for the new thread; none leaves it to the server.
+    pub new_runtime: Option<usize>,
+    pub new_interaction: usize,
+    pub dropdown: Option<Dropdown>,
+    /// The last thing that went wrong, until it is dismissed.
+    pub problem: Option<String>,
     pub lists: Vec<ListState>,
     /// Opened steps, with when each opened (for the expand transition).
     pub expanded: HashMap<(ThreadId, usize), Instant>,
@@ -73,6 +96,24 @@ impl Workspace {
             Box::new(ServerSource::connect(crate::wire::default_endpoint()))
         };
         let mut subscriptions = vec![];
+        let new_composer = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.placeholder = "What should the agent do?";
+            c
+        });
+        subscriptions.push(
+            cx.subscribe(&new_composer, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(
+            cx.subscribe(&new_composer, |this, _, event: &Submitted, cx| {
+                this.start_thread(event.0.clone(), cx)
+            }),
+        );
+        subscriptions.push(cx.subscribe(&new_composer, |this, _, event: &Queued, cx| {
+            this.start_thread(event.0.clone(), cx)
+        }));
         let search = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.placeholder = "Search models";
@@ -174,6 +215,13 @@ impl Workspace {
         }
         let mut this = Self {
             expanded_files: HashSet::new(),
+            creating: false,
+            new_composer,
+            new_project: None,
+            new_runtime: None,
+            new_interaction: 0,
+            dropdown: None,
+            problem: None,
             source,
             fold_toggled: HashSet::new(),
             unfolded_at: HashMap::new(),
@@ -225,11 +273,18 @@ impl Workspace {
                     cx.notify()
                 }),
             );
-            self._subscriptions.push(
-                cx.subscribe(&composer, move |this, _, event: &Submitted, cx| {
-                    this.send(id, event.0.clone(), cx)
-                }),
-            );
+            self._subscriptions.push(cx.subscribe(
+                &composer,
+                move |this, _, event: &Submitted, cx| {
+                    this.send(id, event.0.clone(), Delivery::Steer, cx)
+                },
+            ));
+            self._subscriptions.push(cx.subscribe(
+                &composer,
+                move |this, _, event: &Queued, cx| {
+                    this.send(id, event.0.clone(), Delivery::Queue, cx)
+                },
+            ));
             self.composers.push(composer);
         }
         while self.lists.len() < count {
@@ -264,6 +319,183 @@ impl Workspace {
             self.source.focus(self.selected);
         }
         self.sync_transcript();
+        self.take_news(cx);
+    }
+    /// What the source reports since the last look: a thread this window
+    /// started, a project it added, and anything that failed.
+    fn take_news(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.source.take_opened()
+            && id < self.composers.len()
+        {
+            self.creating = false;
+            self.selected = id;
+            self.focused = None;
+            self.new_composer
+                .update(cx, |c, cx| c.set_text(String::new(), cx));
+        }
+        if let Some(project) = self.source.take_added() {
+            self.new_project = Some(project);
+        }
+        while let Some(problem) = self.source.take_problem() {
+            self.problem = Some(problem.message);
+            let Some((at, text)) = problem.unsent else {
+                continue;
+            };
+            let composer = match at {
+                Some(id) if id < self.composers.len() => self.composers[id].clone(),
+                _ => {
+                    self.creating = true;
+                    self.new_composer.clone()
+                }
+            };
+            composer.update(cx, |c, cx| {
+                // Anything typed since stays after the text that did not go.
+                let typed = c.text().to_string();
+                c.set_text(
+                    if typed.is_empty() {
+                        text
+                    } else {
+                        format!("{text}\n{typed}")
+                    },
+                    cx,
+                );
+            });
+        }
+    }
+    /// The project a new thread starts in: the one picked, else the open
+    /// thread's, else the newest.
+    pub fn new_project_id(&self) -> Option<String> {
+        let projects = self.source.projects();
+        self.new_project
+            .clone()
+            .filter(|id| projects.iter().any(|p| &p.id == id))
+            .or_else(|| {
+                let open = self
+                    .source
+                    .list_threads()
+                    .get(self.selected)?
+                    .project
+                    .clone();
+                projects
+                    .iter()
+                    .find(|p| p.title == open)
+                    .map(|p| p.id.clone())
+            })
+            .or_else(|| projects.first().map(|p| p.id.clone()))
+    }
+    pub fn new_project_title(&self) -> Option<String> {
+        if !self.creating {
+            return None;
+        }
+        let id = self.new_project_id()?;
+        self.source
+            .projects()
+            .into_iter()
+            .find(|p| p.id == id)
+            .map(|p| p.title)
+    }
+    /// Starts drafting a thread in the open thread's project.
+    pub fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source.projects().is_empty() {
+            return;
+        }
+        self.creating = true;
+        self.new_project = None;
+        self.dropdown = None;
+        self.picker_open = false;
+        window.focus(&self.new_composer.read(cx).focus.clone(), cx);
+        cx.notify();
+    }
+    fn start_thread(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(project) = self.new_project_id() else {
+            self.problem = Some("There is no project to start a thread in.".into());
+            self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
+            cx.notify();
+            return;
+        };
+        self.source.create_thread(NewThread {
+            project,
+            text,
+            runtime_mode: self.new_runtime.map(|at| RUNTIME_MODES[at].0.into()),
+            interaction_mode: INTERACTION_MODES[self.new_interaction].0.into(),
+        });
+        // Stays in the draft view until the thread is listed; the source then
+        // names it (`take_opened`), which the redraw loop picks up.
+        cx.notify();
+    }
+    /// Adds a folder as a project, asking for it with the system's picker.
+    pub fn add_project(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.first() else { return };
+            let path = path.to_string_lossy().into_owned();
+            this.update(cx, |this, cx| {
+                this.source.add_project(path);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+    /// Sets how the open thread (or the new one) runs.
+    pub fn set_access(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.creating {
+            self.new_runtime = Some(index);
+        } else {
+            let thread = self.source.list_threads()[self.selected].clone();
+            self.source.set_modes(
+                self.selected,
+                RUNTIME_MODES[index].0,
+                &thread.interaction_mode,
+            );
+        }
+        self.dropdown = None;
+        cx.notify();
+    }
+    pub fn set_mode(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.creating {
+            self.new_interaction = index;
+        } else {
+            let thread = self.source.list_threads()[self.selected].clone();
+            self.source.set_modes(
+                self.selected,
+                &thread.runtime_mode,
+                INTERACTION_MODES[index].0,
+            );
+        }
+        self.dropdown = None;
+        cx.notify();
+    }
+    pub fn edit_queued(&mut self, key: &str, edit: QueueEdit, cx: &mut Context<Self>) {
+        self.source.edit_queued(self.selected, key, edit);
+        cx.notify();
+    }
+    /// Takes a waiting message back into the draft to change it.
+    pub fn edit_queued_text(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.source.take_queued(self.selected, key) {
+            let composer = self.composers[self.selected].clone();
+            composer.update(cx, |c, cx| {
+                let typed = c.text().to_string();
+                c.set_text(
+                    if typed.is_empty() {
+                        text
+                    } else {
+                        format!("{text}\n{typed}")
+                    },
+                    cx,
+                );
+            });
+            window.focus(&composer.read(cx).focus.clone(), cx);
+            cx.notify();
+        }
     }
     /// Resizes the open thread's list to a live transcript that changed:
     /// everything from the first changed row is measured again, and a reader
@@ -301,12 +533,22 @@ impl Workspace {
     pub fn run_folded(&self, id: ThreadId, start: usize, len: usize, total: usize) -> bool {
         (start + len != total) != self.fold_toggled.contains(&(id, start))
     }
+    /// The composer the window is writing into: the new thread's, or the open one's.
+    pub fn active_composer(&self) -> &Entity<Composer> {
+        if self.creating {
+            &self.new_composer
+        } else {
+            &self.composers[self.selected]
+        }
+    }
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.source.retry();
         cx.notify();
     }
     pub fn select(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         self.selected = id;
+        self.creating = false;
+        self.dropdown = None;
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,6 +569,10 @@ impl Workspace {
         }
     }
     pub fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The real model picker is a later piece of work; the list here is a fixture.
+        if !self.source.preview() {
+            return;
+        }
         self.picker_open = !self.picker_open;
         self.picker_at = Some(Instant::now());
         self.palette_open = false;
@@ -345,6 +591,11 @@ impl Workspace {
         cx.notify();
     }
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        // Escape also reaches here with nothing running; that interrupts nothing.
+        let running = self.source.list_threads()[self.selected].status == Status::Running;
+        if !running && !self.source.preview() {
+            return;
+        }
         self.source.stop(self.selected);
         self.composers[self.selected].update(cx, |c, cx| {
             c.enabled = true;
@@ -352,8 +603,13 @@ impl Workspace {
         });
         cx.notify();
     }
-    fn send(&mut self, id: ThreadId, text: String, cx: &mut Context<Self>) {
-        let Some(reply) = self.source.send_message(id, text) else {
+    fn send(&mut self, id: ThreadId, text: String, delivery: Delivery, cx: &mut Context<Self>) {
+        let reply = self.source.send_message(id, text, delivery);
+        self.animate(id, reply, cx);
+    }
+    /// Plays a simulated reply (the mock's); a live source has none.
+    fn animate(&mut self, id: ThreadId, reply: Option<Reply>, cx: &mut Context<Self>) {
+        let Some(reply) = reply else {
             cx.notify();
             return;
         };
@@ -391,11 +647,10 @@ impl Workspace {
         })
         .detach();
     }
-    pub fn send_queued(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.source.take_queued(self.selected) {
-            self.stop(cx);
-            self.send(self.selected, text, cx);
-        }
+    /// Stops the running turn so the waiting message goes next.
+    pub fn send_queued_now(&mut self, key: &str, cx: &mut Context<Self>) {
+        let reply = self.source.send_queued_now(self.selected, key);
+        self.animate(self.selected, reply, cx);
     }
 }
 
@@ -454,11 +709,16 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
-                    if this.picker_open {
+                    if this.dropdown.is_some() {
+                        this.dropdown = None;
+                    } else if this.picker_open {
                         this.picker_open = false;
                         window.focus(&this.model_focus, cx);
                     } else if this.palette_open {
                         this.palette_open = false;
+                        window.focus(&this.sidebar_focus, cx);
+                    } else if this.creating {
+                        this.creating = false;
                         window.focus(&this.sidebar_focus, cx);
                     } else {
                         this.stop(cx);

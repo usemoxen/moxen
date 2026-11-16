@@ -1,11 +1,16 @@
 use crate::model::*;
 use std::time::Instant;
 
+/// How many threads the fixtures hold.
+const FIXTURES: usize = 10;
+
 pub struct MockSource {
     threads: Vec<Thread>,
     messages: Vec<Vec<Message>>,
     running: Vec<Option<usize>>,
     queues: Vec<Vec<String>>,
+    opened: Option<ThreadId>,
+    added: Option<String>,
 }
 impl MockSource {
     pub fn new() -> Self {
@@ -105,6 +110,8 @@ impl MockSource {
                     settled,
                     model: "Claude Opus 5.5".into(),
                     started_at: None,
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
                 },
             )
             .collect();
@@ -127,6 +134,8 @@ impl MockSource {
             messages,
             running: vec![None; count],
             queues: vec![vec![]; count],
+            opened: None,
+            added: None,
         }
     }
     pub fn preview() -> Self {
@@ -196,15 +205,97 @@ impl ThreadSource for MockSource {
             })
             .collect()
     }
-    fn queued(&self, id: ThreadId) -> &[String] {
-        &self.queues[id]
+    fn queued(&self, id: ThreadId) -> Vec<Queued> {
+        let last = self.queues[id].len().saturating_sub(1);
+        self.queues[id]
+            .iter()
+            .enumerate()
+            .map(|(at, text)| Queued {
+                key: at.to_string(),
+                text: text.clone(),
+                held: false,
+                scheduled: None,
+                earlier: at,
+                later: last - at,
+            })
+            .collect()
     }
-    fn take_queued(&mut self, id: ThreadId) -> Option<String> {
-        if self.queues[id].is_empty() {
-            None
-        } else {
-            Some(self.queues[id].remove(0))
+    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<String> {
+        let at: usize = key.parse().ok()?;
+        (at < self.queues[id].len()).then(|| self.queues[id].remove(at))
+    }
+    fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit) {
+        let Ok(at) = key.parse::<usize>() else { return };
+        let queue = &mut self.queues[id];
+        match edit {
+            QueueEdit::Earlier if at > 0 && at < queue.len() => queue.swap(at, at - 1),
+            QueueEdit::Later if at + 1 < queue.len() => queue.swap(at, at + 1),
+            QueueEdit::Remove if at < queue.len() => {
+                queue.remove(at);
+            }
+            _ => {}
         }
+    }
+    fn send_queued_now(&mut self, id: ThreadId, key: &str) -> Option<Reply> {
+        let text = self.take_queued(id, key)?;
+        self.stop(id);
+        self.send_message(id, text, Delivery::Steer)
+    }
+    fn projects(&self) -> Vec<Project> {
+        ["moxen-agent", "moxen-chat"]
+            .into_iter()
+            .map(|title| Project {
+                id: title.into(),
+                title: title.into(),
+            })
+            .collect()
+    }
+    fn create_thread(&mut self, draft: NewThread) {
+        let id = self.threads.len();
+        let title: String = draft.text.chars().take(48).collect();
+        self.threads.push(Thread {
+            id,
+            title,
+            project: draft.project,
+            status: Status::Idle,
+            activity: "now".into(),
+            depth: 0,
+            settled: false,
+            model: "Claude Opus 5.5".into(),
+            started_at: None,
+            runtime_mode: draft.runtime_mode.unwrap_or_else(|| "full-access".into()),
+            interaction_mode: draft.interaction_mode,
+        });
+        self.messages.push(vec![
+            Message::User { text: draft.text },
+            Message::Assistant {
+                text: "Started. This is the mock source, so nothing runs.".into(),
+                at: "Thu 09:38".into(),
+            },
+        ]);
+        self.running.push(None);
+        self.queues.push(vec![]);
+        self.opened = Some(id);
+    }
+    fn order(&self, _: bool) -> Vec<ThreadId> {
+        // Threads started here come first, newest first.
+        (FIXTURES..self.threads.len())
+            .rev()
+            .chain(0..FIXTURES)
+            .collect()
+    }
+    fn take_opened(&mut self) -> Option<ThreadId> {
+        self.opened.take()
+    }
+    fn add_project(&mut self, path: String) {
+        self.added = Some(path);
+    }
+    fn take_added(&mut self) -> Option<String> {
+        self.added.take()
+    }
+    fn set_modes(&mut self, id: ThreadId, runtime: &str, interaction: &str) {
+        self.threads[id].runtime_mode = runtime.into();
+        self.threads[id].interaction_mode = interaction.into();
     }
     fn inspector(&self, _: ThreadId) -> InspectorData {
         InspectorData {
@@ -221,7 +312,7 @@ impl ThreadSource for MockSource {
     fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>> {
         std::sync::Arc::new(self.messages[id].clone())
     }
-    fn send_message(&mut self, id: ThreadId, text: String) -> Option<Reply> {
+    fn send_message(&mut self, id: ThreadId, text: String, _: Delivery) -> Option<Reply> {
         if text.trim().is_empty() {
             return None;
         }
@@ -267,10 +358,14 @@ mod tests {
     #[test]
     fn stopped_reply_cannot_mutate_a_new_turn() {
         let mut source = MockSource::new();
-        let old = source.send_message(0, "first".into()).unwrap();
+        let old = source
+            .send_message(0, "first".into(), Delivery::Steer)
+            .unwrap();
         source.stop(0);
         assert!(source.list_threads()[0].started_at.is_none());
-        let new = source.send_message(0, "second".into()).unwrap();
+        let new = source
+            .send_message(0, "second".into(), Delivery::Steer)
+            .unwrap();
         source.stream_word(0, old.message, "stale", true);
         assert_eq!(source.list_threads()[0].status, Status::Running);
         assert!(source.list_threads()[0].started_at.is_some());
@@ -285,13 +380,19 @@ mod tests {
     #[test]
     fn running_send_queues_without_mutating_another_thread() {
         let mut source = MockSource::new();
-        let reply = source.send_message(0, "hello".into()).unwrap();
+        let reply = source
+            .send_message(0, "hello".into(), Delivery::Steer)
+            .unwrap();
         let other = source.messages(2).len();
-        assert!(source.send_message(0, "next".into()).is_none());
-        assert_eq!(source.queued(0), &["next"]);
+        assert!(
+            source
+                .send_message(0, "next".into(), Delivery::Steer)
+                .is_none()
+        );
+        assert_eq!(source.queued(0)[0].text, "next");
         source.stream_word(0, reply.message, "reply", true);
         assert_eq!(source.messages(2).len(), other);
-        assert_eq!(source.take_queued(0).as_deref(), Some("next"));
-        assert!(source.take_queued(0).is_none());
+        assert_eq!(source.take_queued(0, "0").as_deref(), Some("next"));
+        assert!(source.take_queued(0, "0").is_none());
     }
 }

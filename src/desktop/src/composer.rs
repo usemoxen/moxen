@@ -6,10 +6,12 @@ use unicode_segmentation::UnicodeSegmentation;
 actions!(
     composer,
     [
-        Send, Newline, Backspace, Delete, Left, Right, Up, Down, SelectAll, Paste
+        Send, QueueSend, Newline, Backspace, Delete, Left, Right, Up, Down, SelectAll, Paste
     ]
 );
 pub struct Submitted(pub String);
+/// The draft, sent to wait for the running turn instead of steering it.
+pub struct Queued(pub String);
 pub struct Changed;
 
 pub struct Composer {
@@ -27,6 +29,7 @@ pub struct Composer {
     bounds: Option<Bounds<Pixels>>,
 }
 impl EventEmitter<Submitted> for Composer {}
+impl EventEmitter<Queued> for Composer {}
 impl EventEmitter<Changed> for Composer {}
 impl Focusable for Composer {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -80,6 +83,14 @@ impl Composer {
             let text = std::mem::take(&mut self.text);
             self.selection = 0..0;
             cx.emit(Submitted(text));
+            cx.notify();
+        }
+    }
+    fn queue_send(&mut self, _: &QueueSend, _: &mut Window, cx: &mut Context<Self>) {
+        if self.enabled && self.marked.is_none() && !self.text.trim().is_empty() {
+            let text = std::mem::take(&mut self.text);
+            self.selection = 0..0;
+            cx.emit(Queued(text));
             cx.notify();
         }
     }
@@ -294,6 +305,7 @@ impl Render for Composer {
             .bg(color(self.surface))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(Self::queue_send))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -401,6 +413,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Send, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
+        KeyBinding::new("cmd-enter", QueueSend, Some("Composer")),
+        KeyBinding::new("ctrl-enter", QueueSend, Some("Composer")),
         KeyBinding::new("backspace", Backspace, Some("Composer")),
         KeyBinding::new("delete", Delete, Some("Composer")),
         KeyBinding::new("left", Left, Some("Composer")),

@@ -15,7 +15,7 @@ use crate::{
     model::Message,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The most an opened step shows, so one huge result cannot stall the window.
 const OUTPUT_LINES: usize = 120;
@@ -30,10 +30,51 @@ pub struct Row {
     pub message: Message,
 }
 
+/// Turns that never started: still waiting in the queue, or cancelled while
+/// they waited (`cancelledBeforeStart` in `src/tui/model/thread.ts`).
+fn unstarted_turns(thread: &Value) -> HashSet<&str> {
+    let mut waited = HashSet::new();
+    let mut promoted = HashSet::new();
+    let mut interrupted = HashSet::new();
+    let mut unstarted: HashSet<&str> = HashSet::new();
+    for activity in thread["activities"].as_array().into_iter().flatten() {
+        let Some(turn) = text(activity, &["turnId"]) else {
+            continue;
+        };
+        match text(activity, &["kind"]) {
+            Some("turn.queued" | "turn.scheduled") => {
+                waited.insert(turn);
+            }
+            Some("turn.promoted") => {
+                promoted.insert(turn);
+            }
+            Some("turn.interrupted") => {
+                interrupted.insert(turn);
+                if activity["payload"]["beforeStart"] == true {
+                    unstarted.insert(turn);
+                }
+            }
+            _ => {}
+        }
+    }
+    unstarted.extend(
+        interrupted
+            .into_iter()
+            .filter(|turn| waited.contains(turn) && !promoted.contains(turn)),
+    );
+    for queued in thread["queuedTurns"].as_array().into_iter().flatten() {
+        if let Some(turn) = text(queued, &["turnId"]) {
+            unstarted.insert(turn);
+        }
+    }
+    unstarted
+}
+
 /// The conversation of a `ThreadEnvelope`, oldest first.
 pub fn project(thread: &Value) -> Vec<Row> {
     // (when, tie-break, row): messages sort before the steps they began.
     let mut rows: Vec<(i64, usize, Row)> = vec![];
+    let unstarted = unstarted_turns(thread);
     for (n, message) in thread["messages"]
         .as_array()
         .into_iter()
@@ -43,6 +84,12 @@ pub fn project(thread: &Value) -> Vec<Row> {
         let (Some(role), Some(id)) = (text(message, &["role"]), text(message, &["id"])) else {
             continue;
         };
+        // A message that has not run yet waits in the queue strip, and one taken
+        // back before it ran is gone.
+        if role == "user" && text(message, &["turnId"]).is_some_and(|turn| unstarted.contains(turn))
+        {
+            continue;
+        }
         let body = text(message, &["text"]).unwrap_or_default().to_string();
         let when = ms(message, &["createdAt"]).unwrap_or(0);
         let streaming = message.get("streaming").and_then(Value::as_bool) == Some(true);
@@ -422,6 +469,25 @@ pub fn created_ms(message: &Value) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_message_that_has_not_run_waits_in_the_queue_not_the_transcript() {
+        let thread = json!({
+            "messages": [
+                {"id": "m1", "role": "user", "text": "ran", "turnId": "t1", "createdAt": "2026-11-16T10:00:00.000Z"},
+                {"id": "m2", "role": "user", "text": "waiting", "turnId": "t2", "createdAt": "2026-11-16T10:01:00.000Z"},
+                {"id": "m3", "role": "user", "text": "taken back", "turnId": "t3", "createdAt": "2026-11-16T10:02:00.000Z"},
+            ],
+            "queuedTurns": [{"turnId": "t2", "messageId": "m2", "scheduledFor": null, "scheduleReason": null}],
+            "activities": [
+                {"id": "a1", "turnId": "t3", "kind": "turn.queued", "tone": "info", "createdAt": "2026-11-16T10:02:00.000Z"},
+                {"id": "a2", "turnId": "t3", "kind": "turn.interrupted", "tone": "info", "createdAt": "2026-11-16T10:03:00.000Z"},
+            ],
+        });
+        let rows = project(&thread);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "m1");
+    }
     use super::*;
     use serde_json::json;
 

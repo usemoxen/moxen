@@ -245,13 +245,16 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .child(
                             div()
                                 .id("new-thread")
-                                .inert("New thread is unavailable in this preview")
+                                .control("New thread in this project")
                                 .size(px(30.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .rounded(px(6.))
-                                .child(ui::icon("square-pen", "ink-2")),
+                                .child(ui::icon("square-pen", "ink-2"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.new_thread(window, cx)),
+                                ),
                         ),
                 )
                 .child(ui::segmented(

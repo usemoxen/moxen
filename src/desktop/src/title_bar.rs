@@ -50,7 +50,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                                 .size_full()
                                 .text_color(color("ink")),
                         )
-                        .when(t.status == Status::Running, |s| {
+                        .when(t.status == Status::Running && !w.creating, |s| {
                             s.child(
                                 div()
                                     .absolute()
@@ -68,7 +68,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .text_color(color("ink-2"))
-                        .child(t.project.clone()),
+                        .child(w.new_project_title().unwrap_or_else(|| t.project.clone())),
                 )
                 .child(
                     div()
@@ -84,7 +84,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .font_weight(FontWeight::BOLD)
-                        .child(t.title.clone()),
+                        .child(if w.creating {
+                            "New thread".to_string()
+                        } else {
+                            t.title.clone()
+                        }),
                 ),
         )
         .child(div().flex_1())

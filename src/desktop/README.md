@@ -2,7 +2,7 @@
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
 server and lists the user's real projects and threads, live. Everything else in
-the window (the inspector, sending, the model picker) is still the mock
+the window (the inspector and the model picker) is still the mock
 fixtures, which are shown only with `--mock` or in a demo stage; with the real
 server those parts are left out rather than shown with made-up numbers. Each is
 its own issue under MXN-30.
@@ -31,6 +31,34 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   (todos, tasks, questions, memory, web, image) show as generic tool rows for now.
   A run of consecutive steps folds under one summary row; finished runs start
   folded, the last stays open while it ends the conversation.
+- Sending, stopping and queueing drive real turns (`live.rs`, over `Wire::dispatch`;
+  every command runs on its own thread, so the window never waits for the
+  server). Enter on an idle thread sends `thread.turn.start` (a settled thread
+  wakes on the send). On a running thread Enter steers (`delivery: "steer"`,
+  lands at the turn's next step) and Cmd/Ctrl+Enter or Queue queues
+  (`delivery: "queue"`), as the TUI's Enter and Tab do. Stop and Escape send
+  `thread.turn.interrupt`, only while a turn runs. A command the server refuses
+  shows its message above the composer and puts the unsent text back in the
+  draft.
+- The queue strip lists the thread's waiting messages in the server's order
+  (`queuedTurns` joined with `queue.read`, which knows which are held). Each can
+  move earlier or later (`queue.edit` `up`/`down`, as many steps as other
+  threads' entries between them, like the TUI's work queue), be held or
+  released, be taken back into the draft to edit, be removed (a
+  `thread.turn.interrupt` with the turn id, as the TUI's Queued panel cancels),
+  and the first can be sent now (it moves first and the running turn is
+  interrupted, so the queue promotes it). A message that has not run yet, or
+  was taken back, is not in the transcript.
+- New thread (the pencil in the sidebar): a draft view with project, access
+  (runtime mode) and mode (interaction mode) choices above the composer.
+  `thread.create` then `thread.turn.start`; the window opens the thread once the
+  shell lists it. "Add project…" asks for a folder with the system picker and
+  sends `project.create`. The model is the one the project's newest thread
+  runs on (the server's default with none); choosing one is the model
+  picker's job and is not done here. The access and mode chips of an open,
+  idle thread change it (`thread.runtime-mode.set`, `thread.interaction-mode.set`).
+  Not done: attachments, scheduled sends and queue conditions, starting the
+  first thread of an account with none, and the run-size question of `/research`.
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs
@@ -75,9 +103,9 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 - Git contains the mock commit and file counts. Agents and Background are empty
   states. The usage control opens Context.
 - The composer preserves native multiline input, Unicode grapheme deletion,
-  Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line.
-  Send uses the same action. Stop (Escape) cancels the simulated reply; late
-  words from that reply cannot mutate a later turn.
+  Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line;
+  Cmd/Ctrl+Enter queues while a turn runs. Send uses the same action. In the mock, Stop (Escape) cancels the simulated
+  reply; late words from that reply cannot mutate a later turn.
 - Tab and Shift+Tab move focus between controls; the focused one carries a
   2px `live` ring. Hovered controls show a tooltip with their shortcut as a key
   cap; the toolbar controls (search, Tasks, inspector, stop, send) show the
