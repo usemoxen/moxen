@@ -1,4 +1,6 @@
 mod assets;
+#[cfg(feature = "render-harness")]
+mod automation;
 mod composer;
 mod connection;
 mod diff;
@@ -77,24 +79,37 @@ fn main() {
                 (theme::WIDTH, theme::HEIGHT)
             };
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
-            cx.open_window(
-                WindowOptions {
-                    focus: true,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        appears_transparent: true,
-                        title: Some("Moxen Agent".into()),
+            // Automation never shows, focuses or activates the window.
+            #[cfg(feature = "render-harness")]
+            let automation = automation::requested();
+            #[cfg(not(feature = "render-harness"))]
+            let automation: Option<std::path::PathBuf> = None;
+            let visible = automation.is_none();
+            let _window = cx
+                .open_window(
+                    WindowOptions {
+                        focus: visible,
+                        show: visible,
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            appears_transparent: true,
+                            title: Some("Moxen Agent".into()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let workspace = cx.new(|cx| workspace::Workspace::new(demo, window, cx));
-                    window.focus(&workspace.read(cx).sidebar_focus.clone(), cx);
-                    workspace
-                },
-            )
-            .expect("open Moxen Agent window");
-            cx.activate(true);
+                    },
+                    |window, cx| {
+                        let workspace = cx.new(|cx| workspace::Workspace::new(demo, window, cx));
+                        window.focus(&workspace.read(cx).sidebar_focus.clone(), cx);
+                        workspace
+                    },
+                )
+                .expect("open Moxen Agent window");
+            if let Some(_script) = automation {
+                #[cfg(feature = "render-harness")]
+                automation::start(cx, _window.into(), _script);
+            } else {
+                cx.activate(true);
+            }
         });
 }

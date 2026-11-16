@@ -104,6 +104,41 @@ the tokens in `theme.rs`.
   scroll into view do not replay it; Git diffs open over 150ms; the inspector
   slides open and closed over 160ms; the live glyph breathes over 1.8s.
 
+## Driving the window without focus (automation)
+
+For checking the app while someone is using the computer: the window is created
+hidden and never activated, so it cannot come to the front or take keyboard
+focus. It is compiled only with the `render-harness` feature and runs only when
+`MOXEN_DESKTOP_AUTOMATION` names a script; a normal build ignores it.
+
+```sh
+python3 automate.py script.txt --mock     # --mock for fixtures, or omit for the real server
+```
+
+`automate.py` builds with the feature, runs the script and, on macOS, samples
+the frontmost application (`lsappinfo front`) for the whole run and fails if it
+is ever the app itself (you switching apps meanwhile is fine). Input goes into GPUI as platform events (no OS event, no accessibility
+permission) and a screenshot is GPUI's own offscreen render of the frame, in
+Retina pixels, without the native traffic lights. One command per line; a line
+starting with `#` is a comment:
+
+```text
+wait 500                  # run frames for 500 ms, so animations advance
+move X Y                  # pointer to a window point (points, origin top-left)
+click X Y                 # also rightclick X Y
+scroll X Y DX DY
+key cmd-k                 # a keystroke: enter, escape, tab, shift-tab, cmd-k
+type some text            # the rest of the line, as written, into the focused input
+screenshot out/main.png
+quit
+```
+
+The app waits 1.5 s for its first frame (and the server's first snapshot)
+before the first command. It exits non-zero, naming the line, on a bad script or
+a failed command. Frames are drawn on demand, so a timer or animation advances
+only during `wait` and between commands. macOS was exercised; Windows and Linux
+were not.
+
 ## Screenshots
 
 ```sh

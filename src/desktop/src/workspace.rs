@@ -367,6 +367,9 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A snapshot can arrive between two polls; never draw a thread that
+        // has no composer or list yet.
+        self.sync_threads(cx);
         if self.source.order(false).is_empty() {
             return crate::connection::render(self, cx).into_any_element();
         }
