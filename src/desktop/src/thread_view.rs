@@ -8,6 +8,7 @@ use crate::{
 use gpui::{prelude::*, *};
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let id = w.selected;
+    let can_send = !w.composers[id].read(cx).text().trim().is_empty();
     let thread = w.source.list_threads()[id].clone();
     let messages = w.source.messages(id);
     let entity = cx.entity();
@@ -230,6 +231,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                             div()
                                                 .id("model-pill")
                                                 .control("Choose model and effort")
+                                                .track_focus(&w.model_focus)
                                                 .h(px(28.))
                                                 .px(px(10.))
                                                 .flex()
@@ -256,13 +258,11 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                         [w.effort],
                                                 ))
                                                 .child(ui::icon("chevron-down", "ink-2"))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.picker_open = !this.picker_open;
-                                                    cx.notify();
-                                                })),
+                                                .on_click(cx.listener(|this, _, window, cx| this.toggle_picker(window,cx))),
                                         )
                                         .child(
                                             div()
+                                                .id("access").disabled("Access is fixed for this preview")
                                                 .text_size(px(12.5))
                                                 .text_color(color("ink-2"))
                                                 .child("Full access"),
@@ -286,12 +286,8 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                 .child(
                                                     div()
                                                         .id("stop")
-                                                        .control("Stop reply · Escape")
-                                                        .when(
-                                                            thread.status
-                                                                != crate::model::Status::Running,
-                                                            |s| s.opacity(0.4),
-                                                        )
+                                                        .when(thread.status == crate::model::Status::Running, |s| s.control("Stop reply · Escape"))
+                                                        .when(thread.status != crate::model::Status::Running, |s| s.disabled("No reply is running"))
                                                         .size(px(30.))
                                                         .border_1()
                                                         .border_color(color("edge"))
@@ -300,7 +296,6 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                         .items_center()
                                                         .justify_center()
                                                         .child(ui::icon("square", "ink-2"))
-                                                        .cursor_pointer()
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.stop(cx)
                                                         })),
@@ -308,9 +303,8 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                 .child(
                                                     div()
                                                         .id("send")
-                                                        .control(
-                                                            "Send · Enter; queues while working",
-                                                        )
+                                                        .when(can_send, |s| s.control("Send · Enter; queues while working"))
+                                                        .when(!can_send, |s| s.disabled("Write a message to send · Enter"))
                                                         .size(px(30.))
                                                         .rounded(px(8.))
                                                         .bg(color(
@@ -338,8 +332,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
-                                                        .cursor_pointer()
-                                                        .child(ui::icon("arrow-up", "ink-2"))
+                                                        .child(ui::icon("arrow-up", if can_send { "on-ink" } else { "ink-2" }))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 window.focus(

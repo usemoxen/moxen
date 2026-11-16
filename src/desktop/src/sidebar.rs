@@ -66,7 +66,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .rounded(px(6.))
+                .rounded(px(if t.depth > 0 { 0. } else { 6. }))
                 .border_l_2()
                 .border_color(color(if w.selected == i {
                     "live"
@@ -137,6 +137,13 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .gap(px(6.))
                         .child(
                             div()
+                                .id("jump-search")
+                                .control("Jump to thread · ⌘K")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_palette(window, cx)
+                                    }),
+                                )
                                 .flex_1()
                                 .border_1()
                                 .border_color(color("rule"))
@@ -163,7 +170,13 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                         .child("⌘K"),
                                 ),
                         )
-                        .child(div().w(px(24.)).child(ui::icon("square-pen", "ink-2"))),
+                        .child(
+                            div()
+                                .id("new-thread")
+                                .disabled("New thread is unavailable in this preview")
+                                .w(px(24.))
+                                .child(ui::icon("square-pen", "ink-2")),
+                        ),
                 )
                 .child(
                     div().flex().rounded(px(8.)).bg(color("sunk")).children(
@@ -211,7 +224,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             },
                             "ink-2",
                         ))
-                        .child("Settled")
+                        .child(div().flex_1().pl(px(8.)).child("Settled"))
                         .child(threads.iter().filter(|t| t.settled).count().to_string())
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {

@@ -87,9 +87,10 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .w(px(14.))
                         .when(w.model == i, |s| s.child(ui::icon("check", "ink"))),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.model = i;
                     this.picker_open = false;
+                    window.focus(&this.model_focus, cx);
                     cx.notify();
                 })),
         );

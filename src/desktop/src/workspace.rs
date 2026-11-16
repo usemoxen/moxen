@@ -18,6 +18,8 @@ pub struct Workspace {
     pub inspector_open: bool,
     pub tasks_open: bool,
     pub picker_open: bool,
+    pub palette_open: bool,
+    pub model_focus: FocusHandle,
     pub model: usize,
     pub effort: usize,
     pub group: usize,
@@ -113,14 +115,6 @@ impl Workspace {
                         }
                         "focus" => {
                             window.focus(&this.composers[0].read(cx).focus.clone(), cx);
-                            window.dispatch_event(
-                                PlatformInput::MouseMove(MouseMoveEvent {
-                                    position: point(px(130.), px(184.)),
-                                    pressed_button: None,
-                                    modifiers: Modifiers::default(),
-                                }),
-                                cx,
-                            );
                         }
                         "input" => {
                             this.stop(cx);
@@ -133,6 +127,19 @@ impl Workspace {
                     cx.notify();
                 })
                 .expect("demo window is attached");
+                if stage == "focus" {
+                    cx.update(|window, cx| {
+                        window.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position: point(px(130.), px(184.)),
+                                pressed_button: None,
+                                modifiers: Modifiers::default(),
+                            }),
+                            cx,
+                        );
+                    })
+                    .expect("demo window is attached");
+                }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 #[cfg(feature = "render-harness")]
                 capture(cx, &format!("harness-{stage}.png"));
@@ -151,6 +158,8 @@ impl Workspace {
             inspector_open: true,
             tasks_open: true,
             picker_open: false,
+            palette_open: false,
+            model_focus: cx.focus_handle(),
             model: 1,
             effort: 1,
             group: 1,
@@ -165,6 +174,33 @@ impl Workspace {
     }
     pub fn select(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         self.selected = id;
+        cx.notify();
+    }
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.picker_open = false;
+        self.search.update(cx, |c, cx| {
+            c.placeholder = "Search threads";
+            c.set_text(String::new(), cx);
+        });
+        window.focus(&self.search.read(cx).focus.clone(), cx);
+        cx.notify();
+    }
+    pub fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker_open = !self.picker_open;
+        self.palette_open = false;
+        self.search.update(cx, |c, cx| {
+            c.placeholder = "Search models";
+            c.set_text(String::new(), cx);
+        });
+        window.focus(
+            &if self.picker_open {
+                self.search.read(cx).focus.clone()
+            } else {
+                self.model_focus.clone()
+            },
+            cx,
+        );
         cx.notify();
     }
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -241,11 +277,39 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .relative()
             .type_scale("body")
             .size_full()
             .flex()
             .flex_col()
             .bg(color("ground"))
+            .on_action(
+                cx.listener(|this, _: &crate::palette::OpenPalette, window, cx| {
+                    this.open_palette(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|_, _: &crate::palette::NextFocus, window, cx| window.focus_next(cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &crate::palette::PreviousFocus, window, cx| {
+                    window.focus_prev(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
+                    if this.picker_open {
+                        this.picker_open = false;
+                        window.focus(&this.model_focus, cx);
+                    } else if this.palette_open {
+                        this.palette_open = false;
+                        window.focus(&this.sidebar_focus, cx);
+                    } else {
+                        this.stop(cx);
+                    }
+                    cx.notify();
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if this.resizing_inspector {
                     this.inspector_width =
@@ -300,5 +364,8 @@ impl Render for Workspace {
                         )
                     }),
             )
+            .when(self.palette_open, |s| {
+                s.child(crate::palette::render(self, cx))
+            })
     }
 }

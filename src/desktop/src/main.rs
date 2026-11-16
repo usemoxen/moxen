@@ -1,9 +1,11 @@
+mod assets;
 mod composer;
 mod diff;
 mod inspector;
 mod mock;
 mod model;
 mod model_picker;
+mod palette;
 mod sidebar;
 mod steps;
 mod theme;
@@ -19,7 +21,7 @@ actions!(app, [Quit]);
 fn main() {
     let demo = std::env::args().any(|a| a == "--demo");
     gpui_platform::application()
-        .with_assets(DesktopAssets)
+        .with_assets(assets::DesktopAssets)
         .run(move |cx| {
             cx.text_system()
                 .add_fonts(vec![
@@ -56,12 +58,16 @@ fn main() {
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-i", title_bar::ToggleInspector, None),
                 KeyBinding::new("ctrl-t", title_bar::ToggleTasks, None),
+                KeyBinding::new("cmd-k", palette::OpenPalette, None),
+                KeyBinding::new("escape", palette::Dismiss, None),
+                KeyBinding::new("tab", palette::NextFocus, None),
+                KeyBinding::new("shift-tab", palette::PreviousFocus, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let bounds = Bounds::centered(None, size(px(theme::WIDTH), px(theme::HEIGHT)), cx);
             cx.open_window(
                 WindowOptions {
-                    focus: !demo,
+                    focus: true,
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
                         appears_transparent: true,
@@ -77,32 +83,6 @@ fn main() {
                 },
             )
             .expect("open Moxen Agent window");
-            if !demo {
-                cx.activate(true);
-            }
+            cx.activate(true);
         });
-}
-
-struct DesktopAssets;
-impl AssetSource for DesktopAssets {
-    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if path != "agent-mark" {
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons");
-            // Only fixed names from the icon helper are accepted as asset keys.
-            if path.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
-                return Ok(std::fs::read(root.join(format!("{path}.svg")))
-                    .ok()
-                    .map(std::borrow::Cow::Owned));
-            }
-            return Ok(None);
-        }
-        Ok((path == "agent-mark").then(|| {
-            std::borrow::Cow::Borrowed(
-                include_bytes!("../design-system/assets/logos/agent-mark-on-dark.svg").as_slice(),
-            )
-        }))
-    }
-    fn list(&self, _: &str) -> Result<Vec<SharedString>> {
-        Ok(vec!["agent-mark".into()])
-    }
 }

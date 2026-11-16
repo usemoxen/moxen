@@ -30,8 +30,15 @@ pub fn state(status: crate::model::Status) -> AnyElement {
 
 pub trait Control: Sized {
     fn control(self, tooltip: impl Into<SharedString>) -> Self;
+    fn disabled(self, tooltip: impl Into<SharedString>) -> Self;
 }
 impl Control for Stateful<Div> {
+    fn disabled(self, tooltip: impl Into<SharedString>) -> Self {
+        let text = tooltip.into();
+        self.opacity(0.45)
+            .cursor(CursorStyle::Arrow)
+            .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
+    }
     fn control(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         self.cursor_pointer()
