@@ -1,10 +1,11 @@
 use crate::{
+    catalog::{Catalog, prettify, provider_color},
     composer::{Composer, Queued, Submitted},
     live::ServerSource,
     mock::MockSource,
     model::{
-        Delivery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES, Reply, Status, ThreadId,
-        ThreadSource,
+        CatalogState, Delivery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES, Reply,
+        Selection, Status, ThreadId, ThreadSource,
     },
     theme::{self, color},
 };
@@ -51,6 +52,8 @@ pub struct Workspace {
     /// The access chosen for the new thread; none leaves it to the server.
     pub new_runtime: Option<usize>,
     pub new_interaction: usize,
+    /// The model chosen for the new thread; none starts it on its project's.
+    pub new_model: Option<Selection>,
     pub dropdown: Option<Dropdown>,
     /// The last thing that went wrong, until it is dismissed.
     pub problem: Option<String>,
@@ -62,8 +65,6 @@ pub struct Workspace {
     pub picker_open: bool,
     pub palette_open: bool,
     pub model_focus: FocusHandle,
-    pub model: usize,
-    pub effort: usize,
     pub group: usize,
     pub tab: usize,
     pub search: Entity<Composer>,
@@ -220,6 +221,7 @@ impl Workspace {
             new_project: None,
             new_runtime: None,
             new_interaction: 0,
+            new_model: None,
             dropdown: None,
             problem: None,
             source,
@@ -245,8 +247,6 @@ impl Workspace {
             picker_open: false,
             palette_open: false,
             model_focus: cx.focus_handle(),
-            model: 1,
-            effort: 1,
             group: 1,
             tab: 1,
             selected: 0,
@@ -383,6 +383,64 @@ impl Workspace {
             })
             .or_else(|| projects.first().map(|p| p.id.clone()))
     }
+    /// The model the open thread runs on, or the new thread would start on.
+    pub fn effective_selection(&self) -> Option<Selection> {
+        if self.creating {
+            self.new_model
+                .clone()
+                .or_else(|| self.source.project_selection(&self.new_project_id()?))
+        } else {
+            self.source.selection(self.selected)
+        }
+    }
+    /// The catalog, once read.
+    pub fn catalog(&self) -> Option<std::sync::Arc<Catalog>> {
+        match self.source.catalog() {
+            CatalogState::Ready(catalog) => Some(catalog),
+            _ => None,
+        }
+    }
+    /// A model's name and the token it is drawn in: the catalog's name once
+    /// known, a readable form of the slug until then.
+    pub fn model_label(&self, selection: Option<&Selection>) -> (String, &'static str) {
+        let Some(selection) = selection else {
+            return ("Default model".into(), "ink");
+        };
+        let catalog = self.catalog();
+        let name = catalog
+            .as_ref()
+            .map_or_else(|| prettify(&selection.model), |c| c.model_name(selection));
+        let driver = catalog
+            .as_ref()
+            .and_then(|c| c.provider(&selection.instance))
+            .map_or("", |p| p.driver.as_str());
+        (name, provider_color(driver, &selection.instance))
+    }
+    /// Switches the model of the open thread, or of the new one: what still
+    /// applies of the old choice carries over (`Catalog::rebase`).
+    pub fn choose_model(&mut self, instance: &str, model: &str, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog() else {
+            return;
+        };
+        let next = catalog.rebase(self.effective_selection().as_ref(), instance, model);
+        self.apply_selection(next);
+        self.picker_open = false;
+        cx.notify();
+    }
+    /// Sets one option of the current model, e.g. its reasoning level.
+    pub fn choose_option(&mut self, option: &str, value: &str, cx: &mut Context<Self>) {
+        if let Some(current) = self.effective_selection() {
+            self.apply_selection(current.with_option(option, value));
+            cx.notify();
+        }
+    }
+    fn apply_selection(&mut self, selection: Selection) {
+        if self.creating {
+            self.new_model = Some(selection);
+        } else {
+            self.source.set_model(self.selected, selection);
+        }
+    }
     pub fn new_project_title(&self) -> Option<String> {
         if !self.creating {
             return None;
@@ -401,6 +459,7 @@ impl Workspace {
         }
         self.creating = true;
         self.new_project = None;
+        self.new_model = None;
         self.dropdown = None;
         self.picker_open = false;
         window.focus(&self.new_composer.read(cx).focus.clone(), cx);
@@ -418,6 +477,7 @@ impl Workspace {
             text,
             runtime_mode: self.new_runtime.map(|at| RUNTIME_MODES[at].0.into()),
             interaction_mode: INTERACTION_MODES[self.new_interaction].0.into(),
+            model: self.new_model.clone(),
         });
         // Stays in the draft view until the thread is listed; the source then
         // names it (`take_opened`), which the redraw loop picks up.
@@ -569,11 +629,11 @@ impl Workspace {
         }
     }
     pub fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The real model picker is a later piece of work; the list here is a fixture.
-        if !self.source.preview() {
-            return;
-        }
         self.picker_open = !self.picker_open;
+        if self.picker_open {
+            // A model may have been hidden or a provider signed in since it was read.
+            self.source.refresh_catalog();
+        }
         self.picker_at = Some(Instant::now());
         self.palette_open = false;
         self.search.update(cx, |c, cx| {

@@ -1,3 +1,5 @@
+pub use crate::catalog::{CatalogState, Selection};
+
 pub type ThreadId = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +149,9 @@ pub struct NewThread {
     /// `None` leaves it to the server's setting.
     pub runtime_mode: Option<String>,
     pub interaction_mode: String,
+    /// The model picked for it; `None` starts it on the project's model, or
+    /// the server's default.
+    pub model: Option<Selection>,
 }
 
 /// Something the source could not do, to tell the user.
@@ -226,6 +231,23 @@ pub trait ThreadSource {
     fn create_thread(&mut self, _draft: NewThread) {}
     /// Adds the folder as a project and returns once it is known.
     fn add_project(&mut self, _path: String) {}
+    /// The providers, models and efforts on offer.
+    fn catalog(&self) -> CatalogState {
+        CatalogState::Loading
+    }
+    /// Asks for the catalog again (a model may have been hidden since).
+    fn refresh_catalog(&mut self) {}
+    /// The model a thread runs on, once the source knows it.
+    fn selection(&self, _id: ThreadId) -> Option<Selection> {
+        None
+    }
+    /// The model a new thread in `project` starts on when none is chosen:
+    /// the one its newest thread runs on.
+    fn project_selection(&self, _project: &str) -> Option<Selection> {
+        None
+    }
+    /// Changes the model of a thread.
+    fn set_model(&mut self, _id: ThreadId, _selection: Selection) {}
     /// Changes how an idle thread runs.
     fn set_modes(&mut self, _id: ThreadId, _runtime: &str, _interaction: &str) {}
     /// The thread a `create_thread` started, once the source lists it.

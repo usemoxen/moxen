@@ -1,6 +1,7 @@
 mod assets;
 #[cfg(feature = "render-harness")]
 mod automation;
+mod catalog;
 mod composer;
 mod connection;
 mod diff;

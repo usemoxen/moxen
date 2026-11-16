@@ -2,7 +2,7 @@
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
 server and lists the user's real projects and threads, live. Everything else in
-the window (the inspector and the model picker) is still the mock
+the window (the inspector) is still the mock
 fixtures, which are shown only with `--mock` or in a demo stage; with the real
 server those parts are left out rather than shown with made-up numbers. Each is
 its own issue under MXN-30.
@@ -53,9 +53,9 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   (runtime mode) and mode (interaction mode) choices above the composer.
   `thread.create` then `thread.turn.start`; the window opens the thread once the
   shell lists it. "Add project…" asks for a folder with the system picker and
-  sends `project.create`. The model is the one the project's newest thread
-  runs on (the server's default with none); choosing one is the model
-  picker's job and is not done here. The access and mode chips of an open,
+  sends `project.create`. The model is the one chosen in the model picker,
+  else the one the project's newest thread runs on (the server's default with
+  none). The access and mode chips of an open,
   idle thread change it (`thread.runtime-mode.set`, `thread.interaction-mode.set`).
   Not done: attachments, scheduled sends and queue conditions, starting the
   first thread of an account with none, and the run-size question of `/research`.
@@ -94,8 +94,33 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   opens the two settled fixture threads.
 - Click a step to open its output beneath a rule. The run summary folds its
   steps, including thoughts.
-- The model pill (or Cmd+M) opens a searchable, provider-grouped model picker.
-  Selecting a model changes the pill; effort has a segmented control.
+- The model pill (or Cmd+M) opens a searchable, provider-grouped model picker
+  (`model_picker.rs`, data and rules in `catalog.rs`). Over the real server it
+  lists what `getConfig` reports, with the TUI's rules (`core/catalog/selection.ts`,
+  `summary.ts`, `tui/model/display.ts`, `continue.ts`):
+  - A new thread lists every enabled provider; an open thread stays on its own
+    provider, so only that provider's models are listed, even if the provider
+    has been turned off since. A model the user hid (`models hide`) is left out
+    unless the thread is on it. A "default" tag marks the catalog's default; a
+    "Low–Max" range shows the reasoning levels a model takes.
+  - A provider that is not installed has its models disabled; one that is
+    installed but signed out shows the server's own status ("Run codex login")
+    and can still be chosen, as the TUI does.
+  - Each select option of the chosen model (reasoning effort, say) is a
+    segmented control; the level in force is the chosen one, else the catalog's
+    current/default, else medium (or the middle level). Switching model keeps
+    flags and any option value the new model also offers, and sets missing
+    reasoning levels to their default (`Catalog::rebase`).
+  - An open thread changes model with `thread.model-selection.set` (shown at
+    once; a refusal puts the old model back). A new-thread draft keeps the
+    choice in `Workspace.new_model` and sends it on `thread.create` and
+    `thread.turn.start`. The catalog is read on connect and again whenever the
+    picker opens, so a newly hidden model or a signed-in provider shows up.
+  - The transcript's author line and the pill use the catalog's name and the
+    provider's colour (`provider-claude`, `provider-opencode`, else ink).
+  Not done: arrow/Enter keyboard navigation in the picker, the per-thread model
+  of each past turn (the thread's current model labels every turn), and the
+  "default" tag following the settings' Model (only the catalog's default).
 - Cmd+I or the title-bar control toggles the inspector. Ctrl+T, Tasks or the
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
@@ -220,6 +245,8 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
 - `thread_view.rs`: reading column and composer shell.
 - `steps.rs`: compact tool/thought rows, syntax colours and expanded output.
 - `model_picker.rs`: model and effort popover.
+- `catalog.rs`: the providers, models and efforts `getConfig` reports, and the
+  TUI's selection rules over them (offered models, names, effort, rebase).
 - `composer.rs`: native input, shaping, caret and hit testing.
 - `theme.rs`: colour, pixel-token, focus-ring and shadow resolution through the
   pinned tokens, and layout constants.

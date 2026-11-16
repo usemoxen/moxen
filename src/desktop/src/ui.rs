@@ -152,7 +152,7 @@ pub fn kbd(key: &'static str) -> Div {
 }
 
 /// A small uppercase section label (`mono-caps`).
-pub fn caps(label: &'static str) -> Div {
+pub fn caps(label: &str) -> Div {
     div()
         .type_scale("mono-caps")
         .text_color(color("ink-2"))
@@ -170,6 +170,21 @@ pub fn segmented(
     cx: &mut Context<Workspace>,
     set: fn(&mut Workspace, usize),
 ) -> Div {
+    let labels: Vec<SharedString> = options.iter().map(|l| (*l).into()).collect();
+    segments(id.into(), &labels, selected, pad, cx, move |this, i, _| {
+        set(this, i)
+    })
+}
+
+/// `segmented` for options only known at run time.
+pub fn segments(
+    id: SharedString,
+    options: &[SharedString],
+    selected: usize,
+    pad: f32,
+    cx: &mut Context<Workspace>,
+    set: impl Fn(&mut Workspace, usize, &mut Context<Workspace>) + Clone + 'static,
+) -> Div {
     div()
         .flex()
         .p(px(3.))
@@ -178,9 +193,10 @@ pub fn segmented(
         .bg(color("sunk"))
         .children(options.iter().enumerate().map(|(i, label)| {
             let on = selected == i;
+            let set = set.clone();
             div()
-                .id((id, i))
-                .control(*label)
+                .id(ElementId::NamedInteger(id.clone(), i as u64))
+                .control(label.clone())
                 .flex()
                 .items_center()
                 .h(px(24.))
@@ -199,9 +215,9 @@ pub fn segmented(
                         spread_radius: px(1.),
                     }])
                 })
-                .child(*label)
+                .child(label.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    set(this, i);
+                    set(this, i, cx);
                     cx.notify();
                 }))
         }))

@@ -9,9 +9,10 @@
 //! stops listing it, because the window keys per-thread state by it.
 
 use crate::{
+    catalog::Catalog,
     model::{
-        Connection, Delivery, DiffLine, InspectorData, Message, NewThread, Problem, Project,
-        QueueEdit, Queued, Reply, Status, Thread, ThreadId, ThreadSource,
+        CatalogState, Connection, Delivery, DiffLine, InspectorData, Message, NewThread, Problem,
+        Project, QueueEdit, Queued, Reply, Selection, Status, Thread, ThreadId, ThreadSource,
     },
     transcript::{self, Row},
     wire::{Wire, WireError},
@@ -367,6 +368,8 @@ struct State {
     opening: Option<String>,
     opened: Option<ThreadId>,
     added: Option<String>,
+    /// The providers and models, once read: `None` until the first answer.
+    catalog: Option<Result<Arc<Catalog>, String>>,
 }
 impl State {
     /// Replaces the listed threads with a shell snapshot's.
@@ -630,6 +633,7 @@ impl ServerSource {
 fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
     let (wire, _hello) = Wire::connect(endpoint)?;
     let wire = Arc::new(wire);
+    load_catalog(shared, &wire);
     let subscription = wire.subscribe_shell()?;
     shared.update(|state| {
         state.wire_epoch += 1;
@@ -656,6 +660,33 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
         state.watch += 1;
     });
     ended
+}
+
+/// Reads the providers, models and efforts (`getConfig`) on its own thread.
+/// A failed read is kept, to be shown and tried again when the picker opens.
+fn load_catalog(shared: &Arc<Shared>, wire: &Arc<Wire>) {
+    let (shared, wire) = (shared.clone(), wire.clone());
+    let spawned = std::thread::Builder::new()
+        .name("moxen-catalog".into())
+        .spawn(move || {
+            let read = wire
+                .request("getConfig", None)
+                .map_err(|error| error.message)
+                .and_then(|config| {
+                    Catalog::from_config(&config)
+                        .map(Arc::new)
+                        .ok_or_else(|| "The server's provider list was not understood.".to_string())
+                });
+            shared.update(|state| match read {
+                Ok(catalog) => state.catalog = Some(Ok(catalog)),
+                // Keeps a catalog already read: a hiccup should not empty the picker.
+                Err(message) if !matches!(state.catalog, Some(Ok(_))) => {
+                    state.catalog = Some(Err(message))
+                }
+                Err(_) => {}
+            });
+        });
+    drop(spawned);
 }
 
 /// Starts following the focused thread's conversation, ending any watcher
@@ -967,19 +998,74 @@ impl ThreadSource for ServerSource {
         let state = self.shared.state.lock().expect("live state");
         state.projects.clone()
     }
-    fn create_thread(&mut self, draft: NewThread) {
-        // The thread starts on the model the project's newest thread runs on;
-        // with none, the server's default for the project. Choosing one is the
-        // model picker's job.
-        let selection = {
-            let state = self.shared.state.lock().expect("live state");
-            state
-                .slots
-                .iter()
-                .filter(|slot| slot.present && slot.project_id == draft.project)
-                .max_by_key(|slot| slot.sort_ms)
-                .and_then(|slot| slot.selection.clone())
+    fn catalog(&self) -> CatalogState {
+        match &self.shared.state.lock().expect("live state").catalog {
+            None => CatalogState::Loading,
+            Some(Ok(catalog)) => CatalogState::Ready(catalog.clone()),
+            Some(Err(message)) => CatalogState::Failed(message.clone()),
+        }
+    }
+    fn refresh_catalog(&mut self) {
+        let wire = self.shared.state.lock().expect("live state").wire.clone();
+        if let Some(wire) = wire {
+            load_catalog(&self.shared, &wire);
+        }
+    }
+    fn selection(&self, id: ThreadId) -> Option<Selection> {
+        let state = self.shared.state.lock().expect("live state");
+        state
+            .slots
+            .get(id)?
+            .selection
+            .as_ref()
+            .and_then(Selection::from_json)
+    }
+    fn project_selection(&self, project: &str) -> Option<Selection> {
+        let state = self.shared.state.lock().expect("live state");
+        project_selection(&state, project).and_then(|value| Selection::from_json(&value))
+    }
+    fn set_model(&mut self, id: ThreadId, selection: Selection) {
+        let value = selection.to_json();
+        // Shown at once; the shell's next snapshot confirms it, and a refusal
+        // puts the old one back.
+        let (uuid, before) = {
+            let mut state = self.shared.state.lock().expect("live state");
+            let Some(slot) = state.slots.get_mut(id) else {
+                return;
+            };
+            let before = (slot.selection.clone(), slot.thread.model.clone());
+            slot.selection = Some(value.clone());
+            slot.thread.model = selection.model.clone();
+            (slot.uuid.clone(), before)
         };
+        self.shared.update(|_| {});
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "thread.model-selection.set",
+                json!({ "threadId": uuid, "modelSelection": value }),
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                shared.update(|state| {
+                    if let Some(slot) = state.slots.get_mut(id)
+                        && slot.selection.as_ref() == Some(&value)
+                    {
+                        slot.selection = before.0;
+                        slot.thread.model = before.1;
+                    }
+                });
+                problem(&error, None)
+            })
+        });
+    }
+    fn create_thread(&mut self, draft: NewThread) {
+        // The thread starts on the model chosen for it; else the one the
+        // project's newest thread runs on; with none, the server's default.
+        let selection = draft.model.as_ref().map(Selection::to_json).or_else(|| {
+            let state = self.shared.state.lock().expect("live state");
+            project_selection(&state, &draft.project)
+        });
         let shared = self.shared.clone();
         background(&self.shared, move |wire| {
             let unsent = || Some((None, draft.text.clone()));
@@ -1071,6 +1157,16 @@ impl ThreadSource for ServerSource {
         state.problems.pop_front()
     }
     fn stream_word(&mut self, _: ThreadId, _: usize, _: &str, _: bool) {}
+}
+
+/// The model the project's newest thread runs on, as the server sent it.
+fn project_selection(state: &State, project: &str) -> Option<Value> {
+    state
+        .slots
+        .iter()
+        .filter(|slot| slot.present && slot.project_id == project)
+        .max_by_key(|slot| slot.sort_ms)
+        .and_then(|slot| slot.selection.clone())
 }
 
 impl ServerSource {
@@ -1388,6 +1484,16 @@ mod tests {
                                     .unwrap();
                                 continue;
                             }
+                            "getConfig" => json!({"providers": [{
+                                "instanceId": "claude", "driver": "claudeAgent", "displayName": "Claude Code",
+                                "enabled": true, "installed": true, "auth": {"status": "authenticated"},
+                                "models": [
+                                    {"slug": "opus", "name": "Opus", "isCustom": false,
+                                     "capabilities": {"optionDescriptors": [
+                                        {"id": "effort", "label": "Effort", "type": "select",
+                                         "options": [{"id": "low", "label": "Low"}, {"id": "max", "label": "Max"}]}]}},
+                                    {"slug": "haiku", "name": "Haiku", "isCustom": false}
+                                ]}], "settings": {}}),
                             "query" => json!({"entries": [
                                 {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
                                 {"threadId": "other", "turnId": "x", "policy": {"held": false}},
@@ -1477,6 +1583,7 @@ mod tests {
             text: "build it\nplease".into(),
             runtime_mode: Some("auto".into()),
             interaction_mode: "research".into(),
+            model: None,
         });
         let create = sent(7);
         assert_eq!(create["type"], "thread.create");
@@ -1489,6 +1596,37 @@ mod tests {
         assert_eq!(start["type"], "thread.turn.start");
         assert_eq!(start["threadId"], "new-thread");
         assert_eq!(start["message"]["text"], "build it\nplease");
+
+        // The catalog the server reports, and a thread's model changing
+        // through `thread.model-selection.set`, shown at once.
+        wait_for("the catalog", || {
+            matches!(source.catalog(), CatalogState::Ready(_))
+        });
+        let CatalogState::Ready(catalog) = source.catalog() else {
+            unreachable!()
+        };
+        let haiku = catalog.rebase(source.selection(0).as_ref(), "claude", "haiku");
+        source.set_model(0, haiku.clone());
+        let set = sent(9);
+        assert_eq!(set["type"], "thread.model-selection.set");
+        assert_eq!(set["threadId"], "t1");
+        assert_eq!(set["modelSelection"], haiku.to_json());
+        assert_eq!(source.selection(0), Some(haiku));
+
+        // A thread started with a model of its own does not take the project's.
+        let max = catalog
+            .rebase(None, "claude", "opus")
+            .with_option("effort", "max");
+        source.create_thread(NewThread {
+            project: "p".into(),
+            text: "again".into(),
+            runtime_mode: None,
+            interaction_mode: "default".into(),
+            model: Some(max.clone()),
+        });
+        let create = sent(10);
+        assert_eq!(create["modelSelection"], max.to_json());
+        assert_eq!(sent(11)["modelSelection"], max.to_json());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -82,7 +82,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
         .rposition(|m| matches!(m, Message::Assistant { .. }));
     let entity = cx.entity();
     let state = w.lists[id].clone();
-    let model = thread.model.clone();
+    let (model, model_tone) = w.model_label(w.source.selection(id).as_ref());
     let started = thread.started_at;
     div()
         .relative()
@@ -151,7 +151,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             div()
                                                 .text_size(px(13.5))
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(color("provider-claude"))
+                                                .text_color(color(model_tone))
                                                 .child(model.clone()),
                                         )
                                         .child(
@@ -351,7 +351,7 @@ fn composer(
                                 .gap(px(4.))
                                 .items_center()
                                 .when(creating, |s| s.child(project_chip(w, cx)))
-                                .child(model_pill(w, thread, cx))
+                                .child(model_pill(w, cx))
                                 .child(menu_chip(
                                     w,
                                     Dropdown::Access,
@@ -553,43 +553,14 @@ fn mode_of(w: &Workspace, thread: &Thread) -> String {
     }
 }
 
-fn model_pill(w: &Workspace, thread: &Thread, cx: &mut Context<Workspace>) -> impl IntoElement {
-    if !w.source.preview() {
-        // The server's own model name; choosing another is the model picker's job.
-        let name = if w.creating {
-            "Project's model".to_string()
-        } else {
-            thread.model.clone()
-        };
-        return div()
-            .id("model-pill")
-            .inert("The model is chosen from the model picker, which is not available yet")
-            .h(px(28.))
-            .px(px(10.))
-            .flex()
-            .gap(px(8.))
-            .items_center()
-            .rounded(px(14.))
-            .child(
-                div()
-                    .size(px(8.))
-                    .rounded(px(2.))
-                    .bg(color("provider-claude")),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color("provider-claude"))
-                    .child(name),
-            )
-            .into_any_element();
-    }
-    let provider = if w.model < 4 {
-        "provider-claude"
-    } else {
-        "provider-opencode"
-    };
+fn model_pill(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let selection = w.effective_selection();
+    let (name, tone) = w.model_label(selection.as_ref());
+    // The reasoning level beside the name, once the catalog says what it is.
+    let effort = selection
+        .as_ref()
+        .zip(w.catalog())
+        .and_then(|(selection, catalog)| catalog.effort_label(selection));
     div()
         .id("model-pill")
         .shortcut("Model and effort", "⌘M")
@@ -601,21 +572,23 @@ fn model_pill(w: &Workspace, thread: &Thread, cx: &mut Context<Workspace>) -> im
         .items_center()
         .rounded(px(14.))
         .when(w.picker_open, |s| s.bg(color("sunk")))
-        .child(div().size(px(8.)).rounded(px(2.)).bg(color(provider)))
+        .child(div().size(px(8.)).rounded(px(2.)).bg(color(tone)))
         .child(
             div()
                 .text_size(px(13.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color(provider))
-                .child(crate::model_picker::MODELS[w.model].0),
+                .text_color(color(tone))
+                .child(name),
         )
-        .child(
-            div()
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(color("effort"))
-                .child(crate::model_picker::EFFORTS[w.effort]),
-        )
+        .when_some(effort, |s, effort| {
+            s.child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color("effort"))
+                    .child(effort),
+            )
+        })
         .child(ui::icon("chevron-down", "ink-2"))
         .on_click(cx.listener(|this, _, window, cx| this.toggle_picker(window, cx)))
         .into_any_element()

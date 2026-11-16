@@ -1,4 +1,6 @@
+use crate::catalog::{Catalog, OptionValue};
 use crate::model::*;
+use serde_json::{Value, json};
 use std::time::Instant;
 
 /// How many threads the fixtures hold.
@@ -11,6 +13,70 @@ pub struct MockSource {
     queues: Vec<Vec<String>>,
     opened: Option<ThreadId>,
     added: Option<String>,
+    catalog: std::sync::Arc<Catalog>,
+    selections: Vec<Selection>,
+}
+
+/// The `getConfig` answer the fixtures stand in for: the providers the
+/// mockups show, a model with no effort options, and one hidden model.
+fn fixture_config() -> Value {
+    let levels = json!([
+        { "id": "low", "label": "Low" },
+        { "id": "medium", "label": "Medium", "isDefault": true },
+        { "id": "high", "label": "High" },
+        { "id": "xhigh", "label": "Extra" },
+        { "id": "max", "label": "Max" }
+    ]);
+    let effort = json!({ "capabilities": { "optionDescriptors": [
+        { "id": "effort", "label": "Effort", "type": "select", "options": levels }
+    ] } });
+    let model = |slug: &str, name: &str, extra: &Value, default: bool| {
+        let mut model =
+            json!({ "slug": slug, "name": name, "isCustom": false, "isDefault": default });
+        if let (Some(model), Some(extra)) = (model.as_object_mut(), extra.as_object()) {
+            model.extend(extra.clone());
+        }
+        model
+    };
+    let none = json!({});
+    json!({
+        "providers": [
+            {
+                "instanceId": "claudeAgent", "driver": "claudeAgent", "displayName": "Claude Code",
+                "enabled": true, "installed": true, "status": "Ready", "auth": { "status": "authenticated" },
+                "models": [
+                    model("fable-5-1", "Fable 5.1", &effort, false),
+                    model("opus-5-5", "Opus 5.5", &effort, true),
+                    model("sonnet-5-5", "Sonnet 5.5", &effort, false),
+                    model("haiku-4-5", "Haiku 4.5", &effort, false),
+                    model("opus-4", "Opus 4", &effort, false)
+                ]
+            },
+            {
+                "instanceId": "opencode", "driver": "opencode", "displayName": "OpenCode",
+                "enabled": true, "installed": true, "status": "Ready", "auth": { "status": "authenticated" },
+                "models": [
+                    model("space-bunny-free", "Space Bunny Free", &none, true),
+                    model("big-pickle", "Big Pickle", &none, false),
+                    model("grok-code-fast-1", "Grok Code Fast 1", &none, false)
+                ]
+            },
+            {
+                "instanceId": "codex", "driver": "codex", "displayName": "Codex",
+                "enabled": true, "installed": true, "status": "Run codex login",
+                "auth": { "status": "unauthenticated" },
+                "models": [ model("gpt-6-1", "GPT-6.1", &effort, true) ]
+            }
+        ],
+        "settings": { "providerModelPreferences": { "claudeAgent": { "hiddenModels": ["opus-4"] } } }
+    })
+}
+fn opus() -> Selection {
+    Selection {
+        instance: "claudeAgent".into(),
+        model: "opus-5-5".into(),
+        options: vec![("effort".into(), OptionValue::Text("medium".into()))],
+    }
 }
 impl MockSource {
     pub fn new() -> Self {
@@ -108,7 +174,7 @@ impl MockSource {
                     activity: activity.into(),
                     depth,
                     settled,
-                    model: "Claude Opus 5.5".into(),
+                    model: "opus-5-5".into(),
                     started_at: None,
                     runtime_mode: "full-access".into(),
                     interaction_mode: "default".into(),
@@ -136,6 +202,10 @@ impl MockSource {
             queues: vec![vec![]; count],
             opened: None,
             added: None,
+            catalog: std::sync::Arc::new(
+                Catalog::from_config(&fixture_config()).expect("fixture catalog"),
+            ),
+            selections: vec![opus(); count],
         }
     }
     pub fn preview() -> Self {
@@ -253,6 +323,7 @@ impl ThreadSource for MockSource {
     fn create_thread(&mut self, draft: NewThread) {
         let id = self.threads.len();
         let title: String = draft.text.chars().take(48).collect();
+        let selection = draft.model.unwrap_or_else(opus);
         self.threads.push(Thread {
             id,
             title,
@@ -261,7 +332,7 @@ impl ThreadSource for MockSource {
             activity: "now".into(),
             depth: 0,
             settled: false,
-            model: "Claude Opus 5.5".into(),
+            model: selection.model.clone(),
             started_at: None,
             runtime_mode: draft.runtime_mode.unwrap_or_else(|| "full-access".into()),
             interaction_mode: draft.interaction_mode,
@@ -275,6 +346,7 @@ impl ThreadSource for MockSource {
         ]);
         self.running.push(None);
         self.queues.push(vec![]);
+        self.selections.push(selection);
         self.opened = Some(id);
     }
     fn order(&self, _: bool) -> Vec<ThreadId> {
@@ -292,6 +364,19 @@ impl ThreadSource for MockSource {
     }
     fn take_added(&mut self) -> Option<String> {
         self.added.take()
+    }
+    fn catalog(&self) -> CatalogState {
+        CatalogState::Ready(self.catalog.clone())
+    }
+    fn selection(&self, id: ThreadId) -> Option<Selection> {
+        self.selections.get(id).cloned()
+    }
+    fn project_selection(&self, _: &str) -> Option<Selection> {
+        Some(opus())
+    }
+    fn set_model(&mut self, id: ThreadId, selection: Selection) {
+        self.threads[id].model = selection.model.clone();
+        self.selections[id] = selection;
     }
     fn set_modes(&mut self, id: ThreadId, runtime: &str, interaction: &str) {
         self.threads[id].runtime_mode = runtime.into();
