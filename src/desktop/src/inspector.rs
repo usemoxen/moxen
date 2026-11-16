@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
     workspace::Workspace,
@@ -6,12 +7,14 @@ use gpui::{prelude::*, *};
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let data = w.source.inspector(w.selected);
     let mut pane = div()
+        .id("inspector-scroll")
         .relative()
         .w(px(w.inspector_width))
         .h_full()
         .flex_shrink_0()
         .flex()
         .flex_col()
+        .overflow_y_scroll()
         .line_height(px(18.2))
         .bg(color("ground"))
         .border_l_1()
@@ -40,7 +43,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(10.))
                 .items_center()
                 .text_size(px(13.))
-                .child("Tasks")
+                .child(div().font_weight(FontWeight::BOLD).child("Tasks"))
                 .child(
                     div()
                         .text_color(color("ink-2"))
@@ -72,15 +75,15 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .child(
                         div()
                             .text_color(color(if i == 3 { "live" } else { "ink-2" }))
-                            .child(if i < 3 {
-                                "✓"
+                            .child(ui::state(if i < 3 {
+                                crate::model::Status::Idle
                             } else if i == 3 {
-                                "◐"
+                                crate::model::Status::Running
                             } else {
-                                "○"
-                            }),
+                                crate::model::Status::Queued
+                            })),
                     )
-                    .child(div().w(px(292.)).flex_shrink_0().min_w_0().child(t))
+                    .child(div().flex_1().min_w_0().child(t))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -106,6 +109,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .map(|(i, t)| {
                         div()
                             .id(("tab", i))
+                            .control(t)
                             .py(px(8.))
                             .border_b_2()
                             .border_color(color(if w.tab == i { "ink" } else { "ground" }))
@@ -121,7 +125,10 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     }),
             ),
     );
-    if w.tab != 1 {
+    if w.tab == 2 {
+        return pane.child(crate::usage::render());
+    }
+    if w.tab != 1 && w.tab != 0 {
         return pane.child(
             div()
                 .p(px(24.))
@@ -138,8 +145,22 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             .justify_between()
             .text_size(px(12.))
             .text_color(color("ink-2"))
-            .child("‹  Commits")
-            .child("5a7bee1  ⧉    ↗    ⤢"),
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(ui::icon("chevron-left", "ink-2"))
+                    .child("Commits"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child("5a7bee1")
+                    .child(ui::icon("copy", "ink-2"))
+                    .child(ui::icon("external-link", "ink-2"))
+                    .child(ui::icon("maximize", "ink-2")),
+            ),
     )
     .child(
         div()
@@ -153,7 +174,28 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .text_size(px(16.))
                     .child(data.subject),
             )
-            .child(div().text_size(px(12.)).child(data.author))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .rounded_full()
+                            .bg(color("sunk"))
+                            .border_1()
+                            .border_color(color("rule"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(9.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("AM"),
+                    )
+                    .child(data.author),
+            )
             .child(
                 div()
                     .flex()
@@ -189,27 +231,50 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .text_size(px(11.5))
                     .text_color(color("ink-2"))
                     .child("FILES")
-                    .child("73 · +5706 −2165"),
+                    .child("3 · +68 −9"),
             ),
     )
-    .children(data.files.into_iter().map(|(file, delta)| {
-        let (added, removed) = delta.split_once(' ').unwrap_or((&delta, ""));
-        div()
-            .px(px(16.))
-            .py(px(7.))
-            .flex()
-            .gap(px(8.))
-            .text_size(px(12.5))
-            .font_family(theme::MONO)
-            .child(
+    .children(
+        data.files
+            .into_iter()
+            .enumerate()
+            .map(|(i, (file, delta))| {
+                let (added, removed) = delta.split_once(' ').unwrap_or((&delta, ""));
+                let open = w.expanded_files.contains(&i);
                 div()
-                    .flex_1()
-                    .truncate()
-                    .child(format!("› src/core/providers/opencode/{file}")),
-            )
-            .child(div().text_color(color("added")).child(added.to_string()))
-            .child(div().text_color(color("broken")).child(removed.to_string()))
-    }))
+                    .child(
+                        div()
+                            .id(("git-file", i))
+                            .control(file.clone())
+                            .px(px(16.))
+                            .py(px(7.))
+                            .flex()
+                            .gap(px(8.))
+                            .text_size(px(12.5))
+                            .font_family(theme::MONO)
+                            .items_center()
+                            .child(ui::icon(
+                                if open {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                },
+                                "ink-2",
+                            ))
+                            .child(div().flex_1().truncate().child(format!("src/{file}")))
+                            .when(i == 0, |s| s.child(chip("new")))
+                            .child(div().text_color(color("added")).child(added.to_string()))
+                            .child(div().text_color(color("broken")).child(removed.to_string()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded_files.remove(&i) {
+                                    this.expanded_files.insert(i);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |s| s.child(crate::diff::render(i)))
+            }),
+    )
 }
 fn chip(label: &'static str) -> impl IntoElement {
     div()

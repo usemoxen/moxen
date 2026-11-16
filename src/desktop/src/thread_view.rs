@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{
     model::Message,
     theme::{self, color},
@@ -27,13 +28,11 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     }
                     let open = entity.read(cx).expanded.contains(&(id, index));
                     let body = match messages[index].clone() {
-                        Message::User { text, preview } => div()
+                        Message::User { text } => div()
                             .flex()
                             .flex_col()
                             .items_end()
                             .gap(px(8.))
-                            .when(preview, |s| s.pt(px(17.)))
-                            .when(preview, |s| s.child(preview_thumbnail()))
                             .child(
                                 div()
                                     .max_w(px(594.))
@@ -82,15 +81,24 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                 s.child(
                                     div()
                                         .id("run-summary")
+                                        .control("Fold or expand the run")
                                         .text_size(px(12.5))
                                         .font_family(theme::MONO)
                                         .text_color(color("ink-2"))
                                         .cursor_pointer()
                                         .py(px(8.))
-                                        .child(format!(
-                                            "{} Ran 4 commands, read 3 files · 38s",
-                                            if folded { "▸" } else { "▾" }
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(ui::icon(
+                                            if folded {
+                                                "chevron-right"
+                                            } else {
+                                                "chevron-down"
+                                            },
+                                            "ink-2",
                                         ))
+                                        .child("Ran 3 commands, read 3 files, edited 1 file")
                                         .on_click(move |_, _, cx| {
                                             target.update(cx, |this, cx| {
                                                 if !this.folded.remove(&id) {
@@ -141,6 +149,60 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .flex()
                         .flex_col()
                         .gap(px(6.))
+                        .when(!w.source.queued(id).is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .px(px(10.))
+                                    .py(px(6.))
+                                    .rounded(px(8.))
+                                    .bg(color("sunk"))
+                                    .text_size(px(12.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .truncate()
+                                            .child(w.source.queued(id)[0].clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("edit-queued")
+                                            .control("Edit queued message")
+                                            .px(px(6.))
+                                            .rounded(px(4.))
+                                            .child("Edit")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if let Some(text) =
+                                                    this.source.take_queued(this.selected)
+                                                {
+                                                    this.composers[this.selected]
+                                                        .update(cx, |c, cx| c.set_text(text, cx));
+                                                    window.focus(
+                                                        &this.composers[this.selected]
+                                                            .read(cx)
+                                                            .focus
+                                                            .clone(),
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("send-queued")
+                                            .control("Stop this turn and send queued message")
+                                            .px(px(6.))
+                                            .rounded(px(4.))
+                                            .child("Send now")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.send_queued(cx)),
+                                            ),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
                                 .border_1()
@@ -166,6 +228,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                         .child(
                                             div()
                                                 .id("model-pill")
+                                                .control("Choose model and effort")
                                                 .h(px(28.))
                                                 .px(px(10.))
                                                 .flex()
@@ -182,8 +245,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                         } else {
                                                             "provider-opencode"
                                                         }))
+                                                        .font_weight(FontWeight::SEMIBOLD)
                                                         .child(format!(
-                                                            "▪ {}",
+                                                            "{}",
                                                             crate::model_picker::MODELS[w.model].0
                                                         )),
                                                 )
@@ -191,7 +255,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                     ["Low", "Medium", "High", "Extra", "Max"]
                                                         [w.effort],
                                                 ))
-                                                .child("⌄")
+                                                .child(ui::icon("chevron-down", "ink-2"))
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.picker_open = !this.picker_open;
                                                     cx.notify();
@@ -201,7 +265,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                             div()
                                                 .text_size(px(12.5))
                                                 .text_color(color("ink-2"))
-                                                .child("Full access ⌄"),
+                                                .child("Full access"),
                                         ),
                                 )
                                 .child(w.composers[id].clone())
@@ -210,7 +274,11 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                         .flex()
                                         .items_center()
                                         .justify_between()
-                                        .child(div().text_color(color("ink-2")).child("📎"))
+                                        .child(
+                                            div()
+                                                .text_color(color("ink-2"))
+                                                .child(ui::icon("paperclip", "ink-2")),
+                                        )
                                         .child(
                                             div()
                                                 .flex()
@@ -218,12 +286,20 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                 .child(
                                                     div()
                                                         .id("stop")
+                                                        .control("Stop reply · Escape")
+                                                        .when(
+                                                            thread.status
+                                                                != crate::model::Status::Running,
+                                                            |s| s.opacity(0.4),
+                                                        )
                                                         .size(px(30.))
                                                         .border_1()
                                                         .border_color(color("edge"))
                                                         .rounded(px(8.))
-                                                        .text_center()
-                                                        .child("▪")
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(ui::icon("square", "ink-2"))
                                                         .cursor_pointer()
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             this.stop(cx)
@@ -232,6 +308,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                 .child(
                                                     div()
                                                         .id("send")
+                                                        .control(
+                                                            "Send · Enter; queues while working",
+                                                        )
                                                         .size(px(30.))
                                                         .rounded(px(8.))
                                                         .bg(color(
@@ -256,9 +335,11 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                                 "on-ink"
                                                             },
                                                         ))
-                                                        .text_center()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
                                                         .cursor_pointer()
-                                                        .child("↑")
+                                                        .child(ui::icon("arrow-up", "ink-2"))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 window.focus(
@@ -286,16 +367,44 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                 .text_size(px(11.5))
                                 .text_color(color("ink-2"))
                                 .child(
-                                    div().flex().gap(px(6.)).child("⑂ opencode-v2 ").child(
-                                        div().text_color(color("effort")).child("10 changed"),
-                                    ),
+                                    div()
+                                        .id("branch")
+                                        .control("Open Git")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.tab = 1;
+                                            this.inspector_open = true;
+                                            cx.notify();
+                                        }))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(ui::icon("git-branch", "ink-2"))
+                                        .child("picker-focus")
+                                        .child(
+                                            div().text_color(color("effort")).child("10 changed"),
+                                        ),
                                 )
                                 .child(
                                     div()
                                         .id("usage")
+                                        .control("Open context and plan usage")
                                         .rounded(px(6.))
                                         .cursor_pointer()
-                                        .child("66% 663k / 1m | 5h 36% wk 43%")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .child(crate::usage::meter(34., 4.))
+                                        .child("66% 663k / 1m")
+                                        .child(
+                                            div()
+                                                .text_color(color("context-tools"))
+                                                .child("5h 36%"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(color("context-system"))
+                                                .child("wk 43%"),
+                                        )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.tab = 2;
                                             this.inspector_open = true;
@@ -308,63 +417,4 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .when(w.picker_open, |s| {
             s.child(crate::model_picker::render(w, cx))
         })
-}
-
-fn preview_thumbnail() -> impl IntoElement {
-    div()
-        .w(px(260.))
-        .h(px(160.))
-        .rounded(px(14.))
-        .bg(color("ground"))
-        .flex()
-        .overflow_hidden()
-        .child(
-            div()
-                .w(px(64.))
-                .border_r_1()
-                .border_color(color("rule"))
-                .p(px(10.))
-                .flex()
-                .flex_col()
-                .gap(px(7.))
-                .children([40., 34., 44.].into_iter().map(|width| {
-                    div()
-                        .w(px(width))
-                        .h(px(5.))
-                        .rounded(px(3.))
-                        .bg(color("rule"))
-                })),
-        )
-        .child(
-            div()
-                .flex_1()
-                .p(px(12.))
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(div().h(px(6.)).bg(color("rule")).rounded(px(3.)))
-                .child(
-                    div()
-                        .w(px(130.))
-                        .h(px(6.))
-                        .bg(color("rule"))
-                        .rounded(px(3.)),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .h(px(50.))
-                        .border_1()
-                        .border_color(color("live"))
-                        .rounded(px(8.))
-                        .p(px(10.))
-                        .child(
-                            div()
-                                .w(px(70.))
-                                .h(px(12.))
-                                .rounded(px(6.))
-                                .bg(color("provider-claude")),
-                        ),
-                ),
-        )
 }

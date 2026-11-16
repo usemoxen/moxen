@@ -27,13 +27,13 @@ impl Status {
             Self::Queued => "ink-2",
         }
     }
-    pub fn glyph(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
-            Self::Running => "◐",
-            Self::Idle => "✓",
-            Self::Error => "×",
-            Self::Held => "●",
-            Self::Queued => "○",
+            Self::Running => "state-running",
+            Self::Idle => "check",
+            Self::Error => "x",
+            Self::Held => "state-held",
+            Self::Queued => "circle",
         }
     }
 }
@@ -47,12 +47,12 @@ pub struct Thread {
     pub project: String,
     pub depth: usize,
     pub settled: bool,
+    pub started_at: Option<std::time::Instant>,
 }
 #[derive(Clone)]
 pub enum Message {
     User {
         text: String,
-        preview: bool,
     },
     Assistant(String),
     Tool {
@@ -74,6 +74,8 @@ pub struct InspectorData {
 }
 
 pub trait ThreadSource {
+    fn queued(&self, id: ThreadId) -> &[String];
+    fn take_queued(&mut self, id: ThreadId) -> Option<String>;
     fn inspector(&self, id: ThreadId) -> InspectorData;
     fn list_threads(&self) -> Vec<Thread>;
     fn messages(&self, id: ThreadId) -> Vec<Message>;

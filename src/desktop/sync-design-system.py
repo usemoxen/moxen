@@ -17,11 +17,39 @@ FILES = ["tokens.json", "tokens.css", "components/bundle.css", "components/bundl
          "mockups/agent-desktop/source/ds/moxen/tokens.css",
          "mockups/agent-desktop/source/ds/moxen/components/bundle.css",
          "mockups/agent-desktop/source/ds/moxen/components/bundle.js"]
-for name in FILES:
-    entry = json.loads(subprocess.check_output(["gh", "api", f"repos/usemoxen/design-system/contents/{name}?ref={REV}"]))
-    blob = json.loads(subprocess.check_output(["gh", "api", f"repos/usemoxen/design-system/git/blobs/{entry['sha']}"]))
+def fetch(repo, revision, name, target):
+    entry = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/contents/{name}?ref={revision}"]))
+    blob = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/git/blobs/{entry['sha']}"]))
     data = base64.b64decode(blob["content"])
-    target = ROOT / name
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+
+for name in FILES:
+    fetch("usemoxen/design-system", REV, name, ROOT / name)
 (ROOT / "REVISION").write_text(REV + "\n")
+
+# The design system has no font or icon assets at this revision.
+LUCIDE = "55782beff3a0133df79c417eb68f96e8f19e2404"
+ICONS = ["check", "circle", "circle-dot", "circle-gauge", "x", "chevron-right",
+         "chevron-down", "chevron-left", "external-link", "square", "dollar-sign",
+         "asterisk", "paperclip", "file", "pencil", "search", "square-pen",
+         "panel-right", "settings", "arrow-up", "git-branch", "copy", "maximize"]
+for name in ICONS:
+    fetch("lucide-icons/lucide", LUCIDE, f"icons/{name}.svg", ROOT.parent / "icons" / f"{name}.svg")
+fetch("lucide-icons/lucide", LUCIDE, "LICENSE", ROOT.parent / "icons/LICENSE")
+
+# Explicit static instances let native font matching select real weights.
+# Install fonttools in the Python environment used to run this script.
+from fontTools.ttLib import TTFont
+from fontTools.varLib.instancer import instantiateVariableFont
+FONTS = "cc39c4c2c304bc368c9b7c311ea2bcc6013299fe"
+for family, stem, weights in [
+    ("atkinsonhyperlegiblenext", "AtkinsonHyperlegibleNext", [500, 600, 700, 800]),
+    ("atkinsonhyperlegiblemono", "AtkinsonHyperlegibleMono", [500]),
+]:
+    variable = ROOT.parent / "fonts" / f"{stem}-Variable.ttf"
+    fetch("google/fonts", FONTS, f"ofl/{family}/{stem}[wght].ttf", variable)
+    for weight in weights:
+        font = instantiateVariableFont(TTFont(variable), {"wght": weight}, inplace=False, updateFontNames=True)
+        font.save(ROOT.parent / "fonts" / f"{stem}-{weight}.ttf")
+    variable.unlink()

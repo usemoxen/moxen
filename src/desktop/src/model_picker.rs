@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
     workspace::Workspace,
@@ -23,15 +24,19 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .bg(color("raised"))
         .border_1()
         .border_color(color("rule"))
-        .shadow_lg()
+        .shadow(theme::float_shadow())
         .text_size(px(14.))
         .line_height(px(20.))
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
                 .px(px(8.))
                 .py(px(6.))
                 .text_color(color("ink-2"))
-                .child(w.search.clone()),
+                .child(ui::icon("search", "ink-2"))
+                .child(div().flex_1().child(w.search.clone())),
         );
     let query = w.search.read(cx).text().to_lowercase();
     let mut provider = None;
@@ -53,16 +58,13 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     } else {
                         "provider-opencode"
                     }))
-                    .child(if i < 4 {
-                        "▪ CLAUDE CODE"
-                    } else {
-                        "▪ OPENCODE"
-                    }),
+                    .child(if i < 4 { "CLAUDE CODE" } else { "OPENCODE" }),
             );
         }
         pane = pane.child(
             div()
                 .id(("model", i))
+                .control(format!("Select {name}"))
                 .h(px(32.))
                 .px(px(8.))
                 .flex()
@@ -70,7 +72,6 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(8.))
                 .rounded(px(6.))
                 .when(w.model == i, |s| s.bg(color("sunk")))
-                .hover(|s| s.bg(color("sunk")))
                 .cursor_pointer()
                 .child(div().flex_1().child(*name))
                 .child(
@@ -80,7 +81,11 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_color(color("ink-2"))
                         .child(*context),
                 )
-                .child(div().w(px(14.)).child(if w.model == i { "✓" } else { "" }))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .when(w.model == i, |s| s.child(ui::icon("check", "ink"))),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.model = i;
                     this.picker_open = false;
@@ -106,6 +111,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .map(|(i, label)| {
                             div()
                                 .id(("effort", i))
+                                .control(format!("{label} effort"))
                                 .px(px(8.))
                                 .py(px(4.))
                                 .rounded(px(6.))
@@ -121,4 +127,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 ),
             ),
     )
+    .with_animation("picker-reveal", ui::reveal(), |s, v| {
+        s.opacity(v).w(px(328. + 6. * v)).bottom(px(194. + 6. * v))
+    })
 }

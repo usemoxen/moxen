@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
     workspace::Workspace,
@@ -6,7 +7,13 @@ use gpui::{prelude::*, *};
 actions!(sidebar, [PreviousThread, NextThread]);
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let threads = w.source.list_threads();
-    let mut rows = div().flex_1().px(px(8.)).pt(px(4.));
+    let mut rows = div()
+        .id("thread-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(8.))
+        .pt(px(4.));
     for (i, t) in threads.iter().enumerate() {
         if t.settled && !w.settled_open {
             continue;
@@ -51,6 +58,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         rows = rows.child(
             div()
                 .id(("thread", i))
+                .control(t.title.clone())
                 .h(px(if t.depth > 0 { 26. } else { theme::ROW }))
                 .ml(px(t.depth as f32 * 23.))
                 .px(px(10.))
@@ -59,15 +67,20 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(8.))
                 .rounded(px(6.))
                 .border_l_2()
-                .border_color(color(if w.selected == i { "live" } else { "ground" }))
+                .border_color(color(if w.selected == i {
+                    "live"
+                } else if t.depth > 0 {
+                    "rule"
+                } else {
+                    "ground"
+                }))
                 .when(w.selected == i, |s| s.bg(color("sunk")))
                 .text_size(px(if t.depth > 0 { 12.5 } else { 13.5 }))
                 .cursor_pointer()
-                .hover(|s| s.bg(color("sunk")))
                 .child(
                     div()
                         .text_color(color(t.status.token()))
-                        .child(t.status.glyph()),
+                        .child(ui::state(t.status)),
                 )
                 .child(
                     div()
@@ -133,9 +146,23 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                 .px(px(10.))
                                 .py(px(2.))
                                 .text_color(color("ink-2"))
-                                .child("⌕  Jump to thread or action  ⌘K"),
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(ui::icon("search", "ink-2"))
+                                .child(div().flex_1().child("Jump to thread or action"))
+                                .child(
+                                    div()
+                                        .px(px(4.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(color("rule"))
+                                        .font_family(theme::MONO)
+                                        .text_size(px(10.))
+                                        .child("⌘K"),
+                                ),
                         )
-                        .child(div().w(px(24.)).child("↗")),
+                        .child(div().w(px(24.)).child(ui::icon("square-pen", "ink-2"))),
                 )
                 .child(
                     div().flex().rounded(px(8.)).bg(color("sunk")).children(
@@ -145,6 +172,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             .map(|(i, s)| {
                                 div()
                                     .id(("group", i))
+                                    .control(s)
                                     .flex_1()
                                     .text_center()
                                     .text_size(px(12.))
@@ -171,9 +199,18 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .child(
                     div()
                         .id("settled-toggle")
+                        .control("Show settled threads")
                         .flex()
                         .justify_between()
-                        .child("›  Settled")
+                        .child(ui::icon(
+                            if w.settled_open {
+                                "chevron-down"
+                            } else {
+                                "chevron-right"
+                            },
+                            "ink-2",
+                        ))
+                        .child("Settled")
                         .child(threads.iter().filter(|t| t.settled).count().to_string())
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -181,6 +218,13 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             cx.notify();
                         })),
                 )
-                .child(div().pt(px(8.)).child("⚙  Settings")),
+                .child(
+                    div()
+                        .pt(px(8.))
+                        .flex()
+                        .gap(px(8.))
+                        .child(ui::icon("settings", "ink-2"))
+                        .child("Settings"),
+                ),
         )
 }

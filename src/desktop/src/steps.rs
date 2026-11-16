@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
     workspace::Workspace,
@@ -13,10 +14,10 @@ pub fn render(
     open: bool,
 ) -> impl IntoElement {
     let (icon, verb, token, meta) = match name.as_str() {
-        "thought" => ("✻", "Thought", "ink-2", "6s"),
-        "command" => ("$", "Ran", "tool-command", "3.4s"),
-        "edit" => ("✎", "Edited", "tool-edit", "+5 −1"),
-        _ => ("▤", "Read", "tool-read", "551 lines"),
+        "thought" => ("asterisk", "Thought", "ink-2", "6s"),
+        "command" => ("dollar-sign", "Ran", "tool-command", "3.4s"),
+        "edit" => ("pencil", "Edited", "tool-edit", "+5 −1"),
+        _ => ("file", "Read", "tool-read", "551 lines"),
     };
     let thought = name == "thought";
     let meta = if name == "read" {
@@ -59,6 +60,7 @@ pub fn render(
         .child(
             div()
                 .id(("step", index))
+                .control(summary.clone())
                 .h(px(32.))
                 .flex()
                 .items_center()
@@ -66,9 +68,8 @@ pub fn render(
                 .px(px(8.))
                 .rounded(px(6.))
                 .when(open, |s| s.bg(color("sunk")))
-                .hover(|s| s.bg(color("sunk")))
                 .cursor_pointer()
-                .child(div().w(px(16.)).text_color(color(token)).child(icon))
+                .child(ui::icon(icon, token))
                 .child(
                     div()
                         .w(px(58.))
@@ -114,7 +115,10 @@ pub fn render(
                     .text_size(px(13.))
                     .text_color(color("ink-2"))
                     .when(thought, |s| s.italic())
-                    .child(output),
+                    .child(output)
+                    .with_animation(("step-reveal", index), ui::reveal(), |s, v| {
+                        s.opacity(v).mt(px(4. * v))
+                    }),
             )
         })
 }

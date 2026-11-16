@@ -35,3 +35,14 @@ pub const COMPOSER: f32 = 48.;
 pub const CURSOR: f32 = 2.;
 pub const WIDTH: f32 = 1440.;
 pub const HEIGHT: f32 = 900.;
+
+pub fn float_shadow() -> Vec<gpui::BoxShadow> {
+    // shadow-float, dark: 0 12px 32px rgba(0,0,0,.55). The rule is drawn by the surface.
+    vec![gpui::BoxShadow {
+        inset: false,
+        color: gpui::rgba(0x0000008c).into(),
+        offset: gpui::point(gpui::px(0.), gpui::px(12.)),
+        blur_radius: gpui::px(32.),
+        spread_radius: gpui::px(0.),
+    }]
+}

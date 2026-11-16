@@ -36,7 +36,7 @@ impl Composer {
         Self {
             focus: cx.focus_handle(),
             enabled: true,
-            placeholder: "Steer the agent. ⌘↵ queues it for after this turn.",
+            placeholder: "Steer the agent…",
             height: theme::COMPOSER,
             surface: "ground",
             text: String::new(),
@@ -48,6 +48,12 @@ impl Composer {
     }
     pub fn text(&self) -> &str {
         &self.text
+    }
+    pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.selection = text.len()..text.len();
+        self.text = text;
+        cx.emit(Changed);
+        cx.notify();
     }
     pub fn demo_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "Show a safe streaming reply.", window, cx);
@@ -280,6 +286,10 @@ impl Render for Composer {
             .id("composer")
             .key_context("Composer")
             .track_focus(&self.focus)
+            .border_b_1()
+            .border_color(color("rule").opacity(0.))
+            .focus_visible(|s| s.border_color(color("live")))
+            .focus(|s| s.border_color(color("live")))
             .w_full()
             .h(px(self.height))
             .bg(color(self.surface))

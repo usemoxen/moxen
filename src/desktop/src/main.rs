@@ -1,4 +1,5 @@
 mod composer;
+mod diff;
 mod inspector;
 mod mock;
 mod model;
@@ -8,6 +9,8 @@ mod steps;
 mod theme;
 mod thread_view;
 mod title_bar;
+mod ui;
+mod usage;
 mod workspace;
 
 use gpui::*;
@@ -20,6 +23,21 @@ fn main() {
         .run(move |cx| {
             cx.text_system()
                 .add_fonts(vec![
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/AtkinsonHyperlegibleNext-500.ttf").as_slice(),
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/AtkinsonHyperlegibleNext-600.ttf").as_slice(),
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/AtkinsonHyperlegibleNext-700.ttf").as_slice(),
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/AtkinsonHyperlegibleNext-800.ttf").as_slice(),
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/AtkinsonHyperlegibleMono-500.ttf").as_slice(),
+                    ),
                     std::borrow::Cow::Borrowed(
                         include_bytes!("../fonts/AtkinsonHyperlegibleNext-Italic.ttf").as_slice(),
                     ),
@@ -68,6 +86,16 @@ fn main() {
 struct DesktopAssets;
 impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path != "agent-mark" {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons");
+            // Only fixed names from the icon helper are accepted as asset keys.
+            if path.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+                return Ok(std::fs::read(root.join(format!("{path}.svg")))
+                    .ok()
+                    .map(std::borrow::Cow::Owned));
+            }
+            return Ok(None);
+        }
         Ok((path == "agent-mark").then(|| {
             std::borrow::Cow::Borrowed(
                 include_bytes!("../design-system/assets/logos/agent-mark-on-dark.svg").as_slice(),

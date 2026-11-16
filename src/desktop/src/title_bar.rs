@@ -1,3 +1,4 @@
+use crate::ui::{self, Control};
 use crate::{model::Status, theme::color, workspace::Workspace};
 use gpui::{prelude::*, *};
 actions!(title_bar, [ToggleInspector, ToggleTasks]);
@@ -49,17 +50,24 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(div().flex_1())
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .font_family(crate::theme::MONO)
                 .text_size(px(12.))
                 .text_color(color(t.status.token()))
+                .child(ui::state(t.status))
                 .child(if t.status == Status::Running {
-                    "◐ Working · 4m 12s".to_string()
+                    let seconds = t.started_at.map_or(0, |start| start.elapsed().as_secs());
+                    format!("Working · {}m {:02}s", seconds / 60, seconds % 60)
                 } else {
-                    format!("{} {}", t.status.glyph(), t.status.label())
+                    t.status.label().to_string()
                 }),
         )
         .child(
             div()
                 .id("tasks-toggle")
+                .control("Toggle tasks · ⌃T")
                 .px(px(8.))
                 .rounded(px(6.))
                 .bg(color("sunk"))
@@ -75,9 +83,10 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .id("inspector-toggle")
+                .control("Toggle inspector · ⌘I")
                 .px(px(8.))
                 .cursor_pointer()
-                .child("◫")
+                .child(ui::icon("panel-right", "ink-2"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.inspector_open = !this.inspector_open;
                     cx.notify();

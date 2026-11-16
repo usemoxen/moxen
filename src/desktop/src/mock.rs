@@ -1,83 +1,167 @@
 use crate::model::*;
+use std::time::Instant;
 
 pub struct MockSource {
     threads: Vec<Thread>,
     messages: Vec<Vec<Message>>,
     running: Vec<Option<usize>>,
+    queues: Vec<Vec<String>>,
 }
 impl MockSource {
     pub fn new() -> Self {
-        let titles = [
-            "TUI desktop app feature parity in Zed GPUI",
-            "Settings page: tabbed layout",
-            "SCContentSharingPicker NVENC testing status",
-            "SFU auth against real stack",
-            "frameFormat.ts header resync",
-            "Resume isolation test",
-            "NVENC probe Windows exe",
-            "Hit limits, last message visible",
-            "Add desktop design and design-sync setup",
-            "Context tab: real tool names",
+        let fixtures = [
+            (
+                "Make model selection keyboard accessible",
+                "moxen-agent",
+                Status::Idle,
+                "now",
+                0,
+                false,
+            ),
+            (
+                "Restore drafts after reconnecting",
+                "moxen-agent",
+                Status::Queued,
+                "2h",
+                0,
+                false,
+            ),
+            (
+                "Screen-sharing capture pipeline",
+                "moxen-chat",
+                Status::Held,
+                "1d",
+                0,
+                false,
+            ),
+            (
+                "Verify authentication on reconnect",
+                "moxen-chat",
+                Status::Held,
+                "1d",
+                1,
+                false,
+            ),
+            (
+                "Recover partial frame headers",
+                "moxen-chat",
+                Status::Idle,
+                "2d",
+                1,
+                false,
+            ),
+            (
+                "Test session isolation",
+                "moxen-chat",
+                Status::Idle,
+                "2d",
+                1,
+                false,
+            ),
+            (
+                "Validate the Windows encoder",
+                "moxen-chat",
+                Status::Idle,
+                "3d",
+                1,
+                false,
+            ),
+            (
+                "Retain the final reply at usage limits",
+                "moxen-chat",
+                Status::Error,
+                "3d",
+                0,
+                false,
+            ),
+            (
+                "Sync the desktop design tokens",
+                "moxen-agent",
+                Status::Idle,
+                "4d",
+                0,
+                true,
+            ),
+            (
+                "Show tool names in context usage",
+                "moxen-agent",
+                Status::Idle,
+                "4d",
+                0,
+                true,
+            ),
         ];
-        let threads = titles
-            .iter()
+        let threads: Vec<_> = fixtures
+            .into_iter()
             .enumerate()
-            .map(|(id, title)| Thread {
-                id,
-                title: title.to_string(),
-                model: "Claude Opus 5.5".into(),
-                status: match id {
-                    1 => Status::Queued,
-                    2 | 3 => Status::Held,
-                    7 => Status::Error,
-                    _ => Status::Idle,
+            .map(
+                |(id, (title, project, status, activity, depth, settled))| Thread {
+                    id,
+                    title: title.into(),
+                    project: project.into(),
+                    status,
+                    activity: activity.into(),
+                    depth,
+                    settled,
+                    model: "Claude Opus 5.5".into(),
+                    started_at: None,
                 },
-                activity: if id == 0 {
-                    "now"
-                } else if id == 1 {
-                    "2h"
-                } else {
-                    "4d"
-                }
-                .into(),
-                project: if id < 2 { "t3code-cli" } else { "moxen-chat" }.into(),
-                depth: usize::from((3..7).contains(&id)),
-                settled: id >= 8,
-            })
+            )
             .collect();
-        let messages = titles.iter().map(|title| vec![
-            Message::User { text: if *title == titles[0] { "The chip shows hover but no picker appears. Check the click handler, then drive it with ⌘K and look at it.".into() } else {title.to_string()}, preview: *title == titles[0] },
-            Message::Assistant("It builds. Relaunching against the demo server and driving it with keystrokes, ⌘K for the palette, to check it visually.".into()),
-            Message::Tool { name: "read".into(), summary: "src/pickers.rs".into(), output: "551 lines · src/pickers.rs\n\nimpl ModelPicker {\n    fn toggle(&mut self) {\n        self.open = !self.open;\n    }\n}".into() },
-            Message::Tool { name: "thought".into(), summary: "The picker state flips, so the click arrives. Something is eating the render.".into(), output: "The picker state flips, so the click arrives. Something is eating the render. The overlay is a child of a clipped container. Build, then check the overlay outside the clip.".into() },
-            Message::Tool { name: "command".into(), summary: "cargo build -p moxen-desktop 2>&1 | tail -3".into(), output: "Compiling moxen-desktop\nFinished dev profile in 3.4s".into() },
-            Message::Tool { name: "read".into(), summary: "src/composer.rs".into(), output: "120 lines · src/composer.rs".into() },
-            Message::Tool { name: "command".into(), summary: "bun desktop/scripts/demo-server.ts /tmp/mxdemo.sock".into(), output: "Mock demo server running".into() },
-            Message::Tool { name: "thought".into(), summary: "Quick check of the palette actions before clicking.".into(), output: "Quick check of the palette actions before clicking.".into() },
-            Message::Tool { name: "command".into(), summary: "python3 - <<'EOF'  19 lines".into(), output: "Updated palette presentation.".into() },
-            Message::Tool { name: "read".into(), summary: "src/app.rs".into(), output: "340–420 · src/app.rs".into() },
-            Message::Tool { name: "command".into(), summary: "screencapture -l 3188 -o /tmp/mx-app.png".into(), output: "No output. Exit 0.".into() },
+        let messages = threads.iter().map(|t| vec![
+            Message::User { text: format!("Please investigate: {}. Keep the change focused and verify the result.", t.title) },
+            Message::Assistant("I traced the event from the control to its view state. The state updates correctly; I’m checking the layout and keyboard path before changing the presentation.".into()),
+            tool("read", "src/model_picker.rs", "124 lines · src/model_picker.rs\n\nfn open_picker(&mut self) {\n    self.picker_open = true;\n    self.search.focus();\n}"),
+            tool("thought", "Keep focus inside the picker until a selection is made.", "Opening a picker should put focus in search. Escape returns focus to the trigger; choosing a model should preserve the draft and effort. I’ll verify each path independently."),
+            tool("command", "cargo test model_picker", "running 3 tests\ntest opens_with_search_focus ... ok\ntest escape_restores_trigger ... ok\ntest selection_preserves_draft ... ok\n\n3 passed; 0 failed"),
+            tool("read", "src/composer.rs", "406 lines · src/composer.rs\nThe composer owns its input handler and retains the draft per thread."),
+            tool("edit", "src/model_picker.rs", "- self.picker_open = true;\n+ self.open_picker(window, cx);"),
+            tool("command", "cargo clippy -- -D warnings", "Checking moxen-desktop\nFinished dev profile in 2.8s"),
+            tool("thought", "Verify the expanded output without moving the reading position.", "The selected thread owns its scroll state. Expanding a step should not move the composer or reset the reading position."),
+            tool("read", "src/workspace.rs", "267 lines · src/workspace.rs\nPer-thread state retains drafts, expanded steps and scroll positions."),
+            tool("command", "cargo build", "Compiling moxen-desktop\nFinished dev profile in 3.4s"),
         ]).collect();
+        let count = threads.len();
         Self {
             threads,
             messages,
-            running: vec![None; 10],
+            running: vec![None; count],
+            queues: vec![vec![]; count],
         }
     }
     pub fn preview() -> Self {
         let mut source = Self::new();
         source.threads[0].status = Status::Running;
+        source.threads[0].started_at = Some(Instant::now());
+        source.queues[0].push("Also check Escape returns focus to the model control.".into());
         source
     }
 }
+fn tool(name: &str, summary: &str, output: &str) -> Message {
+    Message::Tool {
+        name: name.into(),
+        summary: summary.into(),
+        output: output.into(),
+    }
+}
 impl ThreadSource for MockSource {
+    fn queued(&self, id: ThreadId) -> &[String] {
+        &self.queues[id]
+    }
+    fn take_queued(&mut self, id: ThreadId) -> Option<String> {
+        if self.queues[id].is_empty() {
+            None
+        } else {
+            Some(self.queues[id].remove(0))
+        }
+    }
     fn inspector(&self, _: ThreadId) -> InspectorData {
         InspectorData {
-            tasks: ["Move TUI projections behind the server","Rust moxen-client crate: wire, handshake, subscriptions","GPUI shell on gpui-kit: window, theme, sidebar, timeline","Interaction: composer, pickers, answer panel, queue, palette actions","Side panel tabs, Git tab, settings, background, subagent view","Parity verification and packaging"].into_iter().map(str::to_string).collect(),
-            subject: "Move the OpenCode driver to the v2 server API".into(),
-            author: "Aaron Mompié   Thu 1 Oct 2026, 04:49 · 6 days ago".into(),
-            message: "OpenCode v2 breaks v1's API: events are a tagged union with direct payloads, text deltas, tools arrive as session.tool.*, questions are forms, history is a flat timeline. translate.ts maps v2 onto the vocabulary the driver and TUI already read, tested.".into(),
-            files: [("tests/v2.test.ts","+1144 −0"),("tests/driver.test.ts","+751 −42"),("driver.ts","+672 −120"),("translate.ts","+384 −92")].into_iter().map(|(f,d)|(f.into(),d.into())).collect(),
+            tasks: ["Trace the picker event and focus path", "Add keyboard navigation and selection", "Preserve drafts when switching models", "Verify expanded output and focus return", "Check the native window at two sizes", "Run the full desktop checks"].into_iter().map(str::to_string).collect(),
+            subject: "Keep model selection in the keyboard flow".into(),
+            author: "Aaron Mompié · 12 minutes ago".into(),
+            message: "Focus search when the picker opens, return to the trigger on Escape, and preserve the thread’s draft when choosing a model. The selection and focus-return paths have regression tests.".into(),
+            files: [("tests/picker.rs", "+42 −0"), ("model_picker.rs", "+18 −6"), ("workspace.rs", "+8 −3")].into_iter().map(|(f,d)|(f.into(),d.into())).collect(),
         }
     }
     fn list_threads(&self) -> Vec<Thread> {
@@ -87,19 +171,21 @@ impl ThreadSource for MockSource {
         self.messages[id].clone()
     }
     fn send_message(&mut self, id: ThreadId, text: String) -> Option<Reply> {
-        if self.threads[id].status == Status::Running || text.trim().is_empty() {
+        if text.trim().is_empty() {
+            return None;
+        }
+        if self.threads[id].status == Status::Running {
+            self.queues[id].push(text);
             return None;
         }
         self.threads[id].status = Status::Running;
-        self.threads[id].activity = "just now".into();
-        self.messages[id].push(Message::User {
-            text,
-            preview: false,
-        });
+        self.threads[id].started_at = Some(Instant::now());
+        self.threads[id].activity = "now".into();
+        self.messages[id].push(Message::User { text });
         let message = self.messages[id].len();
         self.messages[id].push(Message::Assistant(String::new()));
         self.running[id] = Some(message);
-        Some(Reply { message, words: "The mock reply is now complete. Each word arrived on a background timer, while the UI stayed responsive. This conversation belongs to its original thread even if you switch away during streaming. No server or provider was contacted.".split_inclusive(' ').map(str::to_string).collect() })
+        Some(Reply { message, words: "The keyboard path is verified. Search receives focus on open, selection preserves the draft, and Escape returns to the trigger. The targeted tests pass; I’m checking the native window next.".split_inclusive(' ').map(str::to_string).collect() })
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool) {
         if self.running[id] != Some(message) {
@@ -110,12 +196,14 @@ impl ThreadSource for MockSource {
         }
         if finished {
             self.threads[id].status = Status::Idle;
+            self.threads[id].started_at = None;
             self.running[id] = None;
         }
     }
     fn stop(&mut self, id: ThreadId) {
         self.running[id] = None;
         self.threads[id].status = Status::Idle;
+        self.threads[id].started_at = None;
     }
 }
 
@@ -127,24 +215,25 @@ mod tests {
         let mut source = MockSource::new();
         let old = source.send_message(0, "first".into()).unwrap();
         source.stop(0);
+        assert!(source.list_threads()[0].started_at.is_none());
         let new = source.send_message(0, "second".into()).unwrap();
         source.stream_word(0, old.message, "stale", true);
         assert_eq!(source.list_threads()[0].status, Status::Running);
+        assert!(source.list_threads()[0].started_at.is_some());
         assert!(matches!(&source.messages(0)[old.message],Message::Assistant(s) if s.is_empty()));
         source.stream_word(0, new.message, "new", true);
         assert!(matches!(&source.messages(0)[new.message],Message::Assistant(s) if s=="new"));
     }
     #[test]
-    fn switching_threads_preserves_reply_and_rejects_duplicate_send() {
+    fn running_send_queues_without_mutating_another_thread() {
         let mut source = MockSource::new();
         let reply = source.send_message(0, "hello".into()).unwrap();
-        assert!(source.send_message(0, "duplicate".into()).is_none());
         let other = source.messages(2).len();
+        assert!(source.send_message(0, "next".into()).is_none());
+        assert_eq!(source.queued(0), &["next"]);
         source.stream_word(0, reply.message, "reply", true);
         assert_eq!(source.messages(2).len(), other);
-        assert!(
-            matches!(&source.messages(0)[reply.message], Message::Assistant(s) if s == "reply")
-        );
-        assert_eq!(source.list_threads()[0].status, Status::Idle);
+        assert_eq!(source.take_queued(0).as_deref(), Some("next"));
+        assert!(source.take_queued(0).is_none());
     }
 }
