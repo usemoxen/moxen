@@ -44,12 +44,13 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
 FONTS = "cc39c4c2c304bc368c9b7c311ea2bcc6013299fe"
 for family, stem, weights in [
-    ("atkinsonhyperlegiblenext", "AtkinsonHyperlegibleNext", [500, 600, 700, 800]),
-    ("atkinsonhyperlegiblemono", "AtkinsonHyperlegibleMono", [500]),
+    ("atkinsonhyperlegiblenext", "AtkinsonHyperlegibleNext", [400, 500, 600, 700, 800]),
+    ("atkinsonhyperlegiblemono", "AtkinsonHyperlegibleMono", [400, 500]),
 ]:
     variable = ROOT.parent / "fonts" / f"{stem}-Variable.ttf"
     fetch("google/fonts", FONTS, f"ofl/{family}/{stem}[wght].ttf", variable)
     for weight in weights:
         font = instantiateVariableFont(TTFont(variable), {"wght": weight}, inplace=False, updateFontNames=True)
-        font.save(ROOT.parent / "fonts" / f"{stem}-{weight}.ttf")
+        filename = f"{stem}.ttf" if weight == 400 else f"{stem}-{weight}.ttf"
+        font.save(ROOT.parent / "fonts" / filename)
     variable.unlink()

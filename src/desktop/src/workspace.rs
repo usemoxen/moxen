@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::{
     composer::{Composer, Submitted},
     mock::MockSource,
@@ -240,7 +241,7 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .font_family(theme::FONT)
+            .type_scale("body")
             .size_full()
             .flex()
             .flex_col()

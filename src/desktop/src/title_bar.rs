@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{model::Status, theme::color, workspace::Workspace};
 use gpui::{prelude::*, *};
@@ -41,12 +42,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .text_color(color("ink-2"))
                 .child(format!("{}  /", t.project)),
         )
-        .child(
-            div()
-                .font_weight(FontWeight::BOLD)
-                .truncate()
-                .child(t.title.clone()),
-        )
+        .child(div().type_scale("title").truncate().child(t.title.clone()))
         .child(div().flex_1())
         .child(
             div()

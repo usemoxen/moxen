@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
@@ -41,7 +42,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         div()
                             .flex_1()
                             .text_size(px(13.))
-                            .font_weight(FontWeight::BOLD)
+                            .type_scale("label")
                             .child(t.project.clone()),
                     )
                     .child(

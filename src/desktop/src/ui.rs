@@ -37,11 +37,17 @@ impl Control for Stateful<Div> {
         self.cursor_pointer()
             .focusable()
             .tab_index(0)
-            .border_1()
-            .border_color(color("rule").opacity(0.))
             .hover(|s| s.bg(color("sunk")))
             .active(|s| s.bg(color("rule")))
-            .focus_visible(|s| s.border_color(color("live")))
+            .focus_visible(|s| {
+                s.shadow(vec![BoxShadow {
+                    inset: true,
+                    color: color("live"),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(1.),
+                }])
+            })
             .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
     }
 }

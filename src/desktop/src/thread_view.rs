@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{
     model::Message,
@@ -245,11 +246,10 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                                         } else {
                                                             "provider-opencode"
                                                         }))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(format!(
-                                                            "{}",
-                                                            crate::model_picker::MODELS[w.model].0
-                                                        )),
+                                                        .type_scale("label")
+                                                        .child(
+                                                            crate::model_picker::MODELS[w.model].0,
+                                                        ),
                                                 )
                                                 .child(div().text_color(color("effort")).child(
                                                     ["Low", "Medium", "High", "Extra", "Max"]

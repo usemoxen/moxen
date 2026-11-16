@@ -1,3 +1,4 @@
+use gpui::{FontWeight, Styled, px};
 use gpui::{Hsla, rgb};
 use std::sync::LazyLock;
 
@@ -35,6 +36,38 @@ pub const COMPOSER: f32 = 48.;
 pub const CURSOR: f32 = 2.;
 pub const WIDTH: f32 = 1440.;
 pub const HEIGHT: f32 = 900.;
+
+pub trait TypeScale: Styled + Sized {
+    fn type_scale(self, name: &str) -> Self {
+        let groups = TOKENS["type"]["groups"].as_array().unwrap();
+        let (group, style) = groups
+            .iter()
+            .find_map(|group| {
+                group["styles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|style| style["name"] == name)
+                    .map(|style| (group, style))
+            })
+            .expect("known type token");
+        let size: f32 = style["fontSize"]
+            .as_str()
+            .unwrap()
+            .trim_end_matches("px")
+            .parse()
+            .unwrap();
+        self.font_family(if group["family"] == "machine" {
+            MONO
+        } else {
+            FONT
+        })
+        .text_size(px(size))
+        .line_height(px(size * style["lineHeight"].as_f64().unwrap() as f32))
+        .font_weight(FontWeight(style["fontWeight"].as_f64().unwrap() as f32))
+    }
+}
+impl<T: Styled> TypeScale for T {}
 
 pub fn float_shadow() -> Vec<gpui::BoxShadow> {
     // shadow-float, dark: 0 12px 32px rgba(0,0,0,.55). The rule is drawn by the surface.

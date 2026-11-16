@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
@@ -43,7 +44,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(10.))
                 .items_center()
                 .text_size(px(13.))
-                .child(div().font_weight(FontWeight::BOLD).child("Tasks"))
+                .child(div().type_scale("title").child("Tasks"))
                 .child(
                     div()
                         .text_color(color("ink-2"))
@@ -170,7 +171,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             .gap(px(10.))
             .child(
                 div()
-                    .font_weight(FontWeight::BOLD)
+                    .type_scale("title")
                     .text_size(px(16.))
                     .child(data.subject),
             )
@@ -191,7 +192,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             .items_center()
                             .justify_center()
                             .text_size(px(9.))
-                            .font_weight(FontWeight::BOLD)
+                            .type_scale("title")
                             .child("AM"),
                     )
                     .child(data.author),

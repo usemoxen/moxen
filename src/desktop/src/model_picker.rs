@@ -1,3 +1,4 @@
+use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
@@ -115,7 +116,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                 .px(px(8.))
                                 .py(px(4.))
                                 .rounded(px(6.))
-                                .text_size(px(12.))
+                                .type_scale("label")
                                 .when(w.effort == i, |s| s.bg(color("ground")))
                                 .cursor_pointer()
                                 .child(label)
