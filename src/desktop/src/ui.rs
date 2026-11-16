@@ -22,11 +22,22 @@ pub fn icon(name: &'static str, token: &str) -> Svg {
         .text_color(color(token))
 }
 
-/// A state glyph. The live one breathes: a slow, shallow opacity pulse.
+/// A state glyph: 12px, centred in a 14px slot so it lines up with inline
+/// icons (the mockup's glyphs are text at 13px, about 10px of ink). The live
+/// one breathes: a slow, shallow opacity pulse.
 pub fn state(status: crate::model::Status) -> AnyElement {
-    let glyph = icon(status.icon(), status.token());
+    let glyph = icon(status.icon(), status.token()).size(px(12.));
+    let slot = || {
+        div()
+            .size(px(14.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+    };
     if status == crate::model::Status::Running {
-        glyph
+        slot()
+            .child(glyph)
             .with_animation(
                 "live-pulse",
                 Animation::new(Duration::from_millis(1800))
@@ -37,7 +48,7 @@ pub fn state(status: crate::model::Status) -> AnyElement {
             )
             .into_any_element()
     } else {
-        glyph.into_any_element()
+        slot().child(glyph).into_any_element()
     }
 }
 
