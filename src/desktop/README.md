@@ -56,7 +56,9 @@ live until Stop is clicked.
 ## Look and motion
 
 Numbers come from the mockup's HTML/CSS (`design-system/mockups/agent-desktop/source/`)
-and `tokens.json`; colours, radii, strokes and the float shadow are read from
+and `tokens.json`. The mockups and `screenshots/` are not in git: run
+`python3 sync-design-system.py` to fetch the mockups, and the capture script
+to make screenshots. Both paths are ignored in `.gitignore`. Values also come from `tokens.json`; colours, radii, strokes and the float shadow are read from
 the tokens in `theme.rs`.
 
 - Interface text is 13/1.3 (`theme::UI`); transcript prose is `body` at 15/1.6
