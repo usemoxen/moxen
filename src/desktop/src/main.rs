@@ -59,12 +59,21 @@ fn main() {
                 KeyBinding::new("cmd-i", title_bar::ToggleInspector, None),
                 KeyBinding::new("ctrl-t", title_bar::ToggleTasks, None),
                 KeyBinding::new("cmd-k", palette::OpenPalette, None),
+                KeyBinding::new("cmd-m", model_picker::TogglePicker, None),
                 KeyBinding::new("escape", palette::Dismiss, None),
                 KeyBinding::new("tab", palette::NextFocus, None),
                 KeyBinding::new("shift-tab", palette::PreviousFocus, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
-            let bounds = Bounds::centered(None, size(px(theme::WIDTH), px(theme::HEIGHT)), cx);
+            // The "small" demo stage checks that all three regions fit a
+            // 1280×800 window as well as the 1440×900 reference.
+            let small = std::env::args().nth(2).as_deref() == Some("small");
+            let (width, height) = if small {
+                (1280., 800.)
+            } else {
+                (theme::WIDTH, theme::HEIGHT)
+            };
+            let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             cx.open_window(
                 WindowOptions {
                     focus: true,

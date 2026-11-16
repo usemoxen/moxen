@@ -1,10 +1,10 @@
-use crate::theme::TypeScale;
 use crate::ui::{self, Control};
 use crate::{
     theme::{self, color},
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
+actions!(model_picker, [TogglePicker]);
 pub const MODELS: [(&str, &str); 7] = [
     ("Fable 5.1", "1m"),
     ("Opus 5.5", "1m"),
@@ -14,27 +14,39 @@ pub const MODELS: [(&str, &str); 7] = [
     ("Big Pickle", "200k"),
     ("Grok Code Fast 1", "256k"),
 ];
-pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+pub const EFFORTS: [&str; 5] = ["Low", "Medium", "High", "Extra", "Max"];
+/// The mockup's 320 lets the effort control overhang the popover's edge;
+/// 344, with tighter options, holds all five inside it.
+const WIDTH: f32 = 344.;
+
+pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement {
+    // Fades in and grows from 96% over 120ms, anchored at its bottom left.
+    let p = ui::progress(w.picker_at, 120, window);
+    let scale = 0.96 + 0.04 * p;
     let mut pane = div()
+        .id("model-picker")
+        .occlude()
+        // Anchored 8pt above the composer box, which is its parent.
         .absolute()
-        .bottom(px(200.))
-        .left(px(26.))
-        .w(px(334.))
+        .bottom(relative(1.))
+        .mb(px(8. - 4. * (1. - p)))
+        .left(px(-2.))
+        .w(px(WIDTH * scale))
+        .opacity(p)
         .p(px(6.))
         .rounded(px(12.))
         .bg(color("raised"))
-        .border_1()
-        .border_color(color("rule"))
         .shadow(theme::float_shadow())
         .text_size(px(14.))
-        .line_height(px(20.))
+        .line_height(px(18.))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .px(px(8.))
-                .py(px(6.))
+                .pt(px(6.))
+                .pb(px(8.))
                 .text_color(color("ink-2"))
                 .child(ui::icon("search", "ink-2"))
                 .child(div().flex_1().child(w.search.clone())),
@@ -49,17 +61,18 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             provider = Some(i < 4);
             pane = pane.child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
                     .px(px(8.))
                     .pt(px(8.))
                     .pb(px(4.))
-                    .font_family(theme::MONO)
-                    .text_size(px(11.))
-                    .text_color(color(if i < 4 {
+                    .child(div().size(px(6.)).rounded(px(2.)).bg(color(if i < 4 {
                         "provider-claude"
                     } else {
                         "provider-opencode"
-                    }))
-                    .child(if i < 4 { "CLAUDE CODE" } else { "OPENCODE" }),
+                    })))
+                    .child(ui::caps(if i < 4 { "Claude Code" } else { "OpenCode" })),
             );
         }
         pane = pane.child(
@@ -73,7 +86,6 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(8.))
                 .rounded(px(6.))
                 .when(w.model == i, |s| s.bg(color("sunk")))
-                .cursor_pointer()
                 .child(div().flex_1().child(*name))
                 .child(
                     div()
@@ -95,41 +107,29 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 })),
         );
     }
-    pane.child(
-        div()
-            .mt(px(6.))
-            .pt(px(10.))
-            .border_t_1()
-            .border_color(color("rule"))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(div().text_color(color("ink-2")).child("Effort"))
-            .child(
-                div().flex().bg(color("sunk")).rounded(px(8.)).children(
-                    ["Low", "Medium", "High", "Extra", "Max"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, label)| {
-                            div()
-                                .id(("effort", i))
-                                .control(format!("{label} effort"))
-                                .px(px(8.))
-                                .py(px(4.))
-                                .rounded(px(6.))
-                                .type_scale("label")
-                                .when(w.effort == i, |s| s.bg(color("ground")))
-                                .cursor_pointer()
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.effort = i;
-                                    cx.notify();
-                                }))
-                        }),
-                ),
-            ),
-    )
-    .with_animation("picker-reveal", ui::reveal(), |s, v| {
-        s.opacity(v).w(px(328. + 6. * v)).bottom(px(194. + 6. * v))
-    })
+    pane.child(div().h(px(1.)).mx(px(2.)).my(px(6.)).bg(color("rule")))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .pl(px(8.))
+                .pr(px(6.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color("ink-2"))
+                        .child("Effort"),
+                )
+                .child(div().flex_1())
+                .child(ui::segmented(
+                    "effort",
+                    &EFFORTS,
+                    w.effort,
+                    8.,
+                    cx,
+                    |this, i| this.effort = i,
+                )),
+        )
 }

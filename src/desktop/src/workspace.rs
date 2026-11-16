@@ -1,4 +1,3 @@
-use crate::theme::TypeScale;
 use crate::{
     composer::{Composer, Submitted},
     mock::MockSource,
@@ -6,7 +5,23 @@ use crate::{
     theme::{self, color},
 };
 use gpui::{prelude::*, *};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+
+/// The turn keeps at least this width; the inspector gives way first.
+const MIN_TURN: f32 = 480.;
+const MIN_INSPECTOR: f32 = 320.;
+
+/// Focus handles for toolbar controls that show a tip under keyboard focus.
+pub struct Tips {
+    pub jump: FocusHandle,
+    pub tasks: FocusHandle,
+    pub inspector: FocusHandle,
+    pub stop: FocusHandle,
+    pub send: FocusHandle,
+}
 
 pub struct Workspace {
     pub source: Box<dyn ThreadSource>,
@@ -14,7 +29,8 @@ pub struct Workspace {
     pub sidebar_focus: FocusHandle,
     pub composers: Vec<Entity<Composer>>,
     pub lists: Vec<ListState>,
-    pub expanded: HashSet<(ThreadId, usize)>,
+    /// Opened steps, with when each opened (for the expand transition).
+    pub expanded: HashMap<(ThreadId, usize), Instant>,
     pub inspector_open: bool,
     pub tasks_open: bool,
     pub picker_open: bool,
@@ -26,6 +42,10 @@ pub struct Workspace {
     pub tab: usize,
     pub search: Entity<Composer>,
     pub folded: HashSet<ThreadId>,
+    pub unfolded_at: HashMap<ThreadId, Instant>,
+    pub picker_at: Option<Instant>,
+    pub inspector_at: Option<Instant>,
+    pub tips: Tips,
     pub settled_open: bool,
     pub inspector_width: f32,
     pub resizing_inspector: bool,
@@ -40,7 +60,8 @@ impl Workspace {
             let mut c = Composer::new(cx);
             c.placeholder = "Search models";
             c.surface = "raised";
-            c.height = 26.;
+            c.height = 24.;
+            c.size = 14.;
             c
         });
         subscriptions.push(
@@ -106,15 +127,15 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     match stage.as_str() {
                         "picker" => {
-                            this.picker_open = true;
+                            this.toggle_picker(window, cx);
                         }
                         "details" => {
-                            this.expanded.insert((0, 4));
+                            this.expanded.insert((0, 4), Instant::now());
                             this.lists[0].splice(4..5, 1);
                             this.expanded_files.insert(1);
                         }
                         "focus" => {
-                            window.focus(&this.composers[0].read(cx).focus.clone(), cx);
+                            window.focus(&this.tips.tasks, cx);
                         }
                         "input" => {
                             this.stop(cx);
@@ -130,13 +151,17 @@ impl Workspace {
                 if stage == "focus" {
                     cx.update(|window, cx| {
                         window.dispatch_event(
-                            PlatformInput::MouseMove(MouseMoveEvent {
-                                position: point(px(130.), px(184.)),
-                                pressed_button: None,
-                                modifiers: Modifiers::default(),
+                            PlatformInput::KeyDown(KeyDownEvent {
+                                keystroke: Keystroke::parse("tab").expect("tab keystroke"),
+                                is_held: false,
+                                prefer_character_input: false,
                             }),
                             cx,
                         );
+                        // Tab put the window in keyboard mode; land on the
+                        // inspector toggle, whose tip names its shortcut.
+                        this.update(cx, |this, cx| window.focus(&this.tips.inspector, cx))
+                            .expect("workspace is alive");
                     })
                     .expect("demo window is attached");
                 }
@@ -151,6 +176,16 @@ impl Workspace {
             expanded_files: HashSet::new(),
             source,
             folded: HashSet::new(),
+            unfolded_at: HashMap::new(),
+            picker_at: None,
+            inspector_at: None,
+            tips: Tips {
+                jump: cx.focus_handle(),
+                tasks: cx.focus_handle(),
+                inspector: cx.focus_handle(),
+                stop: cx.focus_handle(),
+                send: cx.focus_handle(),
+            },
             settled_open: false,
             inspector_width: theme::INSPECTOR,
             resizing_inspector: false,
@@ -168,7 +203,7 @@ impl Workspace {
             sidebar_focus: cx.focus_handle(),
             composers,
             lists,
-            expanded: HashSet::new(),
+            expanded: HashMap::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -186,8 +221,16 @@ impl Workspace {
         window.focus(&self.search.read(cx).focus.clone(), cx);
         cx.notify();
     }
+    /// Opens or closes the inspector, timing the slide.
+    pub fn set_inspector(&mut self, open: bool) {
+        if self.inspector_open != open {
+            self.inspector_open = open;
+            self.inspector_at = Some(Instant::now());
+        }
+    }
     pub fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker_open = !self.picker_open;
+        self.picker_at = Some(Instant::now());
         self.palette_open = false;
         self.search.update(cx, |c, cx| {
             c.placeholder = "Search models";
@@ -275,10 +318,19 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
     .expect("demo window remains open");
 }
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = f32::from(window.viewport_size().width);
+        let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
+        let slide = crate::ui::progress(self.inspector_at, 160, window);
+        let shown = if self.inspector_open {
+            slide
+        } else {
+            1. - slide
+        };
+        let inspector_width = self.inspector_width.clamp(MIN_INSPECTOR, room);
         div()
             .relative()
-            .type_scale("body")
+            .font_family(theme::FONT)
             .size_full()
             .flex()
             .flex_col()
@@ -312,9 +364,12 @@ impl Render for Workspace {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if this.resizing_inspector {
+                    let viewport = f32::from(window.viewport_size().width);
                     this.inspector_width =
-                        f32::from(window.viewport_size().width - event.position.x)
-                            .clamp(420., 800.);
+                        f32::from(window.viewport_size().width - event.position.x).clamp(
+                            MIN_INSPECTOR,
+                            (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR),
+                        );
                     cx.notify();
                 }
             }))
@@ -326,41 +381,50 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::title_bar::ToggleInspector, _, cx| {
-                    this.inspector_open = !this.inspector_open;
+                    this.set_inspector(!this.inspector_open);
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &crate::title_bar::ToggleTasks, _, cx| {
-                    this.tasks_open = !this.tasks_open;
-                    this.inspector_open = true;
+                    if this.inspector_open {
+                        this.tasks_open = !this.tasks_open;
+                    } else {
+                        this.tasks_open = true;
+                        this.set_inspector(true);
+                    }
                     cx.notify();
                 }),
             )
-            .text_size(px(theme::BODY))
-            .line_height(px(theme::LINE))
+            .on_action(
+                cx.listener(|this, _: &crate::model_picker::TogglePicker, window, cx| {
+                    this.toggle_picker(window, cx)
+                }),
+            )
+            .text_size(px(theme::UI))
+            .line_height(px(theme::UI_LINE))
             .text_color(color("ink"))
-            .child(crate::title_bar::render(self, cx))
+            .child(crate::title_bar::render(self, window, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(crate::sidebar::render(self, cx))
-                    .child(crate::thread_view::render(self, cx))
-                    .when(self.inspector_open, |s| {
-                        let width = self.inspector_width;
+                    .child(crate::sidebar::render(self, window, cx))
+                    .child(crate::thread_view::render(self, window, cx))
+                    .when(shown > 0., |s| {
+                        // Slides in from the window's right edge: the pane
+                        // keeps its width and the clip around it grows.
                         s.child(
                             div()
                                 .h_full()
-                                .overflow_hidden()
                                 .flex_shrink_0()
-                                .child(crate::inspector::render(self, cx))
-                                .with_animation(
-                                    "inspector-reveal",
-                                    crate::ui::reveal(),
-                                    move |s, v| s.w(px(width * v)).opacity(v),
-                                ),
+                                .flex()
+                                .justify_end()
+                                .overflow_hidden()
+                                .w(px(inspector_width * shown))
+                                .opacity(0.4 + 0.6 * shown)
+                                .child(crate::inspector::render(self, inspector_width, cx)),
                         )
                     }),
             )

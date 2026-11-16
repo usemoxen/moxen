@@ -29,7 +29,11 @@ pub const INSPECTOR: f32 = 420.;
 pub const MONO: &str = "Atkinson Hyperlegible Mono";
 pub const READING: f32 = 720.;
 pub const ROW: f32 = 30.;
+/// Transcript prose: `body` at 15/1.6, per the desktop doc.
 pub const BODY: f32 = 15.;
+/// Interface text (rows, controls, panes): 13/1.3, the mockup's UI size.
+pub const UI: f32 = 13.;
+pub const UI_LINE: f32 = 17.;
 pub const FONT: &str = "Atkinson Hyperlegible Next";
 pub const LINE: f32 = 24.;
 pub const COMPOSER: f32 = 48.;
@@ -69,6 +73,33 @@ pub trait TypeScale: Styled + Sized {
 }
 impl<T: Styled> TypeScale for T {}
 
+/// A design token's pixel value, e.g. `px_token("stroke", "stroke-rule")`.
+pub fn px_token(group: &str, name: &str) -> f32 {
+    TOKENS[group]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .and_then(|t| t["value"].as_str())
+        .expect("known pixel token")
+        .trim_end_matches("px")
+        .parse()
+        .unwrap()
+}
+
+/// The keyboard focus ring: the design system's `:focus-visible` outline,
+/// 2px of `live`. GPUI drop shadows fill beneath the element, so the ring is
+/// drawn inset to keep transparent controls transparent.
+pub fn focus_ring() -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        inset: true,
+        color: color("live"),
+        offset: gpui::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(px_token("stroke", "stroke-furrow")),
+    }]
+}
+
 pub fn float_shadow() -> Vec<gpui::BoxShadow> {
     let value = TOKENS["shadow"]["tokens"][0]["value"]["dark"]
         .as_str()
@@ -86,11 +117,23 @@ pub fn float_shadow() -> Vec<gpui::BoxShadow> {
         .map(|v| v.parse().unwrap())
         .collect();
     let tint = rgb(((channels[0] as u32) << 16) | ((channels[1] as u32) << 8) | channels[2] as u32);
-    vec![gpui::BoxShadow {
+    let mut shadows = vec![gpui::BoxShadow {
         inset: false,
         color: Hsla::from(tint).opacity(channels[3]),
         offset: gpui::point(gpui::px(lengths[0]), gpui::px(lengths[1])),
         blur_radius: gpui::px(lengths[2]),
         spread_radius: gpui::px(0.),
-    }]
+    }];
+    // The second layer is a hairline ring ("0 0 0 1px #…"): it replaces a border.
+    if let Some(ring) = value.split("), ").nth(1) {
+        let parts: Vec<&str> = ring.split_whitespace().collect();
+        shadows.push(gpui::BoxShadow {
+            inset: false,
+            color: rgb(u32::from_str_radix(parts[4].trim_start_matches('#'), 16).unwrap()).into(),
+            offset: gpui::point(gpui::px(0.), gpui::px(0.)),
+            blur_radius: gpui::px(0.),
+            spread_radius: gpui::px(parts[3].trim_end_matches("px").parse().unwrap()),
+        });
+    }
+    shadows
 }

@@ -18,6 +18,8 @@ pub struct Composer {
     pub placeholder: &'static str,
     pub height: f32,
     pub surface: &'static str,
+    /// Text size: transcript prose (15) in the composer, 14 in search fields.
+    pub size: f32,
     text: String,
     selection: Range<usize>,
     marked: Option<Range<usize>>,
@@ -39,6 +41,7 @@ impl Composer {
             placeholder: "Steer the agent…",
             height: theme::COMPOSER,
             surface: "ground",
+            size: theme::BODY,
             text: String::new(),
             selection: 0..0,
             marked: None,
@@ -286,10 +289,6 @@ impl Render for Composer {
             .id("composer")
             .key_context("Composer")
             .track_focus(&self.focus)
-            .border_b_1()
-            .border_color(color("rule").opacity(0.))
-            .focus_visible(|s| s.border_color(color("live")))
-            .focus(|s| s.border_color(color("live")))
             .w_full()
             .h(px(self.height))
             .bg(color(self.surface))
@@ -333,7 +332,7 @@ impl Render for Composer {
                                 .text_system()
                                 .shape_text(
                                     display.to_string().into(),
-                                    px(theme::BODY),
+                                    px(this.size),
                                     &[run],
                                     Some(bounds.size.width),
                                     None,

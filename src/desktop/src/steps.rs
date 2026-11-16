@@ -4,15 +4,34 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
-pub fn render(
-    name: String,
-    summary: String,
-    output: String,
-    id: usize,
-    index: usize,
-    entity: Entity<Workspace>,
-    open: bool,
-) -> impl IntoElement {
+
+/// A step row's height (`.b-row` in the mockup: min-height 32px).
+pub const STEP: f32 = 32.;
+/// The tallest an opened step's output grows before it scrolls.
+const OUTPUT_MAX: f32 = 240.;
+
+pub struct Step {
+    pub name: String,
+    pub summary: String,
+    pub output: String,
+    pub id: usize,
+    pub index: usize,
+    /// How far the row itself has appeared, 0 to 1 (the fold opening).
+    pub shown: f32,
+    /// How far its output has opened, 0 to 1, or `None` when closed.
+    pub open: Option<f32>,
+}
+
+pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
+    let Step {
+        name,
+        summary,
+        output,
+        id,
+        index,
+        shown,
+        open,
+    } = step;
     let (icon, verb, token, meta) = match name.as_str() {
         "thought" => ("asterisk", "Thought", "ink-2", "6s"),
         "command" => ("dollar-sign", "Ran", "tool-command", "3.4s"),
@@ -57,22 +76,35 @@ pub fn render(
     div()
         .flex()
         .flex_col()
+        .opacity(shown)
         .child(
             div()
                 .id(("step", index))
                 .control(summary.clone())
-                .h(px(32.))
+                .h(px(STEP * shown))
+                .overflow_hidden()
+                // The row's hover fill reaches 8pt past the reading column,
+                // so its icon lines up with the prose.
+                .mx(px(-8.))
+                .px(px(8.))
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .px(px(8.))
                 .rounded(px(6.))
-                .when(open, |s| s.bg(color("sunk")))
-                .cursor_pointer()
-                .child(ui::icon(icon, token))
+                .when(open.is_some(), |s| s.bg(color("sunk")))
+                .child(
+                    div()
+                        .w(px(16.))
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_center()
+                        .child(ui::icon(icon, token)),
+                )
                 .child(
                     div()
                         .w(px(58.))
+                        .flex_shrink_0()
+                        .font_family(theme::FONT)
                         .text_size(px(14.))
                         .text_color(color("ink-2"))
                         .child(verb),
@@ -80,47 +112,62 @@ pub fn render(
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .truncate()
-                        .text_size(px(13.5))
-                        .font_family(if thought { theme::FONT } else { theme::MONO })
-                        .when(thought, |s| s.italic().text_color(color("ink-2")))
+                        .when(thought, |s| {
+                            s.font_family(theme::FONT)
+                                .text_size(px(14.))
+                                .italic()
+                                .text_color(color("ink-2"))
+                        })
+                        .when(!thought, |s| s.font_family(theme::MONO).text_size(px(13.5)))
                         .child(target),
                 )
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .flex_shrink_0()
                         .font_family(theme::MONO)
+                        .text_size(px(12.))
                         .text_color(color("ink-2"))
                         .child(meta),
                 )
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
-                        if !this.expanded.remove(&(id, index)) {
-                            this.expanded.insert((id, index));
+                        if this.expanded.remove(&(id, index)).is_none() {
+                            this.expanded.insert((id, index), std::time::Instant::now());
                         }
                         this.lists[id].splice(index..index + 1, 1);
                         cx.notify();
                     });
                 }),
         )
-        .when(open, |s| {
+        .when_some(open, |s, p| {
             s.child(
                 div()
                     .id(("step-output", index))
                     .overflow_y_scroll()
+                    .max_h(px(OUTPUT_MAX * p))
+                    .opacity(p)
                     .ml(px(25.))
-                    .my(px(4.))
+                    .mt(px(2. * p))
+                    .mb(px(8. * p))
+                    .py(px(4.))
                     .pl(px(14.))
-                    .border_l_1()
+                    .border_l_2()
                     .border_color(color("rule"))
-                    .font_family(if thought { theme::FONT } else { theme::MONO })
-                    .text_size(px(13.))
                     .text_color(color("ink-2"))
-                    .when(thought, |s| s.italic())
-                    .child(output)
-                    .with_animation(("step-reveal", index), ui::reveal(), |s, v| {
-                        s.opacity(v).max_h(px(240. * v))
-                    }),
+                    .when(thought, |s| {
+                        s.font_family(theme::FONT)
+                            .text_size(px(14.))
+                            .line_height(px(14. * 1.6))
+                            .italic()
+                    })
+                    .when(!thought, |s| {
+                        s.font_family(theme::MONO)
+                            .text_size(px(13.))
+                            .line_height(px(13. * 1.6))
+                    })
+                    .child(output),
             )
         })
 }

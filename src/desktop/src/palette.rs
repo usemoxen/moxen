@@ -56,5 +56,5 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         }))
                 }),
         )
-        .with_animation("palette-reveal", ui::reveal(), |s, v| s.opacity(v))
+        .with_animation("palette-reveal", ui::expand(), |s, v| s.opacity(v))
 }
