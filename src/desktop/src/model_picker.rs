@@ -17,9 +17,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
     // Fades in and grows from 96% over 120ms, anchored at its bottom left.
     let p = ui::progress(w.picker_at, 120, window);
     let scale = 0.96 + 0.04 * p;
-    let query = w.search.read(cx).text().to_lowercase();
-    let current = w.effective_selection();
-    let mut pane = div()
+    let pane = div()
         .id("model-picker")
         .occlude()
         // Anchored 8pt above the composer box, which is its parent.
@@ -34,19 +32,25 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
         .bg(color("raised"))
         .shadow(theme::float_shadow())
         .text_size(px(14.))
-        .line_height(px(18.))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(8.))
-                .pt(px(6.))
-                .pb(px(8.))
-                .text_color(color("ink-2"))
-                .child(ui::icon("search", "ink-2"))
-                .child(div().flex_1().child(w.search.clone())),
-        );
+        .line_height(px(18.));
+    body(w, pane, cx)
+}
+
+pub fn body(w: &Workspace, mut pane: Stateful<Div>, cx: &mut Context<Workspace>) -> Stateful<Div> {
+    let query = w.search.read(cx).text().to_lowercase();
+    let current = w.effective_selection();
+    pane = pane.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .pt(px(6.))
+            .pb(px(8.))
+            .text_color(color("ink-2"))
+            .child(ui::icon("search", "ink-2"))
+            .child(div().flex_1().child(w.search.clone())),
+    );
     let catalog = match w.source.catalog() {
         CatalogState::Ready(catalog) => catalog,
         CatalogState::Loading => return pane.child(note("Loading models…")),
@@ -98,7 +102,7 @@ fn list(
     query: &str,
     cx: &mut Context<Workspace>,
 ) -> Div {
-    let locked = if w.creating {
+    let locked = if w.creating || w.choosing_action_model() {
         None
     } else {
         current.and_then(|c| catalog.provider(&c.instance))
@@ -223,7 +227,9 @@ fn model_row(
     row.control(format!("Select {}", model.name))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.choose_model(&instance, &slug, cx);
-            window.focus(&this.model_focus, cx);
+            if !this.choosing_action_model() {
+                window.focus(&this.model_focus, cx);
+            }
         }))
         .into_any_element()
 }

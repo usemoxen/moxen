@@ -8,6 +8,7 @@ use crate::{
         Selection, Status, ThreadId, ThreadSource,
     },
     theme::{self, color},
+    thread_actions,
 };
 use gpui::{prelude::*, *};
 use std::{
@@ -25,6 +26,7 @@ pub enum Dropdown {
     Project,
     Access,
     Mode,
+    Thread,
 }
 
 /// Focus handles for toolbar controls that show a tip under keyboard focus.
@@ -75,6 +77,12 @@ pub struct Workspace {
     pub group: usize,
     pub tab: usize,
     pub search: Entity<Composer>,
+    pub thread_popup: Option<thread_actions::Popup>,
+    pub thread_form: Option<thread_actions::Form>,
+    pub action_model: Option<Selection>,
+    pub action_input: Entity<Composer>,
+    pub thread_action_focus: FocusHandle,
+    focus_new_draft: bool,
     /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
     pub fold_toggled: HashSet<(ThreadId, usize)>,
     pub unfolded_at: HashMap<(ThreadId, usize), Instant>,
@@ -169,6 +177,35 @@ impl Workspace {
                 cx.notify()
             }),
         );
+        subscriptions.push(cx.subscribe_in(
+            &search,
+            window,
+            |this, _, e: &Submitted, window, cx| {
+                if this.palette_open {
+                    crate::palette::pick_first(this, &e.0, window, cx);
+                } else {
+                    this.search
+                        .update(cx, |input, cx| input.set_text(e.0.clone(), cx));
+                }
+            },
+        ));
+        let action_input = cx.new(|cx| {
+            let mut input = Composer::new(cx);
+            input.height = 44.;
+            input
+        });
+        subscriptions.push(
+            cx.subscribe(&action_input, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.subscribe_in(
+            &action_input,
+            window,
+            |this, _, e: &Submitted, window, cx| {
+                this.submit_thread_action(Some(&e.0), window, cx);
+            },
+        ));
         // Redraws when the source's data changes, and each second while a turn
         // runs so its timer counts.
         cx.spawn(async move |this, cx| {
@@ -295,6 +332,12 @@ impl Workspace {
             inspector_width: theme::INSPECTOR,
             resizing_inspector: false,
             search,
+            thread_popup: None,
+            thread_form: None,
+            action_model: None,
+            action_input,
+            thread_action_focus: cx.focus_handle(),
+            focus_new_draft: false,
             inspector_open: true,
             tasks_open: true,
             picker_open: false,
@@ -365,7 +408,14 @@ impl Workspace {
         } else if !listed.contains(&self.selected)
             && let Some(&first) = listed.first()
         {
-            self.selected = first;
+            self.select(first, cx);
+        } else if listed.is_empty()
+            && self.chosen
+            && !self.creating
+            && !self.source.projects().is_empty()
+        {
+            self.creating = true;
+            self.focus_new_draft = true;
         }
         if !listed.is_empty() && self.focused != Some(self.selected) {
             self.focused = Some(self.selected);
@@ -380,11 +430,49 @@ impl Workspace {
         if let Some(id) = self.source.take_opened()
             && id < self.composers.len()
         {
+            self.thread_form = None;
+            self.action_model = None;
             self.creating = false;
             self.selected = id;
             self.focused = None;
             self.new_composer
                 .update(cx, |c, cx| c.set_text(String::new(), cx));
+        }
+        if self.source.take_settled() == Some(self.selected) && !self.creating {
+            self.creating = true;
+            self.new_project = None;
+            self.new_model = self.source.selection(self.selected);
+            let thread = &self.source.list_threads()[self.selected];
+            self.new_runtime = RUNTIME_MODES
+                .iter()
+                .position(|(mode, _)| *mode == thread.runtime_mode);
+            self.new_interaction = INTERACTION_MODES
+                .iter()
+                .position(|(mode, _)| *mode == thread.interaction_mode)
+                .unwrap_or(0);
+            self.focus_new_draft = true;
+        }
+        if let Some((id, draft)) = self.source.take_reverted() {
+            if id == self.selected {
+                self.set_inspector(false);
+            }
+            if let Some(draft) = draft {
+                self.composers[id].update(cx, |composer, cx| {
+                    let current = composer.text();
+                    let text = if current.is_empty() {
+                        draft
+                    } else {
+                        format!("{draft}\n{current}")
+                    };
+                    composer.set_text(text, cx);
+                });
+            }
+        }
+        if let Some((id, answer)) = self.source.take_side_answer()
+            && id == self.selected
+            && self.thread_form.is_none()
+        {
+            self.thread_form = Some(thread_actions::Form::Answer(answer));
         }
         if let Some(project) = self.source.take_added() {
             self.new_project = Some(project);
@@ -438,13 +526,20 @@ impl Workspace {
     }
     /// The model the open thread runs on, or the new thread would start on.
     pub fn effective_selection(&self) -> Option<Selection> {
-        if self.creating {
+        if self.choosing_action_model() {
+            self.action_model.clone()
+        } else if self.creating {
             self.new_model
                 .clone()
                 .or_else(|| self.source.project_selection(&self.new_project_id()?))
         } else {
             self.source.selection(self.selected)
         }
+    }
+    pub fn choosing_action_model(&self) -> bool {
+        self.thread_form
+            .as_ref()
+            .is_some_and(thread_actions::Form::chooses_model)
     }
     /// The catalog, once read.
     pub fn catalog(&self) -> Option<std::sync::Arc<Catalog>> {
@@ -477,7 +572,9 @@ impl Workspace {
         };
         let next = catalog.rebase(self.effective_selection().as_ref(), instance, model);
         self.apply_selection(next);
-        self.picker_open = false;
+        if !self.choosing_action_model() {
+            self.picker_open = false;
+        }
         cx.notify();
     }
     /// Sets one option of the current model, e.g. its reasoning level.
@@ -488,7 +585,9 @@ impl Workspace {
         }
     }
     fn apply_selection(&mut self, selection: Selection) {
-        if self.creating {
+        if self.choosing_action_model() {
+            self.action_model = Some(selection);
+        } else if self.creating {
             self.new_model = Some(selection);
         } else {
             self.source.set_model(self.selected, selection);
@@ -665,10 +764,15 @@ impl Workspace {
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_form.is_some() {
+            return;
+        }
+        self.thread_popup = None;
+        self.dropdown = None;
         self.palette_open = true;
         self.picker_open = false;
         self.search.update(cx, |c, cx| {
-            c.placeholder = "Search threads";
+            c.placeholder = "Search threads and actions";
             c.set_text(String::new(), cx);
         });
         window.focus(&self.search.read(cx).focus.clone(), cx);
@@ -682,6 +786,9 @@ impl Workspace {
         }
     }
     pub fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_form.is_some() || self.thread_popup.is_some() {
+            return;
+        }
         self.picker_open = !self.picker_open;
         if self.picker_open {
             // A model may have been hidden or a provider signed in since it was read.
@@ -788,12 +895,23 @@ impl Render for Workspace {
         // A snapshot can arrive between two polls; never draw a thread that
         // has no composer or list yet.
         self.sync_threads(cx);
-        if self.source.order(false).is_empty() {
+        if self.source.order(false).is_empty()
+            && self.source.archived().is_empty()
+            && !self.creating
+            && self.thread_form.is_none()
+        {
             return crate::connection::render(self, cx).into_any_element();
         }
-        self.sync_panel(window, cx);
-        self.sync_inspector();
-        self.sync_work();
+        let has_thread = !self.source.list_threads().is_empty();
+        if has_thread {
+            self.sync_panel(window, cx);
+            self.sync_inspector();
+            self.sync_work();
+        }
+        if self.focus_new_draft {
+            self.focus_new_draft = false;
+            window.focus(&self.new_composer.read(cx).focus.clone(), cx);
+        }
         let viewport = f32::from(window.viewport_size().width);
         let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
         let slide = crate::ui::progress(self.inspector_at, 160, window);
@@ -824,8 +942,47 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &thread_actions::OpenMenu, window, cx| {
+                    if this.thread_form.is_none()
+                        && !this.creating
+                        && !thread_actions::items(this, this.selected).is_empty()
+                    {
+                        this.open_thread_menu(
+                            this.selected,
+                            point(px(16.), px(78.)),
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &thread_actions::RenameThread, window, cx| {
+                    if this.thread_form.is_none()
+                        && !this.creating
+                        && thread_actions::items(this, this.selected)
+                            .contains(&thread_actions::Item::Rename)
+                    {
+                        this.pick_thread_action(
+                            this.selected,
+                            thread_actions::Item::Rename,
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &thread_actions::ConfirmAction, window, cx| {
+                    this.submit_thread_action(None, window, cx);
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
-                    if this.custom_open {
+                    if this.thread_form.is_some() || this.thread_popup.is_some() {
+                        this.close_thread_action(window, cx);
+                    } else if this.custom_open {
                         this.close_custom(window, cx);
                     } else if this.git_ui.form.is_some() {
                         this.close_form(window, cx);
@@ -838,9 +995,9 @@ impl Render for Workspace {
                         this.palette_open = false;
                         window.focus(&this.sidebar_focus, cx);
                     } else if this.creating {
-                        this.creating = false;
+                        this.creating = this.source.order(false).is_empty();
                         window.focus(&this.sidebar_focus, cx);
-                    } else {
+                    } else if !this.source.order(false).is_empty() {
                         use crate::work_view::Escape;
                         match this.work_ui.escape(this.source.as_ref(), this.selected) {
                             Escape::CloseDetail | Escape::KeepApproval => {}
@@ -893,15 +1050,24 @@ impl Render for Workspace {
             .text_size(px(theme::UI))
             .line_height(px(theme::UI_LINE))
             .text_color(color("ink"))
-            .child(crate::title_bar::render(self, window, cx))
+            .when(has_thread, |s| {
+                s.child(crate::title_bar::render(self, window, cx))
+            })
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .child(crate::sidebar::render(self, window, cx))
-                    .child(crate::thread_view::render(self, window, cx))
-                    .when(shown > 0. && self.source.preview(), |s| {
+                    .when(
+                        has_thread && (self.creating || !self.source.order(false).is_empty()),
+                        |s| s.child(crate::thread_view::render(self, window, cx)),
+                    )
+                    .when(
+                        !has_thread || (!self.creating && self.source.order(false).is_empty()),
+                        |s| s.child(crate::connection::render(self, cx)),
+                    )
+                    .when(has_thread && shown > 0. && self.source.preview(), |s| {
                         // Slides in from the window's right edge: the pane
                         // keeps its width and the clip around it grows.
                         s.child(
@@ -919,6 +1085,12 @@ impl Render for Workspace {
             )
             .when(self.palette_open, |s| {
                 s.child(crate::palette::render(self, cx))
+            })
+            .when_some(self.thread_popup.as_ref(), |s, popup| {
+                s.child(crate::thread_actions::popup(self, popup, window, cx))
+            })
+            .when_some(self.thread_form.as_ref(), |s, form| {
+                s.child(crate::thread_actions::form(self, form, window, cx))
             })
             .into_any_element()
     }

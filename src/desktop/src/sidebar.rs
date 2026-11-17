@@ -56,7 +56,10 @@ pub fn visible(w: &Workspace, threads: &[Thread]) -> Vec<ThreadId> {
         .into_iter()
         .filter(|&i| {
             let t = &threads[i];
-            (!t.settled || w.settled_open) && (w.group != 2 || Some(t.project.as_str()) == project)
+            w.source
+                .sidebar_section(i)
+                .is_some_and(|settled| !settled || w.settled_open)
+                && (w.group != 2 || Some(t.project.as_str()) == project)
         })
         .collect()
 }
@@ -65,6 +68,9 @@ pub fn visible(w: &Workspace, threads: &[Thread]) -> Vec<ThreadId> {
 fn step(w: &mut Workspace, step: isize, cx: &mut Context<Workspace>) {
     let threads = w.source.list_threads();
     let listed = visible(w, &threads);
+    if listed.is_empty() {
+        return;
+    }
     let at = listed.iter().position(|&i| i == w.selected).unwrap_or(0) as isize;
     if let Some(&next) = listed.get((at + step).clamp(0, listed.len() as isize - 1) as usize) {
         w.select(next, cx);
@@ -99,8 +105,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             projects.push(&t.project);
             let count = listed
                 .iter()
-                .map(|&o| &threads[o])
-                .filter(|o| o.project == t.project && o.depth == 0 && !o.settled)
+                .filter(|&&i| {
+                    threads[i].project == t.project
+                        && threads[i].depth == 0
+                        && w.source.sidebar_section(i) == Some(false)
+                })
                 .count();
             rows = rows.child(
                 div()
@@ -158,6 +167,12 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     .child(t.title.clone()),
             )
             .child(meta(t.activity.clone()))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_thread_menu(i, event.position, None, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |this, _, window, cx| {
                 window.focus(&this.sidebar_focus, cx);
                 this.select(i, cx);
@@ -296,7 +311,10 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .child(meta(
                             listed
                                 .iter()
-                                .filter(|&&i| threads[i].settled)
+                                .filter(|&&i| {
+                                    w.source.sidebar_section(i) == Some(true)
+                                        && threads[i].depth == 0
+                                })
                                 .count()
                                 .to_string(),
                         ))
@@ -305,6 +323,21 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             cx.notify();
                         })),
                 )
+                .when(!w.source.archived().is_empty(), |s| {
+                    s.child(
+                        row("archived-toggle", "Show archived threads")
+                            .child(ui::icon("clock", "ink-2"))
+                            .child(div().flex_1().child("Archived"))
+                            .child(meta(w.source.archived().len().to_string()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_thread_form(
+                                    crate::thread_actions::Form::Archived,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                })
                 .child(
                     row("settings", "Settings are unavailable in this preview")
                         .cursor(CursorStyle::Arrow)

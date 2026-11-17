@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadStore } from "../../core/threads/store.js";
 
-import type { CommandOf, ThreadDetail } from "../protocol.js";
+import type { CommandOf, ShellFrame, ThreadDetail } from "../protocol.js";
 import { decodeCommand } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
@@ -433,7 +433,7 @@ describe("DirectConnection subscriptions", () => {
       shellPollMs: 30,
       threadPollMs: 30,
     });
-    const frames: unknown[] = [];
+    const frames: ShellFrame[] = [];
     const unsubscribe = connection.subscribeShell(
       {},
       (item) => frames.push(item),
@@ -441,7 +441,7 @@ describe("DirectConnection subscriptions", () => {
     );
     try {
       await waitFor("shell sync", async () =>
-        frames.some((frame) => (frame as { kind?: string }).kind === "synchronized"),
+        frames.some((frame) => frame.kind === "synchronized"),
       );
       const workspaceRoot = await realpath(harness.work);
       const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
@@ -451,9 +451,27 @@ describe("DirectConnection subscriptions", () => {
         title: "Shell",
         modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
-      await waitFor("thread row", async () =>
-        frames.some((frame) => JSON.stringify(frame).includes("thread-shell")),
-      );
+      const latestSnapshot = () => frames.findLast((frame) => frame.kind === "snapshot");
+      await waitFor("thread row", async () => latestSnapshot()?.snapshot.threads.some((thread) => thread.id === "thread-shell") ?? false);
+      await connection.dispatch({ type: "thread.archive", threadId: "thread-shell" });
+      await waitFor("archived row", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return !snapshot?.threads.some((thread) => thread.id === "thread-shell")
+          && snapshot?.archivedThreads?.some((thread) => thread.id === "thread-shell" && thread.title === "Shell") === true;
+      });
+      await connection.dispatch({ type: "thread.restore", threadId: "thread-shell" });
+      await waitFor("restored row", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return snapshot?.threads.some((thread) => thread.id === "thread-shell") === true
+          && !snapshot.archivedThreads?.some((thread) => thread.id === "thread-shell");
+      });
+      await connection.dispatch({ type: "thread.delete", threadId: "thread-shell" });
+      await expect(connection.dispatch({ type: "thread.restore", threadId: "thread-shell" })).rejects.toMatchObject({ code: "THREAD_ARCHIVED" });
+      await waitFor("deleted row disappears", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return snapshot !== undefined && !snapshot.threads.some((thread) => thread.id === "thread-shell")
+          && !snapshot.archivedThreads?.some((thread) => thread.id === "thread-shell");
+      });
     } finally {
       unsubscribe();
       await connection.close();

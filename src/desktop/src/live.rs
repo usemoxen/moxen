@@ -9,12 +9,12 @@
 //! stops listing it, because the window keys per-thread state by it.
 
 use crate::{
-    catalog::Catalog,
+    catalog::{Catalog, OptionValue, is_effort},
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
         Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
         NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
-        Status, Thread, ThreadId, ThreadSource,
+        Status, Thread, ThreadAction, ThreadId, ThreadSource,
     },
     pending,
     transcript::{self, Row},
@@ -53,6 +53,7 @@ pub struct Arranged {
     pub grouped: Vec<ThreadId>,
     /// 1 for a delegated task shown under its parent.
     pub depth: HashMap<ThreadId, usize>,
+    sections: HashMap<ThreadId, bool>,
 }
 
 /// The top-level ancestor a task nests under: a parent listed in the same
@@ -102,11 +103,40 @@ fn nest(entries: &[&Entry]) -> Vec<(ThreadId, usize)> {
 /// project, projects with live work first, newest first.
 pub fn arrange(entries: &[Entry]) -> Arranged {
     let mut arranged = Arranged::default();
+    let by_uuid: HashMap<_, _> = entries.iter().map(|e| (e.uuid.as_str(), e)).collect();
+    let mut anchors = HashSet::new();
+    for entry in entries.iter().filter(|entry| !entry.settled) {
+        let mut parent = entry.parent.as_deref();
+        let mut seen = HashSet::from([entry.uuid.as_str()]);
+        while let Some(up) = parent.and_then(|id| by_uuid.get(id)) {
+            if !seen.insert(up.uuid.as_str()) {
+                break;
+            }
+            if up.settled {
+                anchors.insert(up.id);
+            }
+            parent = up.parent.as_deref();
+        }
+    }
+    for entry in entries {
+        let settled = entry.settled && !anchors.contains(&entry.id);
+        let parent_live = entry
+            .parent
+            .as_deref()
+            .and_then(|id| by_uuid.get(id))
+            .is_some_and(|parent| !parent.settled || anchors.contains(&parent.id));
+        // Put away a settled task until its parent settles. A settled parent
+        // with live tasks remains as the header of their active family.
+        if !settled || !parent_live {
+            arranged.sections.insert(entry.id, settled);
+        }
+    }
+    let in_section = |entry: &Entry, settled| arranged.sections.get(&entry.id) == Some(&settled);
     let flat_of = |settled: bool| -> Vec<(ThreadId, usize)> {
         nest(
             &entries
                 .iter()
-                .filter(|e| e.settled == settled)
+                .filter(|e| in_section(e, settled))
                 .collect::<Vec<_>>(),
         )
     };
@@ -123,7 +153,7 @@ pub fn arrange(entries: &[Entry]) -> Arranged {
     let newest = |project: &str, settled: bool| {
         entries
             .iter()
-            .filter(|e| e.project == project && e.settled == settled)
+            .filter(|e| e.project == project && in_section(e, settled))
             .map(|e| e.sort_ms)
             .max()
     };
@@ -140,12 +170,20 @@ pub fn arrange(entries: &[Entry]) -> Arranged {
         for settled in [false, true] {
             let of_project: Vec<&Entry> = entries
                 .iter()
-                .filter(|e| e.project == project && e.settled == settled)
+                .filter(|e| e.project == project && in_section(e, settled))
                 .collect();
             arranged
                 .grouped
                 .extend(nest(&of_project).into_iter().map(|(id, _)| id));
         }
+    }
+    for entry in entries
+        .iter()
+        .filter(|entry| !arranged.sections.contains_key(&entry.id))
+    {
+        // Still selectable in the jump palette and from its parent's inspector.
+        arranged.flat.push(entry.id);
+        arranged.grouped.push(entry.id);
     }
     arranged
 }
@@ -282,6 +320,9 @@ fn status_of(thread: &Value) -> Status {
     {
         return Status::Error;
     }
+    if ms(thread, &["snoozedUntil"]).is_some_and(|until| until > now_ms()) {
+        return Status::Snoozed;
+    }
     if thread
         .get("queuedTurns")
         .and_then(Value::as_array)
@@ -328,6 +369,64 @@ fn is_listed(thread: &Value) -> bool {
         && !set("deletedAt")
 }
 
+fn iso_ms(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|instant| instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn model_request(fields: &mut Value, model: &Selection) {
+    fields["provider"] = json!(model.instance);
+    fields["model"] = json!(model.model);
+    for (id, value) in &model.options {
+        match (id.as_str(), value) {
+            ("serviceTier", OptionValue::Text(tier)) => {
+                fields["speedMode"] = json!(if tier == "fast" { "fast" } else { "standard" });
+            }
+            ("fastMode", OptionValue::Flag(fast)) => {
+                fields["speedMode"] = json!(if *fast { "fast" } else { "standard" });
+            }
+            (id, OptionValue::Text(effort)) if is_effort(id) => {
+                fields["thinkingEffort"] = json!(effort);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn usage_reset_of(thread: &Value) -> Option<i64> {
+    let latest = text(thread, &["latestTurn", "turnId"])?;
+    let limit = thread["activities"].as_array()?.iter().rev().find(|row| {
+        text(row, &["turnId"]) == Some(latest)
+            && matches!(text(row, &["kind"]), Some("usage.limit" | "usage.wrap-up"))
+    })?;
+    ms(limit, &["payload", "resetsAt"])
+}
+
+fn revert_targets(thread: &Value) -> HashMap<String, usize> {
+    let turns: HashMap<_, _> = thread["checkpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some((
+                text(row, &["turnId"])?,
+                usize::try_from(row["checkpointTurnCount"].as_u64()?.checked_sub(1)?).ok()?,
+            ))
+        })
+        .collect();
+    thread["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some((
+                text(row, &["id"])?.to_string(),
+                *turns.get(text(row, &["turnId"])?)?,
+            ))
+        })
+        .collect()
+}
+
 struct Slot {
     uuid: String,
     thread: Thread,
@@ -342,6 +441,11 @@ struct Slot {
     created_ms: i64,
     branch: Option<String>,
     worktree: Option<String>,
+    cwd: Option<String>,
+    snoozed_until: Option<i64>,
+    has_work: bool,
+    protected: bool,
+    scheduled_continue: Option<String>,
 }
 
 /// What is known of one thread's conversation.
@@ -350,6 +454,8 @@ struct Transcript {
     rows: Vec<Row>,
     /// `rows` as the window reads them, rebuilt when they change.
     messages: Option<Arc<Vec<Message>>>,
+    revert: HashMap<String, usize>,
+    usage_reset: Option<i64>,
 }
 
 /// The approvals and questions open on one thread.
@@ -404,6 +510,12 @@ struct State {
     work: HashMap<(ThreadId, Read), Arc<Result<View, String>>>,
     work_reads: HashSet<(ThreadId, Read)>,
     inspector: HashMap<ThreadId, Arc<InspectorData>>,
+    archived: Vec<(String, String)>,
+    restoring: HashSet<String>,
+    actions: HashSet<ThreadId>,
+    settled: Option<ThreadId>,
+    side_answer: Option<(ThreadId, String)>,
+    reverted: Option<(ThreadId, Option<String>)>,
 }
 impl State {
     /// The thread's Git tab data, to change.
@@ -427,10 +539,10 @@ impl State {
             let (Some(uuid), true) = (text(thread, &["id"]), is_listed(thread)) else {
                 continue;
             };
-            let next = self.slots.len();
-            let id = *self.ids.entry(uuid.to_string()).or_insert(next);
+            let id = *self.ids.entry(uuid.to_string()).or_insert(self.slots.len());
             let status = status_of(thread);
             let settled = is_settled(thread) && status != Status::Running;
+            let snoozed_until = ms(thread, &["snoozedUntil"]);
             let project_id = text(thread, &["projectId"]).unwrap_or_default();
             let project = projects
                 .get(project_id)
@@ -470,6 +582,28 @@ impl State {
                 created_ms: ms(thread, &["createdAt"]).unwrap_or(0),
                 branch: text(thread, &["branch"]).map(str::to_string),
                 worktree: text(thread, &["worktreePath"]).map(str::to_string),
+                cwd: text(thread, &["worktreePath"])
+                    .or_else(|| {
+                        snapshot["projects"]
+                            .as_array()?
+                            .iter()
+                            .find(|p| text(p, &["id"]) == Some(project_id))
+                            .and_then(|p| text(p, &["workspaceRoot"]))
+                    })
+                    .map(str::to_string),
+                snoozed_until,
+                has_work: matches!(status, Status::Running | Status::Held)
+                    || thread["queuedTurns"]
+                        .as_array()
+                        .is_some_and(|rows| !rows.is_empty()),
+                protected: thread["protection"]["protected"] == true,
+                scheduled_continue: thread["queuedTurns"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|turn| text(turn, &["scheduleReason"]) == Some("usage-reset"))
+                    .and_then(|turn| text(turn, &["turnId"]))
+                    .map(str::to_string),
             };
             if id == self.slots.len() {
                 self.slots.push(slot);
@@ -486,6 +620,20 @@ impl State {
                 settled,
             });
         }
+        self.archived = snapshot["archivedThreads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let uuid = text(row, &["id"])?;
+                Some((
+                    uuid.to_string(),
+                    text(row, &["title"]).unwrap_or(uuid).to_string(),
+                ))
+            })
+            .collect();
+        self.restoring
+            .retain(|uuid| self.archived.iter().any(|(id, _)| uuid == id));
         self.arranged = arrange(&entries);
         self.projects = projects_of(snapshot, &entries);
         if let Some(uuid) = &self.opening
@@ -503,6 +651,26 @@ impl State {
                 .copied()
                 .unwrap_or(0);
         }
+    }
+
+    fn has_family_work(&self, id: ThreadId) -> bool {
+        self.slots.iter().any(|slot| {
+            if !slot.present || !slot.has_work {
+                return false;
+            }
+            let mut member = slot;
+            for _ in 0..self.slots.len() {
+                if member.thread.id == id {
+                    return true;
+                }
+                let Some(parent) = member.parent.as_ref().and_then(|uuid| self.ids.get(uuid))
+                else {
+                    break;
+                };
+                member = &self.slots[*parent];
+            }
+            false
+        })
     }
 }
 
@@ -647,6 +815,157 @@ pub struct ServerSource {
     endpoint: String,
 }
 impl ServerSource {
+    fn dispatch_thread_action(&self, id: ThreadId, action: ThreadAction) {
+        let (uuid, cwd, current, reset, scheduled_continue) = {
+            let state = self.shared.state.lock().expect("live state");
+            let Some(slot) = state.slots.get(id).filter(|slot| slot.present) else {
+                return;
+            };
+            (
+                slot.uuid.clone(),
+                slot.cwd.clone(),
+                slot.selection.as_ref().and_then(Selection::from_json),
+                state
+                    .transcripts
+                    .get(&id)
+                    .and_then(|transcript| transcript.usage_reset),
+                slot.scheduled_continue.clone(),
+            )
+        };
+        let mut fields = json!({"threadId": uuid});
+        let (name, opened, draft) = match action {
+            ThreadAction::Rename(title) => {
+                fields["title"] = json!(title);
+                ("thread.meta.update", None, None)
+            }
+            ThreadAction::RegenerateTitle => {
+                fields["regenerateTitle"] = json!(true);
+                ("thread.meta.update", None, None)
+            }
+            ThreadAction::Settle { stop } => {
+                if stop {
+                    fields["stop"] = json!(true);
+                }
+                ("thread.settle", None, None)
+            }
+            ThreadAction::Unsettle => {
+                fields["reason"] = json!("user");
+                ("thread.unsettle", None, None)
+            }
+            ThreadAction::Snooze(until) => {
+                fields["snoozedUntil"] = json!(until);
+                ("thread.snooze", None, None)
+            }
+            ThreadAction::Unsnooze => ("thread.unsnooze", None, None),
+            ThreadAction::Archive => ("thread.archive", None, None),
+            ThreadAction::Delete => ("thread.delete", None, None),
+            ThreadAction::Protect => ("thread.protect", None, None),
+            ThreadAction::Handover { prompt, selection } => {
+                let Some(cwd) = cwd else {
+                    return;
+                };
+                fields = json!({
+                    "cwd": cwd, "prompt": prompt, "wait": false,
+                });
+                model_request(&mut fields, &selection);
+                ("thread.handover", Some(&["threadId"][..]), None)
+            }
+            ThreadAction::Continue { selection } => {
+                let same_provider = selection.as_ref().is_none_or(|choice| {
+                    current
+                        .as_ref()
+                        .is_some_and(|current| current.instance == choice.instance)
+                });
+                if let Some(choice) = selection.filter(|choice| Some(choice) != current.as_ref()) {
+                    fields["modelSelection"] = choice.to_json();
+                }
+                if same_provider && let Some(reset) = reset.filter(|reset| *reset > now_ms()) {
+                    // The TUI allows a minute for the provider's limit to clear before starting.
+                    fields["scheduledFor"] = json!(iso_ms(reset + 60_000));
+                }
+                ("thread.continue", Some(&["threadId"][..]), None)
+            }
+            ThreadAction::ContinueAtReset => {
+                let Some(reset) = reset
+                    .filter(|reset| *reset > now_ms())
+                    .and_then(|reset| iso_ms(reset + 60_000))
+                else {
+                    return;
+                };
+                if scheduled_continue.is_some() {
+                    return;
+                }
+                fields["scheduledFor"] = json!(reset);
+                fields["scheduleReason"] = json!("usage-reset");
+                fields["message"] = json!({"text": "The usage limit that stopped the last turn has reset. Continue the task where you left off."});
+                ("thread.turn.start", None, None)
+            }
+            ThreadAction::CancelContinue { notify_parent } => {
+                let Some(turn) = scheduled_continue else {
+                    return;
+                };
+                fields["turnId"] = json!(turn);
+                if !notify_parent {
+                    fields["notifyParent"] = json!(false);
+                }
+                ("thread.turn.interrupt", None, None)
+            }
+            ThreadAction::Delegate { task, selection } => {
+                fields = json!({
+                    "parentThreadId": uuid, "task": task,
+                    "wait": false, "isolation": "shared",
+                });
+                model_request(&mut fields, &selection);
+                ("thread.delegate", Some(&["child", "id"][..]), None)
+            }
+            ThreadAction::SideQuestion(question) => {
+                fields["question"] = json!(question);
+                ("thread.side-question", None, None)
+            }
+            ThreadAction::Revert {
+                turn_count,
+                restore_files,
+                draft,
+            } => {
+                fields["turnCount"] = json!(turn_count);
+                if restore_files {
+                    fields["restoreFiles"] = json!(true);
+                }
+                ("thread.conversation.revert", None, draft)
+            }
+        };
+        if !self.shared.update(|state| state.actions.insert(id)) {
+            return;
+        }
+        background_result(&self.shared, move |wire, shared| {
+            let result = wire.and_then(|wire| wire.dispatch(name, fields));
+            shared.update(|state| {
+                state.actions.remove(&id);
+                let Ok(result) = &result else {
+                    return;
+                };
+                if let Some(uuid) = opened.and_then(|path| text(result, path)) {
+                    if let Some(&id) = state.ids.get(uuid).filter(|&&id| state.slots[id].present) {
+                        state.opened = Some(id);
+                    } else {
+                        state.opening = Some(uuid.to_string());
+                    }
+                }
+                if name == "thread.settle" {
+                    state.settled = Some(id);
+                }
+                if name == "thread.side-question" {
+                    state.side_answer =
+                        text(result, &["text"]).map(|answer| (id, answer.to_string()));
+                }
+                if name == "thread.conversation.revert" {
+                    state.reverted = Some((id, draft));
+                    state.patches.retain(|(thread, _), _| *thread != id);
+                }
+            });
+            result.map(|_| ()).map_err(|error| problem(&error, None))
+        });
+    }
     pub fn connect(endpoint: String) -> Self {
         let source = Self {
             shared: Arc::new(Shared {
@@ -834,7 +1153,10 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
             }
             let entry = state.transcripts.entry(id).or_default();
             if frame["kind"] == "snapshot" {
-                entry.rows = transcript::project(&frame["snapshot"]["thread"]);
+                let thread = &frame["snapshot"]["thread"];
+                entry.rows = transcript::project(thread);
+                entry.revert = revert_targets(thread);
+                entry.usage_reset = usage_reset_of(thread);
             } else {
                 let payload = &frame["event"]["payload"];
                 if frame["event"]["type"] == "thread.message-sent" {
@@ -861,6 +1183,128 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
 }
 
 impl ThreadSource for ServerSource {
+    fn thread_action(&mut self, id: ThreadId, action: ThreadAction) {
+        self.dispatch_thread_action(id, action);
+    }
+    fn action_pending(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .actions
+            .contains(&id)
+    }
+    fn has_family_work(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .has_family_work(id)
+    }
+    fn archived(&self) -> Vec<(String, String)> {
+        let state = self.shared.state.lock().expect("live state");
+        state
+            .archived
+            .iter()
+            .filter(|(id, _)| !state.restoring.contains(id))
+            .cloned()
+            .collect()
+    }
+    fn restore_thread(&mut self, uuid: &str) {
+        let uuid = uuid.to_string();
+        if !self
+            .shared
+            .update(|state| state.restoring.insert(uuid.clone()))
+        {
+            return;
+        }
+        background_result(&self.shared, move |wire, shared| {
+            match wire.and_then(|wire| wire.dispatch("thread.restore", json!({"threadId": uuid}))) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    shared.update(|state| {
+                        state.restoring.remove(&uuid);
+                    });
+                    Err(problem(&error, None))
+                }
+            }
+        });
+    }
+    fn take_settled(&mut self) -> Option<ThreadId> {
+        self.shared.state.lock().expect("live state").settled.take()
+    }
+    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .side_answer
+            .take()
+    }
+    fn revert_before(&self, id: ThreadId, row: usize) -> Option<usize> {
+        let state = self.shared.state.lock().expect("live state");
+        let transcript = state.transcripts.get(&id)?;
+        transcript
+            .revert
+            .get(&transcript.rows.get(row)?.key)
+            .copied()
+    }
+    fn take_reverted(&mut self) -> Option<(ThreadId, Option<String>)> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .reverted
+            .take()
+    }
+    fn usage_reset(&self, id: ThreadId) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .transcripts
+            .get(&id)?
+            .usage_reset
+            .filter(|reset| *reset > now_ms())
+            .and_then(iso_ms)
+    }
+    fn scheduled_continue(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .is_some_and(|slot| slot.scheduled_continue.is_some())
+    }
+    fn is_protected(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .is_some_and(|slot| slot.protected)
+    }
+    fn is_snoozed(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .and_then(|slot| slot.snoozed_until)
+            .is_some_and(|until| until > now_ms())
+    }
+    fn can_handover(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .is_some_and(|slot| slot.cwd.is_some())
+    }
     fn order(&self, by_project: bool) -> Vec<ThreadId> {
         let state = self.shared.state.lock().expect("live state");
         if by_project {
@@ -868,6 +1312,16 @@ impl ThreadSource for ServerSource {
         } else {
             state.arranged.flat.clone()
         }
+    }
+    fn sidebar_section(&self, id: ThreadId) -> Option<bool> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .arranged
+            .sections
+            .get(&id)
+            .copied()
     }
     fn preview(&self) -> bool {
         false
@@ -893,6 +1347,11 @@ impl ThreadSource for ServerSource {
             .iter()
             .map(|slot| {
                 let mut thread = slot.thread.clone();
+                if thread.status == Status::Snoozed
+                    && slot.snoozed_until.is_some_and(|until| until <= now)
+                {
+                    thread.status = Status::Idle;
+                }
                 if let Some(stamp) = slot.stamp_ms {
                     thread.activity = relative_age(now, stamp);
                     if thread.status == Status::Running {
@@ -1816,18 +2275,28 @@ fn background(
     shared: &Arc<Shared>,
     job: impl FnOnce(&Wire) -> Result<(), Problem> + Send + 'static,
 ) {
+    background_result(shared, move |wire, _| {
+        let wire = wire.map_err(|error| problem(&error, None))?;
+        job(&wire)
+    });
+}
+
+fn background_result(
+    shared: &Arc<Shared>,
+    job: impl FnOnce(Result<Arc<Wire>, WireError>, &Arc<Shared>) -> Result<(), Problem> + Send + 'static,
+) {
     let wire = shared.state.lock().expect("live state").wire.clone();
     let shared = shared.clone();
     let spawned = std::thread::Builder::new()
         .name("moxen-command".into())
         .spawn(move || {
-            let outcome = match wire {
-                Some(wire) => job(&wire),
-                None => Err(Problem {
+            let outcome = job(
+                wire.ok_or_else(|| WireError {
+                    code: "NOT_CONNECTED".into(),
                     message: "Not connected to the Moxen server.".into(),
-                    unsent: None,
                 }),
-            };
+                &shared,
+            );
             if let Err(failed) = outcome {
                 shared.update(|state| state.problems.push_back(failed));
             }
@@ -1916,6 +2385,66 @@ mod tests {
         ];
         assert_eq!(arrange(&entries).flat, vec![0, 1, 2]);
         assert_eq!(arrange(&entries).grouped, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn settled_tasks_leave_the_sidebar_until_the_parent_settles() {
+        let mut family = [
+            entry(0, "parent", None, "p", 20, false),
+            entry(1, "child", Some("parent"), "p", 30, true),
+        ];
+        assert_eq!(arrange(&family).sections, HashMap::from([(0, false)]));
+        family[0].settled = true;
+        let settled = arrange(&family);
+        assert_eq!(settled.sections, HashMap::from([(0, true), (1, true)]));
+        assert_eq!(settled.depth[&1], 1);
+        family[1].settled = false;
+        let anchored = arrange(&family);
+        assert_eq!(anchored.sections, HashMap::from([(0, false), (1, false)]));
+        assert_eq!(anchored.depth[&1], 1);
+    }
+
+    #[test]
+    fn shell_keeps_snoozed_threads_and_reports_work_only_in_the_target_family() {
+        let mut state = State::default();
+        state.apply(&json!({
+            "threads": [
+                {"id": "root", "snoozedUntil": "2099-01-01T00:00:00Z"},
+                {"id": "child", "parentThreadId": "root"},
+                {"id": "grandchild", "parentThreadId": "child", "queuedTurns": [{"turnId": "q"}]},
+                {"id": "past", "snoozedUntil": "2000-01-01T00:00:00Z"},
+                {"id": "deleted", "deletedAt": "2026-01-01T00:00:00Z"}
+            ],
+            "archivedThreads": [{"id":"archived","title":"Archive"}]
+        }));
+        assert_eq!(state.slots[0].thread.status, Status::Snoozed);
+        assert_eq!(state.slots[3].thread.status, Status::Idle);
+        assert_eq!(state.arranged.sections[&0], false);
+        assert!(state.has_family_work(0));
+        assert!(state.has_family_work(1));
+        assert!(!state.has_family_work(3));
+        assert!(!state.ids.contains_key("deleted"));
+        assert_eq!(state.archived, [("archived".into(), "Archive".into())]);
+    }
+
+    #[test]
+    fn only_the_latest_turns_usage_hit_and_checkpointed_messages_are_actionable() {
+        let mut thread = json!({
+            "latestTurn": {"turnId": "latest"},
+            "activities": [
+                {"kind":"usage.limit","turnId":"older","payload":{"resetsAt":"2098-01-01T00:00:00Z"}},
+                {"kind":"usage.limit","turnId":"latest","payload":{"resetsAt":"2099-01-01T00:00:00Z"}}
+            ],
+            "messages": [{"id":"a","turnId":"older"},{"id":"b","turnId":"latest"}],
+            "checkpoints": [{"turnId":"older","checkpointTurnCount":1}]
+        });
+        assert_eq!(
+            usage_reset_of(&thread),
+            parse_iso_ms("2099-01-01T00:00:00Z")
+        );
+        thread["latestTurn"]["turnId"] = json!("new turn");
+        assert_eq!(usage_reset_of(&thread), None);
+        assert_eq!(revert_targets(&thread), HashMap::from([("a".into(), 0)]));
     }
 
     #[test]
@@ -2112,7 +2641,8 @@ mod tests {
                             "subscribeShell" | "subscribeThread" => {
                                 let item = if message["method"] == "subscribeShell" {
                                     json!({"kind": "snapshot", "snapshot": {
-                                        "projects": [{"id": "p", "title": "moxen"}],
+                                        "projects": [{"id": "p", "title": "moxen", "workspaceRoot": "/fake/project"}],
+                                        "archivedThreads": [{"id": "archived", "title": "Archived work"}],
                                         "threads": [{"id": "t1", "projectId": "p", "title": "Fix",
                                             "session": {"status": "running"},
                                             "modelSelection": {"instanceId": "claude", "model": "opus"}},
@@ -2258,6 +2788,28 @@ mod tests {
                                     Some("thread.task.cancel") => {
                                         json!({"task": {"taskId": params["taskId"], "status": "cancel_requested"},
                                             "interruptRequested": true, "stateAfter": "running"})
+                                    }
+                                    Some(
+                                        "thread.meta.update"
+                                        | "thread.settle"
+                                        | "thread.unsettle"
+                                        | "thread.snooze"
+                                        | "thread.unsnooze"
+                                        | "thread.archive"
+                                        | "thread.restore"
+                                        | "thread.delete"
+                                        | "thread.protect"
+                                        | "thread.conversation.revert",
+                                    ) => json!({"accepted": true}),
+                                    Some("thread.handover" | "thread.continue") => {
+                                        json!({"threadId": "new-thread"})
+                                    }
+                                    Some("thread.delegate") => json!({"child": {"id": "child"}}),
+                                    Some("thread.side-question") => {
+                                        json!({"text": "Separate answer"})
+                                    }
+                                    Some("thread.turn.start" | "thread.turn.interrupt") => {
+                                        json!({"accepted": true, "threadId": "new-thread"})
                                     }
                                     _ => json!({"accepted": true, "threadId": "new-thread"}),
                                 }
@@ -2530,6 +3082,154 @@ mod tests {
             json!({
                 "type": "thread.task.cancel", "parentThreadId": "t1", "taskId": "child",
                 "notifyParent": false,
+            })
+        );
+        let choice = Selection::from_json(&json!({
+            "instanceId": "codex", "model": "gpt", "options": [{"id": "reasoningEffort", "value": "high"}],
+        })).unwrap();
+        let old = source.selection(0).unwrap();
+        source.shared.update(|state| {
+            state.transcripts.get_mut(&0).unwrap().usage_reset =
+                parse_iso_ms("2099-01-01T00:00:00Z");
+        });
+        let cases = [
+            (
+                ThreadAction::Rename("New title".into()),
+                json!({"type":"thread.meta.update","threadId":"t1","title":"New title"}),
+            ),
+            (
+                ThreadAction::RegenerateTitle,
+                json!({"type":"thread.meta.update","threadId":"t1","regenerateTitle":true}),
+            ),
+            (
+                ThreadAction::Settle { stop: false },
+                json!({"type":"thread.settle","threadId":"t1"}),
+            ),
+            (
+                ThreadAction::Settle { stop: true },
+                json!({"type":"thread.settle","threadId":"t1","stop":true}),
+            ),
+            (
+                ThreadAction::Unsettle,
+                json!({"type":"thread.unsettle","threadId":"t1","reason":"user"}),
+            ),
+            (
+                ThreadAction::Snooze("2099-01-01T00:00:00.000Z".into()),
+                json!({"type":"thread.snooze","threadId":"t1","snoozedUntil":"2099-01-01T00:00:00.000Z"}),
+            ),
+            (
+                ThreadAction::Unsnooze,
+                json!({"type":"thread.unsnooze","threadId":"t1"}),
+            ),
+            (
+                ThreadAction::Archive,
+                json!({"type":"thread.archive","threadId":"t1"}),
+            ),
+            (
+                ThreadAction::Delete,
+                json!({"type":"thread.delete","threadId":"t1"}),
+            ),
+            (
+                ThreadAction::Protect,
+                json!({"type":"thread.protect","threadId":"t1"}),
+            ),
+            (
+                ThreadAction::Handover {
+                    prompt: "Handoff".into(),
+                    selection: choice.clone(),
+                },
+                json!({"type":"thread.handover","cwd":"/fake/project","prompt":"Handoff","provider":"codex","model":"gpt","thinkingEffort":"high","wait":false}),
+            ),
+            (
+                ThreadAction::Continue {
+                    selection: Some(old),
+                },
+                json!({"type":"thread.continue","threadId":"t1","scheduledFor":"2099-01-01T00:01:00.000Z"}),
+            ),
+            (
+                ThreadAction::Continue {
+                    selection: Some(choice.clone()),
+                },
+                json!({"type":"thread.continue","threadId":"t1","modelSelection":choice.to_json()}),
+            ),
+            (
+                ThreadAction::Delegate {
+                    task: "Check it".into(),
+                    selection: choice.clone(),
+                },
+                json!({"type":"thread.delegate","parentThreadId":"t1","task":"Check it","provider":"codex","model":"gpt","thinkingEffort":"high","wait":false,"isolation":"shared"}),
+            ),
+            (
+                ThreadAction::SideQuestion("Why?".into()),
+                json!({"type":"thread.side-question","threadId":"t1","question":"Why?"}),
+            ),
+            (
+                ThreadAction::Revert {
+                    turn_count: 0,
+                    restore_files: false,
+                    draft: Some("Prompt".into()),
+                },
+                json!({"type":"thread.conversation.revert","threadId":"t1","turnCount":0}),
+            ),
+            (
+                ThreadAction::Revert {
+                    turn_count: 2,
+                    restore_files: true,
+                    draft: None,
+                },
+                json!({"type":"thread.conversation.revert","threadId":"t1","turnCount":2,"restoreFiles":true}),
+            ),
+        ];
+        let restore_at = 21 + cases.len();
+        for (at, (action, expected)) in cases.into_iter().enumerate() {
+            source.thread_action(0, action);
+            assert_eq!(sent(21 + at), expected);
+            wait_for("thread action acknowledgement", || {
+                !source.action_pending(0)
+            });
+        }
+        assert_eq!(source.take_settled(), Some(0));
+        assert_eq!(source.take_opened(), Some(1));
+        assert_eq!(
+            source.take_side_answer(),
+            Some((0, "Separate answer".into()))
+        );
+        assert_eq!(source.take_reverted(), Some((0, None)));
+        assert_eq!(
+            source.archived(),
+            [("archived".into(), "Archived work".into())]
+        );
+        source.restore_thread("archived");
+        assert_eq!(
+            sent(restore_at),
+            json!({"type":"thread.restore","threadId":"archived"})
+        );
+        assert!(source.archived().is_empty());
+        source.thread_action(0, ThreadAction::ContinueAtReset);
+        assert_eq!(
+            sent(restore_at + 1),
+            json!({
+                "type": "thread.turn.start", "threadId": "t1",
+                "message": {"text": "The usage limit that stopped the last turn has reset. Continue the task where you left off."},
+                "scheduledFor": "2099-01-01T00:01:00.000Z", "scheduleReason": "usage-reset",
+            })
+        );
+        wait_for("continue schedule acknowledgement", || {
+            !source.action_pending(0)
+        });
+        source
+            .shared
+            .update(|state| state.slots[1].scheduled_continue = Some("reset-turn".into()));
+        source.thread_action(
+            1,
+            ThreadAction::CancelContinue {
+                notify_parent: false,
+            },
+        );
+        assert_eq!(
+            sent(restore_at + 2),
+            json!({
+                "type": "thread.turn.interrupt", "threadId": "child", "turnId": "reset-turn", "notifyParent": false,
             })
         );
         let _ = std::fs::remove_dir_all(&dir);

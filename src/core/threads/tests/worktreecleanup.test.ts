@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { branchSlug, provisionWorktree, removeThreadWorktree } from "../operations.js";
+import { ensureStoredProject } from "../../projects/projects.js";
+import { branchSlug, provisionWorktree, removeThreadWorktree, restoreThreadWorktree } from "../operations.js";
 import type { StoredThread } from "../types.js";
 
 const root = realpathSync(mkdtempSync(path.join(tmpdir(), "moxen-wtclean-")));
@@ -43,6 +44,18 @@ describe("removeThreadWorktree", () => {
     writeFileSync(path.join(wt.path, "new.txt"), "work");
     expect(await removeThreadWorktree(store, thread)).toBe(false);
     expect(existsSync(wt.path)).toBe(true);
+  });
+
+  it("reattaches the retained branch at the original checkout path", async () => {
+    const { repo, store, wt, thread } = await setup("restore-1");
+    const { project } = await ensureStoredProject(store, { workspaceRoot: repo });
+    writeFileSync(path.join(wt.path, "a.txt"), "branch work");
+    git(wt.path, "commit", "-qam", "on the thread branch");
+    const tip = git(wt.path, "rev-parse", "HEAD");
+    expect(await removeThreadWorktree(store, thread)).toBe(true);
+    await restoreThreadWorktree(store, { ...thread, projectId: project.id });
+    expect(git(wt.path, "branch", "--show-current").trim()).toBe(wt.branch);
+    expect(git(wt.path, "rev-parse", "HEAD")).toBe(tip);
   });
 
   it("ignores threads that are not in a Moxen-provisioned worktree", async () => {

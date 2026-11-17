@@ -158,7 +158,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 - Click a thread, or use Up/Down with sidebar focus. Each thread retains its
   draft, scroll position and expanded steps.
 - All / Projects / This project changes the sidebar grouping/filter. Settled
-  opens the two settled fixture threads.
+  reveals finished families. A settled task stays off the sidebar while
+  its parent is active; it is still available from the parent's inspector.
 - Click a step to open its output beneath a rule. The run summary folds its
   steps, including thoughts.
 - The model pill (or Cmd+M) opens a searchable, provider-grouped model picker
@@ -191,7 +192,23 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 - Cmd+I or the title-bar control toggles the inspector. Ctrl+T, Tasks or the
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
-- Cmd+K or the search field opens the thread palette.
+- Cmd+K, Ctrl+P, or the search field opens the thread and action palette.
+  Type to filter and press Enter to pick the first match. Right-click a
+  sidebar row to act on it, or use the header's Actions menu. Shift+F10
+  opens the selected thread's menu; F2 opens Rename.
+- Settling a thread also settles its tasks. If the family has running or
+  queued work, confirm before stopping it. Unsettle wakes the family.
+  Snoozed threads stay visible and can be unsnoozed early. Archiving removes
+  a thread from the list; open Archived to restore it. Deleting is permanent
+  and asks for confirmation. Escape closes the action menu or dialog first.
+- Continue in a new thread carries the conversation and its tasks over. Pick
+  a provider, model and effort in the dialog. The current provider waits for
+  a known usage reset; a different provider can start without that wait. You
+  can also schedule or cancel a continuation in the existing thread. A
+  prompt-based hand-off starts a separate thread; delegation starts a task.
+- Ask a side question without adding to the conversation. Right-click a
+  message with a checkpoint to revert to before its turn, with or without
+  restoring files. A reverted prompt returns to the draft.
 - Git, Diff, Agents and Background show the server's data (fixtures with
   `--mock`). The mock usage control opens Context.
 - The composer preserves native multiline input, Unicode grapheme deletion,

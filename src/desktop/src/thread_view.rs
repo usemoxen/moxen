@@ -362,7 +362,36 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                             .when(index + 1 == messages.len(), |s| s.pb(px(24.)))
                             .flex()
                             .justify_center()
-                            .child(div().w_full().max_w(px(theme::READING)).child(body))
+                            .child(
+                                div()
+                                    .id(("transcript-message", index))
+                                    .w_full()
+                                    .max_w(px(theme::READING))
+                                    .child(body)
+                                    .when(
+                                        matches!(
+                                            current,
+                                            Message::User { .. } | Message::Assistant { .. }
+                                        ),
+                                        |s| {
+                                            let entity = entity.clone();
+                                            s.on_mouse_down(
+                                                MouseButton::Right,
+                                                move |event, window, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.open_thread_menu(
+                                                            id,
+                                                            event.position,
+                                                            Some(index),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                },
+                                            )
+                                        },
+                                    ),
+                            )
                             .into_any_element()
                     })
                     .size_full()
@@ -663,10 +692,36 @@ struct Menu {
     items: Vec<(String, bool)>,
 }
 
+pub(crate) fn menu_surface(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .p(px(6.))
+        .rounded(px(12.))
+        .bg(color("raised"))
+        .shadow(theme::float_shadow())
+        .text_size(px(13.5))
+}
+
+pub(crate) fn menu_row(id: impl Into<ElementId>, name: String, selected: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .control(name.clone())
+        .h(px(30.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(6.))
+        .when(selected, |s| s.bg(color("sunk")))
+        .child(div().flex_1().truncate().child(name))
+        .when(selected, |s| s.child(ui::icon("check", "ink-2")))
+}
+
 fn chip_menu(
     w: &Workspace,
     menu: Menu,
-    pick: impl Fn(&mut Workspace, usize, &mut Context<Workspace>) + Clone + 'static,
+    pick: impl Fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let Menu {
@@ -710,39 +765,48 @@ fn chip_menu(
             .into_any_element()
     };
     div().relative().child(button).when(open && !locked, |s| {
-        s.child(
-            div()
-                .id(SharedString::from(format!("{id}-menu")))
-                .occlude()
-                .absolute()
-                .bottom(relative(1.))
-                .mb(px(6.))
-                .left(px(0.))
-                .min_w(px(180.))
-                .max_w(px(320.))
-                .p(px(6.))
-                .rounded(px(12.))
-                .bg(color("raised"))
-                .shadow(theme::float_shadow())
-                .text_size(px(13.5))
-                .children(items.into_iter().enumerate().map(|(i, (name, selected))| {
-                    let pick = pick.clone();
-                    div()
-                        .id((id, i))
-                        .control(name.clone())
-                        .h(px(30.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .rounded(px(6.))
-                        .when(selected, |s| s.bg(color("sunk")))
-                        .child(div().flex_1().truncate().child(name))
-                        .when(selected, |s| s.child(ui::icon("check", "ink-2")))
-                        .on_click(cx.listener(move |this, _, _, cx| pick(this, i, cx)))
-                })),
-        )
+        let menu = menu_surface(SharedString::from(format!("{id}-menu")))
+            .absolute()
+            .when(kind == Dropdown::Thread, |s| {
+                s.top(relative(1.)).mt(px(6.)).right(px(0.))
+            })
+            .when(kind != Dropdown::Thread, |s| {
+                s.bottom(relative(1.)).mb(px(6.)).left(px(0.))
+            })
+            .min_w(px(180.))
+            .max_w(px(320.))
+            .children(items.into_iter().enumerate().map(|(i, (name, selected))| {
+                let pick = pick.clone();
+                menu_row((id, i), name, selected)
+                    .on_click(cx.listener(move |this, _, window, cx| pick(this, i, window, cx)))
+            }));
+        if kind == Dropdown::Thread {
+            s.child(deferred(menu).with_priority(1))
+        } else {
+            s.child(menu)
+        }
     })
+}
+
+pub fn actions_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let id = w.selected;
+    let items = crate::thread_actions::items(w, id);
+    chip_menu(
+        w,
+        Menu {
+            kind: Dropdown::Thread,
+            id: "thread-actions",
+            tooltip: "Thread actions",
+            label: "Actions".into(),
+            locked: items.is_empty(),
+            items: items
+                .iter()
+                .map(|item| (item.label().into(), false))
+                .collect(),
+        },
+        move |this, i, window, cx| this.pick_thread_action(id, items[i], window, cx),
+        cx,
+    )
 }
 
 fn menu_chip(
@@ -790,7 +854,7 @@ fn menu_chip(
     chip_menu(
         w,
         menu,
-        move |this, i, cx| {
+        move |this, i, _, cx| {
             if kind == Dropdown::Access {
                 this.set_access(i, cx)
             } else {
@@ -822,7 +886,7 @@ fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
     chip_menu(
         w,
         menu,
-        move |this, i, cx| {
+        move |this, i, _, cx| {
             let projects = this.source.projects();
             this.dropdown = None;
             match projects.get(i) {

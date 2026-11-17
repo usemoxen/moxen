@@ -4,6 +4,7 @@ use crate::work::{
     self, Agent, Background, BackgroundTask, Delegated, Delegation, InspectorData, Read, View,
 };
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,6 +27,12 @@ pub struct MockSource {
     agents: Vec<Agent>,
     background: Vec<BackgroundTask>,
     task_cancelled: bool,
+    archived: HashSet<ThreadId>,
+    deleted: HashSet<ThreadId>,
+    protected: HashSet<ThreadId>,
+    settled: Option<ThreadId>,
+    side_answer: Option<(ThreadId, String)>,
+    reverted: Option<(ThreadId, Option<String>)>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -223,6 +230,12 @@ impl MockSource {
             agents: vec![],
             background: vec![],
             task_cancelled: false,
+            archived: HashSet::new(),
+            deleted: HashSet::new(),
+            protected: HashSet::new(),
+            settled: None,
+            side_answer: None,
+            reverted: None,
         }
     }
     pub fn preview() -> Self {
@@ -320,6 +333,107 @@ fn tool(name: &str, summary: &str, output: &str) -> Message {
     }
 }
 impl ThreadSource for MockSource {
+    fn has_family_work(&self, id: ThreadId) -> bool {
+        std::iter::once(id)
+            .chain(self.children(id))
+            .any(|id| self.threads[id].status == Status::Running || !self.queues[id].is_empty())
+    }
+    fn take_settled(&mut self) -> Option<ThreadId> {
+        self.settled.take()
+    }
+    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
+        self.side_answer.take()
+    }
+    fn take_reverted(&mut self) -> Option<(ThreadId, Option<String>)> {
+        self.reverted.take()
+    }
+    fn revert_before(&self, _: ThreadId, row: usize) -> Option<usize> {
+        (row <= 1).then_some(0)
+    }
+    fn is_protected(&self, id: ThreadId) -> bool {
+        self.protected.contains(&id)
+    }
+    fn can_handover(&self, _: ThreadId) -> bool {
+        true
+    }
+    fn archived(&self) -> Vec<(String, String)> {
+        self.threads
+            .iter()
+            .filter(|thread| self.archived.contains(&thread.id))
+            .map(|thread| (thread.id.to_string(), thread.title.clone()))
+            .collect()
+    }
+    fn restore_thread(&mut self, uuid: &str) {
+        if let Ok(id) = uuid.parse::<ThreadId>() {
+            self.archived.remove(&id);
+        }
+    }
+    fn thread_action(&mut self, id: ThreadId, action: ThreadAction) {
+        match action {
+            ThreadAction::Rename(title) => self.threads[id].title = title,
+            ThreadAction::RegenerateTitle => {
+                self.threads[id].title = "Regenerated mock title".into()
+            }
+            ThreadAction::Settle { stop } => {
+                for member in std::iter::once(id).chain(self.children(id)) {
+                    if stop {
+                        self.queues[member].clear();
+                        self.stop(member);
+                        self.permissions[member] = None;
+                        self.asks[member] = None;
+                    }
+                    self.threads[member].settled = true;
+                    self.threads[member].status = Status::Idle;
+                }
+                self.settled = Some(id);
+            }
+            ThreadAction::Unsettle => {
+                for member in std::iter::once(id).chain(self.children(id)) {
+                    self.threads[member].settled = false;
+                }
+            }
+            ThreadAction::Snooze(_) => self.threads[id].status = Status::Snoozed,
+            ThreadAction::Unsnooze => self.threads[id].status = Status::Idle,
+            ThreadAction::Archive => {
+                self.archived.insert(id);
+            }
+            ThreadAction::Delete => {
+                self.deleted.insert(id);
+            }
+            ThreadAction::Protect => {
+                self.protected.insert(id);
+            }
+            ThreadAction::ContinueAtReset | ThreadAction::CancelContinue { .. } => {}
+            ThreadAction::SideQuestion(_) => {
+                self.side_answer = Some((
+                    id,
+                    "This mock answer was not added to the transcript.".into(),
+                ))
+            }
+            ThreadAction::Revert { draft, .. } => {
+                self.messages[id].clear();
+                self.reverted = Some((id, draft));
+            }
+            ThreadAction::Continue { selection } => self.create_thread(NewThread {
+                project: self.threads[id].project.clone(),
+                text: format!("Continue {}", self.threads[id].title),
+                runtime_mode: Some(self.threads[id].runtime_mode.clone()),
+                interaction_mode: self.threads[id].interaction_mode.clone(),
+                model: selection,
+            }),
+            ThreadAction::Handover { prompt, selection }
+            | ThreadAction::Delegate {
+                task: prompt,
+                selection,
+            } => self.create_thread(NewThread {
+                project: self.threads[id].project.clone(),
+                text: prompt,
+                runtime_mode: Some(self.threads[id].runtime_mode.clone()),
+                interaction_mode: self.threads[id].interaction_mode.clone(),
+                model: Some(selection),
+            }),
+        }
+    }
     fn queued(&self, id: ThreadId) -> Vec<Queued> {
         let last = self.queues[id].len().saturating_sub(1);
         self.queues[id]
@@ -391,6 +505,8 @@ impl ThreadSource for MockSource {
         ]);
         self.running.push(None);
         self.queues.push(vec![]);
+        self.permissions.push(None);
+        self.asks.push(None);
         self.selections.push(selection);
         self.opened = Some(id);
     }
@@ -399,6 +515,7 @@ impl ThreadSource for MockSource {
         (FIXTURES..self.threads.len())
             .rev()
             .chain(0..FIXTURES)
+            .filter(|id| !self.archived.contains(id) && !self.deleted.contains(id))
             .collect()
     }
     fn take_opened(&mut self) -> Option<ThreadId> {

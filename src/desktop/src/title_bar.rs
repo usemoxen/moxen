@@ -110,6 +110,9 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     t.status.label().to_string()
                 }),
         )
+        .when(!w.creating, |s| {
+            s.child(crate::thread_view::actions_chip(w, cx))
+        })
         .when(!w.creating && !checklist.tasks.is_empty(), |s| {
             s.child(
                 div()

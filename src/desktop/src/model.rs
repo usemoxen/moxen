@@ -12,6 +12,7 @@ pub enum Status {
     Error,
     Held,
     Queued,
+    Snoozed,
 }
 impl Status {
     pub fn label(self) -> &'static str {
@@ -21,6 +22,7 @@ impl Status {
             Self::Error => "Stuck",
             Self::Held => "Your turn",
             Self::Queued => "Up next",
+            Self::Snoozed => "Snoozed",
         }
     }
     pub fn token(self) -> &'static str {
@@ -30,6 +32,7 @@ impl Status {
             Self::Error => "broken",
             Self::Held => "held",
             Self::Queued => "ink-2",
+            Self::Snoozed => "ink-2",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -39,6 +42,7 @@ impl Status {
             Self::Error => "x",
             Self::Held => "state-held",
             Self::Queued => "circle",
+            Self::Snoozed => "clock",
         }
     }
 }
@@ -283,12 +287,56 @@ pub fn mode_label(table: &[(&'static str, &'static str)], value: &str) -> String
 }
 
 pub trait ThreadSource {
+    fn thread_action(&mut self, _: ThreadId, _: ThreadAction) {}
+    fn action_pending(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn has_family_work(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn take_settled(&mut self) -> Option<ThreadId> {
+        None
+    }
+    fn archived(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    fn restore_thread(&mut self, _: &str) {}
+    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
+        None
+    }
+    fn revert_before(&self, _: ThreadId, _: usize) -> Option<usize> {
+        None
+    }
+    fn take_reverted(&mut self) -> Option<(ThreadId, Option<String>)> {
+        None
+    }
+    fn usage_reset(&self, _: ThreadId) -> Option<String> {
+        None
+    }
+    fn scheduled_continue(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn is_protected(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn is_snoozed(&self, id: ThreadId) -> bool {
+        self.list_threads()
+            .get(id)
+            .is_some_and(|thread| thread.status == Status::Snoozed)
+    }
+    fn can_handover(&self, _: ThreadId) -> bool {
+        false
+    }
     /// Thread ids in sidebar order. With `by_project` a project's threads are
     /// contiguous, projects newest first. Gone threads are left out; their ids
     /// stay valid for the life of the source. The mock's fixtures are already
     /// in order.
     fn order(&self, _by_project: bool) -> Vec<ThreadId> {
         (0..self.list_threads().len()).collect()
+    }
+    /// Whether a row is in the settled section, or absent from the sidebar.
+    fn sidebar_section(&self, id: ThreadId) -> Option<bool> {
+        self.list_threads().get(id).map(|thread| thread.settled)
     }
     /// Whether the transcript, inspector and status line are fixtures. A live
     /// source leaves out what it cannot yet fill rather than show made-up numbers.
@@ -418,4 +466,40 @@ pub trait ThreadSource {
         None
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);
+}
+
+#[derive(Clone, Debug)]
+pub enum ThreadAction {
+    Rename(String),
+    RegenerateTitle,
+    Settle {
+        stop: bool,
+    },
+    Unsettle,
+    Snooze(String),
+    Unsnooze,
+    Archive,
+    Delete,
+    Protect,
+    Handover {
+        prompt: String,
+        selection: Selection,
+    },
+    Continue {
+        selection: Option<Selection>,
+    },
+    ContinueAtReset,
+    CancelContinue {
+        notify_parent: bool,
+    },
+    Delegate {
+        task: String,
+        selection: Selection,
+    },
+    SideQuestion(String),
+    Revert {
+        turn_count: usize,
+        restore_files: bool,
+        draft: Option<String>,
+    },
 }

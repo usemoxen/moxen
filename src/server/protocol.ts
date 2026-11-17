@@ -213,6 +213,7 @@ export type CommandBody =
   | { readonly type: "thread.snooze"; readonly threadId: string; readonly snoozedUntil: string }
   | { readonly type: "thread.unsnooze"; readonly threadId: string }
   | { readonly type: "thread.archive"; readonly threadId: string }
+  | { readonly type: "thread.restore"; readonly threadId: string }
   | { readonly type: "thread.delete"; readonly threadId: string }
   | {
       readonly type: "thread.meta.update";
@@ -458,6 +459,7 @@ export interface CommandResults {
   "thread.snooze": Accepted;
   "thread.unsnooze": Accepted;
   "thread.archive": Accepted;
+  "thread.restore": Accepted;
   "thread.delete": Accepted;
   "thread.meta.update": Accepted;
   "thread.model-selection.set": Accepted;
@@ -856,6 +858,7 @@ export type ShellFrame =
         readonly snapshotSequence: number;
         readonly projects: readonly ProjectEnvelope[];
         readonly threads: readonly ThreadEnvelope[];
+        readonly archivedThreads?: readonly { readonly id: string; readonly title: string }[];
         readonly researchRuns?: readonly StoredResearchRun[];
         readonly researchProposals?: readonly ResearchProposal[];
       };
@@ -1190,6 +1193,7 @@ export function decodeCommand(value: unknown): Command {
     }
     case "thread.unsnooze":
     case "thread.archive":
+    case "thread.restore":
     case "thread.delete":
       return { ...meta, type, threadId: threadId() };
     case "thread.meta.update":

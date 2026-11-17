@@ -19,6 +19,7 @@ mod pending;
 mod sidebar;
 mod steps;
 mod theme;
+mod thread_actions;
 mod thread_view;
 mod title_bar;
 mod transcript;
@@ -73,6 +74,14 @@ fn main() {
                 KeyBinding::new("cmd-i", title_bar::ToggleInspector, None),
                 KeyBinding::new("ctrl-t", title_bar::ToggleTasks, None),
                 KeyBinding::new("cmd-k", palette::OpenPalette, None),
+                KeyBinding::new("ctrl-p", palette::OpenPalette, None),
+                KeyBinding::new("shift-f10", thread_actions::OpenMenu, None),
+                KeyBinding::new("f2", thread_actions::RenameThread, None),
+                KeyBinding::new(
+                    "enter",
+                    thread_actions::ConfirmAction,
+                    Some("ThreadActionConfirm"),
+                ),
                 KeyBinding::new("cmd-m", model_picker::TogglePicker, None),
                 KeyBinding::new("escape", palette::Dismiss, None),
                 KeyBinding::new("tab", palette::NextFocus, None),

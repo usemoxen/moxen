@@ -94,6 +94,7 @@ import { CliError } from "../core/errors.js";
 import { buildIdentity } from "../core/build.js";
 import {
   archiveThread,
+  restoreThread,
   createThread,
   deleteThread,
   inspectThread,
@@ -153,6 +154,7 @@ import {
   resolveProjectView,
   retitleThread,
   removeThreadWorktree,
+  restoreThreadWorktree,
   revertThread,
   runDueScheduledTurn,
   queueAgentMessage,
@@ -1074,7 +1076,12 @@ export class DirectConnection implements ClientApi {
         if (stopped || this.closed) return;
         const fingerprint = `${version}#${this.researchRevision}#${JSON.stringify(projects)}`;
         if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
-        const threads = await listThreads(store, { status: "all" });
+        const records = await listThreads(store, { status: "all", includeArchived: true });
+        const threads = records.filter((thread) => thread.archivedAt == null);
+        const archivedThreads = records
+          .filter((thread) => thread.archivedAt != null && thread.hidden !== true)
+          .sort((a, b) => b.archivedAt!.localeCompare(a.archivedAt!))
+          .map(({ id, title }) => ({ id, title }));
         const now = Date.now();
         nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
@@ -1116,12 +1123,12 @@ export class DirectConnection implements ClientApi {
         const researchRuns = threads.flatMap((thread) => [...(thread.pastResearchRuns ?? []), ...(thread.researchRun ? [thread.researchRun] : [])]);
         const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
         lastFingerprint = fingerprint;
-        const hash = JSON.stringify({ projects, threads: visible, researchRuns, researchProposals });
+        const hash = JSON.stringify({ projects, threads: visible, archivedThreads, researchRuns, researchProposals });
         if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
-            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
+            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(archivedThreads.length ? { archivedThreads } : {}), ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
           });
         }
       } catch (cause) {
@@ -1485,7 +1492,10 @@ export class DirectConnection implements ClientApi {
         await unsnoozeThread(await this.store(), command.threadId);
         return accepted;
       case "thread.archive":
-        await this.freeWorktree(await archiveThread(await this.store(), command.threadId));
+        await archiveThread(await this.store(), command.threadId, (thread) => this.freeWorktree(thread));
+        return accepted;
+      case "thread.restore":
+        await restoreThread(await this.store(), command.threadId, (thread) => restoreThreadWorktree(this.storeRoot, thread));
         return accepted;
       case "thread.delete":
         {
