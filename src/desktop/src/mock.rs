@@ -18,6 +18,7 @@ pub struct MockSource {
     /// What each thread waits on the person for, until answered.
     permissions: Vec<Option<Permission>>,
     asks: Vec<Option<Ask>>,
+    git: std::sync::Arc<Git>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -211,6 +212,7 @@ impl MockSource {
             selections: vec![opus(); count],
             permissions: vec![None; count],
             asks: vec![None; count],
+            git: crate::mock_git::fixture(),
         }
     }
     pub fn preview() -> Self {
@@ -293,44 +295,6 @@ fn tool(name: &str, summary: &str, output: &str) -> Message {
     }
 }
 impl ThreadSource for MockSource {
-    fn file_diff(&self, _: ThreadId, file: usize) -> Vec<DiffLine> {
-        let files = [
-            vec![
-                ("", "1", "+", "#[test]"),
-                ("", "2", "+", "fn escape_restores_trigger() {"),
-                ("", "3", "+", "    let mut picker = Picker::new();"),
-                ("", "4", "+", "    picker.open();"),
-                ("", "5", "+", "    picker.dismiss();"),
-                ("", "6", "+", "    assert!(picker.trigger_focused());"),
-                ("", "7", "+", "}"),
-            ],
-            vec![
-                ("26", "26", " ", "fn open_picker(&mut self) {"),
-                ("27", "", "-", "    self.picker_open = true;"),
-                ("", "27", "+", "    self.open_picker(window, cx);"),
-                ("", "28", "+", "    self.search.focus(window, cx);"),
-                ("28", "29", " ", "}"),
-            ],
-            vec![
-                ("8", "8", " ", "struct Workspace {"),
-                ("", "9", "+", "    model_focus: FocusHandle,"),
-                ("9", "10", " ", "    selected: ThreadId,"),
-                ("10", "11", " ", "}"),
-            ],
-        ];
-        files
-            .into_iter()
-            .nth(file)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(old, new, sign, text)| DiffLine {
-                old,
-                new,
-                sign,
-                text,
-            })
-            .collect()
-    }
     fn queued(&self, id: ThreadId) -> Vec<Queued> {
         let last = self.queues[id].len().saturating_sub(1);
         self.queues[id]
@@ -455,12 +419,54 @@ impl ThreadSource for MockSource {
     }
     fn inspector(&self, _: ThreadId) -> InspectorData {
         InspectorData {
-            tasks: ["Trace the picker event and focus path", "Add keyboard navigation and selection", "Preserve drafts when switching models", "Verify expanded output and focus return", "Check the native window at two sizes", "Run the full desktop checks"].into_iter().map(str::to_string).collect(),
-            subject: "Keep model selection in the keyboard flow".into(),
-            author: "Aaron Mompié · 12 minutes ago".into(),
-            message: "Focus search when the picker opens, return to the trigger on Escape, and preserve the thread’s draft when choosing a model. The selection and focus-return paths have regression tests.".into(),
-            files: [("tests/picker.rs", "+42 −0"), ("model_picker.rs", "+18 −6"), ("workspace.rs", "+8 −3")].into_iter().map(|(f,d)|(f.into(),d.into())).collect(),
+            tasks: [
+                "Trace the picker event and focus path",
+                "Add keyboard navigation and selection",
+                "Preserve drafts when switching models",
+                "Verify expanded output and focus return",
+                "Check the native window at two sizes",
+                "Run the full desktop checks",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         }
+    }
+    fn git(&self, _: ThreadId) -> std::sync::Arc<Git> {
+        self.git.clone()
+    }
+    fn open_commit(&mut self, _: ThreadId, sha: &str) {
+        let git = std::sync::Arc::make_mut(&mut self.git);
+        git.commit = Some(crate::git::OpenCommit {
+            sha: sha.to_string(),
+            detail: crate::mock_git::detail(sha),
+            loading: false,
+            runs: None,
+        });
+    }
+    fn close_commit(&mut self, _: ThreadId) {
+        std::sync::Arc::make_mut(&mut self.git).commit = None;
+    }
+    fn create_request(&mut self, _: ThreadId, request: NewRequest) {
+        std::sync::Arc::make_mut(&mut self.git).notice = Some(format!(
+            "Opened {} (fixture, nothing was sent).",
+            request.title
+        ));
+    }
+    fn comment_on_request(&mut self, _: ThreadId, number: i64, _: String) {
+        std::sync::Arc::make_mut(&mut self.git).notice = Some(format!("Commented on #{number}."));
+    }
+    fn merge_request(&mut self, _: ThreadId, number: i64, _: MergeStrategy) {
+        std::sync::Arc::make_mut(&mut self.git).notice = Some(format!("Merged #{number}."));
+    }
+    fn turn_diffs(&self, _: ThreadId) -> Vec<TurnDiff> {
+        crate::mock_git::turns()
+    }
+    fn turn_patch(&self, _: ThreadId, turn: i64) -> Option<Patch> {
+        Some(crate::mock_git::patch_of(turn))
+    }
+    fn tree_patch(&self, _: ThreadId) -> Option<Patch> {
+        Some(crate::mock_git::patch())
     }
     fn list_threads(&self) -> Vec<Thread> {
         self.threads.clone()

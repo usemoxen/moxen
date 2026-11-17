@@ -7,7 +7,7 @@ use crate::{
 use gpui::{prelude::*, *};
 
 const TABS: [(&str, &str); 5] = [
-    ("Diff", "2"),
+    ("Diff", ""),
     ("Git", ""),
     ("Context", "66%"),
     ("Agents", "5"),
@@ -39,19 +39,6 @@ pub fn delta(text: &str) -> Div {
         .text_size(px(12.))
         .child(div().text_color(color("added")).child(added.to_string()))
         .child(div().text_color(color("broken")).child(removed.to_string()))
-}
-
-fn chip(label: &'static str, token: &str) -> Div {
-    div()
-        .px(px(7.))
-        .py(px(4.))
-        .rounded(px(5.))
-        .bg(color("sunk"))
-        .font_family(theme::MONO)
-        .text_size(px(11.5))
-        .line_height(px(12.))
-        .text_color(color(token))
-        .child(label)
 }
 
 fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
@@ -162,7 +149,15 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .gap(px(16.))
                 .border_b_1()
                 .border_color(color("rule"))
-                .children(TABS.into_iter().enumerate().map(|(i, (label, count))| {
+                .children(TABS.into_iter().enumerate().map(|(i, (label, fixed))| {
+                    // Diff counts the turns that changed files; Git, the open requests.
+                    let count = match i {
+                        0 => Some(w.source.turn_diffs(w.selected).len()),
+                        1 => Some(w.source.git(w.selected).requests.len()),
+                        _ => None,
+                    }
+                    .filter(|n| *n > 0)
+                    .map_or_else(|| fixed.to_string(), |n| n.to_string());
                     let on = w.tab == i;
                     div()
                         .id(("tab", i))
@@ -190,7 +185,7 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                                     .font_weight(FontWeight::NORMAL)
                                     .text_size(px(11.5))
                                     .text_color(color("ink-2"))
-                                    .child(count),
+                                    .child(count.clone()),
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -202,7 +197,6 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
 }
 
 pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let data = w.source.inspector(w.selected);
     let mut pane = div()
         .id("inspector")
         .relative()
@@ -258,226 +252,30 @@ pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl In
             ),
         );
     }
-    let (name, when) = data
-        .author
-        .split_once(" · ")
-        .unwrap_or((data.author.as_str(), ""));
-    let (name, when) = (name.to_string(), when.to_string());
-    let initials: String = name
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .take(2)
-        .collect();
-    pane.child(
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .py(px(8.))
-            .pl(px(10.))
-            .pr(px(12.))
-            .border_b_1()
-            .border_color(color("rule"))
-            .child(
-                div()
-                    .id("commits-back")
-                    .inert("Commit history is not in this preview")
-                    .h(px(28.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(color("ink-2"))
-                    .child(ui::icon("chevron-left", "ink-2"))
-                    .child("Commits"),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("copy-sha")
-                    .control("Copy the full sha")
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(6.))
-                    .font_family(theme::MONO)
-                    .text_size(px(12.))
-                    .text_color(color("ink-2"))
-                    .child("5a7bee1")
-                    .child(ui::icon("copy", "ink-2"))
-                    .on_click(|_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string("5a7bee1".into()))
-                    }),
-            )
-            .child(
-                icon_button("open-forge")
-                    .disabled("No remote for this preview commit")
-                    .child(ui::icon("external-link", "ink-2")),
-            )
-            .child(
-                icon_button("widen-diff")
-                    .control("Widen")
-                    .child(ui::icon("maximize", "ink-2"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.inspector_width = if this.inspector_width > theme::INSPECTOR {
-                            theme::INSPECTOR
-                        } else {
-                            620.
-                        };
-                        cx.notify();
-                    })),
-            ),
-    )
-    .child(
-        body.child(
-            div()
-                .pt(px(16.))
-                .px(px(16.))
-                .pb(px(4.))
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .text_size(px(16.))
-                        .line_height(px(16. * 1.35))
-                        .font_weight(FontWeight::BOLD)
-                        .child(data.subject),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(13.))
-                        .child(
-                            div()
-                                .size(px(20.))
-                                .rounded_full()
-                                .bg(color("sunk"))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(8.5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(color("ink-2"))
-                                .child(initials),
-                        )
-                        .child(name)
-                        .child(
-                            div()
-                                .font_family(theme::MONO)
-                                .text_size(px(12.))
-                                .text_color(color("ink-2"))
-                                .child(when),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .child(chip("opencode-v2", "ink"))
-                        .child(chip("parent 86553cd", "ink-2"))
-                        .child(chip("co-authored by Claude Opus 5.5", "ink-2")),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .line_height(px(14. * 1.6))
-                        .child(data.message),
-                )
-                .child(
-                    div()
-                        .id("full-message")
-                        .inert("The full message is shown")
-                        .py(px(4.))
-                        .text_size(px(13.))
-                        .text_color(color("ink-2"))
-                        .child("Show the full message"),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .pt(px(14.))
-                .px(px(16.))
-                .pb(px(8.))
-                .child(ui::caps("Files").flex_1())
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .text_color(color("ink-2"))
-                        .child(format!("{} ·", data.files.len()))
-                        .child(delta("+68 −9")),
-                ),
-        )
-        .children(
-            data.files
-                .into_iter()
-                .enumerate()
-                .map(|(i, (file, change))| {
-                    let open = w.expanded_files.contains(&i);
-                    div()
-                        .child(
-                            div()
-                                .id(("git-file", i))
-                                .control(format!("src/{file}"))
-                                .px(px(12.))
-                                .py(px(7.))
-                                .flex()
-                                .gap(px(8.))
-                                .items_center()
-                                .when(open, |s| s.bg(color("sunk")))
-                                .font_family(theme::MONO)
-                                .text_size(px(12.5))
-                                .line_height(px(16.))
-                                .child(ui::icon(
-                                    if open {
-                                        "chevron-down"
-                                    } else {
-                                        "chevron-right"
-                                    },
-                                    "ink-2",
-                                ))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(format!("src/{file}")),
-                                )
-                                .when(i == 0, |s| {
-                                    s.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(color("ink-2"))
-                                            .child("new"),
-                                    )
-                                })
-                                .child(delta(&change))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.expanded_files.remove(&i) {
-                                        this.expanded_files.insert(i);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .when(open, |s| {
-                            s.child(crate::diff::render(i, w.source.file_diff(w.selected, i)))
-                        })
-                }),
-        )
-        .child(div().h(px(18.))),
-    )
+    if w.tab == 0 {
+        return pane.child(body.child(crate::git_view::diff_tab(w, cx)));
+    }
+    let git = w.source.git(w.selected);
+    if let Some(commit) = &git.commit {
+        return pane
+            .child(crate::git_view::commit_header(commit, cx).child(widen(cx)))
+            .child(body.child(crate::git_view::commit_tab(w, commit, cx)));
+    }
+    pane.child(body.child(crate::git_view::git_tab(w, cx)))
+        .children(crate::git_view::footer(w))
+}
+
+/// The button that widens the pane for reading a patch, and narrows it again.
+fn widen(cx: &mut Context<Workspace>) -> Stateful<Div> {
+    icon_button("widen-diff")
+        .control("Widen")
+        .child(ui::icon("maximize", "ink-2"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.inspector_width = if this.inspector_width > theme::INSPECTOR {
+                theme::INSPECTOR
+            } else {
+                620.
+            };
+            cx.notify();
+        }))
 }

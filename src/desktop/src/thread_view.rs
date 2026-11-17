@@ -411,7 +411,9 @@ fn composer(
                     Some(panel) => panel,
                     None => card(w, thread, draft_empty, window, cx).into_any_element(),
                 })
-                .when(w.source.preview(), |s| s.child(status_line(cx))),
+                .when(w.source.preview() || has_branch(w), |s| {
+                    s.child(status_line(w, cx))
+                }),
         )
 }
 
@@ -1033,7 +1035,26 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
         })
 }
 
-fn status_line(cx: &mut Context<Workspace>) -> impl IntoElement {
+/// The checkout is known (the Git tab has read it): its branch is worth a chip.
+fn has_branch(w: &Workspace) -> bool {
+    w.source
+        .git(w.selected)
+        .overview
+        .as_ref()
+        .is_some_and(|o| o.is_repository)
+}
+
+fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let git = w.source.git(w.selected);
+    let overview = git.overview.as_ref().filter(|o| o.is_repository);
+    let branch = overview
+        .and_then(|o| o.checked_out())
+        .unwrap_or("detached")
+        .to_string();
+    let changed = overview
+        .and_then(|o| o.status.as_ref())
+        .map(|s| s.line())
+        .filter(|line| line != "clean");
     let chip = |id: &'static str, tooltip: &'static str| {
         div()
             .id(id)
@@ -1056,8 +1077,8 @@ fn status_line(cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             chip("branch", "Open Git")
                 .child(ui::icon("git-branch", "ink-2"))
-                .child(div().text_color(color("ink")).child("picker-focus"))
-                .child(div().text_color(color("effort")).child("10 changed"))
+                .child(div().text_color(color("ink")).child(branch))
+                .children(changed.map(|line| div().text_color(color("effort")).child(line)))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.tab = 1;
                     this.set_inspector(true);
@@ -1065,22 +1086,24 @@ fn status_line(cx: &mut Context<Workspace>) -> impl IntoElement {
                 })),
         )
         .child(div().flex_1())
-        .child(
-            chip("usage", "Context and plan usage")
-                .child(crate::usage::meter(40., 5.))
-                .child(div().text_color(color("ink")).child("66%"))
-                .child("663k / 1m")
-                .child(div().w(px(1.)).h(px(12.)).mx(px(4.)).bg(color("rule")))
-                .child("5h")
-                .child(div().text_color(color("context-tools")).child("36%"))
-                .child("wk")
-                .child(div().text_color(color("context-tools")).child("43%"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.tab = 2;
-                    this.set_inspector(true);
-                    cx.notify();
-                })),
-        )
+        .when(w.source.preview(), |s| {
+            s.child(
+                chip("usage", "Context and plan usage")
+                    .child(crate::usage::meter(40., 5.))
+                    .child(div().text_color(color("ink")).child("66%"))
+                    .child("663k / 1m")
+                    .child(div().w(px(1.)).h(px(12.)).mx(px(4.)).bg(color("rule")))
+                    .child("5h")
+                    .child(div().text_color(color("context-tools")).child("36%"))
+                    .child("wk")
+                    .child(div().text_color(color("context-tools")).child("43%"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = 2;
+                        this.set_inspector(true);
+                        cx.notify();
+                    })),
+            )
+        })
 }
 
 #[cfg(test)]

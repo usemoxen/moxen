@@ -10,10 +10,11 @@
 
 use crate::{
     catalog::Catalog,
+    git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
-        Answer, Ask, CatalogState, Connection, Decision, Delivery, DiffLine, InspectorData,
-        Message, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
-        Status, Thread, ThreadId, ThreadSource,
+        Answer, Ask, CatalogState, Connection, Decision, Delivery, InspectorData, MergeStrategy,
+        Message, NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply,
+        Selection, Status, Thread, ThreadId, ThreadSource,
     },
     pending,
     transcript::{self, Row},
@@ -387,8 +388,21 @@ struct State {
     added: Option<String>,
     /// The providers and models, once read: `None` until the first answer.
     catalog: Option<Result<Arc<Catalog>, String>>,
+    /// What the Git tab shows, by thread, and which read of it is the latest.
+    git: HashMap<ThreadId, Arc<Git>>,
+    git_reads: HashMap<ThreadId, u64>,
+    /// The turns that changed files, from each followed thread's snapshot.
+    turns: HashMap<ThreadId, Vec<TurnDiff>>,
+    /// Patches asked for: a turn's, and what is uncommitted.
+    patches: HashMap<(ThreadId, i64), Patch>,
+    trees: HashMap<ThreadId, Patch>,
 }
 impl State {
+    /// The thread's Git tab data, to change.
+    fn git_of(&mut self, id: ThreadId) -> &mut Git {
+        Arc::make_mut(self.git.entry(id).or_default())
+    }
+
     /// Replaces the listed threads with a shell snapshot's.
     fn apply(&mut self, snapshot: &Value) {
         let projects: HashMap<&str, &str> = snapshot["projects"]
@@ -600,9 +614,19 @@ struct Shared {
     revision: AtomicU64,
 }
 impl Shared {
-    fn update(&self, change: impl FnOnce(&mut State)) {
-        change(&mut self.state.lock().expect("live state"));
+    fn update<T>(&self, change: impl FnOnce(&mut State) -> T) -> T {
+        let changed = change(&mut self.state.lock().expect("live state"));
         self.revision.fetch_add(1, Ordering::SeqCst);
+        changed
+    }
+    /// Changes a thread's Git tab data, unless a newer read has begun since
+    /// the one that is reporting.
+    fn update_git(&self, id: ThreadId, read: u64, change: impl FnOnce(&mut Git)) {
+        self.update(|state| {
+            if state.git_reads.get(&id) == Some(&read) {
+                change(state.git_of(id));
+            }
+        });
     }
 }
 
@@ -771,6 +795,7 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
             if frame["kind"] == "snapshot" {
                 let thread = &frame["snapshot"]["thread"];
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
+                state.turns.insert(id, git::turn_diffs_of(thread));
                 state.waiting.insert(
                     id,
                     Waiting {
@@ -971,16 +996,152 @@ impl ThreadSource for ServerSource {
         None
     }
     fn inspector(&self, _: ThreadId) -> InspectorData {
-        InspectorData {
-            tasks: vec![],
-            subject: String::new(),
-            author: String::new(),
-            message: String::new(),
-            files: vec![],
+        InspectorData { tasks: vec![] }
+    }
+    fn git(&self, id: ThreadId) -> Arc<Git> {
+        let state = self.shared.state.lock().expect("live state");
+        state.git.get(&id).cloned().unwrap_or_default()
+    }
+    fn read_git(&mut self, id: ThreadId, branch: Option<String>) {
+        if let Some(uuid) = self.uuid_of(id) {
+            begin_read(&self.shared, id, &uuid, branch);
         }
     }
-    fn file_diff(&self, _: ThreadId, _: usize) -> Vec<DiffLine> {
-        vec![]
+    fn open_commit(&mut self, id: ThreadId, sha: &str) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        let sha = sha.to_string();
+        // Only the commit changes: the history behind it keeps loading.
+        self.shared.update(|state| {
+            state.git_of(id).commit = Some(OpenCommit {
+                sha: sha.clone(),
+                detail: None,
+                loading: true,
+                runs: None,
+            });
+        });
+        let (detail, runs) = (self.shared.clone(), self.shared.clone());
+        let (detail_sha, runs_sha) = (sha.clone(), sha);
+        let (detail_uuid, runs_uuid) = (uuid.clone(), uuid);
+        with_wire(&self.shared, move |wire| {
+            let fields = json!({ "threadId": detail_uuid, "sha": detail_sha });
+            let result = wire.query("git.commit.detail", fields);
+            detail.update(|state| {
+                let git = state.git_of(id);
+                let Some(open) = git.commit.as_mut().filter(|open| open.sha == detail_sha) else {
+                    return;
+                };
+                open.loading = false;
+                match result {
+                    Ok(value) => open.detail = CommitDetail::from_json(&value),
+                    Err(error) => git.error = Some(error.message),
+                }
+            });
+        });
+        with_wire(&self.shared, move |wire| {
+            let fields = json!({ "threadId": runs_uuid, "sha": runs_sha });
+            // CI is the forge's and may be slow or absent: the commit stands without it.
+            let Ok(value) = wire.query("forge.commit.runs", fields) else {
+                return;
+            };
+            let list = git::runs_of(&value["runs"]);
+            runs.update(|state| {
+                if let Some(open) = state
+                    .git_of(id)
+                    .commit
+                    .as_mut()
+                    .filter(|open| open.sha == runs_sha)
+                {
+                    open.runs = Some(list);
+                }
+            });
+        });
+    }
+    fn close_commit(&mut self, id: ThreadId) {
+        self.shared.update(|state| state.git_of(id).commit = None);
+    }
+    fn create_request(&mut self, id: ThreadId, request: NewRequest) {
+        let mut fields = json!({ "title": request.title, "draft": request.draft });
+        if let Some(base) = request.base {
+            fields["targetBranch"] = base.into();
+        }
+        self.forge_write(id, "Opening…", "forge.request.create", fields, |result| {
+            let url = result["url"].as_str();
+            url.map_or("Opened.".to_string(), |url| format!("Opened {url}"))
+        });
+    }
+    fn comment_on_request(&mut self, id: ThreadId, number: i64, body: String) {
+        self.forge_write(
+            id,
+            "Commenting…",
+            "forge.request.comment",
+            json!({ "number": number, "body": body }),
+            move |_| format!("Commented on #{number}."),
+        );
+    }
+    fn merge_request(&mut self, id: ThreadId, number: i64, strategy: MergeStrategy) {
+        self.forge_write(
+            id,
+            "Merging…",
+            "forge.request.merge",
+            json!({ "number": number, "strategy": strategy.wire(), "deleteBranch": false }),
+            move |_| format!("Merged #{number}."),
+        );
+    }
+    fn turn_diffs(&self, id: ThreadId) -> Vec<TurnDiff> {
+        let state = self.shared.state.lock().expect("live state");
+        state.turns.get(&id).cloned().unwrap_or_default()
+    }
+    fn turn_patch(&self, id: ThreadId, turn: i64) -> Option<Patch> {
+        let state = self.shared.state.lock().expect("live state");
+        state.patches.get(&(id, turn)).cloned()
+    }
+    fn read_turn_patch(&mut self, id: ThreadId, turn: i64) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        self.shared.update(|state| {
+            state.patches.insert((id, turn), Patch::Loading);
+        });
+        let shared = self.shared.clone();
+        with_wire(&shared.clone(), move |wire| {
+            let result = wire.request(
+                "turnDiff",
+                Some(json!({ "threadId": uuid, "toTurnCount": turn })),
+            );
+            let patch = match result {
+                Ok(Value::String(diff)) => Patch::Ready(git::parse_patch(&diff)),
+                Ok(_) => Patch::Missing,
+                Err(error) => Patch::Failed(error.message),
+            };
+            shared.update(|state| {
+                state.patches.insert((id, turn), patch);
+            });
+        });
+    }
+    fn tree_patch(&self, id: ThreadId) -> Option<Patch> {
+        let state = self.shared.state.lock().expect("live state");
+        state.trees.get(&id).cloned()
+    }
+    fn read_tree_patch(&mut self, id: ThreadId) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        let root = self.shared.update(|state| {
+            state.trees.insert(id, Patch::Loading);
+            state
+                .git
+                .get(&id)
+                .and_then(|g| g.overview.as_ref()?.root.clone())
+        });
+        let shared = self.shared.clone();
+        with_wire(&shared.clone(), move |wire| {
+            let patch = read_tree(&wire, &uuid, root).unwrap_or_else(Patch::Failed);
+            shared.update(|state| {
+                state.trees.insert(id, patch);
+            });
+        });
     }
     fn send_message(&mut self, id: ThreadId, text: String, delivery: Delivery) -> Option<Reply> {
         let (uuid, busy) = {
@@ -1279,6 +1440,197 @@ impl ServerSource {
         let state = self.shared.state.lock().expect("live state");
         state.slots.get(id).map(|slot| slot.uuid.clone())
     }
+
+    /// A write to the forge. It names what it is doing while it runs, says
+    /// what came of it afterwards, and then reads the forge again: the forge
+    /// decides what happened, so the list is never patched by hand.
+    fn forge_write(
+        &self,
+        id: ThreadId,
+        busy: &'static str,
+        command: &'static str,
+        mut fields: Value,
+        done: impl FnOnce(&Value) -> String + Send + 'static,
+    ) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        fields["threadId"] = uuid.clone().into();
+        self.shared.update(|state| {
+            let git = state.git_of(id);
+            git.busy = Some(busy);
+            git.error = None;
+            git.notice = None;
+        });
+        let shared = self.shared.clone();
+        with_wire(&shared.clone(), move |wire| {
+            let result = wire.dispatch(command, fields);
+            let branch = shared.update(|state| {
+                let git = state.git_of(id);
+                git.busy = None;
+                match &result {
+                    Ok(value) => git.notice = Some(done(value)),
+                    Err(error) => git.error = Some(error.message.clone()),
+                }
+                git.branch.clone()
+            });
+            // The request and the list changed: ask again, as the forge decides what happened.
+            if result.is_ok() && command != "forge.request.comment" {
+                begin_read(&shared, id, &uuid, branch);
+            }
+        });
+    }
+}
+
+/// Starts reading a thread's git and forge: history on one side, the forge on
+/// the other, so a slow forge never holds up the branches and commits.
+fn begin_read(shared: &Arc<Shared>, id: ThreadId, uuid: &str, branch: Option<String>) {
+    let read = shared.update(|state| {
+        let read = state.git_reads.entry(id).or_default();
+        *read += 1;
+        let read = *read;
+        let git = state.git_of(id);
+        git.branch = branch.clone();
+        git.loading_git = true;
+        git.loading_forge = true;
+        git.error = None;
+        read
+    });
+    let (history, forge) = (shared.clone(), shared.clone());
+    let (history_uuid, forge_uuid) = (uuid.to_string(), uuid.to_string());
+    with_wire(shared, move |wire| {
+        read_history(&history, &wire, id, read, &history_uuid, branch.as_deref())
+    });
+    with_wire(shared, move |wire| {
+        read_forge(&forge, &wire, id, read, &forge_uuid)
+    });
+}
+
+/// Runs a read on its own thread with the open connection; nothing if there is none.
+fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) {
+    let wire = shared.state.lock().expect("live state").wire.clone();
+    let Some(wire) = wire else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("moxen-read".into())
+        .spawn(move || job(wire));
+}
+
+/// The checkout's history: status, branches and commits, then each commit's CI.
+fn read_history(
+    shared: &Arc<Shared>,
+    wire: &Wire,
+    id: ThreadId,
+    read: u64,
+    uuid: &str,
+    branch: Option<&str>,
+) {
+    let mut fields = json!({ "threadId": uuid });
+    if let Some(branch) = branch {
+        fields["branch"] = branch.into();
+    }
+    let overview = match wire.query("git.overview", fields) {
+        Ok(value) => Overview::from_json(&value),
+        Err(error) => {
+            shared.update_git(id, read, |git| {
+                git.loading_git = false;
+                git.error = Some(error.message);
+            });
+            return;
+        }
+    };
+    let shown = overview.branch.clone().filter(|_| overview.is_repository);
+    let total = overview.commits.len();
+    shared.update_git(id, read, |git| {
+        git.overview = Some(overview);
+        git.loading_git = false;
+    });
+    // CI per commit rides on the forge and the network: after history has
+    // painted, never before it.
+    if let Some(branch) = shown
+        && let Ok(value) = wire.query(
+            "forge.commits.checks",
+            json!({ "threadId": uuid, "branch": branch, "limit": total }),
+        )
+    {
+        let checks = git::commit_checks_of(&value);
+        shared.update_git(id, read, |git| git.commit_checks = checks);
+    }
+}
+
+/// The forge: which one, the open requests and the checked-out branch's own.
+fn read_forge(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, read: u64, uuid: &str) {
+    let forge = match wire.query("forge.detect", json!({ "threadId": uuid })) {
+        Ok(value) => Forge::from_json(&value),
+        // A forge failure is not a tab failure: history still stands.
+        Err(error) => Forge {
+            reason: Some(error.message),
+            ..Forge::default()
+        },
+    };
+    if forge.kind.is_none() {
+        shared.update_git(id, read, |git| {
+            git.forge = Some(forge);
+            git.requests = vec![];
+            git.status = None;
+            git.loading_forge = false;
+        });
+        return;
+    }
+    let requests = wire
+        .query(
+            "forge.requests.list",
+            json!({ "threadId": uuid, "state": "open" }),
+        )
+        .map(|value| git::requests_of(&value));
+    let status = wire
+        .query("forge.request.status", json!({ "threadId": uuid }))
+        .ok()
+        .and_then(|value| RequestStatus::from_json(&value));
+    shared.update_git(id, read, |git| {
+        git.forge = Some(forge);
+        match requests {
+            Ok(requests) => git.requests = requests,
+            Err(error) => git.error = Some(error.message),
+        }
+        git.status = status;
+        git.loading_forge = false;
+    });
+}
+
+/// What is uncommitted in the checkout, as one patch: the changed files the
+/// server names, then their diff against HEAD. Untracked files are not in it.
+fn read_tree(wire: &Wire, uuid: &str, root: Option<String>) -> Result<Patch, String> {
+    let ask = |root: &str, call: &str, paths: &[&str]| {
+        let mut fields = json!({ "threadId": uuid, "root": root, "call": call });
+        if !paths.is_empty() {
+            fields["paths"] = paths.into();
+        }
+        wire.query("workspace.git", fields)
+            .map(|value| text(&value, &["stdout"]).unwrap_or_default().to_string())
+            .map_err(|error| error.message)
+    };
+    let root = match root {
+        Some(root) => root,
+        None => {
+            let overview = wire
+                .query("git.overview", json!({ "threadId": uuid, "limit": 1 }))
+                .map_err(|error| error.message)?;
+            Overview::from_json(&overview)
+                .root
+                .ok_or_else(|| "This thread's folder is not a git repository.".to_string())?
+        }
+    };
+    let changed = ask(&root, "changed", &[])?;
+    let paths: Vec<&str> = changed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    if paths.is_empty() {
+        return Ok(Patch::Missing);
+    }
+    Ok(Patch::Ready(git::parse_patch(&ask(&root, "diff", &paths)?)))
 }
 
 /// What a refused or failed command tells the user.
@@ -1482,6 +1834,11 @@ mod tests {
                     {"id": "q", "header": "Scope", "question": "Which?", "multiSelect": true,
                      "options": [{"label": "A"}, {"label": "B", "value": "b"}]}]}},
             ],
+            "checkpoints": [
+                {"turnId": "t1", "status": "available", "checkpointTurnCount": 1, "files": []},
+                {"turnId": "t2", "status": "available", "checkpointTurnCount": 2,
+                 "files": [{"path": "src/a.rs", "additions": 2, "deletions": 1}]},
+            ],
         })
     }
 
@@ -1606,11 +1963,52 @@ mod tests {
                                          "options": [{"id": "low", "label": "Low"}, {"id": "max", "label": "Max"}]}]}},
                                     {"slug": "haiku", "name": "Haiku", "isCustom": false}
                                 ]}], "settings": {}}),
-                            "query" => json!({"entries": [
-                                {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
-                                {"threadId": "other", "turnId": "x", "policy": {"held": false}},
-                                {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
-                            ]}),
+                            "turnDiff" => json!(
+                                "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n"
+                            ),
+                            "query" => match params["type"].as_str() {
+                                Some("git.overview") => {
+                                    json!({"isRepository": true, "root": "/work",
+                                    "status": {"branch": "feature", "staged": 0, "unstaged": 2, "untracked": 0, "conflicted": 0},
+                                    "branches": [{"name": "feature", "current": true, "remote": false, "ahead": 1, "behind": 0},
+                                                 {"name": "main", "current": false, "remote": false, "ahead": null, "behind": null}],
+                                    "commits": [{"sha": "abc1234567", "shortSha": "abc1234", "author": "A",
+                                                 "date": "2026-11-16T10:00:00Z", "subject": "Fix", "refs": []}],
+                                    "branch": "feature", "defaultBranch": "main"})
+                                }
+                                Some("forge.commits.checks") => {
+                                    json!({"checks": {"abc1234567": {"passed": 3, "failed": 1, "pending": 0}}})
+                                }
+                                Some("forge.detect") => {
+                                    json!({"kind": "github", "slug": "o/r", "installed": true, "authenticated": true})
+                                }
+                                Some("forge.requests.list") => json!({"requests": [
+                                    {"number": 5, "title": "Other", "state": "open"},
+                                    {"number": 7, "title": "Mine", "state": "open"}]}),
+                                Some("forge.request.status") => {
+                                    json!({"request": {"number": 7, "title": "Mine", "state": "open",
+                                    "url": "https://x/7", "targetBranch": "main", "runs": [], "mergeable": "mergeable"}})
+                                }
+                                Some("git.commit.detail") => {
+                                    json!({"commit": {"sha": "abc1234567", "subject": "Fix", "body": "",
+                                    "author": "A", "date": "2026-11-16T10:00:00Z", "committer": "A", "committerDate": "2026-11-16T10:00:00Z",
+                                    "parents": [], "refs": [], "files": [], "diff": null}})
+                                }
+                                Some("forge.commit.runs") => {
+                                    json!({"runs": [{"name": "ci", "state": "failed", "url": "https://x/run"}]})
+                                }
+                                Some("workspace.git") if params["call"] == "changed" => {
+                                    json!({"stdout": "src/a.rs\0"})
+                                }
+                                Some("workspace.git") => {
+                                    json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
+                                }
+                                _ => json!({"entries": [
+                                    {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
+                                    {"threadId": "other", "turnId": "x", "policy": {"held": false}},
+                                    {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
+                                ]}),
+                            },
                             "dispatch" => {
                                 seen.lock().unwrap().push(params.clone());
                                 json!({"accepted": true, "threadId": "new-thread"})
@@ -1772,6 +2170,96 @@ mod tests {
         let dismissed = sent(14);
         assert_eq!(dismissed["type"], "thread.user-input.dismiss");
         assert_eq!(dismissed["requestId"], "ask1");
+
+        // The Git tab: history, the forge and the branch's own request, each
+        // from the server's own reads.
+        source.read_git(0, None);
+        wait_for("the pull request", || {
+            let git = source.git(0);
+            !git.loading_git && !git.loading_forge && git.status.is_some()
+        });
+        let git = source.git(0);
+        let overview = git.overview.as_ref().expect("overview");
+        assert_eq!(overview.checked_out(), Some("feature"));
+        assert_eq!(overview.commits[0].subject, "Fix");
+        assert_eq!(
+            git.forge.as_ref().and_then(|f| f.slug.as_deref()),
+            Some("o/r")
+        );
+        assert_eq!(git.requests.len(), 2);
+        assert_eq!(git.status.as_ref().map(|s| s.request.number), Some(7));
+        wait_for("the commit CI", || !source.git(0).commit_checks.is_empty());
+        assert_eq!(
+            source.git(0).commit_checks["abc1234567"]
+                .glance()
+                .unwrap()
+                .1,
+            "3/4"
+        );
+
+        // A commit opens in full, its CI after it.
+        source.open_commit(0, "abc1234567");
+        wait_for("the commit", || {
+            source
+                .git(0)
+                .commit
+                .as_ref()
+                .is_some_and(|c| c.detail.is_some() && c.runs.is_some())
+        });
+        source.close_commit(0);
+        assert!(source.git(0).commit.is_none());
+
+        // The turns that changed files, one turn's patch and the uncommitted changes.
+        assert_eq!(source.turn_diffs(0).len(), 1);
+        assert_eq!(source.turn_diffs(0)[0].turn, 2);
+        assert_eq!(source.turn_patch(0, 2), None);
+        source.read_turn_patch(0, 2);
+        wait_for("the turn's patch", || {
+            matches!(source.turn_patch(0, 2), Some(Patch::Ready(_)))
+        });
+        let Some(Patch::Ready(files)) = source.turn_patch(0, 2) else {
+            unreachable!()
+        };
+        assert_eq!(
+            (files[0].path.as_str(), files[0].additions),
+            ("src/a.rs", 2)
+        );
+        source.read_tree_patch(0);
+        wait_for("the working tree", || {
+            matches!(source.tree_patch(0), Some(Patch::Ready(_)))
+        });
+
+        // Forge writes go through the server's commands, name themselves while
+        // they run and say what came of it.
+        source.comment_on_request(0, 7, "looks good".into());
+        let comment = sent(15);
+        assert_eq!(comment["type"], "forge.request.comment");
+        assert_eq!(comment["threadId"], "t1");
+        assert_eq!(
+            (comment["number"].as_i64(), comment["body"].as_str()),
+            (Some(7), Some("looks good"))
+        );
+        wait_for("the comment notice", || {
+            source.git(0).notice.as_deref() == Some("Commented on #7.")
+        });
+        source.merge_request(0, 7, MergeStrategy::Squash);
+        let merge = sent(16);
+        assert_eq!(merge["type"], "forge.request.merge");
+        assert_eq!(merge["strategy"], "squash");
+        assert_eq!(merge["deleteBranch"], false);
+        source.create_request(
+            0,
+            NewRequest {
+                title: "Add it".into(),
+                draft: true,
+                base: Some("main".into()),
+            },
+        );
+        let create = sent(17);
+        assert_eq!(create["type"], "forge.request.create");
+        assert_eq!(create["title"], "Add it");
+        assert_eq!(create["draft"], true);
+        assert_eq!(create["targetBranch"], "main");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

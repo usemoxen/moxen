@@ -2,7 +2,7 @@
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
 server and lists the user's real projects and threads, live. Everything else in
-the window (the inspector) is still the mock
+the window (the inspector's Tasks, Context, Agents and Background) is still the mock
 fixtures, which are shown only with `--mock` or in a demo stage; with the real
 server those parts are left out rather than shown with made-up numbers. Each is
 its own issue under MXN-30.
@@ -78,6 +78,36 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   checklist, not a client action, so the desktop does not send it. The mock
   fixtures hold an approval (Screen-sharing thread), two questions
   (Verify authentication) and a plan (Recover partial frame headers).
+- The inspector's Git and Diff tabs read the server, not the machine (`git.rs`,
+  `git_view.rs`); the window never runs git or `gh` itself. Opening either tab
+  reads the thread's checkout and forge once (and Refresh reads again).
+  **Git**: the thread's pull request (`forge.request.status`) with its state,
+  review decision, conflicts, size and CI runs (failures first, "+N more"),
+  other open requests (`forge.requests.list`), local branches with ahead/behind
+  (click one to read its history, click the current one to follow the
+  checkout again), the branch's commits with author, age and CI
+  (`forge.commits.checks`), and a pinned footer with the forge slug, branch and
+  what is uncommitted. A commit opens in full (`git.commit.detail`, its CI from
+  `forge.commit.runs`): message, people, refs, parents, files with their patch
+  (files start folded; at most 500 lines of a file are drawn). Forge and git
+  reads are separate, so a slow or missing forge (no remote, no CLI, not signed
+  in: its reason is shown) never holds up history. Forge writes are visible to
+  others the moment they land, so none fires on one click: Comment and "Open a
+  draft PR yourself" open a field (Enter sends, Esc cancels) and Merge arms
+  first, then offers Squash or Merge commit (`forge.request.comment` /
+  `.create` / `.merge`; the branch it merges into is picked from the local
+  branches, the default first). "Have the agent open a draft PR / open it ready
+  for review" sends the TUI's exact instruction as a queued message, and the
+  transcript shows it as one "Asked the agent to open …" line. The status line's
+  branch chip shows the branch and what is uncommitted once the Git tab has
+  read them.
+  **Diff**: the turns that changed files (from the snapshot's checkpoints,
+  newest open first, one at a time) with each turn's patch from `turnDiff`,
+  and "Working tree" (`workspace.git`: the files changed against HEAD, then
+  their diff; untracked files are not in it). No syntax highlighting yet.
+  Not done: handing the request to another provider when the thread's own is
+  at its limit (the TUI does), opening a request with a body, rebase merges,
+  deleting the branch on merge, and Windows.
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs
@@ -144,8 +174,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
 - Cmd+K or the search field opens the thread palette.
-- Git contains the mock commit and file counts. Agents and Background are empty
-  states. The usage control opens Context.
+- Git and Diff show the server's data (the fixtures with `--mock`). Agents and
+  Background are empty states. The usage control opens Context.
 - The composer preserves native multiline input, Unicode grapheme deletion,
   Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line;
   Cmd/Ctrl+Enter queues while a turn runs. Send uses the same action. In the mock, Stop (Escape) cancels the simulated
@@ -251,8 +281,8 @@ kept. Native window controls are outside that render.
 
 Remaining differences from the mockup: the mock has two settled threads
 rather than 170; there is no usage-limit block, edit receipt or image
-thumbnail in the fixture; the Git tab opens straight on a commit, not on the
-pull request and history; Git files and counts are a shortened fixture.
+thumbnail in the fixture; the Git fixture is a shortened history and one
+pull request.
 
 ## Implementation and design assets
 
@@ -271,8 +301,11 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
   pinned tokens, and layout constants.
 - `ui.rs`: shared primitives: icons, state glyphs, controls and tooltips, key
   caps, `Segmented`, section labels and transition timing.
-- `inspector.rs`, `diff.rs`, `usage.rs`: tasks, tabs, the commit, its diffs and
-  the Context tab.
+- `inspector.rs`, `usage.rs`: tasks, tabs and the Context tab.
+- `git.rs`: the Git and Diff data and its rules (decoders, patch parser, CI
+  glance, ages, the open-request prompt); `git_view.rs` draws the tabs and runs
+  their controls; `diff.rs` draws a file's hunks; `mock_git.rs` is the fixture,
+  written as the server answers and read by the same decoders.
 
 The design-system snapshot is pinned to
 `ff2e9a65a278df4198b573413007132d20858a75`. Refresh with

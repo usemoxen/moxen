@@ -94,7 +94,10 @@ pub fn project(thread: &Value) -> Vec<Row> {
         let when = ms(message, &["createdAt"]).unwrap_or(0);
         let streaming = message.get("streaming").and_then(Value::as_bool) == Some(true);
         let message = match role {
-            "user" => Message::User { text: body },
+            // The Git tab's ask to open a request is a short line, not the instructions.
+            "user" => Message::User {
+                text: crate::git::open_request_summary(&body).unwrap_or(body),
+            },
             // A reply with no text yet is still being written; an empty,
             // finished one (a turn that was all tool calls) has nothing to show.
             "assistant" if !body.is_empty() || streaming => Message::Assistant {

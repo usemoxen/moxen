@@ -1,4 +1,5 @@
 pub use crate::catalog::{CatalogState, Selection};
+pub use crate::git::{Git, Patch, TurnDiff};
 
 pub type ThreadId = usize;
 
@@ -94,10 +95,6 @@ pub struct Reply {
 }
 pub struct InspectorData {
     pub tasks: Vec<String>,
-    pub subject: String,
-    pub author: String,
-    pub message: String,
-    pub files: Vec<(String, String)>,
 }
 
 /// Whether the source has reached the Moxen server. The mock is always live.
@@ -170,6 +167,32 @@ pub struct Problem {
     /// A message that did not go out, to put back where it was written:
     /// the thread's draft, or the new-thread draft when there is none.
     pub unsent: Option<(Option<ThreadId>, String)>,
+}
+
+/// How a pull request is merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeStrategy {
+    Squash,
+    /// A merge commit.
+    Merge,
+}
+impl MergeStrategy {
+    /// The value the server's `forge.request.merge` reads.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+        }
+    }
+}
+
+/// A pull request or merge request to open by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRequest {
+    pub title: String,
+    pub draft: bool,
+    /// The branch it merges into; `None` leaves it to the forge's default.
+    pub base: Option<String>,
 }
 
 /// A tool the running turn is parked on until it is allowed or denied.
@@ -282,7 +305,6 @@ pub trait ThreadSource {
     }
     /// Reconnects after a failure.
     fn retry(&mut self) {}
-    fn file_diff(&self, id: ThreadId, file: usize) -> Vec<DiffLine>;
     fn queued(&self, id: ThreadId) -> Vec<Queued>;
     /// Takes a waiting message back and returns its text, to edit it.
     fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<String>;
@@ -292,6 +314,36 @@ pub trait ThreadSource {
     fn inspector(&self, id: ThreadId) -> InspectorData;
     fn list_threads(&self) -> Vec<Thread>;
     fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>>;
+    /// What the Git tab shows for a thread: its checkout, branches, history,
+    /// and the pull request with its CI.
+    fn git(&self, _: ThreadId) -> std::sync::Arc<Git> {
+        std::sync::Arc::default()
+    }
+    /// Reads git and the forge again, for the history of `branch` (the
+    /// checked-out one when `None`).
+    fn read_git(&mut self, _: ThreadId, _branch: Option<String>) {}
+    /// Opens a commit of the history in full.
+    fn open_commit(&mut self, _: ThreadId, _sha: &str) {}
+    fn close_commit(&mut self, _: ThreadId) {}
+    /// Opens a request on the forge. It is visible to others at once, so the
+    /// caller confirms with the person first.
+    fn create_request(&mut self, _: ThreadId, _: NewRequest) {}
+    fn comment_on_request(&mut self, _: ThreadId, _number: i64, _body: String) {}
+    fn merge_request(&mut self, _: ThreadId, _number: i64, _: MergeStrategy) {}
+    /// The turns of a thread that changed files, oldest first.
+    fn turn_diffs(&self, _: ThreadId) -> Vec<TurnDiff> {
+        vec![]
+    }
+    /// One turn's patch, once asked for with `read_turn_patch`.
+    fn turn_patch(&self, _: ThreadId, _turn: i64) -> Option<Patch> {
+        None
+    }
+    fn read_turn_patch(&mut self, _: ThreadId, _turn: i64) {}
+    /// What is uncommitted in the thread's checkout, once asked for.
+    fn tree_patch(&self, _: ThreadId) -> Option<Patch> {
+        None
+    }
+    fn read_tree_patch(&mut self, _: ThreadId) {}
     /// The thread the window is showing: a live source follows its transcript.
     fn focus(&mut self, _id: ThreadId) {}
     /// Sends `text`; `delivery` says what to do when a turn is running. A
@@ -353,11 +405,4 @@ pub trait ThreadSource {
         None
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);
-}
-
-pub struct DiffLine {
-    pub old: &'static str,
-    pub new: &'static str,
-    pub sign: &'static str,
-    pub text: &'static str,
 }

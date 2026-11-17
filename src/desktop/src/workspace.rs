@@ -88,7 +88,8 @@ pub struct Workspace {
     pub settled_open: bool,
     pub inspector_width: f32,
     pub resizing_inspector: bool,
-    pub expanded_files: HashSet<usize>,
+    /// The Git and Diff tabs' own state.
+    pub git_ui: crate::git_view::GitUi,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -137,6 +138,21 @@ impl Workspace {
             &custom_input,
             window,
             |this, _, event: &Submitted, window, cx| this.submit_custom(&event.0, window, cx),
+        ));
+        let git_input = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.height = 40.;
+            c
+        });
+        subscriptions.push(
+            cx.subscribe(&git_input, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.subscribe_in(
+            &git_input,
+            window,
+            |this, _, event: &Submitted, window, cx| this.submit_form(&event.0, window, cx),
         ));
         let search = cx.new(|cx| {
             let mut c = Composer::new(cx);
@@ -197,7 +213,10 @@ impl Workspace {
                         "details" => {
                             this.expanded.insert((0, 4), Instant::now());
                             this.lists[0].splice(4..5, 1);
-                            this.expanded_files.insert(1);
+                            this.source.open_commit(0, "5a7bee1");
+                            this.git_ui
+                                .expanded
+                                .insert("commit-5a7bee1:src/workspace.rs".into());
                         }
                         "focus" => {
                             window.focus(&this.tips.tasks, cx);
@@ -238,7 +257,7 @@ impl Workspace {
             .detach();
         }
         let mut this = Self {
-            expanded_files: HashSet::new(),
+            git_ui: crate::git_view::GitUi::new(git_input),
             creating: false,
             new_composer,
             new_project: None,
@@ -766,6 +785,7 @@ impl Render for Workspace {
             return crate::connection::render(self, cx).into_any_element();
         }
         self.sync_panel(window, cx);
+        self.sync_inspector();
         let viewport = f32::from(window.viewport_size().width);
         let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
         let slide = crate::ui::progress(self.inspector_at, 160, window);
@@ -799,6 +819,8 @@ impl Render for Workspace {
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
                     if this.custom_open {
                         this.close_custom(window, cx);
+                    } else if this.git_ui.form.is_some() {
+                        this.close_form(window, cx);
                     } else if this.dropdown.is_some() {
                         this.dropdown = None;
                     } else if this.picker_open {
