@@ -12,13 +12,14 @@ use crate::{
     catalog::Catalog,
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
-        Answer, Ask, CatalogState, Connection, Decision, Delivery, InspectorData, MergeStrategy,
-        Message, NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply,
-        Selection, Status, Thread, ThreadId, ThreadSource,
+        Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
+        NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
+        Status, Thread, ThreadId, ThreadSource,
     },
     pending,
     transcript::{self, Row},
     wire::{Wire, WireError},
+    work::{self, Background, Delegated, Delegation, InspectorData, Read, View},
 };
 use serde_json::{Value, json};
 use std::{
@@ -337,6 +338,10 @@ struct Slot {
     /// same project starts on it.
     selection: Option<Value>,
     sort_ms: i64,
+    parent: Option<String>,
+    created_ms: i64,
+    branch: Option<String>,
+    worktree: Option<String>,
 }
 
 /// What is known of one thread's conversation.
@@ -396,6 +401,9 @@ struct State {
     /// Patches asked for: a turn's, and what is uncommitted.
     patches: HashMap<(ThreadId, i64), Patch>,
     trees: HashMap<ThreadId, Patch>,
+    work: HashMap<(ThreadId, Read), Arc<Result<View, String>>>,
+    work_reads: HashSet<(ThreadId, Read)>,
+    inspector: HashMap<ThreadId, Arc<InspectorData>>,
 }
 impl State {
     /// The thread's Git tab data, to change.
@@ -458,6 +466,10 @@ impl State {
                     .filter(|selection| selection.is_object())
                     .cloned(),
                 sort_ms: sort_ms_of(thread),
+                parent: text(thread, &["parentThreadId"]).map(str::to_string),
+                created_ms: ms(thread, &["createdAt"]).unwrap_or(0),
+                branch: text(thread, &["branch"]).map(str::to_string),
+                worktree: text(thread, &["worktreePath"]).map(str::to_string),
             };
             if id == self.slots.len() {
                 self.slots.push(slot);
@@ -679,6 +691,8 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
     shared.update(|state| {
         state.wire_epoch += 1;
         state.wire = Some(wire.clone());
+        state.work.clear();
+        state.work_reads.clear();
     });
     // A thread opened before the connection existed starts being followed now.
     follow(shared);
@@ -792,8 +806,19 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
         .then(|| wire.query("queue.read", json!({})).ok())
         .flatten();
         shared.update(|state| {
+            if state.watch != token {
+                return;
+            }
             if frame["kind"] == "snapshot" {
                 let thread = &frame["snapshot"]["thread"];
+                state.inspector.insert(
+                    id,
+                    Arc::new(InspectorData {
+                        tasks: work::checklist(thread),
+                        agents: work::agents(thread),
+                        background_count: work::background_count(thread),
+                    }),
+                );
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
                 state.turns.insert(id, git::turn_diffs_of(thread));
                 state.waiting.insert(
@@ -995,8 +1020,83 @@ impl ThreadSource for ServerSource {
         });
         None
     }
-    fn inspector(&self, _: ThreadId) -> InspectorData {
-        InspectorData { tasks: vec![] }
+    fn inspector(&self, id: ThreadId) -> Arc<InspectorData> {
+        let state = self.shared.state.lock().expect("live state");
+        state.inspector.get(&id).cloned().unwrap_or_default()
+    }
+    fn children(&self, id: ThreadId) -> Vec<ThreadId> {
+        let state = self.shared.state.lock().expect("live state");
+        let Some(parent) = state.slots.get(id) else {
+            return vec![];
+        };
+        let mut children: Vec<_> = state
+            .slots
+            .iter()
+            .filter(|s| s.present && s.parent.as_deref() == Some(&parent.uuid))
+            .collect();
+        children.sort_by_key(|s| std::cmp::Reverse(s.created_ms));
+        children.into_iter().map(|s| s.thread.id).collect()
+    }
+    fn delegated(&self, id: ThreadId) -> Option<Delegated> {
+        let state = self.shared.state.lock().expect("live state");
+        let slot = state.slots.get(id)?;
+        let parent = slot.parent.as_ref()?;
+        Some(Delegated {
+            parent: state
+                .ids
+                .get(parent)
+                .copied()
+                .filter(|&id| state.slots[id].present),
+            branch: slot.branch.clone(),
+            worktree: slot.worktree.clone(),
+        })
+    }
+    fn read_work(&mut self, id: ThreadId, read: Read) {
+        read_work(&self.shared, id, read);
+    }
+    fn work(&self, id: ThreadId, read: &Read) -> Option<Arc<Result<View, String>>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.work.get(&(id, read.clone())).cloned()
+    }
+    fn stop_background(&mut self, id: ThreadId, task: &str) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        let task = task.to_string();
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "thread.background.stop",
+                json!({ "threadId": uuid, "taskId": task }),
+            )
+            .map_err(|error| problem(&error, None))?;
+            read_work(&shared, id, Read::Background);
+            Ok(())
+        });
+    }
+    fn cancel_task(&mut self, id: ThreadId, notify_parent: bool) {
+        let (child, parent) = {
+            let state = self.shared.state.lock().expect("live state");
+            let Some(slot) = state.slots.get(id) else {
+                return;
+            };
+            let Some(parent) = &slot.parent else {
+                return;
+            };
+            (slot.uuid.clone(), parent.clone())
+        };
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "thread.task.cancel",
+                json!({
+                    "parentThreadId": parent, "taskId": child, "notifyParent": notify_parent,
+                }),
+            )
+            .map_err(|error| problem(&error, None))?;
+            read_work(&shared, id, Read::Delegation);
+            Ok(())
+        });
     }
     fn git(&self, id: ThreadId) -> Arc<Git> {
         let state = self.shared.state.lock().expect("live state");
@@ -1506,6 +1606,75 @@ fn begin_read(shared: &Arc<Shared>, id: ThreadId, uuid: &str, branch: Option<Str
     });
 }
 
+/// Polls each visible view without overlapping reads of it. Thread and work
+/// IDs key the result, and a previous connection cannot replace it.
+fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
+    let key = (id, read);
+    let (uuid, parent, epoch) = {
+        let mut state = shared.state.lock().expect("live state");
+        let Some(slot) = state.slots.get(id) else {
+            return;
+        };
+        let names = (slot.uuid.clone(), slot.parent.clone(), state.wire_epoch);
+        if state.wire.is_none() || !state.work_reads.insert(key.clone()) {
+            return;
+        }
+        names
+    };
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let answer = match &key.1 {
+            Read::Delegation => (|| {
+                let link = wire.query("thread.delegation", json!({ "threadId": uuid }))?;
+                let status = match &parent {
+                    Some(parent) => wire.query(
+                        "thread.task.status",
+                        json!({
+                            "parentThreadId": parent, "taskId": uuid,
+                        }),
+                    )?,
+                    None => Value::Null,
+                };
+                Ok(View::Delegation(Delegation::read(&link, &status)))
+            })(),
+            Read::Background => wire
+                .query("thread.background.list", json!({ "threadId": uuid }))
+                .map(|value| View::Background(Background::read(&value))),
+            Read::Subagent(agent) => wire
+                .query(
+                    "thread.subagent",
+                    json!({
+                        "threadId": uuid, "agentId": agent,
+                    }),
+                )
+                .map(|value| View::subagent(&value)),
+            Read::Output(task) => wire
+                .query(
+                    "thread.background.output",
+                    json!({
+                        "threadId": uuid, "taskId": task,
+                    }),
+                )
+                .map(|value| View::output(&value)),
+        };
+        target.update(|state| {
+            if state.wire_epoch == epoch {
+                state.work_reads.remove(&key);
+                // Some providers release the output buffer when the task exits.
+                let keep_output = matches!(&answer, Ok(View::Output(None)))
+                    && matches!(state.work.get(&key).map(Arc::as_ref),
+                        Some(Ok(View::Output(Some(output)))) if !output.is_empty());
+                if state.wire.is_some() && !keep_output {
+                    state.work.insert(
+                        key,
+                        Arc::new(answer.map_err(|error: WireError| error.message)),
+                    );
+                }
+            }
+        });
+    });
+}
+
 /// Runs a read on its own thread with the open connection; nothing if there is none.
 fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) {
     let wire = shared.state.lock().expect("live state").wire.clone();
@@ -1833,7 +2002,14 @@ mod tests {
                 {"kind": "user-input.requested", "payload": {"requestId": "ask1", "questions": [
                     {"id": "q", "header": "Scope", "question": "Which?", "multiSelect": true,
                      "options": [{"label": "A"}, {"label": "B", "value": "b"}]}]}},
+                {"kind": "turn.plan.updated", "payload": {"plan": [{"step": "Old plan", "status": "completed"}]}},
+                {"kind": "turn.plan.updated", "payload": {"plan": [
+                     {"step": "Pending first", "status": "pending"},
+                     {"step": "In flight", "status": "in_progress"},
+                     {"step": "Done out of order", "status": "completed"}]}},
+                {"kind": "background.tasks", "payload": {"tasks": [{"taskId": "shell-1"}]}},
             ],
+            "subagentRows": [{"agentId": "agent-1", "agentType": "Explore", "running": true, "stoppable": true}],
             "checkpoints": [
                 {"turnId": "t1", "status": "available", "checkpointTurnCount": 1, "files": []},
                 {"turnId": "t2", "status": "available", "checkpointTurnCount": 2,
@@ -1917,7 +2093,7 @@ mod tests {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
         let listener = UnixListener::bind(&path).expect("bind");
-        let commands = Arc::new(Mutex::new(vec![]));
+        let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
         let seen = commands.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -1939,7 +2115,12 @@ mod tests {
                                         "projects": [{"id": "p", "title": "moxen"}],
                                         "threads": [{"id": "t1", "projectId": "p", "title": "Fix",
                                             "session": {"status": "running"},
-                                            "modelSelection": {"instanceId": "claude", "model": "opus"}}]}})
+                                            "modelSelection": {"instanceId": "claude", "model": "opus"}},
+                                            {"id": "child", "projectId": "p", "title": "Check focus",
+                                             "parentThreadId": "t1", "branch": "task/focus",
+                                             "modelSelection": {"instanceId": "claude", "model": "opus"}},
+                                            {"id": "archived", "projectId": "p", "parentThreadId": "t1",
+                                             "archivedAt": "2026-11-16T10:00:00Z"}]}})
                                 } else {
                                     json!({"kind": "snapshot", "snapshot": {"thread": waiting_thread()}})
                                 };
@@ -1967,6 +2148,54 @@ mod tests {
                                 "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n"
                             ),
                             "query" => match params["type"].as_str() {
+                                Some("thread.delegation") => {
+                                    assert_eq!(params["threadId"], "child");
+                                    json!({"parentThreadId": "t1", "notify": true})
+                                }
+                                Some("thread.task.status") => {
+                                    assert_eq!(params["parentThreadId"], "t1");
+                                    assert_eq!(params["taskId"], "child");
+                                    json!({"task": {"status": "running", "summary": "Checking focus"}})
+                                }
+                                Some("thread.subagent") => {
+                                    assert_eq!(params["threadId"], "t1");
+                                    assert_eq!(params["agentId"], "agent-1");
+                                    json!({"available": true, "messages": [
+                                        {"id": "m1", "role": "user", "text": "Trace the key path"},
+                                        {"id": "m2", "role": "assistant", "text": "Found the listener"},
+                                    ]})
+                                }
+                                Some("thread.background.list") => {
+                                    assert_eq!(params["threadId"], "t1");
+                                    let stopped = seen
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .any(|m| m["type"] == "thread.background.stop");
+                                    if stopped {
+                                        json!({"live": true, "partial": true, "tasks": []})
+                                    } else {
+                                        json!({"live": true, "partial": true, "tasks": [{
+                                            "taskId": "shell-1", "toolName": "Bash", "description": "Checks", "command": "cargo test"
+                                        }, {
+                                            "taskId": "watch", "toolName": "Monitor", "description": "Logs", "stoppable": false
+                                        }]})
+                                    }
+                                }
+                                Some("thread.background.output") => {
+                                    assert_eq!(params["threadId"], "t1");
+                                    assert_eq!(params["taskId"], "shell-1");
+                                    if seen
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .any(|m| m["type"] == "thread.background.stop")
+                                    {
+                                        json!({"available": false, "lines": []})
+                                    } else {
+                                        json!({"available": true, "lines": ["running", "done"]})
+                                    }
+                                }
                                 Some("git.overview") => {
                                     json!({"isRepository": true, "root": "/work",
                                     "status": {"branch": "feature", "staged": 0, "unstaged": 2, "untracked": 0, "conflicted": 0},
@@ -2260,6 +2489,77 @@ mod tests {
         assert_eq!(create["title"], "Add it");
         assert_eq!(create["draft"], true);
         assert_eq!(create["targetBranch"], "main");
+
+        let inspector = source.inspector(0);
+        assert_eq!(work::completed(&inspector.tasks), 1);
+        assert_eq!(
+            inspector
+                .tasks
+                .iter()
+                .map(|step| (step.title.as_str(), step.status))
+                .collect::<Vec<_>>(),
+            [
+                ("Pending first", Status::Queued),
+                ("In flight", Status::Running),
+                ("Done out of order", Status::Idle),
+            ]
+        );
+        assert_eq!(inspector.background_count, 1);
+        assert_eq!(inspector.agents[0].id, "agent-1");
+        assert!(inspector.agents[0].stoppable);
+        assert_eq!(source.children(0), [1]);
+        let delegated = source.delegated(1).expect("delegated");
+        assert_eq!(delegated.parent, Some(0));
+        assert_eq!(delegated.branch.as_deref(), Some("task/focus"));
+
+        let agent = Read::Subagent("agent-1".into());
+        let output = Read::Output("shell-1".into());
+        for (id, read) in [
+            (0, agent.clone()),
+            (0, output.clone()),
+            (0, Read::Background),
+            (1, Read::Delegation),
+        ] {
+            source.read_work(id, read.clone());
+            wait_for("the inspector read", || source.work(id, &read).is_some());
+        }
+        assert!(matches!(source.work(0, &agent).as_deref(),
+            Some(Ok(View::Subagent(Some(rows)))) if rows.len() == 2
+            && matches!(&rows[1].message, Message::Assistant { text, .. } if text == "Found the listener")));
+        assert!(matches!(source.work(0, &output).as_deref(),
+            Some(Ok(View::Output(Some(text)))) if text == "running\ndone"));
+        assert!(matches!(source.work(0, &Read::Background).as_deref(),
+            Some(Ok(View::Background(list))) if list.partial && list.tasks.len() == 2 && !list.tasks[1].stoppable));
+        assert!(matches!(source.work(1, &Read::Delegation).as_deref(),
+            Some(Ok(View::Delegation(link))) if link.notify && link.status.as_deref() == Some("running")));
+
+        source.stop_background(0, "shell-1");
+        let stop = sent(18);
+        assert_eq!(stop["type"], "thread.background.stop");
+        assert_eq!(stop["threadId"], "t1");
+        assert_eq!(stop["taskId"], "shell-1");
+        wait_for("the refreshed background list", || {
+            matches!(source.work(0, &Read::Background).as_deref(),
+            Some(Ok(View::Background(list))) if list.tasks.is_empty())
+        });
+        source.read_work(0, output.clone());
+        wait_for("the finished output read", || {
+            !source
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .work_reads
+                .contains(&(0, output.clone()))
+        });
+        assert!(matches!(source.work(0, &output).as_deref(),
+            Some(Ok(View::Output(Some(text)))) if text == "running\ndone"));
+        source.cancel_task(1, false);
+        let cancel = sent(19);
+        assert_eq!(cancel["type"], "thread.task.cancel");
+        assert_eq!(cancel["parentThreadId"], "t1");
+        assert_eq!(cancel["taskId"], "child");
+        assert_eq!(cancel["notifyParent"], false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

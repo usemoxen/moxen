@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadStore } from "../../core/threads/store.js";
 
-import type { CommandOf } from "../protocol.js";
+import type { CommandOf, ThreadDetail } from "../protocol.js";
 import { decodeCommand } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
@@ -959,7 +959,7 @@ describe("DirectConnection model and session continuity", () => {
     }
   });
 
-  it("reads a native subagent after a restart by resuming the thread's OpenCode session", async () => {
+  it("lists native subagents in thread snapshots and reads their history after a restart", async () => {
     // OpenCode keeps each subagent as a child session that only a driver holding the parent's can read.
     class HistoryDriver extends RecordingDriver {
       readonly subagentHistory = async (threadId: string, agentId: string) =>
@@ -994,7 +994,28 @@ describe("DirectConnection model and session continuity", () => {
     // A restart: a new process, a driver with no live session.
     const second = new HistoryDriver("ses_parent");
     const after = new DirectConnection({ storeRoot: harness.root, drivers: { ...harness.drivers, opencode: () => second } });
+    let detail: ThreadDetail | undefined;
+    const unsubscribe = after.subscribeThread("thread-m", {}, (frame) => {
+      if (frame.kind === "snapshot") detail = frame.snapshot.thread;
+    }, () => undefined);
     try {
+      const append = async (kind: string, payload: Record<string, unknown>) => {
+        await harness.store.appendLedger("thread-m", "activity", {
+          id: harness.store.newId(), threadId: "thread-m", turnId: null,
+          kind, summary: "", payload, createdAt: harness.store.nowIso(),
+        });
+      };
+      await append("subagent", { agentId: "ses_child", agentType: "explore", description: "Map auth", status: "started" });
+      await waitFor("the running subagent in the snapshot", async () => detail?.subagentRows?.length === 1);
+      expect(detail?.subagentRows?.[0]).toMatchObject({
+        agentId: "ses_child", description: "Map auth", running: true, stoppable: true,
+      });
+      await append("background.completed", { taskId: "ses_child", summary: "Auth lives in src/auth.ts" });
+      await waitFor("the finished subagent in the snapshot", async () => detail?.subagentRows?.[0]?.running === false);
+      expect(detail?.subagentRows?.[0]).toMatchObject({
+        running: false, stoppable: false, lastMessage: "Auth lives in src/auth.ts",
+      });
+
       const transcript = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_child" });
       expect(second.starts).toHaveLength(1);
       expect(second.starts[0]?.resumeCursor).toBe("ses_parent");
@@ -1005,6 +1026,7 @@ describe("DirectConnection model and session continuity", () => {
       const other = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_elsewhere" });
       expect(other.available).toBe(false);
     } finally {
+      unsubscribe();
       await after.close();
     }
   });

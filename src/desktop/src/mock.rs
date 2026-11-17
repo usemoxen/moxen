@@ -1,6 +1,10 @@
 use crate::catalog::{Catalog, OptionValue};
 use crate::model::*;
+use crate::work::{
+    self, Agent, Background, BackgroundTask, Delegated, Delegation, InspectorData, Read, View,
+};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// How many threads the fixtures hold.
@@ -19,6 +23,9 @@ pub struct MockSource {
     permissions: Vec<Option<Permission>>,
     asks: Vec<Option<Ask>>,
     git: std::sync::Arc<Git>,
+    agents: Vec<Agent>,
+    background: Vec<BackgroundTask>,
+    task_cancelled: bool,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -213,6 +220,9 @@ impl MockSource {
             permissions: vec![None; count],
             asks: vec![None; count],
             git: crate::mock_git::fixture(),
+            agents: vec![],
+            background: vec![],
+            task_cancelled: false,
         }
     }
     pub fn preview() -> Self {
@@ -220,6 +230,19 @@ impl MockSource {
         source.threads[0].status = Status::Running;
         source.threads[0].started_at = Some(Instant::now());
         source.queues[0].push("Also check Escape returns focus to the model control.".into());
+        source.threads[1].depth = 1;
+        source.agents = work::agents(&json!({"subagentRows": [
+            { "agentId": "explore", "agentType": "Explore", "description": "Trace keyboard focus",
+              "running": false, "lastMessage": "The picker restores focus on close." },
+            { "agentId": "review", "agentType": "Review", "description": "Review the reconnect path",
+              "running": true, "stoppable": true },
+        ]}));
+        source.background = Background::read(&json!({"live": true, "tasks": [
+            { "taskId": "desktop-checks", "description": "Desktop checks", "toolName": "Bash",
+              "command": "cargo test" },
+            { "taskId": "reconnect-watch", "description": "Watch reconnect events", "toolName": "Monitor",
+              "command": "watch reconnect", "stoppable": false },
+        ]})).tasks;
         // A tool approval, two questions and a proposed plan, one thread each.
         source.permissions[2] = Some(Permission {
             request: "perm-1".into(),
@@ -228,6 +251,8 @@ impl MockSource {
             detail: Some("cargo test --release capture::pipeline".into()),
             description: Some("Run the capture pipeline tests in release mode".into()),
         });
+        source.threads[2].status = Status::Running;
+        source.threads[2].started_at = Some(Instant::now());
         let choice = |label: &str, description: &str, preview: Option<&str>| Choice {
             label: label.into(),
             description: Some(description.into()),
@@ -417,19 +442,80 @@ impl ThreadSource for MockSource {
         self.threads[id].runtime_mode = runtime.into();
         self.threads[id].interaction_mode = interaction.into();
     }
-    fn inspector(&self, _: ThreadId) -> InspectorData {
-        InspectorData {
-            tasks: [
-                "Trace the picker event and focus path",
-                "Add keyboard navigation and selection",
-                "Preserve drafts when switching models",
-                "Verify expanded output and focus return",
-                "Check the native window at two sizes",
-                "Run the full desktop checks",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+    fn inspector(&self, id: ThreadId) -> Arc<InspectorData> {
+        if id != 0 {
+            return Arc::default();
+        }
+        Arc::new(InspectorData {
+            tasks: work::checklist(&json!({"activities": [{
+                "kind": "turn.plan.updated", "payload": {"plan": [
+                    {"step": "Trace the picker event and focus path", "status": "completed"},
+                    {"step": "Add keyboard navigation and selection", "status": "completed"},
+                    {"step": "Preserve drafts when switching models", "status": "completed"},
+                    {"step": "Verify expanded output and focus return", "status": "inProgress"},
+                    {"step": "Check the native window at two sizes", "status": "pending"},
+                    {"step": "Run the full desktop checks", "status": "pending"},
+                ]},
+            }]})),
+            agents: self.agents.clone(),
+            background_count: self.background.len(),
+        })
+    }
+    fn children(&self, id: ThreadId) -> Vec<ThreadId> {
+        if id == 0 { vec![1] } else { vec![] }
+    }
+    fn delegated(&self, id: ThreadId) -> Option<Delegated> {
+        (id == 1).then(|| Delegated {
+            parent: Some(0),
+            branch: Some("restore-drafts".into()),
+            worktree: None,
+        })
+    }
+    fn work(&self, id: ThreadId, read: &Read) -> Option<Arc<Result<View, String>>> {
+        let view = match read {
+            Read::Delegation if id == 1 => View::Delegation(Delegation {
+                active: true,
+                notify: true,
+                status: self.task_cancelled.then(|| "cancelled".into()),
+                summary: None,
+            }),
+            Read::Background => View::Background(Background {
+                live: id == 0,
+                partial: false,
+                tasks: if id == 0 {
+                    self.background.clone()
+                } else {
+                    vec![]
+                },
+            }),
+            Read::Subagent(agent) if id == 0 && agent == "explore" => View::subagent(&json!({
+                "available": true, "messages": [
+                    {"id": "prompt", "role": "user", "text": "Trace keyboard focus."},
+                    {"id": "reply", "role": "assistant", "text": "The picker restores focus on close."},
+                ]
+            })),
+            Read::Subagent(_) => View::Subagent(None),
+            Read::Output(task) if id == 0 && task == "desktop-checks" => View::output(&json!({
+                "available": true, "lines": ["running 3 tests", "test picker_restores_focus ... ok"],
+            })),
+            Read::Output(_) => View::Output(None),
+            _ => return None,
+        };
+        Some(Arc::new(Ok(view)))
+    }
+    fn stop_background(&mut self, id: ThreadId, task: &str) {
+        if id == 0 {
+            self.background.retain(|row| row.id != task);
+            if let Some(row) = self.agents.iter_mut().find(|row| row.id == task) {
+                row.status = Status::Idle;
+                row.stoppable = false;
+            }
+        }
+    }
+    fn cancel_task(&mut self, id: ThreadId, _: bool) {
+        if id == 1 {
+            self.task_cancelled = true;
+            self.threads[id].status = Status::Idle;
         }
     }
     fn git(&self, _: ThreadId) -> std::sync::Arc<Git> {

@@ -25,6 +25,8 @@ mod transcript;
 mod ui;
 mod usage;
 mod wire;
+mod work;
+mod work_view;
 mod workspace;
 
 use gpui::*;

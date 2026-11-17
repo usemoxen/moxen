@@ -22,6 +22,7 @@
  */
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import type { SubagentTranscript } from "../core/threads/subagents.js";
+import type { NativeSubagentRow } from "./subagentrows.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
 import { parseSkillProviders } from "../core/skills/routing.js";
@@ -879,8 +880,12 @@ export type ShellFrame =
       readonly event: { readonly type: "app.server-restart-required"; readonly payload: { readonly version: string; readonly from: string | null } };
     };
 
+export type ThreadDetail = ThreadEnvelope & {
+  readonly subagentRows?: readonly (NativeSubagentRow & { readonly stoppable: boolean })[];
+};
+
 export type ThreadFrame =
-  | { readonly kind: "snapshot"; readonly snapshot: { readonly snapshotSequence: number; readonly thread: ThreadEnvelope } }
+  | { readonly kind: "snapshot"; readonly snapshot: { readonly snapshotSequence: number; readonly thread: ThreadDetail } }
   | { readonly kind: "synchronized" }
   /** Live assistant text between snapshots: `text` is the delta, not the whole reply. */
   | {

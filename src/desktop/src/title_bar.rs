@@ -15,8 +15,7 @@ const MARK_SCALE: f32 = MARK_H / 2.84;
 
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = &w.source.list_threads()[w.selected];
-    // Tasks and the inspector are fixtures until the server feeds them.
-    let preview = w.source.preview();
+    let checklist = w.source.inspector(w.selected);
     let head = |at: f32| (at + 0.42) * MARK_SCALE;
     div()
         .h(px(44.))
@@ -111,7 +110,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     t.status.label().to_string()
                 }),
         )
-        .when(preview, |s| {
+        .when(!w.creating && !checklist.tasks.is_empty(), |s| {
             s.child(
                 div()
                     .relative()
@@ -134,7 +133,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(color("ink-2"))
                             .child("Tasks")
-                            .child(div().text_color(color("ink")).child("3/6"))
+                            .child(div().text_color(color("ink")).child(format!(
+                                "{}/{}",
+                                crate::work::completed(&checklist.tasks),
+                                checklist.tasks.len()
+                            )))
                             .on_click(cx.listener(|_, _, window, cx| {
                                 window.dispatch_action(Box::new(ToggleTasks), cx);
                             })),
@@ -148,7 +151,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     )),
             )
         })
-        .when(preview, |s| {
+        .when(!w.creating, |s| {
             s.child(
                 div()
                     .relative()

@@ -303,6 +303,17 @@ impl Workspace {
         }
     }
 
+    /// Escape can dismiss a question, but a permission still needs an
+    /// explicit decision. Neither should fall through to interrupting the turn.
+    pub fn dismiss_panel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.source.ask(self.selected).is_some() {
+            self.dismiss_ask(cx);
+            true
+        } else {
+            self.source.permission(self.selected).is_some()
+        }
+    }
+
     /// Keys for the open panel: arrows move, a digit or Enter picks.
     fn panel_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.selected;

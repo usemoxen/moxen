@@ -1,11 +1,9 @@
 # Moxen Agent — native desktop
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
-server and lists the user's real projects and threads, live. Everything else in
-the window (the inspector's Tasks, Context, Agents and Background) is still the mock
-fixtures, which are shown only with `--mock` or in a demo stage; with the real
-server those parts are left out rather than shown with made-up numbers. Each is
-its own issue under MXN-30.
+server and lists the user's real projects and threads, live. The inspector's
+Context view still has fixtures only (`--mock` or demo); it shows no made-up
+numbers against a real server. The desktop parity work is tracked under MXN-30.
 
 ## The server connection
 
@@ -13,7 +11,8 @@ its own issue under MXN-30.
 (`src/server/transport/wire.ts`) over its local endpoint: `MOXEN_SERVER_ENDPOINT`,
 else `~/.moxen/server.sock`. `live.rs` is the `ThreadSource` over the shell
 subscription; its ordering, nesting and status rules follow the TUI's sidebar
-(`src/tui/model/sidebar.ts`, `shell.ts`). The desktop adds no server surface.
+(`src/tui/model/sidebar.ts`, `shell.ts`). The thread subscription includes the
+same native subagent rows the TUI derives from the activity history.
 
 - The server refuses a client from another build. The desktop is not built
   from the same code, so it asks once with a placeholder build, reads the
@@ -108,6 +107,25 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   Not done: handing the request to another provider when the thread's own is
   at its limit (the TUI does), opening a request with a body, rebase merges,
   deleting the branch on merge, and Windows.
+- **Tasks** pins a thread's latest checklist above the inspector tabs. The
+  title-bar toggle and the checklist header count completed steps from the
+  snapshot. The checklist is read-only. Escape dismisses an agent question
+  without answering it; an open permission request still needs a decision.
+  Neither Escape action interrupts the turn.
+- **Agents** lists delegated threads and provider subagents. Click a delegated
+  thread to open its own conversation and composer. Its **Info** tab shows its
+  task, parent link, model and checkout; a live delegated task can be cancelled
+  there, with a choice whether to notify its parent when notifications are on
+  (`thread.delegation`, `thread.task.status`, `thread.task.cancel`).
+  Click a provider subagent to read its prompt, steps and replies
+  (`thread.subagent`); it updates while the subagent runs. The Stop action
+  is shown for independently stoppable work. Back or Escape returns to the list.
+- **Background** groups the jobs reported by the live session; the composer
+  status line also opens the tab when the thread reports background work.
+  Click a job to see its command, status and output. The list and open output
+  refresh while the tab is visible (`thread.background.list`,
+  `thread.background.output`). Stop dispatches `thread.background.stop` for
+  that job, not the thread's turn. A partial list is marked as such.
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs
@@ -174,8 +192,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
 - Cmd+K or the search field opens the thread palette.
-- Git and Diff show the server's data (the fixtures with `--mock`). Agents and
-  Background are empty states. The usage control opens Context.
+- Git, Diff, Agents and Background show the server's data (fixtures with
+  `--mock`). The mock usage control opens Context.
 - The composer preserves native multiline input, Unicode grapheme deletion,
   Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line;
   Cmd/Ctrl+Enter queues while a turn runs. Send uses the same action. In the mock, Stop (Escape) cancels the simulated
@@ -301,7 +319,9 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
   pinned tokens, and layout constants.
 - `ui.rs`: shared primitives: icons, state glyphs, controls and tooltips, key
   caps, `Segmented`, section labels and transition timing.
-- `inspector.rs`, `usage.rs`: tasks, tabs and the Context tab.
+- `inspector.rs`, `usage.rs`: the pinned checklist, tabs and the Context view.
+- `work.rs`, `work_view.rs`: data and inspector controls for checklists,
+  delegated threads, provider subagents and background jobs.
 - `git.rs`: the Git and Diff data and its rules (decoders, patch parser, CI
   glance, ages, the open-request prompt); `git_view.rs` draws the tabs and runs
   their controls; `diff.rs` draws a file's hunks; `mock_git.rs` is the fixture,

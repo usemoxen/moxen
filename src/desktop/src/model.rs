@@ -1,5 +1,7 @@
 pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
+use crate::work::{Delegated, InspectorData, Read, View};
+use std::sync::Arc;
 
 pub type ThreadId = usize;
 
@@ -92,9 +94,6 @@ pub enum Message {
 pub struct Reply {
     pub message: usize,
     pub words: Vec<String>,
-}
-pub struct InspectorData {
-    pub tasks: Vec<String>,
 }
 
 /// Whether the source has reached the Moxen server. The mock is always live.
@@ -311,7 +310,21 @@ pub trait ThreadSource {
     fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit);
     /// Stops the running turn so the waiting message goes next.
     fn send_queued_now(&mut self, id: ThreadId, key: &str) -> Option<Reply>;
-    fn inspector(&self, id: ThreadId) -> InspectorData;
+    fn inspector(&self, _: ThreadId) -> Arc<InspectorData> {
+        Arc::default()
+    }
+    fn children(&self, _: ThreadId) -> Vec<ThreadId> {
+        vec![]
+    }
+    fn delegated(&self, _: ThreadId) -> Option<Delegated> {
+        None
+    }
+    fn read_work(&mut self, _: ThreadId, _: Read) {}
+    fn work(&self, _: ThreadId, _: &Read) -> Option<Arc<Result<View, String>>> {
+        None
+    }
+    fn stop_background(&mut self, _: ThreadId, _task: &str) {}
+    fn cancel_task(&mut self, _: ThreadId, _notify_parent: bool) {}
     fn list_threads(&self) -> Vec<Thread>;
     fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>>;
     /// What the Git tab shows for a thread: its checkout, branches, history,

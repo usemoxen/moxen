@@ -199,10 +199,12 @@ import {
   type QueryType,
   type ShellFrame,
   type StartedTurnSummary,
+  type ThreadDetail,
   type ThreadFrame,
   type PermissionDecision,
   type UserInputAnswers,
 } from "./protocol.js";
+import { nativeSubagents } from "./subagentrows.js";
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
@@ -1319,15 +1321,22 @@ export class DirectConnection implements ClientApi {
     };
   }
 
-  private async threadDetail(threadId: string): Promise<ThreadEnvelope | null> {
+  private async threadDetail(threadId: string): Promise<ThreadDetail | null> {
     const store = await this.store();
     const read = await readThread(store, threadId, { view: "messages" }).catch(() => null);
     if (!read) return null;
-    return { ...toThreadEnvelope(read.thread, read.turns, {
+    const thread = toThreadEnvelope(read.thread, read.turns, {
       messages: read.messages,
       activities: read.activities,
       checkpoints: await this.withCheckpointFiles(read.thread.env.path, read.checkpoints),
-    }), turnThroughput: turnThroughput(read.turns) };
+    });
+    const selection = read.turns.findLast((turn) => turn.modelSelection)?.modelSelection ?? thread.modelSelection;
+    const driver = selection ? driverKey(selection.instanceId) : null;
+    const subagentRows = nativeSubagents(thread.activities ?? []).map((row) => ({
+      ...row,
+      stoppable: row.running && (driver === "opencode" || driver === "harness"),
+    }));
+    return { ...thread, turnThroughput: turnThroughput(read.turns), ...(subagentRows.length > 0 ? { subagentRows } : {}) };
   }
 
   /**

@@ -1045,6 +1045,7 @@ fn has_branch(w: &Workspace) -> bool {
 }
 
 fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let background = crate::work_view::background_count(w);
     let git = w.source.git(w.selected);
     let overview = git.overview.as_ref().filter(|o| o.is_repository);
     let branch = overview
@@ -1086,6 +1087,17 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 })),
         )
         .child(div().flex_1())
+        .when(background > 0, |s| {
+            s.child(
+                chip("background", "Open background tasks")
+                    .child(format!("{background} background"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = 4;
+                        this.set_inspector(true);
+                        cx.notify();
+                    })),
+            )
+        })
         .when(w.source.preview(), |s| {
             s.child(
                 chip("usage", "Context and plan usage")

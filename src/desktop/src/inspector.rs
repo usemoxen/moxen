@@ -6,16 +6,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 
-const TABS: [(&str, &str); 5] = [
-    ("Diff", ""),
-    ("Git", ""),
-    ("Context", "66%"),
-    ("Agents", "5"),
-    ("Background", ""),
-];
-const TASK_TIMES: [&str; 6] = ["42m", "1h 10m", "2h 3m", "38m", "", ""];
-/// Task 3 is the running one; those before it are done.
-const LIVE_TASK: usize = 3;
+const TABS: [&str; 5] = ["Diff", "Git", "Context", "Agents", "Background"];
 
 /// The `.ib` icon button: 28pt square, 6pt corners.
 fn icon_button(id: &'static str) -> Stateful<Div> {
@@ -41,13 +32,12 @@ pub fn delta(text: &str) -> Div {
         .child(div().text_color(color("broken")).child(removed.to_string()))
 }
 
-fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let tasks = w.source.inspector(w.selected).tasks;
-    let state = |i: usize| match i {
-        _ if i < LIVE_TASK => Status::Idle,
-        LIVE_TASK => Status::Running,
-        _ => Status::Queued,
-    };
+fn tasks(
+    id: crate::model::ThreadId,
+    tasks: &[crate::work::Step],
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let done = crate::work::completed(tasks);
     div()
         .flex_shrink_0()
         .border_b_1()
@@ -75,7 +65,7 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_size(px(11.5))
                         .line_height(px(12.))
                         .text_color(color("ink-2"))
-                        .child(format!("{LIVE_TASK} of {}", tasks.len())),
+                        .child(format!("{done} of {}", tasks.len())),
                 )
                 .child(
                     div()
@@ -83,12 +73,12 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .flex()
                         .gap(px(3.))
                         .px(px(4.))
-                        .children((0..tasks.len()).map(|i| {
+                        .children(tasks.iter().map(|step| {
                             div()
                                 .flex_1()
                                 .h(px(3.))
                                 .rounded(px(2.))
-                                .bg(color(match state(i) {
+                                .bg(color(match step.status {
                                     Status::Idle => "ink-2",
                                     Status::Running => "live",
                                     _ => "rule",
@@ -101,13 +91,16 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
         .child(
             div()
+                .id(("checklist", id))
+                .max_h(px(224.))
+                .overflow_y_scroll()
                 .px(px(8.))
                 .pb(px(10.))
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .children(tasks.into_iter().enumerate().map(|(i, t)| {
-                    let live = state(i) == Status::Running;
+                .children(tasks.iter().map(|step| {
+                    let live = step.status == Status::Running;
                     div()
                         .flex()
                         .items_start()
@@ -117,27 +110,20 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .rounded(px(6.))
                         .text_size(px(13.))
                         .line_height(px(18.))
-                        .text_color(color(if state(i) == Status::Idle {
+                        .text_color(color(if step.status == Status::Idle {
                             "ink-2"
                         } else {
                             "ink"
                         }))
                         .when(live, |s| s.bg(color("sunk")))
-                        .child(div().pt(px(2.)).child(ui::state(state(i))))
-                        .child(div().flex_1().min_w_0().child(t))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .font_family(theme::MONO)
-                                .text_size(px(11.5))
-                                .text_color(color(if live { "live" } else { "ink-2" }))
-                                .child(TASK_TIMES.get(i).copied().unwrap_or("")),
-                        )
+                        .child(div().pt(px(2.)).child(ui::state(step.status)))
+                        .child(div().flex_1().min_w_0().child(step.title.clone()))
                 })),
         )
 }
 
 fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let info = w.source.delegated(w.selected).is_some();
     div()
         .flex_shrink_0()
         .pt(px(12.))
@@ -146,18 +132,19 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .gap(px(16.))
                 .border_b_1()
                 .border_color(color("rule"))
-                .children(TABS.into_iter().enumerate().map(|(i, (label, fixed))| {
-                    // Diff counts the turns that changed files; Git, the open requests.
+                .children(TABS.into_iter().enumerate().map(|(i, label)| {
                     let count = match i {
-                        0 => Some(w.source.turn_diffs(w.selected).len()),
-                        1 => Some(w.source.git(w.selected).requests.len()),
-                        _ => None,
-                    }
-                    .filter(|n| *n > 0)
-                    .map_or_else(|| fixed.to_string(), |n| n.to_string());
+                        0 => w.source.turn_diffs(w.selected).len(),
+                        1 => w.source.git(w.selected).requests.len(),
+                        3 if !info => crate::work_view::agent_count(w),
+                        4 => crate::work_view::background_count(w),
+                        _ => 0,
+                    };
+                    let label = if i == 3 && info { "Info" } else { label };
                     let on = w.tab == i;
                     div()
                         .id(("tab", i))
@@ -178,14 +165,14 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_color(color(if on { "ink" } else { "ink-2" }))
                         .when(on, |s| s.font_weight(FontWeight::SEMIBOLD))
                         .child(label)
-                        .when(!count.is_empty(), |s| {
+                        .when(count > 0, |s| {
                             s.child(
                                 div()
                                     .font_family(theme::MONO)
                                     .font_weight(FontWeight::NORMAL)
                                     .text_size(px(11.5))
                                     .text_color(color("ink-2"))
-                                    .child(count.clone()),
+                                    .child(count.to_string()),
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -222,34 +209,27 @@ pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl In
                     cx.listener(|this, _, _, _| this.resizing_inspector = true),
                 ),
         );
-    if w.tasks_open {
-        pane = pane.child(tasks(w, cx));
+    let checklist = w.source.inspector(w.selected);
+    if !w.creating && w.tasks_open && !checklist.tasks.is_empty() {
+        pane = pane.child(tasks(w.selected, &checklist.tasks, cx));
     }
     pane = pane.child(tabs(w, cx));
     let body = div()
-        .id("inspector-scroll")
+        .id(("inspector-scroll", w.tab))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll();
     if w.tab == 2 {
-        return pane.child(body.child(crate::usage::render()));
+        return pane.child(body.child(if w.source.preview() {
+            crate::usage::render().into_any_element()
+        } else {
+            crate::work_view::notice("Context usage is not available here yet.").into_any_element()
+        }));
     }
     if w.tab > 2 {
         return pane.child(
-            body.child(
-                div()
-                    .px(px(24.))
-                    .py(px(48.))
-                    .text_center()
-                    .text_size(px(13.5))
-                    .line_height(px(20.))
-                    .text_color(color("ink-2"))
-                    .child(if w.tab == 3 {
-                        "No agents in this preview."
-                    } else {
-                        "Nothing is running in the background. Commands the agent leaves running show here, with their output."
-                    }),
-            ),
+            body.track_focus(&w.work_focus)
+                .child(crate::work_view::render(w, cx)),
         );
     }
     if w.tab == 0 {

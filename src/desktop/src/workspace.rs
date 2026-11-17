@@ -90,6 +90,8 @@ pub struct Workspace {
     pub resizing_inspector: bool,
     /// The Git and Diff tabs' own state.
     pub git_ui: crate::git_view::GitUi,
+    pub work_ui: crate::work_view::WorkUi,
+    pub work_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -176,15 +178,18 @@ impl Workspace {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
-                ticks = (ticks + 1) % 10;
+                ticks = (ticks + 1) % 20;
                 if this
                     .update(cx, |this, cx| {
+                        if ticks == 0 {
+                            this.refresh_work();
+                        }
                         let revision = this.source.revision();
                         if seen != Some(revision) {
                             seen = Some(revision);
                             this.sync_threads(cx);
                             cx.notify();
-                        } else if ticks == 0
+                        } else if ticks.is_multiple_of(10)
                             && this
                                 .source
                                 .list_threads()
@@ -258,6 +263,8 @@ impl Workspace {
         }
         let mut this = Self {
             git_ui: crate::git_view::GitUi::new(git_input),
+            work_ui: crate::work_view::WorkUi::default(),
+            work_focus: cx.focus_handle(),
             creating: false,
             new_composer,
             new_project: None,
@@ -786,6 +793,7 @@ impl Render for Workspace {
         }
         self.sync_panel(window, cx);
         self.sync_inspector();
+        self.sync_work();
         let viewport = f32::from(window.viewport_size().width);
         let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
         let slide = crate::ui::progress(self.inspector_at, 160, window);
@@ -832,7 +840,7 @@ impl Render for Workspace {
                     } else if this.creating {
                         this.creating = false;
                         window.focus(&this.sidebar_focus, cx);
-                    } else {
+                    } else if !this.work_ui.dismiss() && !this.dismiss_panel(cx) {
                         this.stop(cx);
                     }
                     cx.notify();
