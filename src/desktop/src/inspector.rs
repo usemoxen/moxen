@@ -183,6 +183,37 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
+/// The Context tab: what fills the thread's window and what the account's
+/// allowance holds, read from the server. Missing readings read as "no
+/// data", never as 0% or unlimited.
+fn context_tab(w: &Workspace) -> impl IntoElement {
+    let selection = w.source.selection(w.selected);
+    let limits = w.source.limits();
+    let provider_limits = selection
+        .as_ref()
+        .and_then(|selection| limits.as_deref()?.for_instance(&selection.instance));
+    let provider_name = selection.as_ref().and_then(|selection| {
+        w.catalog()
+            .as_ref()
+            .and_then(|catalog| catalog.provider(&selection.instance))
+            .map(|provider| provider.name.clone())
+    });
+    match w.source.context(w.selected) {
+        None => crate::work_view::notice("Reading context usage…").into_any_element(),
+        Some(data)
+            if data.error.is_some() && data.breakdown.is_none() && data.reading.is_none() =>
+        {
+            crate::work_view::notice(format!(
+                "Couldn't read context usage: {}",
+                data.error.clone().unwrap_or_default()
+            ))
+            .into_any_element()
+        }
+        Some(data) => crate::usage::render(&data, provider_limits, provider_name.as_deref())
+            .into_any_element(),
+    }
+}
+
 pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
     let mut pane = div()
         .id("inspector")
@@ -220,11 +251,7 @@ pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl In
         .min_h_0()
         .overflow_y_scroll();
     if w.tab == 2 {
-        return pane.child(body.child(if w.source.preview() {
-            crate::usage::render().into_any_element()
-        } else {
-            crate::work_view::notice("Context usage is not available here yet.").into_any_element()
-        }));
+        return pane.child(body.child(context_tab(w).into_any_element()));
     }
     if w.tab > 2 {
         return pane.child(

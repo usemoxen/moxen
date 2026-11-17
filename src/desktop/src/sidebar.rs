@@ -306,6 +306,14 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         })),
                 )
                 .child(
+                    row("stats", "Usage across every thread and provider")
+                        .child(ui::icon("circle-gauge", "ink-2"))
+                        .child(div().flex_1().child("Stats"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_stats(cx);
+                        })),
+                )
+                .child(
                     row("settings", "Settings are unavailable in this preview")
                         .cursor(CursorStyle::Arrow)
                         .child(ui::icon("settings", "ink-2"))

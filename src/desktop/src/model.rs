@@ -1,5 +1,7 @@
 pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
+pub use crate::stats::{CardState, StatsData, StatsRange, StatsState};
+pub use crate::usage::{ContextData, Hold, LimitsData, ProtectionData, QueueMove, SnapshotUsage};
 use crate::work::{Delegated, InspectorData, Read, View};
 use std::sync::Arc;
 
@@ -88,6 +90,18 @@ pub enum Message {
         /// Work on it has begun.
         implemented: bool,
         /// When it was proposed, as the header shows it.
+        at: String,
+    },
+    /// The provider stopped the turn at its usage limit, or is wrapping up
+    /// before it does: the record of when it happened and when it lifts.
+    UsageLimit {
+        /// The window the provider stopped on ("Session", say); none names no window.
+        label: Option<String>,
+        /// When the window resets, as the server wrote it; none resets when allowed.
+        resets_at: Option<String>,
+        /// Still finishing the step rather than stopped.
+        wrap_up: bool,
+        /// When it happened, as the header shows it.
         at: String,
     },
 }
@@ -347,6 +361,51 @@ pub trait ThreadSource {
     fn turn_diffs(&self, _: ThreadId) -> Vec<TurnDiff> {
         vec![]
     }
+    /// What the Context tab and the status line show for a thread: the live
+    /// breakdown and the last recorded reading, once read with `read_context`.
+    fn context(&self, _: ThreadId) -> Option<Arc<ContextData>> {
+        None
+    }
+    /// Reads the live breakdown and the last recorded reading.
+    fn read_context(&mut self, _: ThreadId) {}
+    /// The thread's recorded context totals, off its snapshot: what the
+    /// status line reads without another query.
+    fn snapshot_usage(&self, _: ThreadId) -> Option<SnapshotUsage> {
+        None
+    }
+    /// The account's plan usage (`usage.limits`), once read with `read_limits`.
+    fn limits(&self) -> Option<Arc<LimitsData>> {
+        None
+    }
+    /// Reads the account's plan usage.
+    fn read_limits(&mut self) {}
+    /// Usage protection (`usage.protection`): the forecasts and the recovery
+    /// queue, once read with `read_protection`.
+    fn protection(&self) -> Option<Arc<ProtectionData>> {
+        None
+    }
+    /// Reads usage protection.
+    fn read_protection(&mut self) {}
+    /// The open thread's own protection hold, off its snapshot.
+    fn hold(&self, _: ThreadId) -> Option<Hold> {
+        None
+    }
+    /// Asks the account to wrap up before its allowance runs out (`usage.wrap`).
+    fn wrap_provider(&mut self, _: String) {}
+    /// Moves or cancels one recovery-queue entry (`usage.queue`).
+    fn queue_protection(&mut self, _: String, _: QueueMove) {}
+    /// Usage stats for a range, once read with `read_stats`.
+    fn stats(&self, _: StatsRange) -> Option<Arc<StatsState>> {
+        None
+    }
+    /// Reads usage stats for a range.
+    fn read_stats(&mut self, _: StatsRange) {}
+    /// The shareable PNG card for a range, once read and saved with `read_card`.
+    fn card(&self, _: StatsRange) -> Option<Arc<CardState>> {
+        None
+    }
+    /// Reads the card and saves it where the person can find it.
+    fn read_card(&mut self, _: StatsRange) {}
     /// One turn's patch, once asked for with `read_turn_patch`.
     fn turn_patch(&self, _: ThreadId, _turn: i64) -> Option<Patch> {
         None

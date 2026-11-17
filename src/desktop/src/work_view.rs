@@ -494,6 +494,17 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
                 Message::User { text } => detail_line("Prompt", text.clone()),
                 Message::Assistant { text, .. } => detail_line("Reply", text.clone()),
                 Message::Plan { text, .. } => detail_line("Plan", text.clone()),
+                Message::UsageLimit { wrap_up, label, .. } => detail_line(
+                    "Usage limit",
+                    if *wrap_up {
+                        "Wrapping up".to_string()
+                    } else {
+                        format!(
+                            "{} limit reached",
+                            label.clone().unwrap_or_else(|| "Plan".to_string())
+                        )
+                    },
+                ),
                 Message::Tool {
                     name,
                     summary,

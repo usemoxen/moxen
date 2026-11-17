@@ -92,6 +92,10 @@ pub struct Workspace {
     pub git_ui: crate::git_view::GitUi,
     pub work_ui: crate::work_view::WorkUi,
     pub work_focus: FocusHandle,
+    /// The stats overlay: open, and the tab and range it shows.
+    pub stats_open: bool,
+    pub stats_tab: crate::stats::StatsTab,
+    pub stats_range: crate::stats::StatsRange,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -183,6 +187,7 @@ impl Workspace {
                     .update(cx, |this, cx| {
                         if ticks == 0 {
                             this.refresh_work();
+                            this.refresh_usage();
                         }
                         let revision = this.source.revision();
                         if seen != Some(revision) {
@@ -299,6 +304,9 @@ impl Workspace {
             tasks_open: true,
             picker_open: false,
             palette_open: false,
+            stats_open: false,
+            stats_tab: crate::stats::StatsTab::default(),
+            stats_range: crate::stats::StatsRange::default(),
             model_focus: cx.focus_handle(),
             group: 1,
             tab: 1,
@@ -610,6 +618,23 @@ impl Workspace {
             cx.notify();
         }
     }
+    /// Re-reads usage while it is on screen: the account's limits and
+    /// protection on their timers, the open thread's context with its tab, and
+    /// the stats range the overlay shows. Reads are cheap snapshots; each
+    /// guards its own in-flight round.
+    pub fn refresh_usage(&mut self) {
+        if self.source.preview() {
+            return;
+        }
+        self.source.read_limits();
+        self.source.read_protection();
+        if self.inspector_open && !self.creating && self.tab == 2 {
+            self.source.read_context(self.selected);
+        }
+        if self.stats_open {
+            self.source.read_stats(self.stats_range);
+        }
+    }
     /// Resizes the open thread's list to a live transcript that changed:
     /// everything from the first changed row is measured again, and a reader
     /// who is at the end stays there as it grows. The mock changes its list
@@ -662,6 +687,12 @@ impl Workspace {
         self.selected = id;
         self.creating = false;
         self.dropdown = None;
+        cx.notify();
+    }
+    pub fn open_stats(&mut self, cx: &mut Context<Self>) {
+        self.stats_open = true;
+        self.stats_tab = crate::stats::StatsTab::default();
+        self.source.read_stats(self.stats_range);
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -825,7 +856,9 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
-                    if this.custom_open {
+                    if this.stats_open {
+                        this.stats_open = false;
+                    } else if this.custom_open {
                         this.close_custom(window, cx);
                     } else if this.git_ui.form.is_some() {
                         this.close_form(window, cx);
@@ -920,6 +953,7 @@ impl Render for Workspace {
             .when(self.palette_open, |s| {
                 s.child(crate::palette::render(self, cx))
             })
+            .when(self.stats_open, |s| s.child(crate::stats::render(self, cx)))
             .into_any_element()
     }
 }

@@ -17,6 +17,7 @@ mod model_picker;
 mod palette;
 mod pending;
 mod sidebar;
+mod stats;
 mod steps;
 mod theme;
 mod thread_view;

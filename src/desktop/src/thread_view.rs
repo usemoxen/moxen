@@ -270,6 +270,91 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     })
                                     .into_any_element()
                             }
+                            Message::UsageLimit {
+                                label,
+                                resets_at,
+                                wrap_up,
+                                at,
+                            } => {
+                                let now = crate::live::now_ms();
+                                let window = label.clone().unwrap_or_else(|| "Plan".to_string());
+                                let reset = match resets_at
+                                    .as_deref()
+                                    .and_then(crate::live::parse_iso_ms)
+                                {
+                                    None => "  ·  resets when the provider allows".to_string(),
+                                    Some(target) if target <= now => {
+                                        format!(
+                                            "  ·  reset at {}",
+                                            crate::transcript::clock(target)
+                                        )
+                                    }
+                                    Some(target) => format!(
+                                        "  ·  resets {} ({})",
+                                        crate::transcript::clock(target),
+                                        crate::usage::until_label(target, now)
+                                            .trim_start_matches("in "),
+                                    ),
+                                };
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(8.))
+                                            .text_size(px(13.))
+                                            .child(
+                                                div()
+                                                    .text_color(color(if wrap_up {
+                                                        "held"
+                                                    } else {
+                                                        "broken"
+                                                    }))
+                                                    .child("◔"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(color(if wrap_up {
+                                                        "held"
+                                                    } else {
+                                                        "broken"
+                                                    }))
+                                                    .child(if wrap_up {
+                                                        "Usage limit reached, wrapping up"
+                                                    } else {
+                                                        "Usage limit reached"
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(color("ink-2"))
+                                                    .child(format!("  ·  {window} limit")),
+                                            )
+                                            .child(div().text_color(color("ink-2")).child(reset))
+                                            .when(!at.is_empty(), |s| {
+                                                s.child(
+                                                    div()
+                                                        .font_family(theme::MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(color("ink-2"))
+                                                        .child(format!("  ·  {at}")),
+                                                )
+                                            }),
+                                    )
+                                    .when(wrap_up, |s| {
+                                        s.child(
+                                            div()
+                                                .text_size(px(13.))
+                                                .text_color(color("ink-2"))
+                                                .child("Finishing this step before stopping."),
+                                        )
+                                    })
+                                    .into_any_element()
+                            }
                             Message::Tool {
                                 name,
                                 summary: target,
@@ -407,13 +492,12 @@ fn composer(
                 .when(!waiting.is_empty(), |s| {
                     s.child(queue_strip(&waiting, running, cx))
                 })
+                .children(protection_banner(w, cx))
                 .child(match crate::ask::panel(w, id, creating, cx) {
                     Some(panel) => panel,
                     None => card(w, thread, draft_empty, window, cx).into_any_element(),
                 })
-                .when(w.source.preview() || has_branch(w), |s| {
-                    s.child(status_line(w, cx))
-                }),
+                .children(status_line(w, cx)),
         )
 }
 
@@ -898,6 +982,216 @@ fn problem(message: String, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
+/// Usage protection holds: the thread's own hold, the forecasts that say to
+/// wrap up, and the recovery queue, with the TUI's actions on each.
+fn protection_banner(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let id = w.selected;
+    let hold = w.source.hold(id);
+    let protection = w.source.protection();
+    let forecasts: Vec<crate::usage::Forecast> = protection
+        .as_deref()
+        .map(|protection| {
+            protection
+                .forecasts
+                .iter()
+                .filter(|forecast| forecast.should_wrap)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let queue = protection
+        .as_deref()
+        .map(|protection| protection.queue.clone())
+        .unwrap_or_default();
+    let error = protection
+        .as_deref()
+        .and_then(|protection| protection.error.clone());
+    if hold.is_none() && forecasts.is_empty() && queue.is_empty() && error.is_none() {
+        return None;
+    }
+    let action = |slot: (&'static str, usize), tooltip: &'static str, label: &'static str| {
+        div()
+            .id(slot)
+            .control(tooltip)
+            .h(px(22.))
+            .px(px(8.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .rounded(px(6.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(color("ink-2"))
+            .child(label)
+    };
+    let name_of = |provider: &str| {
+        w.catalog()
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .providers
+                    .iter()
+                    .find(|candidate| {
+                        candidate.instance.eq_ignore_ascii_case(provider)
+                            || crate::usage::driver_kind(&candidate.instance) == Some(provider)
+                    })
+                    .map(|candidate| candidate.name.clone())
+            })
+            .unwrap_or_else(|| provider.to_string())
+    };
+    let mut rows = div().flex().flex_col().gap(px(4.));
+    if let Some(hold) = hold {
+        let title = hold.title().to_string();
+        let detail = hold.detail().to_string();
+        let wake = (hold.waiting > 0).then(|| {
+            if hold.waiting == 1 {
+                "1 wake-up waiting".to_string()
+            } else {
+                format!("{} wake-ups waiting", hold.waiting)
+            }
+        });
+        rows = rows.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .bg(color("sunk"))
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().text_color(color("held")).child("◔"))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                        .children(wake.map(|wake| {
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(11.5))
+                                .text_color(color("ink-2"))
+                                .child(format!("· {wake}"))
+                        })),
+                )
+                .child(div().text_color(color("ink-2")).child(detail)),
+        );
+    }
+    if let Some(error) = error {
+        rows = rows.child(
+            div()
+                .px(px(12.))
+                .text_size(px(13.))
+                .text_color(color("broken"))
+                .child(format!("Couldn't read usage protection: {error}")),
+        );
+    }
+    let now = crate::live::now_ms();
+    for (at, forecast) in forecasts.iter().enumerate() {
+        let provider = name_of(&forecast.provider);
+        let work = forecast
+            .remaining_ms
+            .map_or_else(|| "unknown".to_string(), crate::usage::duration_words);
+        let reset = forecast
+            .resets_at
+            .as_deref()
+            .and_then(|resets| {
+                crate::live::parse_iso_ms(resets)
+                    .map(|target| crate::usage::duration_words((target - now).max(0)))
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let provider_command = forecast.provider.clone();
+        rows = rows.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .bg(color("sunk"))
+                .text_size(px(13.))
+                .child(div().text_color(color("held")).child("◔"))
+                .child(div().flex_1().min_w_0().truncate().child(format!(
+                    "{provider} · {} {}% · ~{work} of work left · resets in {reset} · estimate",
+                    forecast.label,
+                    forecast.used_percent.round() as i64,
+                )))
+                .child(
+                    action(
+                        ("protection-wrap", at),
+                        "Wrap up all work on this account",
+                        "Wrap up all",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.source.wrap_provider(provider_command.clone());
+                        cx.notify();
+                    })),
+                ),
+        );
+    }
+    for (at, entry) in queue.iter().enumerate() {
+        let thread = entry.thread_id.clone();
+        let detail = entry.detail(now);
+        rows = rows.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .bg(color("sunk"))
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().text_color(color("held")).child("◔"))
+                        .child(div().flex_1().min_w_0().truncate().child(format!(
+                            "{}. {} · {}",
+                            at + 1,
+                            entry.title,
+                            entry.phase.label()
+                        ))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(color("ink-2"))
+                                .child(detail),
+                        )
+                        .children(entry.actions().into_iter().enumerate().map(
+                            |(move_at, direction)| {
+                                let command = thread.clone();
+                                action(
+                                    ("protection-queue", at * 4 + move_at),
+                                    direction.label(),
+                                    direction.label(),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.source.queue_protection(command.clone(), direction);
+                                        cx.notify();
+                                    },
+                                ))
+                            },
+                        )),
+                ),
+        );
+    }
+    Some(rows.into_any_element())
+}
+
 /// Messages waiting for the running turn: the next few, each of which can be
 /// held, moved, taken back to edit, removed, or sent at once.
 fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
@@ -1035,6 +1329,19 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
         })
 }
 
+/// A status-line chip: 28pt tall with a tooltip.
+fn chip(id: &'static str, tooltip: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .control(tooltip)
+        .h(px(28.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .rounded(px(6.))
+}
+
 /// The checkout is known (the Git tab has read it): its branch is worth a chip.
 fn has_branch(w: &Workspace) -> bool {
     w.source
@@ -1044,8 +1351,12 @@ fn has_branch(w: &Workspace) -> bool {
         .is_some_and(|o| o.is_repository)
 }
 
-fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let background = crate::work_view::background_count(w);
+    let usage = usage_chip(w, cx);
+    if !has_branch(w) && usage.is_none() && background == 0 {
+        return None;
+    }
     let git = w.source.git(w.selected);
     let overview = git.overview.as_ref().filter(|o| o.is_repository);
     let branch = overview
@@ -1056,18 +1367,7 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .and_then(|o| o.status.as_ref())
         .map(|s| s.line())
         .filter(|line| line != "clean");
-    let chip = |id: &'static str, tooltip: &'static str| {
-        div()
-            .id(id)
-            .control(tooltip)
-            .h(px(28.))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded(px(6.))
-    };
-    div()
+    let line = div()
         .mx(px(-6.))
         .flex()
         .items_center()
@@ -1075,17 +1375,19 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .font_family(theme::MONO)
         .text_size(px(12.))
         .text_color(color("ink-2"))
-        .child(
-            chip("branch", "Open Git")
-                .child(ui::icon("git-branch", "ink-2"))
-                .child(div().text_color(color("ink")).child(branch))
-                .children(changed.map(|line| div().text_color(color("effort")).child(line)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.tab = 1;
-                    this.set_inspector(true);
-                    cx.notify();
-                })),
-        )
+        .when(has_branch(w), |s| {
+            s.child(
+                chip("branch", "Open Git")
+                    .child(ui::icon("git-branch", "ink-2"))
+                    .child(div().text_color(color("ink")).child(branch))
+                    .children(changed.map(|line| div().text_color(color("effort")).child(line)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = 1;
+                        this.set_inspector(true);
+                        cx.notify();
+                    })),
+            )
+        })
         .child(div().flex_1())
         .when(background > 0, |s| {
             s.child(
@@ -1098,24 +1400,84 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     })),
             )
         })
-        .when(w.source.preview(), |s| {
-            s.child(
-                chip("usage", "Context and plan usage")
-                    .child(crate::usage::meter(40., 5.))
-                    .child(div().text_color(color("ink")).child("66%"))
-                    .child("663k / 1m")
-                    .child(div().w(px(1.)).h(px(12.)).mx(px(4.)).bg(color("rule")))
-                    .child("5h")
-                    .child(div().text_color(color("context-tools")).child("36%"))
-                    .child("wk")
-                    .child(div().text_color(color("context-tools")).child("43%"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = 2;
-                        this.set_inspector(true);
-                        cx.notify();
-                    })),
-            )
+        .children(usage);
+    Some(line.into_any_element())
+}
+
+/// The usage chip: the thread's context share and the account's plan gauges,
+/// from the server. Missing numbers leave it out rather than show made-up ones.
+fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let id = w.selected;
+    let context = w.source.context(id);
+    let totals = context
+        .as_deref()
+        .and_then(|context| context.totals())
+        .or_else(|| {
+            w.source
+                .snapshot_usage(id)
+                .map(|usage| (usage.used, usage.max))
+        });
+    let breakdown = context
+        .as_deref()
+        .and_then(|context| context.breakdown.as_ref());
+    let instance = w.source.selection(id).map(|selection| selection.instance);
+    let limits = w.source.limits();
+    let gauges = crate::usage::plan_gauges(
+        instance
+            .as_deref()
+            .and_then(|instance| limits.as_deref()?.for_instance(instance)),
+    );
+    let (used, max) = totals?;
+    if gauges.is_empty() && breakdown.is_none() {
+        return None;
+    }
+    let shares = breakdown
+        .map(|breakdown| {
+            crate::usage::context_shares(&breakdown.categories, breakdown.max, breakdown.used)
         })
+        .unwrap_or_default();
+    let percent = max
+        .filter(|max| *max > 0)
+        .map(|max| used.clamp(0, max) * 100 / max.max(1));
+    let label = match (percent, max) {
+        (Some(percent), Some(max)) => format!(
+            "{percent}%  {} / {}",
+            crate::usage::format_count(used),
+            crate::usage::format_count(max)
+        ),
+        _ => format!("{} tokens in context", crate::usage::format_count(used)),
+    };
+    let usage = chip("usage", "Context and plan usage")
+        .children((!shares.is_empty()).then(|| crate::usage::meter(&shares, 32., 5.)))
+        .child(div().text_color(color("ink")).child(label))
+        .children(gauges.iter().flat_map(|gauge| {
+            let token = if gauge.percent >= 90. {
+                "broken"
+            } else if gauge.percent >= 70. {
+                "held"
+            } else {
+                "ink-2"
+            };
+            [
+                div()
+                    .w(px(1.))
+                    .h(px(12.))
+                    .mx(px(4.))
+                    .bg(color("rule"))
+                    .into_any_element(),
+                div().child(gauge.short.clone()).into_any_element(),
+                div()
+                    .text_color(color(token))
+                    .child(format!("{}%", gauge.percent.round() as i64))
+                    .into_any_element(),
+            ]
+        }))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.tab = 2;
+            this.set_inspector(true);
+            cx.notify();
+        }));
+    Some(usage.into_any_element())
 }
 
 #[cfg(test)]

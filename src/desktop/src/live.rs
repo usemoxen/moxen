@@ -12,12 +12,15 @@ use crate::{
     catalog::Catalog,
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
-        Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
-        NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
-        Status, Thread, ThreadId, ThreadSource,
+        Answer, Ask, CardState, CatalogState, Connection, ContextData, Decision, Delivery, Hold,
+        LimitsData, MergeStrategy, Message, NewRequest, NewThread, Permission, Problem, Project,
+        ProtectionData, QueueEdit, QueueMove, Queued, Reply, Selection, SnapshotUsage, StatsRange,
+        StatsState, Status, Thread, ThreadId, ThreadSource,
     },
     pending,
+    stats::StatsData,
     transcript::{self, Row},
+    usage::{Breakdown, Reading},
     wire::{Wire, WireError},
     work::{self, Background, Delegated, Delegation, InspectorData, Read, View},
 };
@@ -404,6 +407,28 @@ struct State {
     work: HashMap<(ThreadId, Read), Arc<Result<View, String>>>,
     work_reads: HashSet<(ThreadId, Read)>,
     inspector: HashMap<ThreadId, Arc<InspectorData>>,
+    /// What the Context tab shows, by thread: the live breakdown and the last
+    /// recorded reading, once read.
+    contexts: HashMap<ThreadId, Arc<ContextData>>,
+    /// Threads with a context read on the wire.
+    context_reads: HashSet<ThreadId>,
+    /// The account's plan usage, and when it was read.
+    limits: Option<Arc<LimitsData>>,
+    limits_at: Option<Instant>,
+    limits_reading: bool,
+    /// Usage protection: the forecasts and the recovery queue, once read.
+    protection: Option<Arc<ProtectionData>>,
+    protection_reading: bool,
+    /// Each followed thread's own protection hold, off its snapshot.
+    holds: HashMap<ThreadId, Hold>,
+    /// Each followed thread's recorded context totals, off its snapshot: what
+    /// the status line reads without another query.
+    snapshot_usage: HashMap<ThreadId, SnapshotUsage>,
+    /// Usage stats and saved cards, by range, once read.
+    stats: HashMap<StatsRange, Arc<StatsState>>,
+    stats_reads: HashSet<StatsRange>,
+    cards: HashMap<StatsRange, Arc<CardState>>,
+    card_reads: HashSet<StatsRange>,
 }
 impl State {
     /// The thread's Git tab data, to change.
@@ -819,6 +844,22 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
                         background_count: work::background_count(thread),
                     }),
                 );
+                match Hold::from_json(thread) {
+                    Some(hold) => {
+                        state.holds.insert(id, hold);
+                    }
+                    None => {
+                        state.holds.remove(&id);
+                    }
+                }
+                match SnapshotUsage::from_json(thread) {
+                    Some(usage) => {
+                        state.snapshot_usage.insert(id, usage);
+                    }
+                    None => {
+                        state.snapshot_usage.remove(&id);
+                    }
+                }
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
                 state.turns.insert(id, git::turn_diffs_of(thread));
                 state.waiting.insert(
@@ -1160,6 +1201,72 @@ impl ThreadSource for ServerSource {
     }
     fn close_commit(&mut self, id: ThreadId) {
         self.shared.update(|state| state.git_of(id).commit = None);
+    }
+    fn context(&self, id: ThreadId) -> Option<Arc<ContextData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.contexts.get(&id).cloned()
+    }
+    fn read_context(&mut self, id: ThreadId) {
+        read_context(&self.shared, id);
+    }
+    fn snapshot_usage(&self, id: ThreadId) -> Option<SnapshotUsage> {
+        let state = self.shared.state.lock().expect("live state");
+        state.snapshot_usage.get(&id).cloned()
+    }
+    fn limits(&self) -> Option<Arc<LimitsData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.limits.clone()
+    }
+    fn read_limits(&mut self) {
+        read_limits(&self.shared);
+    }
+    fn protection(&self) -> Option<Arc<ProtectionData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.protection.clone()
+    }
+    fn read_protection(&mut self) {
+        read_protection(&self.shared);
+    }
+    fn hold(&self, id: ThreadId) -> Option<Hold> {
+        let state = self.shared.state.lock().expect("live state");
+        state.holds.get(&id).cloned()
+    }
+    fn wrap_provider(&mut self, provider: String) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch("usage.wrap", json!({ "provider": provider }))
+                .map(|_| ())
+                .map_err(|error| problem(&error, None))?;
+            read_protection(&shared);
+            Ok(())
+        });
+    }
+    fn queue_protection(&mut self, thread_id: String, direction: QueueMove) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "usage.queue",
+                json!({ "threadId": thread_id, "direction": direction.wire() }),
+            )
+            .map(|_| ())
+            .map_err(|error| problem(&error, None))?;
+            read_protection(&shared);
+            Ok(())
+        });
+    }
+    fn stats(&self, range: StatsRange) -> Option<Arc<StatsState>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.stats.get(&range).cloned()
+    }
+    fn read_stats(&mut self, range: StatsRange) {
+        read_stats(&self.shared, range);
+    }
+    fn card(&self, range: StatsRange) -> Option<Arc<CardState>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.cards.get(&range).cloned()
+    }
+    fn read_card(&mut self, range: StatsRange) {
+        read_card(&self.shared, range);
     }
     fn create_request(&mut self, id: ThreadId, request: NewRequest) {
         let mut fields = json!({ "title": request.title, "draft": request.draft });
@@ -1802,6 +1909,243 @@ fn read_tree(wire: &Wire, uuid: &str, root: Option<String>) -> Result<Patch, Str
     Ok(Patch::Ready(git::parse_patch(&ask(&root, "diff", &paths)?)))
 }
 
+/// Reads the thread's live context breakdown and its last recorded reading.
+/// A failed pair keeps the last answer and names the failure, so the Context
+/// tab reads "no data" rather than 0%.
+fn read_context(shared: &Arc<Shared>, id: ThreadId) {
+    let uuid = {
+        let mut state = shared.state.lock().expect("live state");
+        if state.wire.is_none() || !state.context_reads.insert(id) {
+            None
+        } else {
+            state.slots.get(id).map(|slot| slot.uuid.clone())
+        }
+    };
+    let Some(uuid) = uuid else {
+        shared.update(|state| {
+            state.context_reads.remove(&id);
+        });
+        return;
+    };
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let breakdown = wire.query("thread.context", json!({ "threadId": uuid }));
+        let reading = wire.query("thread.context-reading", json!({ "threadId": uuid }));
+        target.update(|state| {
+            state.context_reads.remove(&id);
+            let previous = state.contexts.get(&id);
+            let error = match (&breakdown, &reading) {
+                (Err(error), _) | (_, Err(error)) => Some(error.message.clone()),
+                _ => None,
+            };
+            let live = breakdown
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("live"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let next = breakdown
+                .as_ref()
+                .ok()
+                .and_then(|value| Breakdown::from_json(&value["breakdown"]));
+            let last = reading.as_ref().ok().and_then(Reading::from_json);
+            state.contexts.insert(
+                id,
+                Arc::new(ContextData {
+                    live,
+                    breakdown: next
+                        .or_else(|| previous.and_then(|previous| previous.breakdown.clone())),
+                    reading: last
+                        .or_else(|| previous.and_then(|previous| previous.reading.clone())),
+                    error,
+                }),
+            );
+        });
+    });
+}
+
+/// The account's plan windows, re-read on the TUI's slow timer: live events
+/// refresh the server's copy, this just picks it up.
+fn read_limits(shared: &Arc<Shared>) {
+    let fresh = shared.update(|state| {
+        let due = state
+            .limits_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(20));
+        if due && !state.limits_reading {
+            state.limits_reading = true;
+            true
+        } else {
+            false
+        }
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let answer = wire.query("usage.limits", json!({}));
+        target.update(|state| {
+            state.limits_reading = false;
+            state.limits_at = Some(Instant::now());
+            match answer {
+                Ok(value) => {
+                    state.limits = Some(Arc::new(LimitsData::from_json(&value)));
+                }
+                Err(error) if state.limits.is_none() => {
+                    state.limits = Some(Arc::new(LimitsData {
+                        error: Some(error.message),
+                        ..LimitsData::default()
+                    }));
+                }
+                Err(_) => {}
+            }
+        });
+    });
+}
+
+/// Usage protection on the TUI's fast timer: a reconnect keeps the last
+/// durable queue visible, and a failed read keeps it too.
+fn read_protection(shared: &Arc<Shared>) {
+    let fresh = shared.update(|state| {
+        if state.protection_reading {
+            false
+        } else {
+            state.protection_reading = true;
+            state.wire.is_some()
+        }
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let answer = wire.query("usage.protection", json!({}));
+        target.update(|state| {
+            state.protection_reading = false;
+            match answer {
+                Ok(value) => {
+                    state.protection = Some(Arc::new(ProtectionData::from_json(&value)));
+                }
+                Err(error) if state.protection.is_none() => {
+                    state.protection = Some(Arc::new(ProtectionData {
+                        error: Some(error.message),
+                        ..ProtectionData::default()
+                    }));
+                }
+                Err(_) => {}
+            }
+        });
+    });
+}
+
+/// Usage stats for a range, read when the stats screen opens it.
+fn read_stats(shared: &Arc<Shared>, range: StatsRange) {
+    let fresh = shared.update(|state| {
+        if state.wire.is_none() || !state.stats_reads.insert(range) {
+            return false;
+        }
+        true
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let answer = wire.query("usage.stats", json!({ "range": range.wire() }));
+        target.update(|state| {
+            state.stats_reads.remove(&range);
+            let previous = state.stats.get(&range);
+            match answer {
+                Ok(value) => {
+                    state.stats.insert(
+                        range,
+                        Arc::new(StatsState {
+                            data: StatsData::from_json(range, &value),
+                            error: None,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    state.stats.insert(
+                        range,
+                        Arc::new(StatsState {
+                            data: previous.and_then(|previous| previous.data.clone()),
+                            error: Some(error.message),
+                        }),
+                    );
+                }
+            }
+        });
+    });
+}
+
+/// The shareable PNG card for a range: the server draws it, the client saves
+/// it where it runs, and the modal names the path.
+fn read_card(shared: &Arc<Shared>, range: StatsRange) {
+    let fresh = shared.update(|state| {
+        if state.wire.is_none() || !state.card_reads.insert(range) {
+            return false;
+        }
+        state.cards.insert(
+            range,
+            Arc::new(CardState {
+                busy: true,
+                ..CardState::default()
+            }),
+        );
+        true
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    with_wire(shared, move |wire| {
+        let saved: Result<String, WireError> = (|| {
+            let card = wire.query("usage.card", json!({ "range": range.wire() }))?;
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                text(&card, &["png"]).unwrap_or_default(),
+            )
+            .map_err(|_| WireError::failed("BAD_CARD", "The server's stats card was not a PNG."))?;
+            let path =
+                std::env::temp_dir().join(text(&card, &["filename"]).unwrap_or_default().replace(
+                    |char: char| {
+                        !char.is_ascii_alphanumeric() && char != '.' && char != '_' && char != '-'
+                    },
+                    "_",
+                ));
+            std::fs::write(&path, bytes)
+                .map_err(|cause| WireError::failed("CARD_WRITE_FAILED", cause.to_string()))?;
+            Ok(path.to_string_lossy().into_owned())
+        })();
+        target.update(|state| {
+            state.card_reads.remove(&range);
+            match saved {
+                Ok(path) => {
+                    state.cards.insert(
+                        range,
+                        Arc::new(CardState {
+                            path: Some(path),
+                            error: None,
+                            busy: false,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    state.cards.insert(
+                        range,
+                        Arc::new(CardState {
+                            path: None,
+                            error: Some(error.message),
+                            busy: false,
+                        }),
+                    );
+                }
+            }
+        });
+    });
+}
+
 /// What a refused or failed command tells the user.
 fn problem(error: &WireError, unsent: Option<(Option<ThreadId>, String)>) -> Problem {
     Problem {
@@ -2010,6 +2354,8 @@ mod tests {
                 {"kind": "background.tasks", "payload": {"tasks": [{"taskId": "shell-1"}]}},
             ],
             "subagentRows": [{"agentId": "agent-1", "agentType": "Explore", "running": true, "stoppable": true}],
+            "contextUsage": {"usedTokens": 663_000, "maxTokens": 1_000_000},
+            "protection": {"protected": true, "forced": false, "waitingWakeUps": 1},
             "checkpoints": [
                 {"turnId": "t1", "status": "available", "checkpointTurnCount": 1, "files": []},
                 {"turnId": "t2", "status": "available", "checkpointTurnCount": 2,
@@ -2247,6 +2593,83 @@ mod tests {
                                     {"threadId": "other", "turnId": "x", "policy": {"held": false}},
                                     {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
                                 ]}),
+                                Some("thread.context") => {
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.context", "threadId": "t1"})
+                                    );
+                                    json!({"live": true, "breakdown": {
+                                        "usedTokens": 663_000, "maxTokens": 1_000_000,
+                                        "cachedInputTokens": 1000, "autoCompactThreshold": 800_000,
+                                        "compactsAutomatically": true, "costUsd": 1.25,
+                                        "categories": [
+                                            {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
+                                            {"name": "System and tools", "tokens": 180_000, "kind": "used"},
+                                            {"name": "Reasoning", "tokens": 120_000, "kind": "used"},
+                                            {"name": "Messages", "tokens": 83_000, "kind": "used"},
+                                            {"name": "Free space", "tokens": 337_000, "kind": "free"},
+                                        ],
+                                        "tools": [{"name": "Bash", "tokens": 40_000}],
+                                        "estimated": false,
+                                    }})
+                                }
+                                Some("thread.context-reading") => {
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.context-reading", "threadId": "t1"})
+                                    );
+                                    json!({"reading": {"usedTokens": 600_000, "maxTokens": 1_000_000,
+                                        "takenAt": "2026-11-16T10:00:00.000Z", "compactedSince": false}})
+                                }
+                                Some("usage.limits") => {
+                                    assert_eq!(params, &json!({"type": "usage.limits"}));
+                                    json!({"providers": {"claude": {
+                                        "checkedAt": "2026-11-16T10:00:00.000Z", "windows": [
+                                            {"id": "session", "kind": "session", "label": "Session",
+                                             "usedPercent": 36.0, "resetsAt": "2026-11-16T12:00:00.000Z"},
+                                            {"id": "weekly", "kind": "weekly", "label": "Weekly",
+                                             "usedPercent": 43.0, "resetsAt": null},
+                                        ], "unavailable": null}}})
+                                }
+                                Some("usage.protection") => {
+                                    assert_eq!(params, &json!({"type": "usage.protection"}));
+                                    json!({"forecasts": [{
+                                        "provider": "claude", "windowId": "session", "label": "Session",
+                                        "usedPercent": 97.0, "resetsAt": "2026-11-16T12:00:00.000Z",
+                                        "remainingWorkMs": 1_800_000, "reservePercent": 3.0,
+                                        "shouldWrap": true, "running": 1,
+                                    }], "queue": [{
+                                        "threadId": "t1", "title": "Fix", "provider": "claude",
+                                        "phase": "waiting", "resetsAt": "2026-11-16T12:00:00.000Z",
+                                        "order": 1, "handoff": false,
+                                    }]})
+                                }
+                                Some("usage.stats") => {
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "usage.stats", "range": "all"})
+                                    );
+                                    json!({
+                                        "range": "all", "sessions": 3, "messages": 340, "turns": 48,
+                                        "totalTokens": 663_000, "costUsd": 1.5, "unpricedTurns": 1,
+                                        "activeDays": 5, "bestStreak": 3, "peakHour": 9, "favoriteModel": "opus-5-5",
+                                        "byProvider": [{"key": "claude",
+                                            "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                            "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                        "byModel": [{"key": "opus-5-5",
+                                            "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                            "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                        "daily": [{"day": "2026-11-16", "tokens": 6,
+                                            "byModel": {"opus-5-5": 6}, "byProvider": {}}],
+                                    })
+                                }
+                                Some("usage.card") => {
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "usage.card", "range": "all"})
+                                    );
+                                    json!({"png": "aGk=", "filename": "moxen-stats-test.png"})
+                                }
                                 other => panic!("unexpected fake-server query: {other:?}"),
                             },
                             "dispatch" => {
@@ -2532,6 +2955,144 @@ mod tests {
                 "notifyParent": false,
             })
         );
+
+        // The Context tab: the live breakdown, the last recorded reading, and
+        // the thread's own hold and recorded totals off its snapshot.
+        source.read_context(0);
+        wait_for("the context breakdown", || {
+            source
+                .context(0)
+                .as_deref()
+                .and_then(|context| context.breakdown.as_ref())
+                .is_some()
+        });
+        let context = source.context(0).expect("context");
+        assert!(context.live && context.error.is_none());
+        let breakdown = context.breakdown.as_ref().expect("breakdown");
+        assert_eq!((breakdown.used, breakdown.max), (663_000, Some(1_000_000)));
+        assert_eq!(breakdown.categories.len(), 5);
+        assert_eq!(breakdown.tools.len(), 1);
+        assert!(!breakdown.estimated);
+        let reading = context.reading.as_ref().expect("reading");
+        assert_eq!((reading.used, reading.max), (600_000, Some(1_000_000)));
+        assert!(!reading.compacted_since);
+        // The live breakdown wins over the snapshot's recorded totals.
+        assert_eq!(context.totals(), Some((663_000, Some(1_000_000))));
+        assert_eq!(
+            source
+                .snapshot_usage(0)
+                .map(|usage| (usage.used, usage.max)),
+            Some((663_000, Some(1_000_000)))
+        );
+        let hold = source.hold(0).expect("hold");
+        assert!(!hold.forced);
+        assert_eq!(hold.waiting, 1);
+
+        // The account's plan usage, with its reset times; the instance reads
+        // its own account, then its driver's.
+        source.read_limits();
+        wait_for("plan usage", || source.limits().is_some());
+        let limits = source.limits().expect("limits");
+        assert!(limits.error.is_none());
+        let claude = limits.for_instance("claude").expect("claude limits");
+        assert_eq!(
+            claude
+                .windows
+                .iter()
+                .map(|window| window.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Session", "Weekly"]
+        );
+        assert_eq!(
+            claude.windows[0].resets_at.as_deref(),
+            Some("2026-11-16T12:00:00.000Z")
+        );
+        assert_eq!(claude.windows[1].resets_at, None);
+        let gauges = crate::usage::plan_gauges(Some(claude));
+        assert_eq!(
+            gauges
+                .iter()
+                .map(|gauge| (gauge.short.as_str(), gauge.percent as i64))
+                .collect::<Vec<_>>(),
+            [("5h", 36), ("wk", 43)]
+        );
+        assert!(limits.for_instance("claudeAgent").is_some());
+        assert!(limits.for_instance("unknown").is_none());
+
+        // Usage protection: the forecast that says to wrap up, and the
+        // thread waiting on its allowance, with the wrap and queue commands.
+        source.read_protection();
+        wait_for("usage protection", || {
+            source
+                .protection()
+                .as_deref()
+                .is_some_and(|protection| !protection.queue.is_empty())
+        });
+        let protection = source.protection().expect("protection");
+        assert!(protection.error.is_none());
+        let forecast = protection
+            .forecasts
+            .iter()
+            .find(|forecast| forecast.should_wrap);
+        assert_eq!(
+            forecast.map(|forecast| (forecast.provider.as_str(), forecast.label.as_str())),
+            Some(("claude", "Session"))
+        );
+        let entry = protection.queue.first().expect("queued thread");
+        assert_eq!(entry.phase.label(), "waiting for usage");
+        assert!(!entry.actions().is_empty());
+        source.wrap_provider("claude".into());
+        assert_eq!(
+            sent(21),
+            json!({"type": "usage.wrap", "provider": "claude"})
+        );
+        source.queue_protection("t1".into(), QueueMove::First);
+        assert_eq!(
+            sent(22),
+            json!({"type": "usage.queue", "threadId": "t1", "direction": "first"})
+        );
+        source.queue_protection("t1".into(), QueueMove::Cancel);
+        assert_eq!(
+            sent(23),
+            json!({"type": "usage.queue", "threadId": "t1", "direction": "cancel"})
+        );
+
+        // The stats screen: the numbers for the range, and the saved card.
+        source.read_stats(StatsRange::All);
+        wait_for("usage stats", || {
+            source
+                .stats(StatsRange::All)
+                .as_deref()
+                .and_then(|stats| stats.data.as_ref())
+                .is_some()
+        });
+        let data = source
+            .stats(StatsRange::All)
+            .expect("stats")
+            .data
+            .clone()
+            .expect("stats data");
+        assert_eq!(
+            (data.sessions, data.turns, data.total_tokens),
+            (3, 48, 663_000)
+        );
+        assert_eq!(data.by_model.len(), 1);
+        assert_eq!(
+            data.daily.first().map(|day| day.day.as_str()),
+            Some("2026-11-16")
+        );
+        source.read_card(StatsRange::All);
+        wait_for("the stats card", || {
+            source
+                .card(StatsRange::All)
+                .as_deref()
+                .is_some_and(|card| !card.busy)
+        });
+        let card = source.card(StatsRange::All).expect("card");
+        assert!(card.error.is_none());
+        let path = card.path.clone().expect("card path");
+        assert_eq!(std::fs::read(&path).expect("card bytes"), b"hi");
+        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

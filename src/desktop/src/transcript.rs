@@ -168,6 +168,29 @@ pub fn project(thread: &Value) -> Vec<Row> {
             continue;
         }
         if kind != "reasoning" && !kind.starts_with("tool-call") {
+            // The provider stopped the turn at its usage limit, or is wrapping
+            // up before it does: the record of when it happened and when it
+            // lifts, as the TUI's usage-limit line shows it.
+            if matches!(kind, "usage.limit" | "usage.wrap-up") {
+                let payload = activity.get("payload");
+                rows.push((
+                    when,
+                    1_000_000 + n,
+                    Row {
+                        key: text(activity, &["id"]).unwrap_or_default().to_string(),
+                        message: Message::UsageLimit {
+                            label: payload
+                                .and_then(|payload| text(payload, &["label"]))
+                                .map(str::to_string),
+                            resets_at: payload
+                                .and_then(|payload| text(payload, &["resetsAt"]))
+                                .map(str::to_string),
+                            wrap_up: kind == "usage.wrap-up",
+                            at: clock(when),
+                        },
+                    },
+                ));
+            }
             continue;
         }
         let Some(payload) = activity.get("payload") else {
@@ -551,6 +574,7 @@ mod tests {
                 Message::Assistant { text, .. } => format!("assistant:{text}"),
                 Message::Tool { name, .. } => name.clone(),
                 Message::Plan { .. } => "plan".into(),
+                Message::UsageLimit { .. } => "usage-limit".into(),
             })
             .collect();
         // The empty finished reply (m3) and the context update have nothing to show.
@@ -668,5 +692,52 @@ mod tests {
         assert_eq!(duration(2500), "2.5s");
         assert_eq!(duration(45_000), "45s");
         assert_eq!(duration(185_000), "3m 05s");
+    }
+
+    #[test]
+    fn usage_limits_are_rows_of_their_own() {
+        let mut value = thread();
+        value["activities"] = json!([
+            activity(
+                "limit",
+                "usage.limit",
+                "2026-11-16T10:00:28.000Z",
+                json!({"label": "Session", "resetsAt": "2026-11-16T11:00:00.000Z"})
+            ),
+            activity(
+                "wrap",
+                "usage.wrap-up",
+                "2026-11-16T10:00:29.000Z",
+                json!({"label": null, "resetsAt": null})
+            ),
+        ]);
+        let rows = project(&value);
+        assert_eq!(rows.len(), 4);
+        let Message::UsageLimit {
+            label,
+            resets_at,
+            wrap_up,
+            ..
+        } = &rows[1].message
+        else {
+            panic!("a usage limit")
+        };
+        assert_eq!(
+            (label.as_deref(), resets_at.as_deref(), *wrap_up),
+            (Some("Session"), Some("2026-11-16T11:00:00.000Z"), false)
+        );
+        let Message::UsageLimit {
+            label,
+            resets_at,
+            wrap_up,
+            ..
+        } = &rows[2].message
+        else {
+            panic!("a wrap-up")
+        };
+        assert_eq!(
+            (label.as_deref(), resets_at.as_deref(), *wrap_up),
+            (None, None, true)
+        );
     }
 }
