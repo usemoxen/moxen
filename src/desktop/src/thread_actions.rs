@@ -1,7 +1,7 @@
 use crate::{
-    model::{Message, Status, ThreadAction, ThreadId},
-    theme::color,
-    ui::Control,
+    model::{Message, SIDE_QUESTION_PENDING, Status, ThreadAction, ThreadId},
+    theme::{self, color},
+    ui::{self, Control},
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
@@ -25,6 +25,7 @@ pub enum Item {
     CancelContinue,
     Delegate,
     SideQuestion,
+    SideAnswer,
 }
 
 impl Item {
@@ -45,8 +46,74 @@ impl Item {
             Self::CancelContinue => "Cancel scheduled continue",
             Self::Delegate => "Delegate a task",
             Self::SideQuestion => "Ask a side question",
+            Self::SideAnswer => "Show last side answer",
         }
     }
+
+    fn group(self) -> u8 {
+        match self {
+            Self::Rename | Self::Regenerate => 0,
+            Self::Settle
+            | Self::Unsettle
+            | Self::Snooze
+            | Self::Unsnooze
+            | Self::Archive
+            | Self::Protect => 1,
+            Self::Continue
+            | Self::ContinueAtReset
+            | Self::CancelContinue
+            | Self::Handover
+            | Self::Delegate
+            | Self::SideQuestion
+            | Self::SideAnswer => 2,
+            Self::Delete => 3,
+        }
+    }
+}
+
+fn divider_spacing() -> Pixels {
+    px(theme::px_token("spacing", "space-1"))
+}
+
+fn divider_height() -> Pixels {
+    px(theme::px_token("stroke", "stroke-hair"))
+}
+
+pub fn menu_rows(
+    name: &'static str,
+    id: ThreadId,
+    items: &[Item],
+    cx: &mut Context<Workspace>,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+    for (at, &item) in items.iter().enumerate() {
+        if at > 0 && items[at - 1].group() != item.group() {
+            rows.push(
+                div()
+                    .mx(divider_spacing())
+                    .my(divider_spacing())
+                    .h(divider_height())
+                    .bg(color("rule"))
+                    .into_any_element(),
+            );
+        }
+        let label = if item == Item::Rename {
+            "Rename…"
+        } else {
+            item.label()
+        };
+        rows.push(
+            crate::thread_view::menu_item((name, at), label.into(), false)
+                .plain_control()
+                .when(item == Item::Rename, |row| row.child(ui::kbd("F2")))
+                .when(item == Item::Delete, |row| row.text_color(color("broken")))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.pick_thread_action(id, item, window, cx)
+                }))
+                .into_any_element(),
+        );
+    }
+    rows
 }
 
 pub fn items(w: &Workspace, id: ThreadId) -> Vec<Item> {
@@ -87,7 +154,11 @@ pub fn items(w: &Workspace, id: ThreadId) -> Vec<Item> {
     } else if w.source.usage_reset(id).is_some() {
         items.push(Item::ContinueAtReset);
     }
-    items.extend([Item::Delegate, Item::SideQuestion, Item::Delete]);
+    items.extend([Item::Delegate, Item::SideQuestion]);
+    if w.source.has_side_answer(id) {
+        items.push(Item::SideAnswer);
+    }
+    items.push(Item::Delete);
     items
 }
 
@@ -102,6 +173,12 @@ pub enum Form {
     Revert(ThreadId, usize, Option<String>),
     Archived,
     Answer(String),
+}
+
+pub enum Submission<'a> {
+    Confirm,
+    Text(&'a str),
+    Revert { restore_files: bool },
 }
 
 impl Form {
@@ -132,6 +209,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source.action_pending(id) {
+            return;
+        }
         self.palette_open = false;
         self.picker_open = false;
         self.dropdown = None;
@@ -154,6 +234,12 @@ impl Workspace {
         if item == Item::SideQuestion {
             self.select(id, cx);
         }
+        if item == Item::SideAnswer {
+            if let Some(answer) = self.source.read_side_answer(id, false) {
+                self.open_thread_form(Form::Answer(answer), window, cx);
+            }
+            return;
+        }
         let immediate = match item {
             Item::Regenerate => Some(ThreadAction::RegenerateTitle),
             Item::Settle if !self.source.has_family_work(id) => {
@@ -164,7 +250,7 @@ impl Workspace {
             Item::Archive => Some(ThreadAction::Archive),
             Item::Protect => Some(ThreadAction::Protect),
             Item::ContinueAtReset => Some(ThreadAction::ContinueAtReset),
-            Item::CancelContinue if self.source.delegated(id).is_none() => {
+            Item::CancelContinue if !self.source.notifies_parent(id) => {
                 Some(ThreadAction::CancelContinue {
                     notify_parent: true,
                 })
@@ -224,10 +310,37 @@ impl Workspace {
 
     pub fn submit_thread_action(
         &mut self,
-        submitted: Option<&str>,
+        submitted: Submission<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Submission::Revert { restore_files } = submitted {
+            let Some(Form::Revert(id, turn_count, draft)) = &self.thread_form else {
+                return;
+            };
+            if self.source.list_threads()[*id].status == Status::Running {
+                self.problem = Some("Wait for the turn to finish before reverting".into());
+                self.close_thread_action(window, cx);
+                return;
+            }
+            if self.source.action_pending(*id) {
+                return;
+            }
+            self.source.thread_action(
+                *id,
+                ThreadAction::Revert {
+                    turn_count: *turn_count,
+                    restore_files,
+                    draft: draft.clone(),
+                },
+            );
+            self.close_thread_action(window, cx);
+            return;
+        }
+        let submitted = match submitted {
+            Submission::Text(text) => Some(text),
+            _ => None,
+        };
         let text = submitted
             .unwrap_or_else(|| self.action_input.read(cx).text())
             .trim();
@@ -267,7 +380,18 @@ impl Workspace {
                     }
                 }
             }
-            Item::SideQuestion if !text.is_empty() => ThreadAction::SideQuestion(text.to_string()),
+            Item::SideQuestion if !text.is_empty() => {
+                if self.source.side_question_pending() {
+                    self.problem = Some(SIDE_QUESTION_PENDING.into());
+                    if let Some(text) = submitted {
+                        self.action_input
+                            .update(cx, |input, cx| input.set_text(text.to_string(), cx));
+                    }
+                    cx.notify();
+                    return;
+                }
+                ThreadAction::SideQuestion(text.to_string())
+            }
             _ => return,
         };
         self.source.thread_action(id, action);
@@ -304,14 +428,14 @@ pub fn popup(
     let id = popup.id;
     let mut menu = crate::thread_view::menu_surface("thread-context");
     let viewport = window.viewport_size();
-    let mut count = 0usize;
+    let mut height = px(12.);
     if let Some(index) = popup.message {
         if let Some(message) = w.source.messages(id).get(index)
             && let Message::User { text } | Message::Assistant { text, .. } = message
         {
             let copy = text.clone();
             let draft = matches!(message, Message::User { .. }).then(|| copy.clone());
-            count += 1;
+            height += px(theme::ROW);
             menu = menu.child(
                 crate::thread_view::menu_row("copy-message", "Copy message".into(), false)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -322,7 +446,7 @@ pub fn popup(
             if w.source.list_threads()[id].status != Status::Running
                 && let Some(turn) = w.source.revert_before(id, index)
             {
-                count += 1;
+                height += px(theme::ROW);
                 menu = menu.child(
                     crate::thread_view::menu_row(
                         "revert-message",
@@ -336,19 +460,14 @@ pub fn popup(
             }
         }
     } else {
-        for item in items(w, id) {
-            count += 1;
-            menu = menu.child(
-                crate::thread_view::menu_row(
-                    ("thread-context-item", count),
-                    item.label().into(),
-                    false,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.pick_thread_action(id, item, window, cx)
-                })),
-            );
-        }
+        let items = items(w, id);
+        let dividers = items
+            .windows(2)
+            .filter(|pair| pair[0].group() != pair[1].group())
+            .count();
+        height += px(theme::ROW * items.len() as f32)
+            + (divider_height() + divider_spacing() * 2.) * dividers as f32;
+        menu = menu.children(menu_rows("thread-context-item", id, &items, cx));
     }
     div()
         .absolute()
@@ -368,12 +487,7 @@ pub fn popup(
         .child(
             menu.absolute()
                 .left(popup.at.x.min((viewport.width - px(246.)).max(px(0.))))
-                .top(
-                    popup
-                        .at
-                        .y
-                        .min((viewport.height - px(32. * count as f32 + 12.)).max(px(0.))),
-                )
+                .top(popup.at.y.min((viewport.height - height).max(px(0.))))
                 .w(px(240.)),
         )
 }
@@ -482,13 +596,11 @@ pub fn form(
                 );
             }
         }
-        Form::Revert(id, turn, draft) => {
-            let (id, turn) = (*id, *turn);
+        Form::Revert(_, _, _) => {
             for (files, label) in [
                 (false, "Revert conversation only"),
                 (true, "Revert conversation and files"),
             ] {
-                let draft = draft.clone();
                 panel = panel.child(
                     crate::thread_view::menu_row(
                         ("confirm-revert", usize::from(files)),
@@ -496,15 +608,13 @@ pub fn form(
                         false,
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.source.thread_action(
-                            id,
-                            ThreadAction::Revert {
-                                turn_count: turn,
+                        this.submit_thread_action(
+                            Submission::Revert {
                                 restore_files: files,
-                                draft: draft.clone(),
                             },
+                            window,
+                            cx,
                         );
-                        this.close_thread_action(window, cx);
                     })),
                 );
             }
@@ -547,7 +657,9 @@ pub fn form(
                     .child("Working…")
             } else {
                 crate::thread_view::menu_row("confirm-thread-action", label.into(), false).on_click(
-                    cx.listener(|this, _, window, cx| this.submit_thread_action(None, window, cx)),
+                    cx.listener(|this, _, window, cx| {
+                        this.submit_thread_action(Submission::Confirm, window, cx)
+                    }),
                 )
             });
         }

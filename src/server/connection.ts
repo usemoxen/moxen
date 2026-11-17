@@ -1085,7 +1085,10 @@ export class DirectConnection implements ClientApi {
         const now = Date.now();
         nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
-        const parents = new Map((await store.readDelegations().catch(() => [])).map((row) => [row.childThreadId, row.parentThreadId] as const));
+        const delegations = await store.readDelegations().catch(() => []);
+        const parents = new Map(delegations.map((row) => [row.childThreadId, row.parentThreadId] as const));
+        // Use the latest live link, matching the thread.delegation query.
+        const notifications = new Map(delegations.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.notify === true] as const));
         const seen = new Set<string>();
         const rows = await Promise.all(
           threads.map(async (entry) => {
@@ -1115,7 +1118,8 @@ export class DirectConnection implements ClientApi {
             // Threads from before the record kept its native subagents get
             // the list folded from their ledger once; the next poll shows it.
             if (entry.nativeSubagents === undefined) void backfillNativeSubagents(store, entry.id);
-            return toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            const envelope = toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            return notifications.get(entry.id) ? { ...envelope, delegationNotifies: true as const } : envelope;
           }),
         );
         for (const id of [...turnCache.keys()]) if (!seen.has(id)) turnCache.delete(id);

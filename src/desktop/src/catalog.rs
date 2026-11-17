@@ -78,6 +78,18 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Whether a continuation still names the current model and its options.
+    pub fn same_as(&self, other: &Self) -> bool {
+        if self.instance != other.instance || self.model != other.model {
+            return false;
+        }
+        let mut left: Vec<_> = self.options.iter().collect();
+        let mut right: Vec<_> = other.options.iter().collect();
+        left.sort_by(|a, b| a.0.cmp(&b.0));
+        right.sort_by(|a, b| a.0.cmp(&b.0));
+        left == right
+    }
+
     pub fn from_json(value: &Value) -> Option<Self> {
         let instance = nonempty(&value["instanceId"])?;
         let model = nonempty(&value["model"])?;

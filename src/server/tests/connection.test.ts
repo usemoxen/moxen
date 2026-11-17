@@ -453,6 +453,19 @@ describe("DirectConnection subscriptions", () => {
       });
       const latestSnapshot = () => frames.findLast((frame) => frame.kind === "snapshot");
       await waitFor("thread row", async () => latestSnapshot()?.snapshot.threads.some((thread) => thread.id === "thread-shell") ?? false);
+      const now = harness.store.nowIso();
+      await harness.store.appendDelegation({
+        id: "shell-delegation", childThreadId: "thread-shell", parentThreadId: "parent",
+        prompt: "Run the shell test", status: "running", notify: true, createdAt: now, updatedAt: now,
+      });
+      const shellRow = () => latestSnapshot()?.snapshot.threads.find((thread) => thread.id === "thread-shell");
+      await waitFor("notifying task row", async () => shellRow()?.delegationNotifies === true);
+      expect(await connection.query({ type: "thread.delegation", threadId: "thread-shell" })).toEqual({ parentThreadId: "parent", notify: true });
+      await harness.store.updateDelegation("shell-delegation", { continuedIn: "continuation" });
+      await waitFor("the task still has a parent link but no longer notifies", async () =>
+        shellRow()?.parentThreadId === "parent" && shellRow()?.delegationNotifies === undefined,
+      );
+      expect(await connection.query({ type: "thread.delegation", threadId: "thread-shell" })).toBeNull();
       await connection.dispatch({ type: "thread.archive", threadId: "thread-shell" });
       await waitFor("archived row", async () => {
         const snapshot = latestSnapshot()?.snapshot;

@@ -689,7 +689,6 @@ struct Menu {
     tooltip: &'static str,
     label: String,
     locked: bool,
-    items: Vec<(String, bool)>,
 }
 
 pub(crate) fn menu_surface(id: impl Into<ElementId>) -> Stateful<Div> {
@@ -704,10 +703,13 @@ pub(crate) fn menu_surface(id: impl Into<ElementId>) -> Stateful<Div> {
 }
 
 pub(crate) fn menu_row(id: impl Into<ElementId>, name: String, selected: bool) -> Stateful<Div> {
+    menu_item(id, name.clone(), selected).control(name)
+}
+
+pub(crate) fn menu_item(id: impl Into<ElementId>, name: String, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
-        .control(name.clone())
-        .h(px(30.))
+        .h(px(theme::ROW))
         .px(px(8.))
         .flex()
         .items_center()
@@ -721,7 +723,7 @@ pub(crate) fn menu_row(id: impl Into<ElementId>, name: String, selected: bool) -
 fn chip_menu(
     w: &Workspace,
     menu: Menu,
-    pick: impl Fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>) + Clone + 'static,
+    rows: impl FnOnce(&mut Context<Workspace>) -> Vec<AnyElement>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let Menu {
@@ -730,7 +732,6 @@ fn chip_menu(
         tooltip,
         label,
         locked,
-        items,
     } = menu;
     let open = w.dropdown == Some(kind);
     let button = div()
@@ -752,8 +753,12 @@ fn chip_menu(
             .disabled("Change this once the turn has finished")
             .into_any_element()
     } else {
+        let button = if kind == Dropdown::Thread && open {
+            button.plain_control()
+        } else {
+            button.control(tooltip)
+        };
         button
-            .control(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.dropdown = if this.dropdown == Some(kind) {
                     None
@@ -775,11 +780,7 @@ fn chip_menu(
             })
             .min_w(px(180.))
             .max_w(px(320.))
-            .children(items.into_iter().enumerate().map(|(i, (name, selected))| {
-                let pick = pick.clone();
-                menu_row((id, i), name, selected)
-                    .on_click(cx.listener(move |this, _, window, cx| pick(this, i, window, cx)))
-            }));
+            .children(rows(cx));
         if kind == Dropdown::Thread {
             s.child(deferred(menu).with_priority(1))
         } else {
@@ -799,14 +800,28 @@ pub fn actions_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             tooltip: "Thread actions",
             label: "Actions".into(),
             locked: items.is_empty(),
-            items: items
-                .iter()
-                .map(|item| (item.label().into(), false))
-                .collect(),
         },
-        move |this, i, window, cx| this.pick_thread_action(id, items[i], window, cx),
+        move |cx| crate::thread_actions::menu_rows("thread-actions", id, &items, cx),
         cx,
     )
+}
+
+fn choice_rows(
+    id: &'static str,
+    items: Vec<(String, bool)>,
+    pick: impl Fn(&mut Workspace, usize, &mut Context<Workspace>) + Clone + 'static,
+    cx: &mut Context<Workspace>,
+) -> Vec<AnyElement> {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, selected))| {
+            let pick = pick.clone();
+            menu_row((id, i), name, selected)
+                .on_click(cx.listener(move |this, _, _, cx| pick(this, i, cx)))
+                .into_any_element()
+        })
+        .collect()
 }
 
 fn menu_chip(
@@ -849,17 +864,23 @@ fn menu_chip(
         tooltip,
         label,
         locked,
-        items,
     };
     chip_menu(
         w,
         menu,
-        move |this, i, _, cx| {
-            if kind == Dropdown::Access {
-                this.set_access(i, cx)
-            } else {
-                this.set_mode(i, cx)
-            }
+        move |cx| {
+            choice_rows(
+                id,
+                items,
+                move |this, i, cx| {
+                    if kind == Dropdown::Access {
+                        this.set_access(i, cx)
+                    } else {
+                        this.set_mode(i, cx)
+                    }
+                },
+                cx,
+            )
         },
         cx,
     )
@@ -881,19 +902,25 @@ fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
         tooltip: "Project for the new thread",
         label,
         locked: false,
-        items,
     };
     chip_menu(
         w,
         menu,
-        move |this, i, _, cx| {
-            let projects = this.source.projects();
-            this.dropdown = None;
-            match projects.get(i) {
-                Some(project) => this.new_project = Some(project.id.clone()),
-                None => this.add_project(cx),
-            }
-            cx.notify();
+        |cx| {
+            choice_rows(
+                "project",
+                items,
+                move |this, i, cx| {
+                    let projects = this.source.projects();
+                    this.dropdown = None;
+                    match projects.get(i) {
+                        Some(project) => this.new_project = Some(project.id.clone()),
+                        None => this.add_project(cx),
+                    }
+                    cx.notify();
+                },
+                cx,
+            )
         },
         cx,
     )

@@ -857,7 +857,7 @@ export type ShellFrame =
       readonly snapshot: {
         readonly snapshotSequence: number;
         readonly projects: readonly ProjectEnvelope[];
-        readonly threads: readonly ThreadEnvelope[];
+        readonly threads: readonly (ThreadEnvelope & { readonly delegationNotifies?: true })[];
         readonly archivedThreads?: readonly { readonly id: string; readonly title: string }[];
         readonly researchRuns?: readonly StoredResearchRun[];
         readonly researchProposals?: readonly ResearchProposal[];

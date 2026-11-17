@@ -13,8 +13,9 @@ use crate::{
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
         Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
-        NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
-        Status, Thread, ThreadAction, ThreadId, ThreadSource,
+        NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply,
+        SIDE_QUESTION_PENDING, Selection, SideAnswer, Status, Thread, ThreadAction, ThreadId,
+        ThreadSource,
     },
     pending,
     transcript::{self, Row},
@@ -446,6 +447,7 @@ struct Slot {
     has_work: bool,
     protected: bool,
     scheduled_continue: Option<String>,
+    notifies_parent: bool,
 }
 
 /// What is known of one thread's conversation.
@@ -514,10 +516,28 @@ struct State {
     restoring: HashSet<String>,
     actions: HashSet<ThreadId>,
     settled: Option<ThreadId>,
-    side_answer: Option<(ThreadId, String)>,
+    side_answers: HashMap<ThreadId, SideAnswer>,
+    asking_side_question: bool,
     reverted: Option<(ThreadId, Option<String>)>,
 }
 impl State {
+    fn reserve_action(&mut self, id: ThreadId, is_side_question: bool) -> bool {
+        if is_side_question && self.asking_side_question {
+            self.problems.push_back(Problem {
+                message: SIDE_QUESTION_PENDING.into(),
+                unsent: None,
+            });
+            return false;
+        }
+        if !self.actions.insert(id) {
+            return false;
+        }
+        if is_side_question {
+            self.asking_side_question = true;
+        }
+        true
+    }
+
     /// The thread's Git tab data, to change.
     fn git_of(&mut self, id: ThreadId) -> &mut Git {
         Arc::make_mut(self.git.entry(id).or_default())
@@ -597,6 +617,7 @@ impl State {
                         .as_array()
                         .is_some_and(|rows| !rows.is_empty()),
                 protected: thread["protection"]["protected"] == true,
+                notifies_parent: thread["delegationNotifies"] == true,
                 scheduled_continue: thread["queuedTurns"]
                     .as_array()
                     .into_iter()
@@ -876,7 +897,11 @@ impl ServerSource {
                         .as_ref()
                         .is_some_and(|current| current.instance == choice.instance)
                 });
-                if let Some(choice) = selection.filter(|choice| Some(choice) != current.as_ref()) {
+                if let Some(choice) = selection.filter(|choice| {
+                    !current
+                        .as_ref()
+                        .is_some_and(|current| choice.same_as(current))
+                }) {
                     fields["modelSelection"] = choice.to_json();
                 }
                 if same_provider && let Some(reset) = reset.filter(|reset| *reset > now_ms()) {
@@ -934,13 +959,20 @@ impl ServerSource {
                 ("thread.conversation.revert", None, draft)
             }
         };
-        if !self.shared.update(|state| state.actions.insert(id)) {
+        let is_side_question = name == "thread.side-question";
+        if !self
+            .shared
+            .update(|state| state.reserve_action(id, is_side_question))
+        {
             return;
         }
         background_result(&self.shared, move |wire, shared| {
             let result = wire.and_then(|wire| wire.dispatch(name, fields));
             shared.update(|state| {
                 state.actions.remove(&id);
+                if is_side_question {
+                    state.asking_side_question = false;
+                }
                 let Ok(result) = &result else {
                     return;
                 };
@@ -954,9 +986,10 @@ impl ServerSource {
                 if name == "thread.settle" {
                     state.settled = Some(id);
                 }
-                if name == "thread.side-question" {
-                    state.side_answer =
-                        text(result, &["text"]).map(|answer| (id, answer.to_string()));
+                if is_side_question && let Some(answer) = text(result, &["text"]) {
+                    state
+                        .side_answers
+                        .insert(id, SideAnswer::new(answer.to_string()));
                 }
                 if name == "thread.conversation.revert" {
                     state.reverted = Some((id, draft));
@@ -1233,13 +1266,29 @@ impl ThreadSource for ServerSource {
     fn take_settled(&mut self) -> Option<ThreadId> {
         self.shared.state.lock().expect("live state").settled.take()
     }
-    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
+    fn side_question_pending(&self) -> bool {
         self.shared
             .state
             .lock()
             .expect("live state")
-            .side_answer
-            .take()
+            .asking_side_question
+    }
+    fn has_side_answer(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .side_answers
+            .contains_key(&id)
+    }
+    fn read_side_answer(&mut self, id: ThreadId, only_unread: bool) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .side_answers
+            .get_mut(&id)?
+            .read(only_unread)
     }
     fn revert_before(&self, id: ThreadId, row: usize) -> Option<usize> {
         let state = self.shared.state.lock().expect("live state");
@@ -1276,6 +1325,15 @@ impl ThreadSource for ServerSource {
             .slots
             .get(id)
             .is_some_and(|slot| slot.scheduled_continue.is_some())
+    }
+    fn notifies_parent(&self, id: ThreadId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .is_some_and(|slot| slot.notifies_parent)
     }
     fn is_protected(&self, id: ThreadId) -> bool {
         self.shared
@@ -2419,7 +2477,7 @@ mod tests {
         }));
         assert_eq!(state.slots[0].thread.status, Status::Snoozed);
         assert_eq!(state.slots[3].thread.status, Status::Idle);
-        assert_eq!(state.arranged.sections[&0], false);
+        assert!(!state.arranged.sections[&0]);
         assert!(state.has_family_work(0));
         assert!(state.has_family_work(1));
         assert!(!state.has_family_work(3));
@@ -2445,6 +2503,35 @@ mod tests {
         thread["latestTurn"]["turnId"] = json!("new turn");
         assert_eq!(usage_reset_of(&thread), None);
         assert_eq!(revert_targets(&thread), HashMap::from([("a".into(), 0)]));
+    }
+
+    #[test]
+    fn a_side_question_in_flight_refuses_another_even_on_a_different_thread() {
+        let mut state = State::default();
+        assert!(state.reserve_action(0, true));
+        assert!(!state.reserve_action(1, true));
+        assert_eq!(
+            state.problems.pop_front().unwrap().message,
+            SIDE_QUESTION_PENDING
+        );
+        assert!(state.reserve_action(1, false));
+    }
+
+    #[test]
+    fn the_latest_side_answer_is_preserved_per_thread_after_reading() {
+        let mut state = State::default();
+        state
+            .side_answers
+            .insert(0, SideAnswer::new("First answer".into()));
+        state
+            .side_answers
+            .insert(1, SideAnswer::new("Other thread's answer".into()));
+        let other = state.side_answers.get_mut(&1).unwrap();
+        assert_eq!(other.read(true).as_deref(), Some("Other thread's answer"));
+        assert!(other.read(true).is_none());
+        let first = state.side_answers.get_mut(&0).unwrap();
+        assert_eq!(first.read(true).as_deref(), Some("First answer"));
+        assert_eq!(first.read(false).as_deref(), Some("First answer"));
     }
 
     #[test]
@@ -2648,6 +2735,7 @@ mod tests {
                                             "modelSelection": {"instanceId": "claude", "model": "opus"}},
                                             {"id": "child", "projectId": "p", "title": "Check focus",
                                              "parentThreadId": "t1", "branch": "task/focus",
+                                             "delegationNotifies": true,
                                              "modelSelection": {"instanceId": "claude", "model": "opus"}},
                                             {"id": "archived", "projectId": "p", "parentThreadId": "t1",
                                              "archivedAt": "2026-11-16T10:00:00Z"}]}})
@@ -3087,11 +3175,15 @@ mod tests {
         let choice = Selection::from_json(&json!({
             "instanceId": "codex", "model": "gpt", "options": [{"id": "reasoningEffort", "value": "high"}],
         })).unwrap();
-        let old = source.selection(0).unwrap();
+        let mut old = source.selection(0).unwrap().with_option("effort", "medium");
+        old.options
+            .push(("fastMode".into(), OptionValue::Flag(false)));
         source.shared.update(|state| {
+            state.slots[0].selection = Some(old.to_json());
             state.transcripts.get_mut(&0).unwrap().usage_reset =
                 parse_iso_ms("2099-01-01T00:00:00Z");
         });
+        old.options.reverse();
         let cases = [
             (
                 ThreadAction::Rename("New title".into()),
@@ -3136,9 +3228,13 @@ mod tests {
             (
                 ThreadAction::Handover {
                     prompt: "Handoff".into(),
-                    selection: choice.clone(),
+                    selection: choice.with_option("serviceTier", "fast"),
                 },
-                json!({"type":"thread.handover","cwd":"/fake/project","prompt":"Handoff","provider":"codex","model":"gpt","thinkingEffort":"high","wait":false}),
+                json!({"type":"thread.handover","cwd":"/fake/project","prompt":"Handoff","provider":"codex","model":"gpt","thinkingEffort":"high","speedMode":"fast","wait":false}),
+            ),
+            (
+                ThreadAction::Continue { selection: None },
+                json!({"type":"thread.continue","threadId":"t1","scheduledFor":"2099-01-01T00:01:00.000Z"}),
             ),
             (
                 ThreadAction::Continue {
@@ -3155,9 +3251,12 @@ mod tests {
             (
                 ThreadAction::Delegate {
                     task: "Check it".into(),
-                    selection: choice.clone(),
+                    selection: Selection {
+                        options: vec![("fastMode".into(), OptionValue::Flag(false))],
+                        ..choice.clone()
+                    },
                 },
-                json!({"type":"thread.delegate","parentThreadId":"t1","task":"Check it","provider":"codex","model":"gpt","thinkingEffort":"high","wait":false,"isolation":"shared"}),
+                json!({"type":"thread.delegate","parentThreadId":"t1","task":"Check it","provider":"codex","model":"gpt","speedMode":"standard","wait":false,"isolation":"shared"}),
             ),
             (
                 ThreadAction::SideQuestion("Why?".into()),
@@ -3191,8 +3290,8 @@ mod tests {
         assert_eq!(source.take_settled(), Some(0));
         assert_eq!(source.take_opened(), Some(1));
         assert_eq!(
-            source.take_side_answer(),
-            Some((0, "Separate answer".into()))
+            source.read_side_answer(0, true).as_deref(),
+            Some("Separate answer")
         );
         assert_eq!(source.take_reverted(), Some((0, None)));
         assert_eq!(
@@ -3220,18 +3319,77 @@ mod tests {
         source
             .shared
             .update(|state| state.slots[1].scheduled_continue = Some("reset-turn".into()));
-        source.thread_action(
-            1,
-            ThreadAction::CancelContinue {
-                notify_parent: false,
-            },
-        );
-        assert_eq!(
-            sent(restore_at + 2),
-            json!({
-                "type": "thread.turn.interrupt", "threadId": "child", "turnId": "reset-turn", "notifyParent": false,
-            })
-        );
+        assert!(source.notifies_parent(1));
+        assert!(!source.notifies_parent(0));
+        let guarded_cases = [
+            (
+                1,
+                ThreadAction::CancelContinue {
+                    notify_parent: false,
+                },
+                None,
+                Some(
+                    json!({"type":"thread.turn.interrupt","threadId":"child","turnId":"reset-turn","notifyParent":false}),
+                ),
+            ),
+            (
+                1,
+                ThreadAction::CancelContinue {
+                    notify_parent: true,
+                },
+                None,
+                Some(
+                    json!({"type":"thread.turn.interrupt","threadId":"child","turnId":"reset-turn"}),
+                ),
+            ),
+            (
+                1,
+                ThreadAction::ContinueAtReset,
+                parse_iso_ms("2099-01-01T00:00:00Z"),
+                None,
+            ),
+            (0, ThreadAction::ContinueAtReset, None, None),
+            (
+                0,
+                ThreadAction::ContinueAtReset,
+                parse_iso_ms("2000-01-01T00:00:00Z"),
+                None,
+            ),
+            (
+                0,
+                ThreadAction::Handover {
+                    prompt: "Missing checkout".into(),
+                    selection: choice,
+                },
+                None,
+                None,
+            ),
+            (
+                0,
+                ThreadAction::Continue { selection: None },
+                None,
+                Some(json!({"type":"thread.continue","threadId":"t1"})),
+            ),
+        ];
+        let mut sent_through = restore_at + 1;
+        for (id, action, reset, expected) in guarded_cases {
+            source.shared.update(|state| {
+                state.slots[id].cwd = None;
+                state.transcripts.entry(id).or_default().usage_reset = reset;
+            });
+            source.thread_action(id, action);
+            if let Some(expected) = expected {
+                assert_eq!(sent(sent_through + 1), expected);
+                sent_through += 1;
+                wait_for("guarded action acknowledgement", || {
+                    !source.action_pending(id)
+                });
+            } else {
+                // Commands reserve their slot synchronously before writing.
+                assert!(!source.action_pending(id));
+            }
+            assert_eq!(commands.lock().unwrap().len(), sent_through);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

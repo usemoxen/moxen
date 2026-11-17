@@ -4,7 +4,7 @@ use crate::work::{
     self, Agent, Background, BackgroundTask, Delegated, Delegation, InspectorData, Read, View,
 };
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,7 +31,7 @@ pub struct MockSource {
     deleted: HashSet<ThreadId>,
     protected: HashSet<ThreadId>,
     settled: Option<ThreadId>,
-    side_answer: Option<(ThreadId, String)>,
+    side_answers: HashMap<ThreadId, SideAnswer>,
     reverted: Option<(ThreadId, Option<String>)>,
 }
 
@@ -234,7 +234,7 @@ impl MockSource {
             deleted: HashSet::new(),
             protected: HashSet::new(),
             settled: None,
-            side_answer: None,
+            side_answers: HashMap::new(),
             reverted: None,
         }
     }
@@ -341,8 +341,11 @@ impl ThreadSource for MockSource {
     fn take_settled(&mut self) -> Option<ThreadId> {
         self.settled.take()
     }
-    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
-        self.side_answer.take()
+    fn has_side_answer(&self, id: ThreadId) -> bool {
+        self.side_answers.contains_key(&id)
+    }
+    fn read_side_answer(&mut self, id: ThreadId, only_unread: bool) -> Option<String> {
+        self.side_answers.get_mut(&id)?.read(only_unread)
     }
     fn take_reverted(&mut self) -> Option<(ThreadId, Option<String>)> {
         self.reverted.take()
@@ -405,10 +408,10 @@ impl ThreadSource for MockSource {
             }
             ThreadAction::ContinueAtReset | ThreadAction::CancelContinue { .. } => {}
             ThreadAction::SideQuestion(_) => {
-                self.side_answer = Some((
+                self.side_answers.insert(
                     id,
-                    "This mock answer was not added to the transcript.".into(),
-                ))
+                    SideAnswer::new("This mock answer was not added to the transcript.".into()),
+                );
             }
             ThreadAction::Revert { draft, .. } => {
                 self.messages[id].clear();

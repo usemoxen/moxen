@@ -144,7 +144,8 @@ GPUI macOS implementation):
 ```sh
 cargo run
 cargo build
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features render-harness -- -D warnings
 cargo fmt --check
 cargo test
 ```
@@ -206,8 +207,9 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   a known usage reset; a different provider can start without that wait. You
   can also schedule or cancel a continuation in the existing thread. A
   prompt-based hand-off starts a separate thread; delegation starts a task.
-- Ask a side question without adding to the conversation. Right-click a
-  message with a checkpoint to revert to before its turn, with or without
+- Ask a side question without adding to the conversation. Only one can be
+  in flight at a time; Show last side answer reopens the answer for that thread.
+  Right-click a message with a checkpoint to revert to before its turn, with or without
   restoring files. A reverted prompt returns to the draft.
 - Git, Diff, Agents and Background show the server's data (fixtures with
   `--mock`). The mock usage control opens Context.

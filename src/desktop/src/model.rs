@@ -301,7 +301,13 @@ pub trait ThreadSource {
         vec![]
     }
     fn restore_thread(&mut self, _: &str) {}
-    fn take_side_answer(&mut self) -> Option<(ThreadId, String)> {
+    fn side_question_pending(&self) -> bool {
+        false
+    }
+    fn has_side_answer(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn read_side_answer(&mut self, _: ThreadId, _only_unread: bool) -> Option<String> {
         None
     }
     fn revert_before(&self, _: ThreadId, _: usize) -> Option<usize> {
@@ -314,6 +320,9 @@ pub trait ThreadSource {
         None
     }
     fn scheduled_continue(&self, _: ThreadId) -> bool {
+        false
+    }
+    fn notifies_parent(&self, _: ThreadId) -> bool {
         false
     }
     fn is_protected(&self, _: ThreadId) -> bool {
@@ -467,6 +476,27 @@ pub trait ThreadSource {
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);
 }
+
+pub struct SideAnswer {
+    text: String,
+    unread: bool,
+}
+
+impl SideAnswer {
+    pub fn new(text: String) -> Self {
+        Self { text, unread: true }
+    }
+
+    pub fn read(&mut self, only_unread: bool) -> Option<String> {
+        if only_unread && !self.unread {
+            return None;
+        }
+        self.unread = false;
+        Some(self.text.clone())
+    }
+}
+
+pub const SIDE_QUESTION_PENDING: &str = "A side question is still being answered";
 
 #[derive(Clone, Debug)]
 pub enum ThreadAction {

@@ -55,6 +55,8 @@ pub fn state(status: crate::model::Status) -> AnyElement {
 pub trait Control: Sized {
     /// An interactive control: hover and press fills, a focus ring, a tooltip.
     fn control(self, tooltip: impl Into<SharedString>) -> Self;
+    /// An interactive control whose visible label needs no tooltip.
+    fn plain_control(self) -> Self;
     /// A control whose tooltip carries its keyboard shortcut as a key cap.
     fn shortcut(self, tooltip: impl Into<SharedString>, key: &'static str) -> Self;
     /// A text-only control (tabs, disclosures): hover brightens the text
@@ -87,6 +89,9 @@ impl Control for Stateful<Div> {
     fn control(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         interactive(self).tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
+    }
+    fn plain_control(self) -> Self {
+        interactive(self)
     }
     fn shortcut(self, tooltip: impl Into<SharedString>, key: &'static str) -> Self {
         let text = tooltip.into();

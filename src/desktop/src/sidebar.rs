@@ -8,10 +8,9 @@ use gpui::{prelude::*, *};
 actions!(sidebar, [PreviousThread, NextThread]);
 
 /// A sidebar row (`.row` in the mockup): 30pt, 13.5px Next, meta in Mono.
-fn row(id: impl Into<ElementId>, tooltip: impl Into<SharedString>) -> Stateful<Div> {
+fn row(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
-        .control(tooltip)
         .h(px(theme::ROW))
         .flex_shrink_0()
         .px(px(10.))
@@ -144,7 +143,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             );
         }
         let selected = w.selected == i;
-        let thread_row = row(("thread", i), t.title.clone())
+        let thread_row = row(("thread", i));
+        let thread_row =
+            if w.thread_popup.is_some() || w.dropdown == Some(crate::workspace::Dropdown::Thread) {
+                thread_row.plain_control()
+            } else {
+                thread_row.control(t.title.clone())
+            }
             .when(t.depth > 0, |s| {
                 s.h(px(26.)).text_size(px(12.5)).text_color(color("ink-2"))
             })
@@ -291,7 +296,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .flex_col()
                 .text_color(color("ink-2"))
                 .child(
-                    row("settled-toggle", "Show settled threads")
+                    row("settled-toggle")
+                        .control("Show settled threads")
                         .child(
                             div()
                                 .size(px(14.))
@@ -325,7 +331,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 )
                 .when(!w.source.archived().is_empty(), |s| {
                     s.child(
-                        row("archived-toggle", "Show archived threads")
+                        row("archived-toggle")
+                            .control("Show archived threads")
                             .child(ui::icon("clock", "ink-2"))
                             .child(div().flex_1().child("Archived"))
                             .child(meta(w.source.archived().len().to_string()))
@@ -339,7 +346,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     )
                 })
                 .child(
-                    row("settings", "Settings are unavailable in this preview")
+                    row("settings")
+                        .control("Settings are unavailable in this preview")
                         .cursor(CursorStyle::Arrow)
                         .child(ui::icon("settings", "ink-2"))
                         .child(div().flex_1().child("Settings"))

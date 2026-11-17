@@ -203,7 +203,7 @@ impl Workspace {
             &action_input,
             window,
             |this, _, e: &Submitted, window, cx| {
-                this.submit_thread_action(Some(&e.0), window, cx);
+                this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
             },
         ));
         // Redraws when the source's data changes, and each second while a turn
@@ -468,9 +468,15 @@ impl Workspace {
                 });
             }
         }
-        if let Some((id, answer)) = self.source.take_side_answer()
-            && id == self.selected
+        if !self.creating
             && self.thread_form.is_none()
+            && self.thread_popup.is_none()
+            && !self.palette_open
+            && !self.picker_open
+            && self.dropdown.is_none()
+            && !self.custom_open
+            && self.git_ui.form.is_none()
+            && let Some(answer) = self.source.read_side_answer(self.selected, true)
         {
             self.thread_form = Some(thread_actions::Form::Answer(answer));
         }
@@ -975,7 +981,7 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &thread_actions::ConfirmAction, window, cx| {
-                    this.submit_thread_action(None, window, cx);
+                    this.submit_thread_action(thread_actions::Submission::Confirm, window, cx);
                 }),
             )
             .on_action(
