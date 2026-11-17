@@ -112,6 +112,30 @@ pub fn project(thread: &Value) -> Vec<Row> {
             },
         ));
     }
+    // A plan proposed for approval stands in for the reply that turn never wrote.
+    for (n, plan) in thread["proposedPlans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let (Some(id), Some(body)) = (text(plan, &["id"]), text(plan, &["planMarkdown"])) else {
+            continue;
+        };
+        let when = ms(plan, &["createdAt"]).unwrap_or(0);
+        rows.push((
+            when,
+            500_000 + n,
+            Row {
+                key: id.to_string(),
+                message: Message::Plan {
+                    text: body.to_string(),
+                    implemented: text(plan, &["implementedAt"]).is_some(),
+                    at: clock(when),
+                },
+            },
+        ));
+    }
     let activities: Vec<&Value> = thread["activities"]
         .as_array()
         .into_iter()
@@ -523,6 +547,7 @@ mod tests {
                 Message::User { .. } => "user".into(),
                 Message::Assistant { text, .. } => format!("assistant:{text}"),
                 Message::Tool { name, .. } => name.clone(),
+                Message::Plan { .. } => "plan".into(),
             })
             .collect();
         // The empty finished reply (m3) and the context update have nothing to show.
@@ -604,6 +629,34 @@ mod tests {
             panic!("thought")
         };
         assert!(output.ends_with("then edit and test"));
+    }
+
+    #[test]
+    fn a_proposed_plan_is_a_row_of_its_own() {
+        let mut value = thread();
+        value["proposedPlans"] = json!([{
+            "id": "plan1", "turnId": "t1", "planMarkdown": "1. Do it",
+            "createdAt": "2026-11-16T10:00:03.000Z", "implementedAt": null,
+        }]);
+        let rows = project(&value);
+        let plans: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.message {
+                Message::Plan {
+                    text, implemented, ..
+                } => Some((row.key.as_str(), text.as_str(), *implemented)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plans, [("plan1", "1. Do it", false)]);
+        value["proposedPlans"][0]["implementedAt"] = json!("2026-11-16T10:05:00.000Z");
+        assert!(project(&value).iter().any(|row| matches!(
+            row.message,
+            Message::Plan {
+                implemented: true,
+                ..
+            }
+        )));
     }
 
     #[test]

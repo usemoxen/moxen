@@ -78,6 +78,15 @@ pub enum Message {
         failed: bool,
         running: bool,
     },
+    /// A plan the agent proposed, to read before it starts work.
+    Plan {
+        /// The plan as markdown.
+        text: String,
+        /// Work on it has begun.
+        implemented: bool,
+        /// When it was proposed, as the header shows it.
+        at: String,
+    },
 }
 pub struct Reply {
     pub message: usize,
@@ -161,6 +170,73 @@ pub struct Problem {
     /// A message that did not go out, to put back where it was written:
     /// the thread's draft, or the new-thread draft when there is none.
     pub unsent: Option<(Option<ThreadId>, String)>,
+}
+
+/// A tool the running turn is parked on until it is allowed or denied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Permission {
+    pub request: String,
+    pub tool: String,
+    /// `command-execution`, `file-change` or `file-read`: picks the wording.
+    pub classification: Option<String>,
+    /// The command, path or address the tool would act on.
+    pub detail: Option<String>,
+    /// The agent's own reason, when the tool carries one.
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    /// Allow, and the same tool for the rest of the session.
+    AllowSession,
+    Deny,
+}
+impl Decision {
+    /// The value the server's `thread.permission.respond` reads.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Allow => "accept",
+            Self::AllowSession => "accept-session",
+            Self::Deny => "decline",
+        }
+    }
+}
+
+/// One answer the agent offers to a question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub label: String,
+    pub description: Option<String>,
+    /// What is sent back; the label when the agent gave none.
+    pub value: String,
+    /// Markdown shown while the choice is highlighted.
+    pub preview: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Question {
+    pub id: String,
+    pub header: String,
+    pub text: String,
+    pub choices: Vec<Choice>,
+    pub multi: bool,
+    /// Whether the person may write an answer of their own.
+    pub custom: bool,
+}
+
+/// Questions the agent is waiting on, answered together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ask {
+    pub request: String,
+    pub questions: Vec<Question>,
+}
+
+/// What was answered to one question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    One(String),
+    Many(Vec<String>),
 }
 
 pub const RUNTIME_MODES: [(&str, &str); 4] = [
@@ -250,6 +326,20 @@ pub trait ThreadSource {
     fn set_model(&mut self, _id: ThreadId, _selection: Selection) {}
     /// Changes how an idle thread runs.
     fn set_modes(&mut self, _id: ThreadId, _runtime: &str, _interaction: &str) {}
+    /// The tool approval the thread's turn waits on, oldest first.
+    fn permission(&self, _: ThreadId) -> Option<Permission> {
+        None
+    }
+    /// The questions the thread's agent waits on, oldest first.
+    fn ask(&self, _: ThreadId) -> Option<Ask> {
+        None
+    }
+    /// Answers a tool approval.
+    fn decide(&mut self, _: ThreadId, _request: &str, _: Decision) {}
+    /// Answers every question of a request, by question id.
+    fn answer(&mut self, _: ThreadId, _request: &str, _: Vec<(String, Answer)>) {}
+    /// Closes a request without answering it; the agent is not messaged.
+    fn dismiss(&mut self, _: ThreadId, _request: &str) {}
     /// The thread a `create_thread` started, once the source lists it.
     fn take_opened(&mut self) -> Option<ThreadId> {
         None

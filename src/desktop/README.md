@@ -59,6 +59,25 @@ subscription; its ordering, nesting and status rules follow the TUI's sidebar
   idle thread change it (`thread.runtime-mode.set`, `thread.interaction-mode.set`).
   Not done: attachments, scheduled sends and queue conditions, starting the
   first thread of an account with none, and the run-size question of `/research`.
+- A thread that waits on the person shows a panel in the composer's place, as
+  the TUI's answer and permission panels do (`ask.rs`, `pending.rs`). Both are
+  read from the thread snapshot's activities (`permission.requested` /
+  `user-input.requested` minus their `.resolved`, oldest first; a question wins
+  the slot over an approval). A tool approval offers Yes, Yes for this session
+  and No (`thread.permission.respond` with `accept`, `accept-session`,
+  `decline`; the × denies). Agent questions show one question at a time with
+  numbered choices, an optional written answer, Continue for a multi-select and
+  a tab per question; answers walk to the nearest unanswered question and are
+  sent together from the last (`thread.user-input.respond`), and × dismisses
+  (`thread.user-input.dismiss`). Keys: Up/Down move, Enter or a digit picks,
+  Left/Right change question. An answered request disappears at once and
+  returns with the reason only if the server refuses it and it is still open
+  (a refusal after another client answered first is silent). A plan the agent
+  proposes (`proposedPlans`) is a collapsible "Plan proposed" row in the
+  transcript, read-only like the TUI's; `thread.plan.set` is the agent's own
+  checklist, not a client action, so the desktop does not send it. The mock
+  fixtures hold an approval (Screen-sharing thread), two questions
+  (Verify authentication) and a plan (Recover partial frame headers).
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs

@@ -193,6 +193,83 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                         }),
                                 )
                                 .into_any_element(),
+                            Message::Plan {
+                                text,
+                                implemented,
+                                at,
+                            } => {
+                                let toggle = entity.clone();
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .id(("plan", index))
+                                            .quiet()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .py(px(4.))
+                                            .text_size(px(13.5))
+                                            .text_color(color(if implemented {
+                                                "ink-2"
+                                            } else {
+                                                "ink"
+                                            }))
+                                            .child(ui::icon(
+                                                if open.is_some() {
+                                                    "chevron-down"
+                                                } else {
+                                                    "chevron-right"
+                                                },
+                                                "ink-2",
+                                            ))
+                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(
+                                                if implemented {
+                                                    "Plan implemented"
+                                                } else {
+                                                    "Plan proposed"
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .font_family(theme::MONO)
+                                                    .text_size(px(12.))
+                                                    .text_color(color("ink-2"))
+                                                    .child(at),
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                toggle.update(cx, |this, cx| {
+                                                    if this.expanded.remove(&(id, index)).is_none()
+                                                    {
+                                                        this.expanded.insert(
+                                                            (id, index),
+                                                            std::time::Instant::now(),
+                                                        );
+                                                    }
+                                                    this.lists[id].splice(index..index + 1, 1);
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .when(open.is_some(), |s| {
+                                        s.child(
+                                            div()
+                                                .id(("plan-body", index))
+                                                .max_h(px(360.))
+                                                .overflow_y_scroll()
+                                                .mt(px(4.))
+                                                .py(px(4.))
+                                                .pl(px(14.))
+                                                .border_l_2()
+                                                .border_color(color("rule"))
+                                                .text_size(px(theme::BODY))
+                                                .line_height(px(theme::LINE))
+                                                .child(text),
+                                        )
+                                    })
+                                    .into_any_element()
+                            }
                             Message::Tool {
                                 name,
                                 summary: target,
@@ -330,210 +407,190 @@ fn composer(
                 .when(!waiting.is_empty(), |s| {
                     s.child(queue_strip(&waiting, running, cx))
                 })
+                .child(match crate::ask::panel(w, id, creating, cx) {
+                    Some(panel) => panel,
+                    None => card(w, thread, draft_empty, window, cx).into_any_element(),
+                })
+                .when(w.source.preview(), |s| s.child(status_line(cx))),
+        )
+}
+
+/// The composer: model, access and mode chips, the draft and its buttons.
+fn card(
+    w: &Workspace,
+    thread: &crate::model::Thread,
+    draft_empty: bool,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let creating = w.creating;
+    let running = thread.status == Status::Running && !creating;
+    div()
+        .relative()
+        .border(px(theme::px_token("stroke", "stroke-rule")))
+        .border_color(color(if running { "live" } else { "edge" }))
+        .rounded(px(theme::px_token("radius", "radius-lg")))
+        .bg(color("ground"))
+        .pt(px(10.))
+        .pb(px(10.))
+        .pl(px(14.))
+        .pr(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .ml(px(-6.))
+                .flex()
+                .gap(px(4.))
+                .items_center()
+                .when(creating, |s| s.child(project_chip(w, cx)))
+                .child(model_pill(w, cx))
+                .child(menu_chip(
+                    w,
+                    Dropdown::Access,
+                    "access",
+                    "Access",
+                    match access_of(w, thread).as_str() {
+                        "" => "Default access".to_string(),
+                        mode => mode_label(&RUNTIME_MODES, mode),
+                    },
+                    running,
+                    cx,
+                ))
+                .child(menu_chip(
+                    w,
+                    Dropdown::Mode,
+                    "mode",
+                    "Mode",
+                    mode_label(&INTERACTION_MODES, &mode_of(w, thread)),
+                    running,
+                    cx,
+                )),
+        )
+        .child(w.active_composer().clone())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .id("attach")
+                        .inert("Attachments are unavailable in this preview")
+                        .ml(px(-6.))
+                        .size(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .child(ui::icon("paperclip", "ink-2")),
+                )
+                .child(div().flex_1())
+                .when(running, |s| {
+                    s.child(
+                        div()
+                            .relative()
+                            .children(ui::focus_tip(
+                                &w.tips.stop,
+                                window,
+                                "Stop",
+                                "esc",
+                                ui::Tip::AboveRight,
+                            ))
+                            .child(
+                                div()
+                                    .id("stop")
+                                    .track_focus(&w.tips.stop)
+                                    .shortcut("Stop", "esc")
+                                    .size(px(30.))
+                                    .border(px(theme::px_token("stroke", "stroke-rule")))
+                                    .border_color(color("edge"))
+                                    .rounded(px(theme::px_token("radius", "radius-md")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    // A filled stop square, not an outlined one.
+                                    .child(div().size(px(9.)).rounded(px(2.)).bg(color("ink")))
+                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+                            ),
+                    )
+                })
+                .when(running, |s| {
+                    s.child(
+                        div()
+                            .id("queue")
+                            .shortcut("Queue for after this turn", "⌘↵")
+                            .h(px(30.))
+                            .px(px(10.))
+                            .border(px(theme::px_token("stroke", "stroke-rule")))
+                            .border_color(color("edge"))
+                            .rounded(px(theme::px_token("radius", "radius-md")))
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Queue")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.focus(&this.active_composer().read(cx).focus.clone(), cx);
+                                window.dispatch_action(Box::new(crate::composer::QueueSend), cx);
+                            })),
+                    )
+                })
                 .child(
                     div()
                         .relative()
-                        .border(px(theme::px_token("stroke", "stroke-rule")))
-                        .border_color(color(if running { "live" } else { "edge" }))
-                        .rounded(px(theme::px_token("radius", "radius-lg")))
-                        .bg(color("ground"))
-                        .pt(px(10.))
-                        .pb(px(10.))
-                        .pl(px(14.))
-                        .pr(px(12.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
+                        .children(ui::focus_tip(
+                            &w.tips.send,
+                            window,
+                            if running {
+                                "Steer the running turn"
+                            } else {
+                                "Send"
+                            },
+                            "↵",
+                            ui::Tip::AboveRight,
+                        ))
                         .child(
                             div()
-                                .ml(px(-6.))
-                                .flex()
-                                .gap(px(4.))
-                                .items_center()
-                                .when(creating, |s| s.child(project_chip(w, cx)))
-                                .child(model_pill(w, cx))
-                                .child(menu_chip(
-                                    w,
-                                    Dropdown::Access,
-                                    "access",
-                                    "Access",
-                                    match access_of(w, thread).as_str() {
-                                        "" => "Default access".to_string(),
-                                        mode => mode_label(&RUNTIME_MODES, mode),
-                                    },
-                                    running,
-                                    cx,
-                                ))
-                                .child(menu_chip(
-                                    w,
-                                    Dropdown::Mode,
-                                    "mode",
-                                    "Mode",
-                                    mode_label(&INTERACTION_MODES, &mode_of(w, thread)),
-                                    running,
-                                    cx,
-                                )),
-                        )
-                        .child(w.active_composer().clone())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .id("attach")
-                                        .inert("Attachments are unavailable in this preview")
-                                        .ml(px(-6.))
-                                        .size(px(28.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(6.))
-                                        .child(ui::icon("paperclip", "ink-2")),
-                                )
-                                .child(div().flex_1())
-                                .when(running, |s| {
-                                    s.child(
-                                        div()
-                                            .relative()
-                                            .children(ui::focus_tip(
-                                                &w.tips.stop,
-                                                window,
-                                                "Stop",
-                                                "esc",
-                                                ui::Tip::AboveRight,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .id("stop")
-                                                    .track_focus(&w.tips.stop)
-                                                    .shortcut("Stop", "esc")
-                                                    .size(px(30.))
-                                                    .border(px(theme::px_token(
-                                                        "stroke",
-                                                        "stroke-rule",
-                                                    )))
-                                                    .border_color(color("edge"))
-                                                    .rounded(px(theme::px_token(
-                                                        "radius",
-                                                        "radius-md",
-                                                    )))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    // A filled stop square, not an outlined one.
-                                                    .child(
-                                                        div()
-                                                            .size(px(9.))
-                                                            .rounded(px(2.))
-                                                            .bg(color("ink")),
-                                                    )
-                                                    .on_click(
-                                                        cx.listener(|this, _, _, cx| this.stop(cx)),
-                                                    ),
-                                            ),
+                                .id("send")
+                                .track_focus(&w.tips.send)
+                                .when(!draft_empty, |s| {
+                                    s.shortcut(
+                                        if running {
+                                            "Steer the running turn"
+                                        } else {
+                                            "Send"
+                                        },
+                                        "↵",
                                     )
                                 })
-                                .when(running, |s| {
-                                    s.child(
-                                        div()
-                                            .id("queue")
-                                            .shortcut("Queue for after this turn", "⌘↵")
-                                            .h(px(30.))
-                                            .px(px(10.))
-                                            .border(px(theme::px_token("stroke", "stroke-rule")))
-                                            .border_color(color("edge"))
-                                            .rounded(px(theme::px_token("radius", "radius-md")))
-                                            .flex()
-                                            .items_center()
-                                            .text_size(px(12.5))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Queue")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                window.focus(
-                                                    &this.active_composer().read(cx).focus.clone(),
-                                                    cx,
-                                                );
-                                                window.dispatch_action(
-                                                    Box::new(crate::composer::QueueSend),
-                                                    cx,
-                                                );
-                                            })),
-                                    )
+                                .when(draft_empty, |s| {
+                                    s.cursor(CursorStyle::Arrow).opacity(0.35).tooltip(|_, cx| {
+                                        cx.new(|_| {
+                                            ui::Tooltip("Write a message to send".into(), Some("↵"))
+                                        })
+                                        .into()
+                                    })
                                 })
-                                .child(
-                                    div()
-                                        .relative()
-                                        .children(ui::focus_tip(
-                                            &w.tips.send,
-                                            window,
-                                            if running {
-                                                "Steer the running turn"
-                                            } else {
-                                                "Send"
-                                            },
-                                            "↵",
-                                            ui::Tip::AboveRight,
-                                        ))
-                                        .child(
-                                            div()
-                                                .id("send")
-                                                .track_focus(&w.tips.send)
-                                                .when(!draft_empty, |s| {
-                                                    s.shortcut(
-                                                        if running {
-                                                            "Steer the running turn"
-                                                        } else {
-                                                            "Send"
-                                                        },
-                                                        "↵",
-                                                    )
-                                                })
-                                                .when(draft_empty, |s| {
-                                                    s.cursor(CursorStyle::Arrow)
-                                                        .opacity(0.35)
-                                                        .tooltip(|_, cx| {
-                                                            cx.new(|_| {
-                                                                ui::Tooltip(
-                                                                    "Write a message to send"
-                                                                        .into(),
-                                                                    Some("↵"),
-                                                                )
-                                                            })
-                                                            .into()
-                                                        })
-                                                })
-                                                .size(px(30.))
-                                                .rounded(px(theme::px_token("radius", "radius-md")))
-                                                .bg(color("ink"))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(ui::icon("arrow-up", "on-ink"))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    window.focus(
-                                                        &this
-                                                            .active_composer()
-                                                            .read(cx)
-                                                            .focus
-                                                            .clone(),
-                                                        cx,
-                                                    );
-                                                    window.dispatch_action(
-                                                        Box::new(crate::composer::Send),
-                                                        cx,
-                                                    );
-                                                })),
-                                        ),
-                                ),
-                        )
-                        .when(w.picker_open, |s| {
-                            s.child(crate::model_picker::render(w, window, cx))
-                        }),
-                )
-                .when(w.source.preview(), |s| s.child(status_line(cx))),
+                                .size(px(30.))
+                                .rounded(px(theme::px_token("radius", "radius-md")))
+                                .bg(color("ink"))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(ui::icon("arrow-up", "on-ink"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    window
+                                        .focus(&this.active_composer().read(cx).focus.clone(), cx);
+                                    window.dispatch_action(Box::new(crate::composer::Send), cx);
+                                })),
+                        ),
+                ),
         )
+        .when(w.picker_open, |s| {
+            s.child(crate::model_picker::render(w, window, cx))
+        })
 }
 
 /// How the thread (or the one being drafted) may act on its own.

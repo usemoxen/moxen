@@ -11,9 +11,11 @@
 use crate::{
     catalog::Catalog,
     model::{
-        CatalogState, Connection, Delivery, DiffLine, InspectorData, Message, NewThread, Problem,
-        Project, QueueEdit, Queued, Reply, Selection, Status, Thread, ThreadId, ThreadSource,
+        Answer, Ask, CatalogState, Connection, Decision, Delivery, DiffLine, InspectorData,
+        Message, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply, Selection,
+        Status, Thread, ThreadId, ThreadSource,
     },
+    pending,
     transcript::{self, Row},
     wire::{Wire, WireError},
 };
@@ -26,6 +28,9 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// How long a refused answer waits before it checks the request is still open.
+const REFUSAL_GRACE: Duration = Duration::from_millis(800);
 
 /// One live thread as the sidebar orders it.
 #[derive(Clone, Debug)]
@@ -341,6 +346,13 @@ struct Transcript {
     messages: Option<Arc<Vec<Message>>>,
 }
 
+/// The approvals and questions open on one thread.
+#[derive(Default)]
+struct Waiting {
+    permissions: Vec<Permission>,
+    asks: Vec<Ask>,
+}
+
 #[derive(Default)]
 struct State {
     /// The open connection, while there is one.
@@ -364,6 +376,11 @@ struct State {
     /// takes as many steps as there are other threads' entries to pass.
     global_queue: Vec<(String, String)>,
     problems: VecDeque<Problem>,
+    /// What each followed thread waits on the person for, as its last snapshot said.
+    waiting: HashMap<ThreadId, Waiting>,
+    /// Requests answered here that the server has not yet confirmed: hidden
+    /// at once, and shown again if the answer is refused.
+    answered: HashSet<String>,
     /// A thread being started, until the shell lists it.
     opening: Option<String>,
     opened: Option<ThreadId>,
@@ -754,6 +771,13 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
             if frame["kind"] == "snapshot" {
                 let thread = &frame["snapshot"]["thread"];
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
+                state.waiting.insert(
+                    id,
+                    Waiting {
+                        permissions: pending::permissions(thread),
+                        asks: pending::asks(thread),
+                    },
+                );
                 if let Some(read) = &read {
                     state.global_queue = global_queue(read);
                 }
@@ -1146,6 +1170,48 @@ impl ThreadSource for ServerSource {
             Ok(())
         });
     }
+    fn permission(&self, id: ThreadId) -> Option<Permission> {
+        let state = self.shared.state.lock().expect("live state");
+        let waiting = state.waiting.get(&id)?;
+        let open = |request: &str| !state.answered.contains(request);
+        waiting
+            .permissions
+            .iter()
+            .find(|permission| open(&permission.request))
+            .cloned()
+    }
+    fn ask(&self, id: ThreadId) -> Option<Ask> {
+        let state = self.shared.state.lock().expect("live state");
+        let waiting = state.waiting.get(&id)?;
+        waiting
+            .asks
+            .iter()
+            .find(|ask| !state.answered.contains(&ask.request))
+            .cloned()
+    }
+    fn decide(&mut self, id: ThreadId, request: &str, decision: Decision) {
+        self.reply(id, request, "thread.permission.respond", |command| {
+            command["decision"] = decision.wire().into();
+        });
+    }
+    fn answer(&mut self, id: ThreadId, request: &str, answers: Vec<(String, Answer)>) {
+        self.reply(id, request, "thread.user-input.respond", |command| {
+            command["answers"] = answers
+                .into_iter()
+                .map(|(question, answer)| {
+                    let value = match answer {
+                        Answer::One(one) => json!(one),
+                        Answer::Many(many) => json!(many),
+                    };
+                    (question, value)
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        });
+    }
+    fn dismiss(&mut self, id: ThreadId, request: &str) {
+        self.reply(id, request, "thread.user-input.dismiss", |_| {});
+    }
     fn take_opened(&mut self) -> Option<ThreadId> {
         self.shared.state.lock().expect("live state").opened.take()
     }
@@ -1170,6 +1236,45 @@ fn project_selection(state: &State, project: &str) -> Option<Value> {
 }
 
 impl ServerSource {
+    /// Answers a request the thread waits on. It disappears at once; if the
+    /// server refuses and the request is still open a moment later it comes
+    /// back with the reason. A refusal after another client answered first
+    /// is a race the person already won, so it is not reported.
+    fn reply(
+        &self,
+        id: ThreadId,
+        request: &str,
+        command: &'static str,
+        fill: impl FnOnce(&mut Value),
+    ) {
+        let Some(uuid) = self.uuid_of(id) else {
+            return;
+        };
+        let mut body = json!({ "threadId": uuid, "requestId": request });
+        fill(&mut body);
+        let shared = self.shared.clone();
+        let request = request.to_string();
+        shared.update(|state| {
+            state.answered.insert(request.clone());
+        });
+        background(&self.shared, move |wire| {
+            let Err(error) = wire.dispatch(command, body) else {
+                return Ok(());
+            };
+            std::thread::sleep(REFUSAL_GRACE);
+            let mut state = shared.state.lock().expect("live state");
+            let open = state.waiting.get(&id).is_some_and(|waiting| {
+                waiting.permissions.iter().any(|p| p.request == request)
+                    || waiting.asks.iter().any(|a| a.request == request)
+            });
+            if open {
+                state.answered.remove(&request);
+                Err(problem(&error, None))
+            } else {
+                Ok(())
+            }
+        });
+    }
     fn uuid_of(&self, id: ThreadId) -> Option<String> {
         let state = self.shared.state.lock().expect("live state");
         state.slots.get(id).map(|slot| slot.uuid.clone())
@@ -1369,6 +1474,13 @@ mod tests {
                 {"turnId": "t1", "messageId": "m1", "scheduledFor": null, "scheduleReason": null},
                 {"turnId": "t2", "messageId": "m2", "scheduledFor": null, "scheduleReason": null},
                 {"turnId": "t3", "messageId": "m3", "scheduledFor": "2026-11-16T20:00:00.000Z", "scheduleReason": "usage-reset"},
+            ],
+            "activities": [
+                {"kind": "permission.requested", "payload": {"requestId": "perm1", "toolName": "Bash",
+                    "classification": "command-execution", "detail": "cargo test"}},
+                {"kind": "user-input.requested", "payload": {"requestId": "ask1", "questions": [
+                    {"id": "q", "header": "Scope", "question": "Which?", "multiSelect": true,
+                     "options": [{"label": "A"}, {"label": "B", "value": "b"}]}]}},
             ],
         })
     }
@@ -1627,6 +1739,39 @@ mod tests {
         let create = sent(10);
         assert_eq!(create["modelSelection"], max.to_json());
         assert_eq!(sent(11)["modelSelection"], max.to_json());
+
+        // The approval and the question the thread waits on, answered through
+        // the server's commands; each is hidden as soon as it is answered.
+        wait_for("the approval", || source.permission(0).is_some());
+        let approval = source.permission(0).expect("approval");
+        assert_eq!(
+            (approval.request.as_str(), approval.tool.as_str()),
+            ("perm1", "Bash")
+        );
+        source.decide(0, "perm1", Decision::AllowSession);
+        let respond = sent(12);
+        assert_eq!(respond["type"], "thread.permission.respond");
+        assert_eq!(respond["threadId"], "t1");
+        assert_eq!(respond["requestId"], "perm1");
+        assert_eq!(respond["decision"], "accept-session");
+        assert!(source.permission(0).is_none());
+
+        let ask = source.ask(0).expect("question");
+        assert_eq!(ask.request, "ask1");
+        source.answer(
+            0,
+            "ask1",
+            vec![("q".into(), Answer::Many(vec!["A".into(), "b".into()]))],
+        );
+        let answered = sent(13);
+        assert_eq!(answered["type"], "thread.user-input.respond");
+        assert_eq!(answered["requestId"], "ask1");
+        assert_eq!(answered["answers"], json!({"q": ["A", "b"]}));
+        assert!(source.ask(0).is_none());
+        source.dismiss(0, "ask1");
+        let dismissed = sent(14);
+        assert_eq!(dismissed["type"], "thread.user-input.dismiss");
+        assert_eq!(dismissed["requestId"], "ask1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,3 +1,4 @@
+mod ask;
 mod assets;
 #[cfg(feature = "render-harness")]
 mod automation;
@@ -11,6 +12,7 @@ mod mock;
 mod model;
 mod model_picker;
 mod palette;
+mod pending;
 mod sidebar;
 mod steps;
 mod theme;

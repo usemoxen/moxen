@@ -15,6 +15,9 @@ pub struct MockSource {
     added: Option<String>,
     catalog: std::sync::Arc<Catalog>,
     selections: Vec<Selection>,
+    /// What each thread waits on the person for, until answered.
+    permissions: Vec<Option<Permission>>,
+    asks: Vec<Option<Ask>>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -206,6 +209,8 @@ impl MockSource {
                 Catalog::from_config(&fixture_config()).expect("fixture catalog"),
             ),
             selections: vec![opus(); count],
+            permissions: vec![None; count],
+            asks: vec![None; count],
         }
     }
     pub fn preview() -> Self {
@@ -213,6 +218,57 @@ impl MockSource {
         source.threads[0].status = Status::Running;
         source.threads[0].started_at = Some(Instant::now());
         source.queues[0].push("Also check Escape returns focus to the model control.".into());
+        // A tool approval, two questions and a proposed plan, one thread each.
+        source.permissions[2] = Some(Permission {
+            request: "perm-1".into(),
+            tool: "Bash".into(),
+            classification: Some("command-execution".into()),
+            detail: Some("cargo test --release capture::pipeline".into()),
+            description: Some("Run the capture pipeline tests in release mode".into()),
+        });
+        let choice = |label: &str, description: &str, preview: Option<&str>| Choice {
+            label: label.into(),
+            description: Some(description.into()),
+            value: label.into(),
+            preview: preview.map(str::to_string),
+        };
+        source.asks[3] = Some(Ask {
+            request: "ask-1".into(),
+            questions: vec![
+                Question {
+                    id: "scope".into(),
+                    header: "Scope".into(),
+                    text: "How far should the reconnect check reach?".into(),
+                    choices: vec![
+                        choice(
+                            "Handshake only",
+                            "Verify the token once",
+                            Some("fn reconnect() {\n    verify(token)?;\n}"),
+                        ),
+                        choice("Every frame", "Verify each frame header", None),
+                    ],
+                    multi: false,
+                    custom: true,
+                },
+                Question {
+                    id: "platforms".into(),
+                    header: "Platforms".into(),
+                    text: "Which platforms get a regression test?".into(),
+                    choices: vec![
+                        choice("macOS", "", None),
+                        choice("Windows", "", None),
+                        choice("Linux", "", None),
+                    ],
+                    multi: true,
+                    custom: false,
+                },
+            ],
+        });
+        source.messages[4].push(Message::Plan {
+            text: "1. Add a header scanner that resyncs after a bad frame.\n2. Keep the partial bytes until the next frame starts.\n3. Cover truncated and oversized headers with tests.".into(),
+            implemented: false,
+            at: "Thu 09:41".into(),
+        });
         source
     }
 }
@@ -377,6 +433,21 @@ impl ThreadSource for MockSource {
     fn set_model(&mut self, id: ThreadId, selection: Selection) {
         self.threads[id].model = selection.model.clone();
         self.selections[id] = selection;
+    }
+    fn permission(&self, id: ThreadId) -> Option<Permission> {
+        self.permissions[id].clone()
+    }
+    fn ask(&self, id: ThreadId) -> Option<Ask> {
+        self.asks[id].clone()
+    }
+    fn decide(&mut self, id: ThreadId, _: &str, _: Decision) {
+        self.permissions[id] = None;
+    }
+    fn answer(&mut self, id: ThreadId, _: &str, _: Vec<(String, Answer)>) {
+        self.asks[id] = None;
+    }
+    fn dismiss(&mut self, id: ThreadId, _: &str) {
+        self.asks[id] = None;
     }
     fn set_modes(&mut self, id: ThreadId, runtime: &str, interaction: &str) {
         self.threads[id].runtime_mode = runtime.into();

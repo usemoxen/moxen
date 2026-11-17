@@ -55,6 +55,13 @@ pub struct Workspace {
     /// The model chosen for the new thread; none starts it on its project's.
     pub new_model: Option<Selection>,
     pub dropdown: Option<Dropdown>,
+    /// Takes keys while an approval or question is open in the composer's place.
+    pub ask_focus: FocusHandle,
+    /// The answers given to the open request.
+    pub draft: crate::ask::Draft,
+    /// The field for a written answer is open.
+    pub custom_open: bool,
+    pub custom_input: Entity<Composer>,
     /// The last thing that went wrong, until it is dismissed.
     pub problem: Option<String>,
     pub lists: Vec<ListState>,
@@ -115,6 +122,22 @@ impl Workspace {
         subscriptions.push(cx.subscribe(&new_composer, |this, _, event: &Queued, cx| {
             this.start_thread(event.0.clone(), cx)
         }));
+        let custom_input = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.placeholder = "Write your answer";
+            c.height = 40.;
+            c
+        });
+        subscriptions.push(
+            cx.subscribe(&custom_input, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.subscribe_in(
+            &custom_input,
+            window,
+            |this, _, event: &Submitted, window, cx| this.submit_custom(&event.0, window, cx),
+        ));
         let search = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.placeholder = "Search models";
@@ -223,6 +246,10 @@ impl Workspace {
             new_interaction: 0,
             new_model: None,
             dropdown: None,
+            ask_focus: cx.focus_handle(),
+            draft: crate::ask::Draft::default(),
+            custom_open: false,
+            custom_input,
             problem: None,
             source,
             fold_toggled: HashSet::new(),
@@ -738,6 +765,7 @@ impl Render for Workspace {
         if self.source.order(false).is_empty() {
             return crate::connection::render(self, cx).into_any_element();
         }
+        self.sync_panel(window, cx);
         let viewport = f32::from(window.viewport_size().width);
         let room = (viewport - theme::SIDEBAR - MIN_TURN).max(MIN_INSPECTOR);
         let slide = crate::ui::progress(self.inspector_at, 160, window);
@@ -769,7 +797,9 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
-                    if this.dropdown.is_some() {
+                    if this.custom_open {
+                        this.close_custom(window, cx);
+                    } else if this.dropdown.is_some() {
                         this.dropdown = None;
                     } else if this.picker_open {
                         this.picker_open = false;
