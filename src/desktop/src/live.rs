@@ -2122,6 +2122,7 @@ mod tests {
                                             {"id": "archived", "projectId": "p", "parentThreadId": "t1",
                                              "archivedAt": "2026-11-16T10:00:00Z"}]}})
                                 } else {
+                                    assert_eq!(params, &json!({"threadId": "t1"}));
                                     json!({"kind": "snapshot", "snapshot": {"thread": waiting_thread()}})
                                 };
                                 writeln!(
@@ -2149,29 +2150,38 @@ mod tests {
                             ),
                             "query" => match params["type"].as_str() {
                                 Some("thread.delegation") => {
-                                    assert_eq!(params["threadId"], "child");
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.delegation", "threadId": "child"})
+                                    );
                                     json!({"parentThreadId": "t1", "notify": true})
                                 }
                                 Some("thread.task.status") => {
-                                    assert_eq!(params["parentThreadId"], "t1");
-                                    assert_eq!(params["taskId"], "child");
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.task.status", "parentThreadId": "t1", "taskId": "child"})
+                                    );
                                     json!({"task": {"status": "running", "summary": "Checking focus"}})
                                 }
                                 Some("thread.subagent") => {
-                                    assert_eq!(params["threadId"], "t1");
-                                    assert_eq!(params["agentId"], "agent-1");
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.subagent", "threadId": "t1", "agentId": "agent-1"})
+                                    );
                                     json!({"available": true, "messages": [
                                         {"id": "m1", "role": "user", "text": "Trace the key path"},
                                         {"id": "m2", "role": "assistant", "text": "Found the listener"},
                                     ]})
                                 }
                                 Some("thread.background.list") => {
-                                    assert_eq!(params["threadId"], "t1");
-                                    let stopped = seen
-                                        .lock()
-                                        .unwrap()
-                                        .iter()
-                                        .any(|m| m["type"] == "thread.background.stop");
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.background.list", "threadId": "t1"})
+                                    );
+                                    let stopped = seen.lock().unwrap().iter().any(|m| {
+                                        m["type"] == "thread.background.stop"
+                                            && m["taskId"] == "shell-1"
+                                    });
                                     if stopped {
                                         json!({"live": true, "partial": true, "tasks": []})
                                     } else {
@@ -2183,14 +2193,14 @@ mod tests {
                                     }
                                 }
                                 Some("thread.background.output") => {
-                                    assert_eq!(params["threadId"], "t1");
-                                    assert_eq!(params["taskId"], "shell-1");
-                                    if seen
-                                        .lock()
-                                        .unwrap()
-                                        .iter()
-                                        .any(|m| m["type"] == "thread.background.stop")
-                                    {
+                                    assert_eq!(
+                                        params,
+                                        &json!({"type": "thread.background.output", "threadId": "t1", "taskId": "shell-1"})
+                                    );
+                                    if seen.lock().unwrap().iter().any(|m| {
+                                        m["type"] == "thread.background.stop"
+                                            && m["taskId"] == "shell-1"
+                                    }) {
                                         json!({"available": false, "lines": []})
                                     } else {
                                         json!({"available": true, "lines": ["running", "done"]})
@@ -2232,15 +2242,25 @@ mod tests {
                                 Some("workspace.git") => {
                                     json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
                                 }
-                                _ => json!({"entries": [
+                                Some("queue.read") => json!({"entries": [
                                     {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
                                     {"threadId": "other", "turnId": "x", "policy": {"held": false}},
                                     {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
                                 ]}),
+                                other => panic!("unexpected fake-server query: {other:?}"),
                             },
                             "dispatch" => {
                                 seen.lock().unwrap().push(params.clone());
-                                json!({"accepted": true, "threadId": "new-thread"})
+                                match params["type"].as_str() {
+                                    Some("thread.background.stop") => {
+                                        json!({"stopped": true, "taskId": params["taskId"]})
+                                    }
+                                    Some("thread.task.cancel") => {
+                                        json!({"task": {"taskId": params["taskId"], "status": "cancel_requested"},
+                                            "interruptRequested": true, "stateAfter": "running"})
+                                    }
+                                    _ => json!({"accepted": true, "threadId": "new-thread"}),
+                                }
                             }
                             _ => Value::Null,
                         };
@@ -2490,6 +2510,45 @@ mod tests {
         assert_eq!(create["draft"], true);
         assert_eq!(create["targetBranch"], "main");
 
+        source.stop_background(0, "shell-1");
+        assert_eq!(
+            sent(18),
+            json!({
+                "type": "thread.background.stop", "threadId": "t1", "taskId": "shell-1",
+            })
+        );
+        source.stop_background(0, "agent-1");
+        assert_eq!(
+            sent(19),
+            json!({
+                "type": "thread.background.stop", "threadId": "t1", "taskId": "agent-1",
+            })
+        );
+        source.cancel_task(1, false);
+        assert_eq!(
+            sent(20),
+            json!({
+                "type": "thread.task.cancel", "parentThreadId": "t1", "taskId": "child",
+                "notifyParent": false,
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspector_reads_work_from_the_server_and_retains_released_background_output() {
+        let dir = std::env::temp_dir().join(format!("moxen-work-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let _commands = fake_server(path.clone());
+        let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
+        wait_for("the parent and child threads", || source.children(0) == [1]);
+        source.focus(0);
+        wait_for("the thread snapshot's checklist", || {
+            !source.inspector(0).tasks.is_empty()
+        });
         let inspector = source.inspector(0);
         assert_eq!(work::completed(&inspector.tasks), 1);
         assert_eq!(
@@ -2534,10 +2593,6 @@ mod tests {
             Some(Ok(View::Delegation(link))) if link.notify && link.status.as_deref() == Some("running")));
 
         source.stop_background(0, "shell-1");
-        let stop = sent(18);
-        assert_eq!(stop["type"], "thread.background.stop");
-        assert_eq!(stop["threadId"], "t1");
-        assert_eq!(stop["taskId"], "shell-1");
         wait_for("the refreshed background list", || {
             matches!(source.work(0, &Read::Background).as_deref(),
             Some(Ok(View::Background(list))) if list.tasks.is_empty())
@@ -2554,12 +2609,6 @@ mod tests {
         });
         assert!(matches!(source.work(0, &output).as_deref(),
             Some(Ok(View::Output(Some(text)))) if text == "running\ndone"));
-        source.cancel_task(1, false);
-        let cancel = sent(19);
-        assert_eq!(cancel["type"], "thread.task.cancel");
-        assert_eq!(cancel["parentThreadId"], "t1");
-        assert_eq!(cancel["taskId"], "child");
-        assert_eq!(cancel["notifyParent"], false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

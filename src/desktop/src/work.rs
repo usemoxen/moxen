@@ -227,3 +227,119 @@ impl View {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Background, Delegation, agents, background_count, checklist, completed};
+    use crate::model::Status;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn checklist_takes_the_latest_nonempty_plan_and_counts_out_of_order_completions() {
+        let thread = json!({"activities": [
+            {"kind": "turn.plan.updated", "payload": {"plan": [{"step": "Old", "status": "completed"}]}},
+            {"kind": "turn.plan.updated", "payload": {"plan": [
+                {"step": "Native in progress", "status": "inProgress"},
+                {"step": "Completed", "status": "completed"},
+                {"step": "MCP in progress", "status": "in_progress"},
+                {"step": "Pending"},
+                {"step": "", "status": "completed"},
+            ]}},
+            {"kind": "turn.plan.updated", "payload": {"plan": []}},
+        ]});
+        let steps = checklist(&thread);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.title.as_str(), step.status))
+                .collect::<Vec<_>>(),
+            [
+                ("Native in progress", Status::Running),
+                ("Completed", Status::Idle),
+                ("MCP in progress", Status::Running),
+                ("Pending", Status::Queued),
+            ],
+        );
+        assert_eq!(completed(&steps), 1);
+    }
+
+    #[test]
+    fn subagent_snapshot_rows_take_precedence_and_only_explicitly_allow_stop() {
+        let thread = json!({
+            "subagentRows": [
+                {"agentId": "older", "agentType": "Explore", "at": "2026-11-17T10:00:00Z",
+                 "running": true, "stoppable": false},
+                {"agentId": "newer", "agentType": "Review", "at": "2026-11-17T10:01:00Z",
+                 "description": "Check focus", "running": true, "stoppable": true},
+                {"agentId": "finished", "agentType": "Review", "at": "2026-11-17T09:59:00Z",
+                 "running": false, "lastMessage": "Checked"},
+            ],
+            "nativeSubagents": [{"agentId": "fallback", "agentType": "Explore", "status": "running"}],
+        });
+        let rows = agents(&thread);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.id.as_str(), row.status, row.stoppable))
+                .collect::<Vec<_>>(),
+            [
+                ("newer", Status::Running, true),
+                ("older", Status::Running, false),
+                ("finished", Status::Idle, false),
+            ],
+        );
+        assert_eq!(rows[0].title, "Check focus");
+        assert_eq!(rows[2].last_message.as_deref(), Some("Checked"));
+        let fallback = agents(&json!({"nativeSubagents": thread["nativeSubagents"]}));
+        assert_eq!(fallback[0].id, "fallback");
+        assert!(!fallback[0].stoppable);
+    }
+
+    #[test]
+    fn delegated_status_survives_without_a_live_parent_link() {
+        let status = json!({"task": {"status": "cancelled", "summary": "Stopped before it ran"}});
+        let delegation = Delegation::read(&Value::Null, &status);
+        assert!(!delegation.active && !delegation.notify);
+        assert_eq!(delegation.status.as_deref(), Some("cancelled"));
+        assert_eq!(delegation.summary.as_deref(), Some("Stopped before it ran"));
+        let link = json!({"parentThreadId": "parent", "notify": true});
+        let delegation = Delegation::read(&link, &Value::Null);
+        assert!(delegation.active && delegation.notify);
+    }
+
+    #[test]
+    fn background_jobs_keep_group_order_and_explicit_stop_limits() {
+        let background = Background::read(&json!({
+            "live": true, "partial": true,
+            "tasks": [
+                {"taskId": "agent", "taskType": "local_agent"},
+                {"taskId": "monitor", "taskType": "local_bash", "toolName": "Monitor", "stoppable": false},
+                {"taskId": "shell", "toolName": "Bash", "command": "cargo test"},
+                {"description": "No ID"},
+            ],
+        }));
+        assert!(background.live && background.partial);
+        assert_eq!(
+            background
+                .tasks
+                .iter()
+                .map(|task| (task.id.as_str(), task.kind, task.stoppable))
+                .collect::<Vec<_>>(),
+            [
+                ("shell", "Shell", true),
+                ("monitor", "Monitor", false),
+                ("agent", "Agent", true)
+            ],
+        );
+        assert_eq!(background.tasks[0].title, "cargo test");
+        assert_eq!(background.tasks[0].command.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn empty_latest_background_snapshot_clears_the_count() {
+        let thread = json!({"activities": [
+            {"kind": "background.tasks", "payload": {"tasks": [{"taskId": "shell"}]}},
+            {"kind": "background.tasks", "payload": {"tasks": []}},
+        ]});
+        assert_eq!(background_count(&thread), 0);
+    }
+}

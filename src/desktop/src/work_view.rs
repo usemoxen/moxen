@@ -2,7 +2,7 @@
 
 use crate::{
     live::now_ms,
-    model::{Message, Status, ThreadId},
+    model::{Message, Status, ThreadId, ThreadSource},
     theme::{self, color},
     transcript::duration,
     ui::{self, Control},
@@ -16,6 +16,14 @@ enum Detail {
     Output(BackgroundTask),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Escape {
+    CloseDetail,
+    DismissQuestion,
+    KeepApproval,
+    StopTurn,
+}
+
 #[derive(Default)]
 pub struct WorkUi {
     seen: Option<(ThreadId, usize)>,
@@ -26,6 +34,19 @@ pub struct WorkUi {
 }
 
 impl WorkUi {
+    pub fn escape(&mut self, source: &dyn ThreadSource, id: ThreadId) -> Escape {
+        if self.dismiss() {
+            Escape::CloseDetail
+        } else if source.ask(id).is_some() {
+            Escape::DismissQuestion
+        } else if source.permission(id).is_some() {
+            // A permission still needs an explicit decision.
+            Escape::KeepApproval
+        } else {
+            Escape::StopTurn
+        }
+    }
+
     pub fn dismiss(&mut self) -> bool {
         std::mem::take(&mut self.confirming_cancel) || self.detail.take().is_some()
     }
@@ -590,5 +611,37 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             Some(delegated) => info(w, delegated, cx),
             None => agent_list(w, cx),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Detail, Escape, WorkUi};
+    use crate::{
+        mock::MockSource,
+        model::{Status, ThreadSource},
+        work::{Read, View},
+    };
+
+    #[test]
+    fn escape_closes_details_before_leaving_a_running_approval_alone() {
+        let source = MockSource::preview();
+        let approval = 2;
+        assert_eq!(source.list_threads()[approval].status, Status::Running);
+        assert!(source.permission(approval).is_some());
+        let background = source.work(0, &Read::Background).expect("mock jobs");
+        let Ok(View::Background(background)) = background.as_ref() else {
+            panic!("expected background jobs");
+        };
+        let mut inspector = WorkUi {
+            detail: Some(Detail::Output(background.tasks[0].clone())),
+            ..WorkUi::default()
+        };
+
+        assert_eq!(inspector.escape(&source, approval), Escape::CloseDetail);
+        assert!(inspector.detail.is_none());
+        assert_eq!(inspector.escape(&source, approval), Escape::KeepApproval);
+        assert_eq!(inspector.escape(&source, 3), Escape::DismissQuestion);
+        assert_eq!(inspector.escape(&source, 0), Escape::StopTurn);
     }
 }

@@ -840,8 +840,13 @@ impl Render for Workspace {
                     } else if this.creating {
                         this.creating = false;
                         window.focus(&this.sidebar_focus, cx);
-                    } else if !this.work_ui.dismiss() && !this.dismiss_panel(cx) {
-                        this.stop(cx);
+                    } else {
+                        use crate::work_view::Escape;
+                        match this.work_ui.escape(this.source.as_ref(), this.selected) {
+                            Escape::CloseDetail | Escape::KeepApproval => {}
+                            Escape::DismissQuestion => this.dismiss_ask(cx),
+                            Escape::StopTurn => this.stop(cx),
+                        }
                     }
                     cx.notify();
                 }),
