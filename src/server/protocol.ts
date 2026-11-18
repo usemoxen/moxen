@@ -166,6 +166,8 @@ export interface ResearchProposal {
 export type CommandBody =
   | { readonly type: "prompt.improve"; readonly directory: string; readonly prompt: string; readonly modelSelection?: ModelSelection; readonly protectedText?: readonly string[] }
   | { readonly type: "project.create"; readonly workspaceRoot: string; readonly projectId?: string; readonly title?: string }
+  | { readonly type: "project.rename"; readonly projectId: string; readonly title: string }
+  | { readonly type: "project.remove"; readonly projectId: string }
   | {
       readonly type: "thread.create";
       /** Required unless `scratch` is set. */
@@ -446,6 +448,8 @@ export type WorkspaceGitCall = "changed" | "status" | "diff";
 export interface CommandResults {
   "prompt.improve": { readonly text: string; readonly provider: string; readonly model: string };
   "project.create": { readonly projectId: string; readonly created: boolean };
+  "project.rename": { readonly projectId: string; readonly title: string };
+  "project.remove": { readonly projectId: string };
   "thread.create": { readonly threadId: string } & Accepted;
   "thread.turn.start": StartedTurnSummary & Accepted;
   "thread.turn.interrupt": Accepted;
@@ -1110,6 +1114,10 @@ export function decodeCommand(value: unknown): Command {
         ...(asString(record.projectId) ? { projectId: asString(record.projectId) as string } : {}),
         ...(asString(record.title) ? { title: asString(record.title) as string } : {}),
       };
+    case "project.rename":
+      return { ...meta, type, projectId: requireField(record.projectId, type, "projectId"), title: requireField(record.title, type, "title") };
+    case "project.remove":
+      return { ...meta, type, projectId: requireField(record.projectId, type, "projectId") };
     case "thread.create": {
       const projectId = asString(record.projectId);
       const scratch = record.scratch === true;

@@ -198,6 +198,47 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
   return { project, created: true, command: buildProjectCreateCommand(normalized, title, createdAt, project.id) };
 }
 
+/** Renames a project: only its title changes, threads keep pointing at it. */
+export async function renameStoredProject(
+  root: string,
+  projectId: string,
+  title: string,
+  now: () => string = () => new Date().toISOString(),
+): Promise<StoredProject> {
+  const trimmed = title.trim();
+  if (!trimmed) {
+    throw new CliError("INVALID_PROJECT", "A project title cannot be empty.", { exitCode: 2 });
+  }
+  const all = await loadAll(root);
+  const at = all.findIndex((entry) => entry.id === projectId);
+  if (at < 0 || all[at]?.deletedAt != null) {
+    throw new CliError("PROJECT_NOT_FOUND", `No moxen project exists with id ${projectId}.`, {
+      details: { projectId },
+    });
+  }
+  const renamed: StoredProject = { ...all[at]!, title: trimmed, updatedAt: now() };
+  await saveAll(root, all.map((entry, index) => (index === at ? renamed : entry)));
+  return renamed;
+}
+
+/** Removes a project: a soft delete, so its threads stay readable. */
+export async function removeStoredProject(
+  root: string,
+  projectId: string,
+  now: () => string = () => new Date().toISOString(),
+): Promise<StoredProject> {
+  const all = await loadAll(root);
+  const at = all.findIndex((entry) => entry.id === projectId);
+  if (at < 0 || all[at]?.deletedAt != null) {
+    throw new CliError("PROJECT_NOT_FOUND", `No moxen project exists with id ${projectId}.`, {
+      details: { projectId },
+    });
+  }
+  const removed: StoredProject = { ...all[at]!, deletedAt: now(), updatedAt: now() };
+  await saveAll(root, all.map((entry, index) => (index === at ? removed : entry)));
+  return removed;
+}
+
 function buildProjectCreateCommand(
   workspaceRoot: string,
   title: string,

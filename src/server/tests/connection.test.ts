@@ -403,6 +403,19 @@ describe("DirectConnection dispatch", () => {
         workspaceRoot: "/elsewhere",
       })) as { projectId: string; created: boolean };
       expect(project.created).toBe(true);
+
+      const renamed = await connection.dispatch({
+        type: "project.rename",
+        projectId: "project-2",
+        title: "Renamed",
+      });
+      expect(renamed).toEqual({ projectId: "project-2", title: "Renamed" });
+
+      const removed = await connection.dispatch({ type: "project.remove", projectId: "project-2" });
+      expect(removed).toEqual({ projectId: "project-2" });
+      await expect(connection.dispatch({ type: "project.remove", projectId: "project-2" })).rejects.toMatchObject({
+        code: "PROJECT_NOT_FOUND",
+      });
     } finally {
       await connection.close();
     }

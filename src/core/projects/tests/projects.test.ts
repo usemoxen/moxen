@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureStoredProject,
   listStoredProjects,
+  removeStoredProject,
+  renameStoredProject,
   resolveStoredProject,
   workspaceRootsEqual,
 } from "../projects.js";
@@ -54,6 +56,43 @@ describe("projects registry", () => {
   it("enforces the existing policy", async () => {
     const root = await tmpRoot();
     await expect(ensureStoredProject(root, { workspaceRoot: "/repo", policy: "existing" })).rejects.toMatchObject({
+      code: "PROJECT_NOT_FOUND",
+    });
+  });
+
+  it("renames a project's title and leaves its threads' project alone", async () => {
+    const root = await tmpRoot();
+    const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo" });
+    const renamed = await renameStoredProject(root, project.id, "  Renamed  ");
+    expect(renamed.id).toBe(project.id);
+    expect(renamed.title).toBe("Renamed");
+    expect(renamed.workspaceRoot).toBe(project.workspaceRoot);
+    expect((await listStoredProjects(root)).map((entry) => entry.title)).toEqual(["Renamed"]);
+  });
+
+  it("refuses to rename a missing project or blank title", async () => {
+    const root = await tmpRoot();
+    await expect(renameStoredProject(root, "missing", "Name")).rejects.toMatchObject({
+      code: "PROJECT_NOT_FOUND",
+    });
+    const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo" });
+    await expect(renameStoredProject(root, project.id, "   ")).rejects.toMatchObject({
+      code: "INVALID_PROJECT",
+    });
+  });
+
+  it("removes a project with a soft delete and refuses it twice", async () => {
+    const root = await tmpRoot();
+    const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo" });
+    const removed = await removeStoredProject(root, project.id);
+    expect(removed.id).toBe(project.id);
+    expect(removed.deletedAt).not.toBeNull();
+    expect(await listStoredProjects(root)).toEqual([]);
+    expect(await resolveStoredProject(root, "/repo")).toBeNull();
+    await expect(removeStoredProject(root, project.id)).rejects.toMatchObject({
+      code: "PROJECT_NOT_FOUND",
+    });
+    await expect(renameStoredProject(root, project.id, "Name")).rejects.toMatchObject({
       code: "PROJECT_NOT_FOUND",
     });
   });

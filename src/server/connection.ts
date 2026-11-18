@@ -79,7 +79,7 @@ import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
-import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
 import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
@@ -1447,6 +1447,10 @@ export class DirectConnection implements ClientApi {
         return accepted;
       case "project.create":
         return await this.projectCreate(command);
+      case "project.rename":
+        return await this.projectRename(command);
+      case "project.remove":
+        return await this.projectRemove(command);
       case "thread.create":
         return await this.threadCreate(command);
       case "thread.turn.start":
@@ -1852,6 +1856,16 @@ export class DirectConnection implements ClientApi {
       ...(command.title ? { title: command.title } : {}),
     });
     return { projectId: ensured.project.id, created: true };
+  }
+
+  private async projectRename(command: CommandOf<"project.rename">): Promise<CommandResult<"project.rename">> {
+    const renamed = await renameStoredProject(this.storeRoot, command.projectId, command.title);
+    return { projectId: renamed.id, title: renamed.title };
+  }
+
+  private async projectRemove(command: CommandOf<"project.remove">): Promise<CommandResult<"project.remove">> {
+    const removed = await removeStoredProject(this.storeRoot, command.projectId);
+    return { projectId: removed.id };
   }
 
   /**
