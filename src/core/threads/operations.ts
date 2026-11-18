@@ -2646,6 +2646,17 @@ export async function removeThreadWorktree(storeRoot: string, thread: StoredThre
   }
 }
 
+/** Reattach the original branch when archive freed its clean checkout. */
+export async function restoreThreadWorktree(storeRoot: string, thread: StoredThread): Promise<void> {
+  if (thread.env.mode !== "worktree" || existsSync(thread.env.path)) return;
+  const dir = path.resolve(thread.env.path);
+  const project = await projectById(storeRoot, thread.projectId);
+  if (path.dirname(dir) !== path.join(path.resolve(storeRoot), "worktrees") || !thread.env.branch || !project) {
+    throw new CliError("THREAD_WORKTREE_MISSING", "The thread's original checkout is missing and could not be restored.");
+  }
+  await runProcess("git", ["worktree", "add", "--", dir, thread.env.branch], { cwd: project.workspaceRoot });
+}
+
 /** Per-project settings file, read from the workspace root. */
 export const PROJECT_FILE = `${APP_NAME}.json` as const;
 

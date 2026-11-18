@@ -183,8 +183,8 @@ export interface ListField {
 
 export type ListFieldKind =
   | { readonly type: "string"; readonly placeholder?: string; readonly multiline?: boolean }
-  | { readonly type: "integer"; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
-  | { readonly type: "number"; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "integer"; readonly min?: number; readonly max?: number; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "number"; readonly min?: number; readonly max?: number; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
   | { readonly type: "boolean" }
   | { readonly type: "secret" }
   | { readonly type: "enum"; readonly choices: readonly SettingChoice[] }
@@ -1017,7 +1017,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   {
     key: "ui.language",
     label: "Language",
-    description: "The language of the interface. Auto follows the terminal's locale (LC_ALL, LC_MESSAGES, LANG) and falls back to English. Only the TUI is translated; CLI output and --json stay in English.",
+    description: "The language of the interface. Auto follows the environment (LC_ALL, LC_MESSAGES, LANG) and the system locale, then falls back to English. CLI output and --json stay in English.",
     section: "interface",
     kind: {
       type: "enum",

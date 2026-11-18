@@ -79,7 +79,7 @@ import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
-import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
 import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
@@ -94,6 +94,7 @@ import { CliError } from "../core/errors.js";
 import { buildIdentity } from "../core/build.js";
 import {
   archiveThread,
+  restoreThread,
   createThread,
   deleteThread,
   inspectThread,
@@ -153,6 +154,7 @@ import {
   resolveProjectView,
   retitleThread,
   removeThreadWorktree,
+  restoreThreadWorktree,
   revertThread,
   runDueScheduledTurn,
   queueAgentMessage,
@@ -199,10 +201,12 @@ import {
   type QueryType,
   type ShellFrame,
   type StartedTurnSummary,
+  type ThreadDetail,
   type ThreadFrame,
   type PermissionDecision,
   type UserInputAnswers,
 } from "./protocol.js";
+import { nativeSubagents } from "./subagentrows.js";
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
@@ -1072,11 +1076,19 @@ export class DirectConnection implements ClientApi {
         if (stopped || this.closed) return;
         const fingerprint = `${version}#${this.researchRevision}#${JSON.stringify(projects)}`;
         if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
-        const threads = await listThreads(store, { status: "all" });
+        const records = await listThreads(store, { status: "all", includeArchived: true });
+        const threads = records.filter((thread) => thread.archivedAt == null);
+        const archivedThreads = records
+          .filter((thread) => thread.archivedAt != null && thread.hidden !== true)
+          .sort((a, b) => b.archivedAt!.localeCompare(a.archivedAt!))
+          .map(({ id, title }) => ({ id, title }));
         const now = Date.now();
         nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
-        const parents = new Map((await store.readDelegations().catch(() => [])).map((row) => [row.childThreadId, row.parentThreadId] as const));
+        const delegations = await store.readDelegations().catch(() => []);
+        const parents = new Map(delegations.map((row) => [row.childThreadId, row.parentThreadId] as const));
+        // Use the latest live link, matching the thread.delegation query.
+        const notifications = new Map(delegations.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.notify === true] as const));
         const seen = new Set<string>();
         const rows = await Promise.all(
           threads.map(async (entry) => {
@@ -1106,7 +1118,8 @@ export class DirectConnection implements ClientApi {
             // Threads from before the record kept its native subagents get
             // the list folded from their ledger once; the next poll shows it.
             if (entry.nativeSubagents === undefined) void backfillNativeSubagents(store, entry.id);
-            return toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            const envelope = toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            return notifications.get(entry.id) ? { ...envelope, delegationNotifies: true as const } : envelope;
           }),
         );
         for (const id of [...turnCache.keys()]) if (!seen.has(id)) turnCache.delete(id);
@@ -1114,12 +1127,12 @@ export class DirectConnection implements ClientApi {
         const researchRuns = threads.flatMap((thread) => [...(thread.pastResearchRuns ?? []), ...(thread.researchRun ? [thread.researchRun] : [])]);
         const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
         lastFingerprint = fingerprint;
-        const hash = JSON.stringify({ projects, threads: visible, researchRuns, researchProposals });
+        const hash = JSON.stringify({ projects, threads: visible, archivedThreads, researchRuns, researchProposals });
         if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
-            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
+            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(archivedThreads.length ? { archivedThreads } : {}), ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
           });
         }
       } catch (cause) {
@@ -1319,15 +1332,22 @@ export class DirectConnection implements ClientApi {
     };
   }
 
-  private async threadDetail(threadId: string): Promise<ThreadEnvelope | null> {
+  private async threadDetail(threadId: string): Promise<ThreadDetail | null> {
     const store = await this.store();
     const read = await readThread(store, threadId, { view: "messages" }).catch(() => null);
     if (!read) return null;
-    return { ...toThreadEnvelope(read.thread, read.turns, {
+    const thread = toThreadEnvelope(read.thread, read.turns, {
       messages: read.messages,
       activities: read.activities,
       checkpoints: await this.withCheckpointFiles(read.thread.env.path, read.checkpoints),
-    }), turnThroughput: turnThroughput(read.turns) };
+    });
+    const selection = read.turns.findLast((turn) => turn.modelSelection)?.modelSelection ?? thread.modelSelection;
+    const driver = selection ? driverKey(selection.instanceId) : null;
+    const subagentRows = nativeSubagents(thread.activities ?? []).map((row) => ({
+      ...row,
+      stoppable: row.running && (driver === "opencode" || driver === "harness"),
+    }));
+    return { ...thread, turnThroughput: turnThroughput(read.turns), ...(subagentRows.length > 0 ? { subagentRows } : {}) };
   }
 
   /**
@@ -1427,6 +1447,10 @@ export class DirectConnection implements ClientApi {
         return accepted;
       case "project.create":
         return await this.projectCreate(command);
+      case "project.rename":
+        return await this.projectRename(command);
+      case "project.remove":
+        return await this.projectRemove(command);
       case "thread.create":
         return await this.threadCreate(command);
       case "thread.turn.start":
@@ -1476,7 +1500,10 @@ export class DirectConnection implements ClientApi {
         await unsnoozeThread(await this.store(), command.threadId);
         return accepted;
       case "thread.archive":
-        await this.freeWorktree(await archiveThread(await this.store(), command.threadId));
+        await archiveThread(await this.store(), command.threadId, (thread) => this.freeWorktree(thread));
+        return accepted;
+      case "thread.restore":
+        await restoreThread(await this.store(), command.threadId, (thread) => restoreThreadWorktree(this.storeRoot, thread));
         return accepted;
       case "thread.delete":
         {
@@ -1819,16 +1846,22 @@ export class DirectConnection implements ClientApi {
 
   private async projectCreate(command: CommandOf<"project.create">): Promise<CommandResult<"project.create">> {
     const { workspaceRoot } = command;
-    const existing = await listStoredProjects(this.storeRoot).then(
-      (projects) => projects.find((candidate) => candidate.workspaceRoot === workspaceRoot) ?? null,
-    );
-    if (existing) return { projectId: existing.id, created: false };
     const ensured = await ensureStoredProject(this.storeRoot, {
       ...(command.projectId ? { id: command.projectId } : {}),
       workspaceRoot,
       ...(command.title ? { title: command.title } : {}),
     });
-    return { projectId: ensured.project.id, created: true };
+    return { projectId: ensured.project.id, created: ensured.created };
+  }
+
+  private async projectRename(command: CommandOf<"project.rename">): Promise<CommandResult<"project.rename">> {
+    const renamed = await renameStoredProject(this.storeRoot, command.projectId, command.title);
+    return { projectId: renamed.id, title: renamed.title };
+  }
+
+  private async projectRemove(command: CommandOf<"project.remove">): Promise<CommandResult<"project.remove">> {
+    const removed = await removeStoredProject(this.storeRoot, command.projectId);
+    return { projectId: removed.id };
   }
 
   /**

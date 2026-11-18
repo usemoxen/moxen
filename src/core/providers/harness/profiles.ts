@@ -31,6 +31,15 @@ function fail(label: string, message: string): never {
   throw new CliError("INVALID_CONFIG", `${label} ${message}`);
 }
 
+export const POSITIVE_PROFILE_INT_MIN = 1;
+export const PROFILE_NUMBER_BOUNDS = {
+  temperature: { min: 0, max: 5 },
+  topP: { min: 0, max: 1 },
+  topK: { min: 0, max: 100_000 },
+  minP: { min: 0, max: 1 },
+  fraction: { min: 0.3, max: 0.95 },
+} as const;
+
 function optionalString(input: Record<string, unknown>, key: string, label: string): string | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
@@ -41,13 +50,14 @@ function optionalString(input: Record<string, unknown>, key: string, label: stri
 function optionalPositiveInt(input: Record<string, unknown>, key: string, label: string): number | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) fail(`${label}.${key}`, "must be a positive whole number.");
+  if (typeof value !== "number" || !Number.isInteger(value) || value < POSITIVE_PROFILE_INT_MIN) fail(`${label}.${key}`, "must be a positive whole number.");
   return value;
 }
 
-function optionalNumber(input: Record<string, unknown>, key: string, label: string, min: number, max: number): number | undefined {
+function optionalNumber(input: Record<string, unknown>, key: keyof typeof PROFILE_NUMBER_BOUNDS, label: string): number | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
+  const { min, max } = PROFILE_NUMBER_BOUNDS[key];
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) fail(`${label}.${key}`, `must be a number from ${min} to ${max}.`);
   return value;
 }
@@ -139,10 +149,10 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
     if (typeof input.sampling !== "object" || input.sampling === null || Array.isArray(input.sampling)) fail(`${here}.sampling`, "must be an object.");
     const raw = input.sampling as Record<string, unknown>;
     const sampling: Record<string, unknown> = {};
-    const temperature = optionalNumber(raw, "temperature", `${here}.sampling`, 0, 5);
-    const topP = optionalNumber(raw, "topP", `${here}.sampling`, 0, 1);
-    const topK = optionalNumber(raw, "topK", `${here}.sampling`, 0, 100_000);
-    const minP = optionalNumber(raw, "minP", `${here}.sampling`, 0, 1);
+    const temperature = optionalNumber(raw, "temperature", `${here}.sampling`);
+    const topP = optionalNumber(raw, "topP", `${here}.sampling`);
+    const topK = optionalNumber(raw, "topK", `${here}.sampling`);
+    const minP = optionalNumber(raw, "minP", `${here}.sampling`);
     if (temperature !== undefined) sampling.temperature = temperature;
     if (topP !== undefined) sampling.topP = topP;
     if (topK !== undefined) sampling.topK = topK;
@@ -170,7 +180,7 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
       if (typeof raw.auto !== "boolean") fail(`${label}.auto`, "must be true or false.");
       compaction.auto = raw.auto;
     }
-    const fraction = optionalNumber(raw, "fraction", label, 0.3, 0.95);
+    const fraction = optionalNumber(raw, "fraction", label);
     if (fraction !== undefined) compaction.fraction = fraction;
     const tokens = optionalPositiveInt(raw, "tokens", label);
     if (tokens !== undefined) compaction.tokens = tokens;

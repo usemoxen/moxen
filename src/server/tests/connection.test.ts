@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadStore } from "../../core/threads/store.js";
 
-import type { CommandOf } from "../protocol.js";
+import type { CommandOf, ShellFrame, ThreadDetail } from "../protocol.js";
 import { decodeCommand } from "../protocol.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
@@ -403,6 +403,37 @@ describe("DirectConnection dispatch", () => {
         workspaceRoot: "/elsewhere",
       })) as { projectId: string; created: boolean };
       expect(project.created).toBe(true);
+
+      const renamed = await connection.dispatch({
+        type: "project.rename",
+        projectId: "project-2",
+        title: "Renamed",
+      });
+      expect(renamed).toEqual({ projectId: "project-2", title: "Renamed" });
+
+      const removed = await connection.dispatch({ type: "project.remove", projectId: "project-2" });
+      expect(removed).toEqual({ projectId: "project-2" });
+      await expect(connection.dispatch({ type: "project.remove", projectId: "project-2" })).rejects.toMatchObject({
+        code: "PROJECT_NOT_FOUND",
+      });
+
+      const revived = (await connection.dispatch({
+        type: "project.create",
+        workspaceRoot: "/elsewhere",
+      })) as { projectId: string; created: boolean };
+      expect(revived.projectId).toBe("project-2");
+      expect(revived.created).toBe(false);
+
+      const other = (await connection.dispatch({
+        type: "project.create",
+        projectId: "project-3",
+        title: "Other",
+        workspaceRoot: "/other",
+      })) as { projectId: string; created: boolean };
+      expect(other.created).toBe(true);
+      await expect(
+        connection.dispatch({ type: "project.rename", projectId: "project-2", title: "Other" }),
+      ).rejects.toMatchObject({ code: "PROJECT_ALREADY_EXISTS" });
     } finally {
       await connection.close();
     }
@@ -433,7 +464,7 @@ describe("DirectConnection subscriptions", () => {
       shellPollMs: 30,
       threadPollMs: 30,
     });
-    const frames: unknown[] = [];
+    const frames: ShellFrame[] = [];
     const unsubscribe = connection.subscribeShell(
       {},
       (item) => frames.push(item),
@@ -441,7 +472,7 @@ describe("DirectConnection subscriptions", () => {
     );
     try {
       await waitFor("shell sync", async () =>
-        frames.some((frame) => (frame as { kind?: string }).kind === "synchronized"),
+        frames.some((frame) => frame.kind === "synchronized"),
       );
       const workspaceRoot = await realpath(harness.work);
       const ensured = await ensureStoredProject(storeRoot(), { workspaceRoot });
@@ -451,9 +482,40 @@ describe("DirectConnection subscriptions", () => {
         title: "Shell",
         modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
       });
-      await waitFor("thread row", async () =>
-        frames.some((frame) => JSON.stringify(frame).includes("thread-shell")),
+      const latestSnapshot = () => frames.findLast((frame) => frame.kind === "snapshot");
+      await waitFor("thread row", async () => latestSnapshot()?.snapshot.threads.some((thread) => thread.id === "thread-shell") ?? false);
+      const now = harness.store.nowIso();
+      await harness.store.appendDelegation({
+        id: "shell-delegation", childThreadId: "thread-shell", parentThreadId: "parent",
+        prompt: "Run the shell test", status: "running", notify: true, createdAt: now, updatedAt: now,
+      });
+      const shellRow = () => latestSnapshot()?.snapshot.threads.find((thread) => thread.id === "thread-shell");
+      await waitFor("notifying task row", async () => shellRow()?.delegationNotifies === true);
+      expect(await connection.query({ type: "thread.delegation", threadId: "thread-shell" })).toEqual({ parentThreadId: "parent", notify: true });
+      await harness.store.updateDelegation("shell-delegation", { continuedIn: "continuation" });
+      await waitFor("the task still has a parent link but no longer notifies", async () =>
+        shellRow()?.parentThreadId === "parent" && shellRow()?.delegationNotifies === undefined,
       );
+      expect(await connection.query({ type: "thread.delegation", threadId: "thread-shell" })).toBeNull();
+      await connection.dispatch({ type: "thread.archive", threadId: "thread-shell" });
+      await waitFor("archived row", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return !snapshot?.threads.some((thread) => thread.id === "thread-shell")
+          && snapshot?.archivedThreads?.some((thread) => thread.id === "thread-shell" && thread.title === "Shell") === true;
+      });
+      await connection.dispatch({ type: "thread.restore", threadId: "thread-shell" });
+      await waitFor("restored row", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return snapshot?.threads.some((thread) => thread.id === "thread-shell") === true
+          && !snapshot.archivedThreads?.some((thread) => thread.id === "thread-shell");
+      });
+      await connection.dispatch({ type: "thread.delete", threadId: "thread-shell" });
+      await expect(connection.dispatch({ type: "thread.restore", threadId: "thread-shell" })).rejects.toMatchObject({ code: "THREAD_ARCHIVED" });
+      await waitFor("deleted row disappears", async () => {
+        const snapshot = latestSnapshot()?.snapshot;
+        return snapshot !== undefined && !snapshot.threads.some((thread) => thread.id === "thread-shell")
+          && !snapshot.archivedThreads?.some((thread) => thread.id === "thread-shell");
+      });
     } finally {
       unsubscribe();
       await connection.close();
@@ -959,7 +1021,7 @@ describe("DirectConnection model and session continuity", () => {
     }
   });
 
-  it("reads a native subagent after a restart by resuming the thread's OpenCode session", async () => {
+  it("lists native subagents in thread snapshots and reads their history after a restart", async () => {
     // OpenCode keeps each subagent as a child session that only a driver holding the parent's can read.
     class HistoryDriver extends RecordingDriver {
       readonly subagentHistory = async (threadId: string, agentId: string) =>
@@ -994,7 +1056,28 @@ describe("DirectConnection model and session continuity", () => {
     // A restart: a new process, a driver with no live session.
     const second = new HistoryDriver("ses_parent");
     const after = new DirectConnection({ storeRoot: harness.root, drivers: { ...harness.drivers, opencode: () => second } });
+    let detail: ThreadDetail | undefined;
+    const unsubscribe = after.subscribeThread("thread-m", {}, (frame) => {
+      if (frame.kind === "snapshot") detail = frame.snapshot.thread;
+    }, () => undefined);
     try {
+      const append = async (kind: string, payload: Record<string, unknown>) => {
+        await harness.store.appendLedger("thread-m", "activity", {
+          id: harness.store.newId(), threadId: "thread-m", turnId: null,
+          kind, summary: "", payload, createdAt: harness.store.nowIso(),
+        });
+      };
+      await append("subagent", { agentId: "ses_child", agentType: "explore", description: "Map auth", status: "started" });
+      await waitFor("the running subagent in the snapshot", async () => detail?.subagentRows?.length === 1);
+      expect(detail?.subagentRows?.[0]).toMatchObject({
+        agentId: "ses_child", description: "Map auth", running: true, stoppable: true,
+      });
+      await append("background.completed", { taskId: "ses_child", summary: "Auth lives in src/auth.ts" });
+      await waitFor("the finished subagent in the snapshot", async () => detail?.subagentRows?.[0]?.running === false);
+      expect(detail?.subagentRows?.[0]).toMatchObject({
+        running: false, stoppable: false, lastMessage: "Auth lives in src/auth.ts",
+      });
+
       const transcript = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_child" });
       expect(second.starts).toHaveLength(1);
       expect(second.starts[0]?.resumeCursor).toBe("ses_parent");
@@ -1005,6 +1088,7 @@ describe("DirectConnection model and session continuity", () => {
       const other = await after.query({ type: "thread.subagent", threadId: "thread-m", agentId: "ses_elsewhere" });
       expect(other.available).toBe(false);
     } finally {
+      unsubscribe();
       await after.close();
     }
   });

@@ -237,14 +237,14 @@ export async function createThread(
 
 export async function listThreads(
   store: ThreadStore,
-  options: { status?: ThreadStatus | "all"; projectId?: string } = {},
+  options: { status?: ThreadStatus | "all"; projectId?: string; includeArchived?: boolean } = {},
 ): Promise<StoredThread[]> {
   const status = options.status ?? "active";
   const now = Date.parse(store.nowIso());
   const threads: StoredThread[] = [];
   for (const id of await store.listThreadIds()) {
     const thread = await store.readThreadRecord(id);
-    if (!thread || thread.archivedAt != null || thread.deletedAt != null) continue;
+    if (!thread || thread.deletedAt != null || (thread.archivedAt != null && !options.includeArchived)) continue;
     if (options.projectId !== undefined && thread.projectId !== options.projectId) continue;
     if (status !== "all" && threadStatus(thread, now) !== status) continue;
     threads.push(thread);
@@ -1691,7 +1691,7 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
   });
 }
 
-export async function archiveThread(store: ThreadStore, rawThreadId: string): Promise<StoredThread> {
+export async function archiveThread(store: ThreadStore, rawThreadId: string, releaseCheckout?: (thread: StoredThread) => Promise<void>): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
@@ -1704,8 +1704,23 @@ export async function archiveThread(store: ThreadStore, rawThreadId: string): Pr
     }
     const next: StoredThread = { ...thread, archivedAt: thread.archivedAt ?? now, updatedAt: now };
     await store.writeThreadRecord(next);
+    await releaseCheckout?.(next);
     store.emit(threadId, "archived");
     return next;
+  });
+}
+
+export async function restoreThread(store: ThreadStore, rawThreadId: string, restoreCheckout: (thread: StoredThread) => Promise<void>): Promise<void> {
+  const threadId = requireThreadId(rawThreadId);
+  await store.withThreadLock(threadId, async () => {
+    const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    if (thread.deletedAt != null || thread.hidden === true) {
+      throw new CliError("THREAD_ARCHIVED", `Thread ${threadId} cannot be restored.`, { exitCode: 4 });
+    }
+    if (thread.archivedAt == null) return;
+    await restoreCheckout(thread);
+    await store.writeThreadRecord({ ...thread, archivedAt: null, updatedAt: store.nowIso() });
+    store.emit(threadId, "restored");
   });
 }
 
