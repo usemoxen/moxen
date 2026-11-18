@@ -16,6 +16,10 @@ pub struct Step {
     pub failed: bool,
     pub running: bool,
     pub index: usize,
+    /// Fixed width of the verb column, as in the thread view (58pt). None
+    /// lets the verb take its natural width so the target keeps the rest of
+    /// a narrow column.
+    pub verb_width: Option<f32>,
     /// How far the row itself has appeared, 0 to 1 (the fold opening).
     pub shown: f32,
     /// How far its output has opened, 0 to 1, or `None` when closed.
@@ -31,6 +35,7 @@ pub fn render(step: Step, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoEl
         failed,
         running,
         index,
+        verb_width,
         shown,
         open,
     } = step;
@@ -106,8 +111,8 @@ pub fn render(step: Step, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoEl
                 )
                 .child(
                     div()
-                        .w(px(58.))
                         .flex_shrink_0()
+                        .when_some(verb_width, |s, width| s.w(px(width)))
                         .font_family(theme::FONT)
                         .text_size(px(14.))
                         .text_color(color("ink-2"))
