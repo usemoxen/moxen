@@ -416,6 +416,24 @@ describe("DirectConnection dispatch", () => {
       await expect(connection.dispatch({ type: "project.remove", projectId: "project-2" })).rejects.toMatchObject({
         code: "PROJECT_NOT_FOUND",
       });
+
+      const revived = (await connection.dispatch({
+        type: "project.create",
+        workspaceRoot: "/elsewhere",
+      })) as { projectId: string; created: boolean };
+      expect(revived.projectId).toBe("project-2");
+      expect(revived.created).toBe(false);
+
+      const other = (await connection.dispatch({
+        type: "project.create",
+        projectId: "project-3",
+        title: "Other",
+        workspaceRoot: "/other",
+      })) as { projectId: string; created: boolean };
+      expect(other.created).toBe(true);
+      await expect(
+        connection.dispatch({ type: "project.rename", projectId: "project-2", title: "Other" }),
+      ).rejects.toMatchObject({ code: "PROJECT_ALREADY_EXISTS" });
     } finally {
       await connection.close();
     }

@@ -96,4 +96,25 @@ describe("projects registry", () => {
       code: "PROJECT_NOT_FOUND",
     });
   });
+
+  it("revives a removed project on ensure with the same normalized root", async () => {
+    const root = await tmpRoot();
+    const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo/" });
+    await removeStoredProject(root, project.id);
+    const revived = await ensureStoredProject(root, { workspaceRoot: "/repo" });
+    expect(revived.created).toBe(false);
+    expect(revived.project.id).toBe(project.id);
+    expect(revived.project.deletedAt).toBeNull();
+    expect(revived.command).toBeNull();
+    expect((await listStoredProjects(root)).map((entry) => entry.id)).toEqual([project.id]);
+  });
+
+  it("refuses a rename onto another live project's title", async () => {
+    const root = await tmpRoot();
+    const first = await ensureStoredProject(root, { workspaceRoot: "/one" });
+    const second = await ensureStoredProject(root, { workspaceRoot: "/two" });
+    await expect(renameStoredProject(root, second.project.id, first.project.title)).rejects.toMatchObject({
+      code: "PROJECT_ALREADY_EXISTS",
+    });
+  });
 });

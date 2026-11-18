@@ -1846,16 +1846,12 @@ export class DirectConnection implements ClientApi {
 
   private async projectCreate(command: CommandOf<"project.create">): Promise<CommandResult<"project.create">> {
     const { workspaceRoot } = command;
-    const existing = await listStoredProjects(this.storeRoot).then(
-      (projects) => projects.find((candidate) => candidate.workspaceRoot === workspaceRoot) ?? null,
-    );
-    if (existing) return { projectId: existing.id, created: false };
     const ensured = await ensureStoredProject(this.storeRoot, {
       ...(command.projectId ? { id: command.projectId } : {}),
       workspaceRoot,
       ...(command.title ? { title: command.title } : {}),
     });
-    return { projectId: ensured.project.id, created: true };
+    return { projectId: ensured.project.id, created: ensured.created };
   }
 
   private async projectRename(command: CommandOf<"project.rename">): Promise<CommandResult<"project.rename">> {

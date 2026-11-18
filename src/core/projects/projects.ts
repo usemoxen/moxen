@@ -172,10 +172,24 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
       details: { workspaceRoot: normalized, projectPolicy: policy },
     });
   }
+  const all = await loadAll(root);
+  // A removed project is a soft delete: reopening its folder revives it with
+  // its id, so its threads and per-project settings come back.
+  const deleted = all.find(
+    (entry) => entry.deletedAt != null && workspaceRootsEqual(entry.workspaceRoot, normalized),
+  );
+  if (deleted) {
+    const now = input.now ?? (() => new Date().toISOString());
+    const revived: StoredProject = { ...deleted, workspaceRoot: normalized, deletedAt: null, updatedAt: now() };
+    await saveAll(
+      root,
+      all.map((entry) => (entry.id === deleted.id ? revived : entry)),
+    );
+    return { project: revived, created: false, command: null };
+  }
   const now = input.now ?? (() => new Date().toISOString());
   const createdAt = now();
   const title = input.title?.trim() || projectTitle(normalized);
-  const all = await loadAll(root);
   const id = input.id?.trim() || randomUUID();
   if (input.id?.trim() && all.some((entry) => entry.id === id)) {
     throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with id ${id}.`, {
@@ -214,6 +228,15 @@ export async function renameStoredProject(
   if (at < 0 || all[at]?.deletedAt != null) {
     throw new CliError("PROJECT_NOT_FOUND", `No moxen project exists with id ${projectId}.`, {
       details: { projectId },
+    });
+  }
+  const conflict = all.find(
+    (entry) => entry.id !== projectId && entry.deletedAt == null && entry.title === trimmed,
+  );
+  if (conflict) {
+    throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with title "${trimmed}".`, {
+      exitCode: 4,
+      details: { projectId, title: trimmed, conflictingProjectId: conflict.id },
     });
   }
   const renamed: StoredProject = { ...all[at]!, title: trimmed, updatedAt: now() };
