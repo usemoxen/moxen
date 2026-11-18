@@ -446,6 +446,23 @@ describe("claude driver permissions", () => {
     expect(switchable).not.toContain("ExitPlanMode");
   });
 
+  it("never offers Claude Code's native subagent tool, whatever the user switched off", async () => {
+    // Provider-native subagents escape Moxen's delegation tracking: fan out through `delegate` instead.
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, disabledNativeTools: ["WebSearch"] }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    expect(transport.created[0]!.options.disallowedTools).toEqual(["EnterPlanMode", "ExitPlanMode", "Agent", "WebSearch"]);
+    // A stored `Agent` entry changes nothing: the tool stays blocked, with no settings row to switch it back on.
+    const stored = new FakeTransport([[initMessage()]]);
+    await Effect.runPromise(new ClaudeDriver({ transport: stored }).startSession({ ...START, disabledNativeTools: ["Agent"] }));
+    expect(stored.created[0]!.options.disallowedTools).toEqual(expect.arrayContaining(["Agent"]));
+    const switchable = CLAUDE_NATIVE_TOOLS.map((tool) => tool.name);
+    expect(switchable).not.toContain("Agent");
+    // The rest of the Agents group stays the user's to switch: only `Agent` left the list.
+    expect(switchable).toEqual(expect.arrayContaining(["SendMessage", "Skill"]));
+  });
+
   it("allows everything in full-access except questions", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
