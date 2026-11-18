@@ -88,7 +88,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .pt(px(4.))
         .pb(px(12.))
         .flex()
-        .flex_col();
+        .flex_col()
+        .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
+            // Scrolling moves the rows the tip names by its window Y, so a
+            // kept tip would point at another thread's title.
+            this.clear_thread_tip();
+            cx.notify();
+        }));
     let mut projects: Vec<&str> = vec![];
     let mut nested: Option<Div> = None;
     for i in visible(w, &threads) {
@@ -167,6 +173,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     let at = Some((i, f32::from(event.position.y)));
                     if this.thread_tip != at {
                         this.thread_tip = at;
+                        let threads = this.source.list_threads();
+                        this.thread_tip_order = visible(this, &threads);
                         cx.notify();
                     }
                 }))
@@ -416,9 +424,24 @@ fn row_tip(title: &str, truncated: bool, selected: bool, menu_open: bool) -> Opt
     }
 }
 
+/// Keeps the sidebar row tip only while the listed rows are the ones it was
+/// taken against (`order` in `sync_threads`). A delete, collapse, regroup or
+/// reorder moves the rows, so the stored window Y would point at another
+/// thread's title.
+pub fn retain_tip(
+    tip: Option<(ThreadId, f32)>,
+    listed: &[ThreadId],
+    now: &[ThreadId],
+) -> Option<(ThreadId, f32)> {
+    match tip {
+        Some(kept) if listed == now => Some(kept),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::row_tip;
+    use super::{retain_tip, row_tip};
 
     #[test]
     fn the_tip_shows_a_truncated_title_and_nothing_else() {
@@ -433,5 +456,20 @@ mod tests {
     fn selecting_the_row_or_opening_a_menu_drops_the_tip() {
         assert_eq!(row_tip("a very long thread title", true, true, false), None);
         assert_eq!(row_tip("a very long thread title", true, false, true), None);
+    }
+
+    #[test]
+    fn the_tip_clears_whenever_the_listed_rows_change() {
+        let tip = Some((3, 240.));
+        let listed = vec![0, 1, 2, 3];
+        assert_eq!(retain_tip(tip, &listed, &listed), tip);
+        // A reorder moves the rows under the stored Y.
+        assert_eq!(retain_tip(tip, &listed, &[0, 2, 1, 3]), None);
+        // A delete drops the hovered row's place; a collapse or regroup
+        // lists fewer rows; a new thread lists more.
+        assert_eq!(retain_tip(tip, &listed, &[0, 1, 2]), None);
+        assert_eq!(retain_tip(tip, &listed, &[0, 1]), None);
+        assert_eq!(retain_tip(tip, &listed, &[0, 1, 2, 3, 4]), None);
+        assert_eq!(retain_tip(None, &listed, &listed), None);
     }
 }

@@ -22,6 +22,8 @@ use std::{
 /// The turn keeps at least this width; the inspector gives way first.
 const MIN_TURN: f32 = 480.;
 const MIN_INSPECTOR: f32 = 320.;
+/// The sidebar row tip's height: one 16px line in 5px of vertical padding.
+const THREAD_TIP_HEIGHT: f32 = 26.;
 
 /// The menu open over the composer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +108,10 @@ pub struct Workspace {
     /// its title is truncated: the full title shows beside the row instead
     /// of a window tooltip over the rows below.
     pub thread_tip: Option<(ThreadId, f32)>,
+    /// The listed rows the tip was taken against. The tip names a row by its
+    /// window Y, so any change to this list (delete, collapse, regroup,
+    /// reorder) moves the rows and drops the tip.
+    pub(crate) thread_tip_order: Vec<ThreadId>,
     pub inspector_width: f32,
     pub resizing_inspector: bool,
     /// The Git and Diff tabs' own state.
@@ -352,6 +358,7 @@ impl Workspace {
             },
             settled_open: false,
             thread_tip: None,
+            thread_tip_order: vec![],
             inspector_width: theme::INSPECTOR,
             resizing_inspector: false,
             search,
@@ -459,6 +466,15 @@ impl Workspace {
         }
         self.sync_transcript();
         self.take_news(opened, cx);
+        // The tip names a row by its window Y: when the listed rows changed
+        // under it (delete, collapse, regroup, reorder), it would point at
+        // another thread's title, so drop it.
+        let listed = crate::sidebar::visible(self, &self.source.list_threads());
+        self.thread_tip =
+            crate::sidebar::retain_tip(self.thread_tip, &self.thread_tip_order, &listed);
+        if self.thread_tip.is_none() {
+            self.thread_tip_order.clear();
+        }
     }
     /// What the source reports since the last look: a thread this window
     /// started, a project it added, and anything that failed.
@@ -1035,8 +1051,13 @@ impl Workspace {
         self.dropdown = None;
         // A click selects the row, which drops its tip: the full title
         // would otherwise stay where it opened, over the rows below.
-        self.thread_tip = None;
+        self.clear_thread_tip();
         cx.notify();
+    }
+    /// Drops the sidebar row tip and the listed rows it was taken against.
+    pub fn clear_thread_tip(&mut self) {
+        self.thread_tip = None;
+        self.thread_tip_order.clear();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread_form.is_some() {
@@ -1469,11 +1490,15 @@ impl Render for Workspace {
                 else {
                     return s;
                 };
+                // Centred on the row, kept inside the window: the tip must
+                // not run past the bottom edge either.
+                let max_top =
+                    (f32::from(window.viewport_size().height) - THREAD_TIP_HEIGHT).max(0.);
                 s.child(
                     div()
                         .absolute()
                         .left(px(theme::SIDEBAR + 8.))
-                        .top(px((y - 13.).max(0.)))
+                        .top(px((y - THREAD_TIP_HEIGHT / 2.).max(0.).min(max_top)))
                         .flex()
                         .items_center()
                         .px(px(8.))
