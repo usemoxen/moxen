@@ -247,6 +247,11 @@ impl Workspace {
             window,
             |this, _, e: &Submitted, window, cx| {
                 if this.palette_open {
+                    // Enter on an empty query does nothing: it must not
+                    // activate the first row.
+                    if e.0.trim().is_empty() {
+                        return;
+                    }
                     crate::palette::pick_first(this, &e.0, window, cx);
                 } else {
                     this.search

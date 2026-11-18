@@ -181,6 +181,12 @@ pub enum Submission<'a> {
     Revert { restore_files: bool },
 }
 
+/// Thread and project titles: trim and collapse inner whitespace, like the
+/// server's `normalizeProjectTitle`.
+fn normalize_title(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl Form {
     fn input(&self) -> Option<&'static str> {
         match self {
@@ -352,8 +358,13 @@ impl Workspace {
         }
         let action = match item {
             Item::Rename => {
-                let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if title.is_empty() || title == self.source.list_threads()[id].title {
+                let title = normalize_title(text);
+                // An empty Enter is not a rename: leave the form open, as
+                // before empty submits reached this path.
+                if title.is_empty() {
+                    return;
+                }
+                if title == self.source.list_threads()[id].title {
                     self.close_thread_action(window, cx);
                     return;
                 }
@@ -802,8 +813,13 @@ impl Workspace {
         match form {
             ProjectForm::Rename(id) => {
                 let id = id.clone();
-                let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if title.is_empty() || title == project_title(self, &id) {
+                let title = normalize_title(&text);
+                // An empty Enter is not a rename: leave the form open, as
+                // before empty submits reached this path.
+                if title.is_empty() {
+                    return;
+                }
+                if title == project_title(self, &id) {
                     self.close_project_action(window, cx);
                     return;
                 }
@@ -817,6 +833,11 @@ impl Workspace {
                 {
                     self.problem =
                         Some(format!("A project already exists with title \"{title}\"."));
+                    // The submit cleared the field: put the typed name back so
+                    // it can be fixed and saved, like the refused
+                    // thread-action path does.
+                    self.action_input
+                        .update(cx, |input, cx| input.set_text(title, cx));
                     cx.notify();
                     return;
                 }

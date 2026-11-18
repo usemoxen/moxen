@@ -651,7 +651,8 @@ impl ThreadSource for MockSource {
         self.added = Some(path);
     }
     fn rename_project(&mut self, id: &str, title: String) {
-        let title = title.trim().to_string();
+        // Collapses like the server's `normalizeProjectTitle`.
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
         if title.is_empty() {
             return;
         }

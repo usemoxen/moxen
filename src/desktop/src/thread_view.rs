@@ -570,9 +570,15 @@ fn composer(
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .when_some(w.problem.clone(), |s, message| {
-                    s.child(problem(message, cx))
-                })
+                // While the project form is open the error shows inline in
+                // the form, not as a toast above the composer.
+                .when_some(
+                    w.project_form
+                        .is_none()
+                        .then(|| w.problem.clone())
+                        .flatten(),
+                    |s, message| s.child(problem(message, cx)),
+                )
                 .when(!waiting.is_empty(), |s| {
                     s.child(queue_strip(&waiting, running, cx))
                 })

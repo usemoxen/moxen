@@ -267,6 +267,11 @@ impl Workspace {
 
     /// The written answer to the question shown.
     pub fn submit_custom(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // An empty Enter is not an answer: leave the field open, as before
+        // empty submits reached this path.
+        if text.trim().is_empty() {
+            return;
+        }
         self.custom_open = false;
         window.focus(&self.ask_focus, cx);
         let Some(ask) = self.source.ask(self.selected) else {
