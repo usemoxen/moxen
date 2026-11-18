@@ -134,6 +134,31 @@ pub fn show_fewer_branches() -> String {
         .to_string()
 }
 
+/// The sidebar's age column in the TUI's words. The model writes compact
+/// tokens (`relative_age`: `now`, `45s`, `12m`, `3h`, `4d`); `now` is
+/// `time.now` ("ahora"), and minute/hour tokens use the TUI's duration forms
+/// (`time.minutes`, `time.hours`), which read the same in both languages.
+/// Seconds and days have no TUI form, so they stay as the model wrote them.
+pub fn age(raw: &str) -> String {
+    if !spanish() {
+        return raw.to_string();
+    }
+    if raw == "now" {
+        return message("time.now").to_string();
+    }
+    let token = |suffix: char, key: &'static str, name: &str| {
+        raw.strip_suffix(suffix)
+            .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .map(|number| fill(key, &[(name, number)]))
+    };
+    if let Some(text) =
+        token('m', "time.minutes", "{m}").or_else(|| token('h', "time.hours", "{h}"))
+    {
+        return text;
+    }
+    raw.to_string()
+}
+
 pub fn tr(text: &str) -> Cow<'_, str> {
     if spanish() {
         // The settings catalog names exact settings strings, so it stays
@@ -251,9 +276,11 @@ mod tests {
     #[test]
     fn review_strings_resolve_to_the_tuis_spanish() {
         // Every desktop string the MXN-345 review routes through the TUI's
-        // own Spanish rather than inventing its own: the chip, the counters,
-        // the mode, the branches toggle, the git words, the run header, the
-        // background count and the idle badge.
+        // own Spanish rather than inventing its own: the counters, the mode,
+        // the branches toggle, the git words, the run header, the background
+        // count and the idle badge. The Actions chip is not one of those: it
+        // is a desktop word (`desktop_word`) that happens to match the TUI's
+        // wording, and the TUI catalog names no "Actions" string.
         apply(Some("es-ES"), None);
         assert_eq!(tr("Actions"), "Acciones");
         assert_eq!(step_count(3, 6), "3 de 6");
@@ -278,6 +305,106 @@ mod tests {
         assert_eq!(step_count(3, 6), "3 of 6");
         assert_eq!(of_total(3, 6), "3 of 6");
         assert_eq!(show_more_branches(2), "Show 2 more (remotes included)");
+    }
+
+    #[test]
+    fn queue_git_and_age_strings_resolve_to_the_tuis_spanish() {
+        // Every desktop string the MXN-345 round-3 review routes through the
+        // TUI's own Spanish: the queue row, the PR card, the git panel words
+        // and the sidebar ages. Values the code compares against (`track()`'s
+        // "in sync") stay English; only the render edge translates.
+        use crate::git::{Branch, Request, RequestState, Tone};
+        apply(Some("es-ES"), None);
+        // The queue row lowercases the queued token and keeps the TUI's chip
+        // casing (retener/retirar lowercase, Editar capitalized).
+        assert_eq!(message("queued.queued_7b2f").to_lowercase(), "en cola");
+        assert_eq!(message("queue.action.hold"), "retener");
+        assert_eq!(message("skills.edit"), "Editar");
+        assert_eq!(message("queue.action.remove"), "retirar");
+        // The PR card states and review outcome.
+        assert_eq!(RequestState::Open.label(), "Abierta");
+        assert_eq!(RequestState::Draft.label(), "Borrador");
+        assert_eq!(RequestState::Merged.label(), "Fusionada");
+        assert_eq!(RequestState::Closed.label(), "Cerrada");
+        assert_eq!(message("git.review_required_d01e"), "falta revisión");
+        let review = |decision: &str| Request {
+            number: 1,
+            title: "t".into(),
+            state: RequestState::Open,
+            url: None,
+            target: None,
+            review: Some(decision.into()),
+            checks: None,
+        };
+        assert_eq!(
+            review("REVIEW_REQUIRED").review_label(),
+            Some((message("git.review_required_d01e"), Tone::Pending))
+        );
+        assert_eq!(fill("git.into", &[("{branch}", "main")]), " · a main");
+        // The git panel words.
+        assert_eq!(
+            fill("git.otherOpen", &[("{what}", "PR")]),
+            "Otros PR abiertos"
+        );
+        assert_eq!(message("git.branches_dfc7"), "Ramas");
+        assert_eq!(message("git.in_sync_1199"), "sincronizado");
+        assert_eq!(
+            message("git.checks_some_failing_590a").trim_start(),
+            "comprobaciones, alguna falla"
+        );
+        assert_eq!(message("forge.commentField"), "Comentario");
+        assert_eq!(message("git.refresh_fc78").trim_start(), "Actualizar");
+        assert_eq!(fill("git.localCount", &[("{count}", "5")]), "5 locales");
+        assert_eq!(
+            fill("git.showMoreCommits", &[("{count}", "5")]).trim_start(),
+            "Mostrar 5 más"
+        );
+        assert_eq!(
+            message("git.open_the_failing_run_733c").trim_start(),
+            "abrir la ejecución que falla ↗"
+        );
+        // The compared-against value stays English; only the render edge
+        // translates it through the key above.
+        assert_eq!(
+            Branch {
+                name: "main".into(),
+                current: true,
+                remote: false,
+                ahead: Some(0),
+                behind: Some(0),
+            }
+            .track(),
+            "in sync"
+        );
+        // The sidebar ages: now and the TUI's minute/hour forms; seconds and
+        // days have no TUI form and stay as the model wrote them.
+        assert_eq!(age("now"), "ahora");
+        assert_eq!(age("5m"), "5 min");
+        assert_eq!(age("2h"), "2 h");
+        assert_eq!(age("45s"), "45s");
+        assert_eq!(age("3d"), "3d");
+        apply(Some("en"), None);
+        assert_eq!(RequestState::Open.label(), "Open");
+        assert_eq!(
+            review("REVIEW_REQUIRED").review_label().unwrap().0,
+            "review required"
+        );
+        assert_eq!(fill("git.into", &[("{branch}", "main")]), " · into main");
+        assert_eq!(fill("git.otherOpen", &[("{what}", "PR")]), "Other open PRs");
+        assert_eq!(fill("git.localCount", &[("{count}", "5")]), "5 local");
+        assert_eq!(
+            fill("git.showMoreCommits", &[("{count}", "5")]).trim_start(),
+            "Show 5 more"
+        );
+        assert_eq!(message("git.refresh_fc78").trim_start(), "Refresh");
+        assert_eq!(
+            message("git.open_the_failing_run_733c").trim_start(),
+            "open the failing run ↗"
+        );
+        // English keeps the sidebar's compact tokens, as the TUI does.
+        assert_eq!(age("now"), "now");
+        assert_eq!(age("5m"), "5m");
+        assert_eq!(age("2h"), "2h");
     }
 
     #[test]

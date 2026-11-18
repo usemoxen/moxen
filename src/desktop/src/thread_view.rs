@@ -1515,7 +1515,9 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
             } else if item.scheduled.is_some() {
                 "scheduled".to_string()
             } else {
-                "queued".to_string()
+                // The TUI's queued word (`queued.queued_7b2f`), lowercased the
+                // way this strip reads it.
+                crate::language::message("queued.queued_7b2f").to_lowercase()
             };
             div()
                 .flex()
@@ -1570,23 +1572,37 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
                         this.edit_queued(&hold, QueueEdit::Release, cx)
                     }))
                 } else {
-                    chip("queue-hold", at, "Keep it back until released", "Hold").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.edit_queued(&hold, QueueEdit::Hold, cx)
-                        }),
+                    chip(
+                        "queue-hold",
+                        at,
+                        "Keep it back until released",
+                        crate::language::message("queue.action.hold"),
                     )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_queued(&hold, QueueEdit::Hold, cx)
+                    }))
                 })
                 .child(
-                    chip("queue-edit", at, "Take it back to edit", "Edit").on_click(cx.listener(
-                        move |this, _, window, cx| this.edit_queued_text(&edit, window, cx),
-                    )),
+                    chip(
+                        "queue-edit",
+                        at,
+                        "Take it back to edit",
+                        crate::language::message("skills.edit"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_queued_text(&edit, window, cx)
+                    })),
                 )
                 .child(
-                    chip("queue-remove", at, "Remove without sending", "Remove").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.edit_queued(&remove, QueueEdit::Remove, cx)
-                        }),
-                    ),
+                    chip(
+                        "queue-remove",
+                        at,
+                        "Remove without sending",
+                        crate::language::message("queue.action.remove"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_queued(&remove, QueueEdit::Remove, cx)
+                    })),
                 )
                 .when(running && at == 0 && !item.held, |s| {
                     s.child(

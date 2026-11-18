@@ -585,7 +585,7 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                     s.child(
                         div()
                             .text_color(color("ink-2"))
-                            .child(format!("into {target}")),
+                            .child(crate::language::fill("git.into", &[("{branch}", &target)])),
                     )
                 }),
         )
@@ -632,13 +632,18 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                         .items_center()
                         .gap(px(8.))
                         .children(glance(Some(checks)))
-                        .child(div().text_size(px(12.5)).text_color(color("ink-2")).child(
-                            match tone {
-                                Tone::Passed => "checks passed",
-                                Tone::Failed => "some checks failing",
-                                Tone::Pending => "some checks running",
-                            },
-                        )),
+                        .child(
+                            div().text_size(px(12.5)).text_color(color("ink-2")).child(
+                                match tone {
+                                    Tone::Passed => "checks passed",
+                                    Tone::Failed => {
+                                        crate::language::message("git.checks_some_failing_590a")
+                                            .trim_start()
+                                    }
+                                    Tone::Pending => "some checks running",
+                                },
+                            ),
+                        ),
                 )
                 .when(!status.runs.is_empty(), |s| {
                     s.child(div().ml(px(-16.)).child(runs_list(
@@ -666,14 +671,18 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                         div()
                             .text_size(px(13.))
                             .opacity(0.45)
-                            .child("Comment")
+                            .child(crate::language::message("forge.commentField"))
                             .into_any_element()
                     } else {
-                        action("request-comment", "Comment", "ink-2")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_form(Form::Comment { number }, window, cx)
-                            }))
-                            .into_any_element()
+                        action(
+                            "request-comment",
+                            crate::language::message("forge.commentField"),
+                            "ink-2",
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_form(Form::Comment { number }, window, cx)
+                        }))
+                        .into_any_element()
                     })
                     .child(dot())
                     .children(if armed {
@@ -864,7 +873,7 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         .collect();
     if kind.is_some() && !others.is_empty() {
         tab = tab.child(heading(
-            &format!("Other open {noun}s"),
+            &crate::language::fill("git.otherOpen", &[("{what}", noun)]),
             others.len().to_string(),
         ));
         tab = tab.children(others.into_iter().enumerate().map(|(i, request)| {
@@ -917,7 +926,10 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     } else {
         overview.branches.len() - branches.len()
     };
-    tab = tab.child(heading("Branches", format!("{} local", local.len())));
+    tab = tab.child(heading(
+        crate::language::message("git.branches_dfc7"),
+        crate::language::fill("git.localCount", &[("{count}", &local.len().to_string())]),
+    ));
     let shown_branch = git.branch.clone().or_else(|| overview.branch.clone());
     tab = tab.children(branches.into_iter().enumerate().map(|(i, branch)| {
         let active = shown_branch.as_deref() == Some(branch.name.as_str());
@@ -953,7 +965,13 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                     } else {
                         "held"
                     }))
-                    .child(branch.track()),
+                    // `track()` stays English for the comparison above; only
+                    // this render edge reads the TUI's word.
+                    .child(if branch.track() == "in sync" {
+                        crate::language::message("git.in_sync_1199").to_string()
+                    } else {
+                        branch.track()
+                    }),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 let id = this.selected;
@@ -1016,7 +1034,12 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                         &if w.git_ui.more_commits {
                             "Show fewer commits".to_string()
                         } else {
-                            format!("Show {} more commits", overview.commits.len() - count)
+                            crate::language::fill(
+                                "git.showMoreCommits",
+                                &[("{count}", &(overview.commits.len() - count).to_string())],
+                            )
+                            .trim_start()
+                            .to_string()
                         },
                         "ink-2",
                     )
@@ -1028,14 +1051,21 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             );
         }
     }
-    tab.child(div().px(px(16.)).pt(px(10.)).child(
-        action("git-refresh", "Refresh", "ink-2").on_click(cx.listener(|this, _, _, cx| {
-            let id = this.selected;
-            let branch = this.source.git(id).branch.clone();
-            this.source.read_git(id, branch);
-            cx.notify();
-        })),
-    ))
+    tab.child(
+        div().px(px(16.)).pt(px(10.)).child(
+            action(
+                "git-refresh",
+                crate::language::message("git.refresh_fc78").trim_start(),
+                "ink-2",
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                let id = this.selected;
+                let branch = this.source.git(id).branch.clone();
+                this.source.read_git(id, branch);
+                cx.notify();
+            })),
+        ),
+    )
 }
 
 /// The checked-out branch has no request: where one would merge, and who opens it.
@@ -1368,8 +1398,12 @@ fn commit_body(
             .child(runs_list(runs, w.git_ui.more_runs, cx))
             .children(failing.map(|url| {
                 div().px(px(16.)).pt(px(4.)).child(
-                    action("failing-run", "Open the failing run", "ink-2")
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                    action(
+                        "failing-run",
+                        crate::language::message("git.open_the_failing_run_733c").trim_start(),
+                        "ink-2",
+                    )
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             }));
     }

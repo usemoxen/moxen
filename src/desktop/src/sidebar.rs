@@ -171,7 +171,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     .when(selected, |s| s.text_color(color("ink")))
                     .child(t.title.clone()),
             )
-            .child(meta(t.activity.clone()))
+            .child(meta(crate::language::age(&t.activity)))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

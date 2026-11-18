@@ -370,12 +370,12 @@ pub enum RequestState {
 
 impl RequestState {
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Open => "Open",
-            Self::Draft => "Draft",
-            Self::Merged => "Merged",
-            Self::Closed => "Closed",
-        }
+        crate::language::message(match self {
+            Self::Open => "git.open_c3bf",
+            Self::Draft => "git.draft_f03a",
+            Self::Merged => "git.merged_6391",
+            Self::Closed => "git.closed_03f4",
+        })
     }
     /// A request can still be commented on and merged.
     pub fn active(self) -> bool {
@@ -418,7 +418,10 @@ impl Request {
         match self.review.as_deref()? {
             "APPROVED" => Some(("Approved", Tone::Passed)),
             "CHANGES_REQUESTED" => Some(("Changes requested", Tone::Failed)),
-            "REVIEW_REQUIRED" => Some(("Review required", Tone::Pending)),
+            "REVIEW_REQUIRED" => Some((
+                crate::language::message("git.review_required_d01e"),
+                Tone::Pending,
+            )),
             _ => None,
         }
     }
