@@ -1150,6 +1150,28 @@ A `modelSelection` with `provider`/`model` together is refused.
   the old thread, where the user can hold or remove it. There is no CLI
   surface for this: the palette and `threads continue` stay the user's.
 
+### Continuing in a new thread (palette / `threads continue`)
+
+The user's own **Continue in a new thread** palette action (and
+`moxen threads continue`, including `--at`) moves the source thread's
+pending ordinary messages with it: every queued user message and every message
+queued with `message_queue` becomes a Work queue entry on the new thread, in
+its original order, each waiting for the new thread's handoff turn first — so
+a scheduled continuation still runs its handoff before anything that moved.
+An entry keeps its scheduled time, conditions (and latched state), user hold,
+per-turn model, runtime and interaction-mode overrides, origin and
+notification facts, and attachments. An entry condition elsewhere that names
+a moved message follows it to the new thread.
+
+The source thread keeps its rows as history, but nothing moved can run there:
+each moved turn is taken back as removed, and the handoff names the move
+(one message, or several, arriving as follow-up turns) without assigning
+their texts as this turn's work. Usage, protection and summary traffic, and
+queue-selected model/stored handoffs, keep their own semantics and never
+move this way; removed entries stay removed. The agent's `thread_continue`
+above is unchanged: queued work left on the old thread stays there and runs
+there.
+
 Some providers wake a session on their own — a finished background task,
 a monitor event. That output arrives as a turn like any other and is shown
 in the side panel's Background tab, which can also list and stop running

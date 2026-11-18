@@ -44,6 +44,32 @@ export interface QueuePolicy {
 }
 
 export interface QueueRow { readonly thread: StoredThread; readonly turns: readonly StoredTurn[] }
+
+/**
+ * A manual "Continue in a new thread" moves the source's pending ordinary
+ * messages to the destination as Work queue entries. The source turn is
+ * marked with `transfer:<source turn id>` (inert: interrupted and removed),
+ * and the destination entry carries `handoff:transfer:<source turn id>` as
+ * its queue request id — so entry conditions elsewhere that named the
+ * source turn follow the handoff to the destination, the way
+ * `entryPending` follows queue-handoff rows. Queue-selected model/stored
+ * handoffs use their own `handoff` rows and never carry this prefix.
+ */
+export const TRANSFER_REQUEST_PREFIX = "transfer:";
+
+export function transferRequestId(sourceTurnId: string): string {
+  return `${TRANSFER_REQUEST_PREFIX}${sourceTurnId}`;
+}
+
+export function transferDestinationRequestId(sourceTurnId: string): string {
+  return `handoff:${transferRequestId(sourceTurnId)}`;
+}
+
+/** Whether this turn was moved to a continuation by a manual continue (never a queue handoff). */
+export function isTransferredTurn(turn: StoredTurn): boolean {
+  return turn.handoff?.requestId?.startsWith(TRANSFER_REQUEST_PREFIX) === true;
+}
+
 export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
   readonly provider: string; readonly status: string; readonly policy: QueuePolicy;
