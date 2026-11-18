@@ -13,6 +13,14 @@ actions!(title_bar, [ToggleInspector, ToggleTasks]);
 const MARK_H: f32 = 16.;
 const MARK_SCALE: f32 = MARK_H / 2.84;
 
+fn settled_badge_label() -> &'static str {
+    if crate::language::spanish() {
+        crate::language::message("status.idle")
+    } else {
+        "Done"
+    }
+}
+
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = &w.source.list_threads()[w.selected];
     let checklist = w.source.inspector(w.selected);
@@ -117,9 +125,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         seconds % 60
                     )
                 } else if t.status == Status::Idle {
-                    // The settled badge reads as the TUI does (status.idle),
-                    // not the desktop's old "Done".
-                    crate::language::message("status.idle").to_string()
+                    settled_badge_label().to_owned()
                 } else {
                     crate::language::tr(t.status.label()).into_owned()
                 }),
@@ -201,4 +207,15 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     )),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settled_badge_keeps_the_english_desktop_label() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::settled_badge_label(), "Done");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::settled_badge_label(), "inactivo");
+    }
 }

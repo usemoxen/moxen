@@ -4219,14 +4219,17 @@ mod tests {
 
     #[test]
     fn a_side_question_in_flight_refuses_another_even_on_a_different_thread() {
-        let mut state = State::default();
-        assert!(state.reserve_action(0, true));
-        assert!(!state.reserve_action(1, true));
-        assert_eq!(
-            state.problems.pop_front().unwrap().message,
-            crate::model::side_question_pending()
-        );
-        assert!(state.reserve_action(1, false));
+        for (locale, refusal) in [
+            ("en", "A side question is still being answered"),
+            ("es-ES", "Todavía se está respondiendo otra pregunta aparte"),
+        ] {
+            crate::language::apply(Some(locale), None);
+            let mut state = State::default();
+            assert!(state.reserve_action(0, true));
+            assert!(!state.reserve_action(1, true));
+            assert_eq!(state.problems.pop_front().unwrap().message, refusal);
+            assert!(state.reserve_action(1, false));
+        }
     }
 
     #[test]

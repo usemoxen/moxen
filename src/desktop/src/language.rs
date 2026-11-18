@@ -105,9 +105,11 @@ pub fn step_count(done: usize, total: usize) -> String {
     )
 }
 
-/// A "3 of 6" count in the TUI's words (`settings.ofTotal`): the title bar's
-/// tasks tally.
+/// The title bar's tasks tally: compact in English, in the TUI's words in Spanish.
 pub fn of_total(count: usize, total: usize) -> String {
+    if !spanish() {
+        return format!("{count}/{total}");
+    }
     let (count, total) = (count.to_string(), total.to_string());
     fill(
         "settings.ofTotal",
@@ -192,17 +194,6 @@ pub fn tr(text: &str) -> Cow<'_, str> {
         }
     }
     Cow::Borrowed(text)
-}
-
-/// A settings value that names no user data: `Default`, `On`, `Off` and the
-/// stored-secret placeholder. Names, paths and numbers draw as-is, so a
-/// profile or model that happens to share a word with the catalog is never
-/// translated by accident.
-pub fn setting_value(text: &str) -> Cow<'_, str> {
-    match text {
-        "Default" | "On" | "Off" | "Saved in the keychain" => tr(text),
-        _ => Cow::Borrowed(text),
-    }
 }
 
 /// The desktop's own words: what its fixed labels say in Spanish. Every one
@@ -328,11 +319,9 @@ mod tests {
         assert_eq!(tr("working"), "trabajando");
         assert_eq!(fill("bg.runningCount", &[("{count}", "2")]), "2 en marcha");
         assert_eq!(message("status.idle"), "inactivo");
-        // Desktop-only words with no TUI equivalent stay as they are.
-        assert_eq!(tr("Improve draft"), "Improve draft");
         apply(Some("en"), None);
         assert_eq!(step_count(3, 6), "3 of 6");
-        assert_eq!(of_total(3, 6), "3 of 6");
+        assert_eq!(of_total(3, 6), "3/6");
         assert_eq!(show_more_branches(2), "Show 2 more (remotes included)");
     }
 
@@ -439,40 +428,10 @@ mod tests {
     #[test]
     fn spanish_sweep_routes_settings_live_and_chrome() {
         // The settings, live-notice and chrome strings the MXN-345 Spanish
-        // sweep routes through the TUI's own wording. The TUI numbers its
-        // terminal permission rows, so the render edge drops the prefix the
-        // same way `ask.rs` does (the desktop numbers its own rows).
-        let strip = |text: &str| {
-            text.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
-                .to_string()
-        };
+        // sweep routes through the TUI's own wording.
         apply(Some("es-ES"), None);
-        assert_eq!(strip(message("perm.1_yes_d834")), "Sí");
-        assert_eq!(
-            strip(&fill("perm.yesAlways", &[("{tool}", "Bash")])),
-            "Sí, y no volver a preguntar por Bash"
-        );
         assert_eq!(message("continue.start"), "Continuar");
         assert_eq!(message("continue.cancel"), "Cancelar");
-        assert_eq!(
-            message("app.a_side_question_is_70ee"),
-            "Todavía se está respondiendo otra pregunta aparte"
-        );
-        assert_eq!(
-            crate::model::side_question_pending(),
-            "Todavía se está respondiendo otra pregunta aparte"
-        );
-        // Settings values name no user data, so only the sentinels translate
-        // and anything else draws as-is.
-        assert_eq!(setting_value("Default"), "Por defecto");
-        assert_eq!(setting_value("On"), "Activado");
-        assert_eq!(setting_value("Off"), "Desactivado");
-        assert_eq!(
-            setting_value("Saved in the keychain"),
-            "Guardada en el llavero"
-        );
-        assert_eq!(setting_value("opus"), "opus");
-        assert_eq!(setting_value("Auto"), "Auto");
         assert_eq!(message("settings.inForce"), "Lo que vale ahora");
         assert_eq!(message("mem.empty"), "Aún no hay memorias.");
         assert_eq!(message("guide.saving"), "Guardando…");
@@ -533,18 +492,7 @@ mod tests {
         assert_eq!(tr("Background"), "Segundo plano");
         assert_eq!(tr("Project"), "Proyecto");
         apply(Some("en"), None);
-        assert_eq!(strip(message("perm.1_yes_d834")), "Yes");
-        assert_eq!(
-            strip(&fill("perm.yesAlways", &[("{tool}", "Bash")])),
-            "Yes, and don't ask again for Bash"
-        );
         assert_eq!(message("continue.start"), "Continue");
-        assert_eq!(
-            crate::model::side_question_pending(),
-            "A side question is still being answered"
-        );
-        assert_eq!(setting_value("Default"), "Default");
-        assert_eq!(setting_value("opus"), "opus");
         assert_eq!(message("settings.inForce"), "In force");
         assert_eq!(tr("Updates"), "Updates");
         assert_eq!(tr("Close"), "Close");

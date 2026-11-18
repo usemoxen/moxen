@@ -999,15 +999,7 @@ fn setting_row(
             let label = if pending {
                 crate::language::message("guide.saving").to_owned()
             } else {
-                let value = settings::display_value(view);
-                let displayed = match &view.kind {
-                    SettingKind::Enum(choices) => choices
-                        .iter()
-                        .find(|choice| choice.value == value)
-                        .map_or(value.as_str(), |choice| &choice.label),
-                    _ => &value,
-                };
-                crate::language::tr(displayed).into_owned()
+                setting_row_value(view)
             };
             div()
                 .id(format!("settings-cycle-{key}"))
@@ -1030,7 +1022,7 @@ fn setting_row(
         | SettingKind::Duration
         | SettingKind::Line
         | SettingKind::Other(_) => {
-            let label = crate::language::setting_value(&settings::display_value(view)).into_owned();
+            let label = setting_row_value(view);
             div()
                 .id(format!("settings-edit-{key}"))
                 .control(format!("Edit {}", view.label))
@@ -1076,6 +1068,15 @@ fn setting_row(
 
 fn setting_label(view: &crate::settings::SettingView) -> String {
     crate::language::tr(&view.label).into_owned()
+}
+
+fn setting_row_value(view: &crate::settings::SettingView) -> String {
+    if let (SettingKind::Enum(choices), SettingValue::Text(value)) = (&view.kind, &view.value)
+        && let Some(choice) = choices.iter().find(|choice| choice.value == *value)
+    {
+        return crate::language::tr(&choice.label).into_owned();
+    }
+    settings::display_value(view)
 }
 
 fn sub_line(text: &str) -> Div {
@@ -1342,6 +1343,7 @@ fn entry_detail(
                 .child(ui::caps(crate::language::message("settings.inForce"))),
         );
         for row in &item.resolved {
+            let (label, value) = resolved_row_text(row);
             out = out.child(
                 div()
                     .flex()
@@ -1352,13 +1354,9 @@ fn entry_detail(
                             .w(px(120.))
                             .flex_shrink_0()
                             .text_color(color("ink-2"))
-                            .child(crate::language::tr(&row.label).into_owned()),
+                            .child(label),
                     )
-                    .child(div().flex_1().child(format!(
-                        "{} — {}",
-                        crate::language::tr(&row.value).into_owned(),
-                        crate::language::tr(&row.origin).into_owned()
-                    ))),
+                    .child(div().flex_1().child(value)),
             );
         }
     }
@@ -1384,6 +1382,24 @@ fn entry_detail(
     out
 }
 
+fn resolved_row_text(row: &settings::ResolvedRow) -> (String, String) {
+    (
+        crate::language::tr(&row.label).into_owned(),
+        format!("{} — {}", row.value, crate::language::tr(&row.origin)),
+    )
+}
+
+fn field_default_line(effective: &settings::ListEffective) -> String {
+    let default = crate::language::message("settings.default");
+    let origin = crate::language::tr(&effective.origin);
+    if effective.value == SettingValue::Unset {
+        format!("{default}: {origin}")
+    } else {
+        let value = settings::display_scalar(&effective.value);
+        format!("{default}: {value}, {origin}")
+    }
+}
+
 fn field_row(
     _w: &Workspace,
     view: &crate::settings::SettingView,
@@ -1398,15 +1414,14 @@ fn field_row(
     let title = schema.label.clone();
     let control: AnyElement = match &schema.kind {
         FieldKind::Enum(_) | FieldKind::Boolean | FieldKind::Effort => {
-            let shown = settings::display_field(field, Some(schema));
-            let label = crate::language::setting_value(&shown);
+            let label = settings::display_field(field, Some(schema));
             div()
                 .id(format!("settings-field-cycle-{key}-{id}-{path}"))
                 .control(format!("Change {}", crate::language::tr(&schema.label)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(div().text_color(color("live")).child(label.into_owned()))
+                .child(div().text_color(color("live")).child(label))
                 .child(ui::icon("chevron-right", "ink-2"))
                 .on_click(cx.listener(move |this, _, _, cx| this.cycle_field(&key, &id, &path, cx)))
                 .into_any_element()
@@ -1416,12 +1431,7 @@ fn field_row(
             .child("Below")
             .into_any_element(),
         _ => {
-            let label = settings::display_field(field, Some(schema));
-            let shown = if matches!(field.value, SettingValue::Unset) {
-                crate::language::setting_value(&label).into_owned()
-            } else {
-                label
-            };
+            let shown = settings::display_field(field, Some(schema));
             div()
                 .id(format!("settings-field-edit-{key}-{id}-{path}"))
                 .control(format!("Edit {}", crate::language::tr(&schema.label)))
@@ -1465,15 +1475,8 @@ fn field_row(
                 .line_height(px(16.))
                 .child(crate::language::tr(&schema.description).into_owned()),
         )
-        .when_some(field.effective.clone(), |s, effective| {
-            s.child(sub_line(&format!(
-                "Default: {}{}",
-                crate::language::tr(&effective.label).into_owned(),
-                effective.origin.map_or(String::new(), |origin| format!(
-                    ", {}",
-                    crate::language::tr(&origin).into_owned()
-                ))
-            )))
+        .when_some(field.effective.as_ref(), |s, effective| {
+            s.child(sub_line(&field_default_line(effective)))
         })
 }
 
@@ -1963,10 +1966,7 @@ fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> 
     if let SettingsForm::Field { previous, .. } = form
         && !previous.is_empty()
     {
-        bar = bar.child(sub_line(&format!(
-            "Saved now: {}",
-            crate::language::setting_value(previous)
-        )));
+        bar = bar.child(sub_line(&format!("Saved now: {previous}")));
     }
     if form.secret() {
         bar = bar.child(sub_line("Characters are hidden while typing."));
@@ -2769,9 +2769,9 @@ fn skill_row(w: &Workspace, skill: &ManagedSkill, cx: &mut Context<Workspace>) -
                         })
                         .text_color(color(if enabled { "live" } else { "ink-2" }))
                         .child(if enabled {
-                            crate::language::setting_value("On").into_owned()
+                            crate::language::message("settings.on")
                         } else {
-                            crate::language::setting_value("Off").into_owned()
+                            crate::language::message("settings.off")
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.source.set_skill_enabled(
@@ -3037,11 +3037,11 @@ fn remote_status_row(w: &Workspace, state: &RemoteState, cx: &mut Context<Worksp
                             })
                             .text_color(color(if enabled { "live" } else { "ink-2" }))
                             .child(if saving {
-                                crate::language::message("guide.saving").to_owned()
+                                crate::language::message("guide.saving")
                             } else if enabled {
-                                crate::language::setting_value("On").into_owned()
+                                crate::language::message("settings.on")
                             } else {
-                                crate::language::setting_value("Off").into_owned()
+                                crate::language::message("settings.off")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.source.set_setting(
@@ -3256,6 +3256,62 @@ mod tests {
     fn the_interface_offers_the_same_theme_as_the_tui() {
         let snapshot = crate::mock_settings::snapshot_fixture();
         assert_eq!(setting_label(snapshot.find("ui.theme").unwrap()), "Theme");
+    }
+
+    #[test]
+    fn spanish_settings_rows_keep_configured_values_and_translate_typed_states() {
+        use settings::{ListEffective, ResolvedRow, SettingValue};
+
+        crate::language::apply(Some("es-ES"), None);
+        let mut snapshot = crate::mock_settings::snapshot_fixture();
+        crate::mock_settings::apply_set(&mut snapshot, "instructions", "Off");
+        let instructions = snapshot.find("instructions").unwrap();
+        assert_eq!(super::setting_row_value(instructions), "Off");
+        assert_eq!(
+            super::setting_row_value(snapshot.find("git.autoFetch").unwrap()),
+            "Desactivado"
+        );
+        assert_eq!(
+            super::setting_row_value(snapshot.find("updates.checkLatest").unwrap()),
+            "Activado"
+        );
+        assert_eq!(
+            super::setting_row_value(snapshot.find("model").unwrap()),
+            "Por defecto"
+        );
+        assert_eq!(
+            super::resolved_row_text(&ResolvedRow {
+                label: "images".into(),
+                value: "Off".into(),
+                origin: "your override".into(),
+            }),
+            ("imágenes".into(), "Off — tu ajuste".into())
+        );
+        assert_eq!(
+            super::field_default_line(&ListEffective {
+                value: SettingValue::Text("Off".into()),
+                origin: "your override".into(),
+            }),
+            "Por defecto: Off, tu ajuste"
+        );
+
+        let profiles = snapshot.find("providers.harness.profiles").unwrap();
+        let item = &profiles.items[0];
+        let field = |path| item.fields.iter().find(|field| field.path == path).unwrap();
+        assert_eq!(
+            super::field_default_line(field("slots").effective.as_ref().unwrap()),
+            "Por defecto: 4, las Peticiones simultáneas del propio Moxen Harness"
+        );
+        let mut url = field("baseUrl").clone();
+        url.value = SettingValue::Text("Off".into());
+        assert_eq!(
+            settings::display_field(&url, profiles.field_schema("baseUrl")),
+            "Off"
+        );
+        assert_eq!(
+            settings::display_field(field("apiKey"), profiles.field_schema("apiKey")),
+            "Guardada en el llavero"
+        );
     }
 
     #[test]

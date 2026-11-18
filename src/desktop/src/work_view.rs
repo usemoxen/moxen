@@ -418,16 +418,17 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
     }
 }
 
+fn stop_button_label() -> &'static str {
+    crate::language::desktop("Stop", "Parar")
+}
+
 fn stop_button(key: SharedString, cx: &mut Context<Workspace>) -> Stateful<Div> {
-    action(
-        format!("stop-task-{key}"),
-        crate::language::message("composer.stop_6aae"),
-    )
-    .text_color(color("broken"))
-    .on_click(cx.listener(move |this, _, _, cx| {
-        this.source.stop_background(this.selected, key.as_ref());
-        cx.notify();
-    }))
+    action(format!("stop-task-{key}"), stop_button_label())
+        .text_color(color("broken"))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.source.stop_background(this.selected, key.as_ref());
+            cx.notify();
+        }))
 }
 
 fn background(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -666,6 +667,14 @@ mod tests {
         model::{Status, ThreadSource},
         work::{Read, View},
     };
+
+    #[test]
+    fn background_stop_has_no_terminal_glyph() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::stop_button_label(), "Stop");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::stop_button_label(), "Parar");
+    }
 
     #[test]
     fn escape_closes_details_before_leaving_a_running_approval_alone() {

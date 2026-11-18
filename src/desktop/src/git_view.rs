@@ -482,6 +482,10 @@ pub fn footer(w: &Workspace) -> Option<Div> {
     )
 }
 
+fn comment_heading(number: i64) -> String {
+    crate::language::fill("forge.commentOn", &[("{n}", &number.to_string())])
+}
+
 fn form_box(w: &Workspace, git: &Git) -> Option<Div> {
     let form = w.git_ui.form?;
     let kind = git.forge.as_ref().and_then(|f| f.kind);
@@ -494,10 +498,7 @@ fn form_box(w: &Workspace, git: &Git) -> Option<Div> {
             ),
             "↵ open it on the forge · esc cancel",
         ),
-        Form::Comment { number } => (
-            crate::language::fill("forge.commentOn", &[("#{n}", &number.to_string())]),
-            "↵ post the comment · esc cancel",
-        ),
+        Form::Comment { number } => (comment_heading(number), "↵ post the comment · esc cancel"),
     };
     Some(
         div()
@@ -1666,4 +1667,15 @@ pub fn diff_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         }
     }
     tab.child(div().h(px(18.)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn comment_heading_keeps_the_request_number_sign() {
+        for (locale, expected) in [("en", "Comment on #42"), ("es-ES", "Comentar en #42")] {
+            crate::language::apply(Some(locale), None);
+            assert_eq!(super::comment_heading(42), expected);
+        }
+    }
 }

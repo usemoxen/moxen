@@ -517,6 +517,28 @@ fn line(
         .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
 }
 
+fn permission_rows(tool: &str) -> [(String, Option<String>, Decision); 3] {
+    // The TUI numbers its terminal rows ("1. Yes"); the desktop numbers its
+    // own rows, so the prefix is dropped at the render edge. Only the start
+    // is trimmed, so a tool name starting with a digit survives.
+    let allow = |key: &'static str| {
+        crate::language::message(key)
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
+            .to_string()
+    };
+    [
+        (allow("perm.1_yes_d834"), None, Decision::Allow),
+        (
+            crate::language::fill("perm.yesAlways", &[("{tool}", tool)])
+                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
+                .to_string(),
+            Some(crate::language::message("perm.this_session_1855").to_string()),
+            Decision::AllowSession,
+        ),
+        (crate::language::tr("No").into_owned(), None, Decision::Deny),
+    ]
+}
+
 fn permission_body(w: &Workspace, request: &Permission, cx: &mut Context<Workspace>) -> Div {
     let headline = match request.classification.as_deref() {
         Some("command-execution") => {
@@ -526,25 +548,6 @@ fn permission_body(w: &Workspace, request: &Permission, cx: &mut Context<Workspa
         Some("file-read") => crate::language::message("perm.read_7a1a").to_string(),
         _ => crate::language::fill("perm.use", &[("{tool}", request.tool.as_str())]),
     };
-    // The TUI numbers its terminal rows ("1. Yes"); the desktop numbers its
-    // own rows, so the prefix is dropped at the render edge. Only the start
-    // is trimmed, so a tool name starting with a digit survives.
-    let allow = |key: &'static str| {
-        crate::language::message(key)
-            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
-            .to_string()
-    };
-    let rows = [
-        (allow("perm.1_yes_d834"), None, Decision::Allow),
-        (
-            crate::language::fill("perm.yesAlways", &[("{tool}", request.tool.as_str())])
-                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
-                .to_string(),
-            Some(crate::language::message("perm.this_session_1855").to_string()),
-            Decision::AllowSession,
-        ),
-        (crate::language::tr("No").into_owned(), None, Decision::Deny),
-    ];
     div()
         .flex()
         .flex_col()
@@ -582,29 +585,24 @@ fn permission_body(w: &Workspace, request: &Permission, cx: &mut Context<Workspa
                 .font_weight(FontWeight::MEDIUM)
                 .child(crate::language::message("perm.proceed")),
         )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .children(
-                    rows.into_iter()
-                        .enumerate()
-                        .map(|(at, (label, detail, decision))| {
-                            line(
-                                ("permission", at),
-                                Line {
-                                    number: Some(at + 1),
-                                    label,
-                                    detail,
-                                    active: w.draft.highlight.min(2) == at,
-                                    picked: false,
-                                },
-                                cx,
-                                move |this, _, cx| this.decide(decision, cx),
-                            )
-                        }),
-                ),
-        )
+        .child(div().flex().flex_col().children(
+            permission_rows(&request.tool).into_iter().enumerate().map(
+                |(at, (label, detail, decision))| {
+                    line(
+                        ("permission", at),
+                        Line {
+                            number: Some(at + 1),
+                            label,
+                            detail,
+                            active: w.draft.highlight.min(2) == at,
+                            picked: false,
+                        },
+                        cx,
+                        move |this, _, cx| this.decide(decision, cx),
+                    )
+                },
+            ),
+        ))
         .child(hint("↑↓ move · 1–3 or ↵ pick"))
 }
 
@@ -775,6 +773,19 @@ mod tests {
     use super::{Advance, Draft, Row, rows};
     use crate::model::{Answer, Ask, Choice, Question};
 
+    #[test]
+    fn permission_rows_drop_terminal_numbering_without_changing_the_tool_name() {
+        for (locale, yes, session) in [
+            ("en", "Yes", "Yes, and don't ask again for 7zip"),
+            ("es-ES", "Sí", "Sí, y no volver a preguntar por 7zip"),
+        ] {
+            crate::language::apply(Some(locale), None);
+            let [allow, always, deny] = super::permission_rows("7zip");
+            assert_eq!(allow.0, yes);
+            assert_eq!(always.0, session);
+            assert_eq!(deny.0, "No");
+        }
+    }
     fn question(id: &str, multi: bool, custom: bool) -> Question {
         Question {
             id: id.into(),

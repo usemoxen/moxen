@@ -46,7 +46,7 @@ pub fn snapshot_fixture() -> Snapshot {
                 "section": "long-threads", "kind": {"type": "line", "presets": ["40%", "50%", "60%", "70%", "80%", "90%", "8K", "16K", "24K", "32K", "64K", "128K", "256K", "512K", "1M"]}},
              "explicit": false, "effective": {"value": "50%", "label": "50% of the window"}},
             {"descriptor": {"key": "instructions", "label": "Extra instructions",
-                "description": "Appended to every provider session's system prompt.",
+                "description": "Appended to every provider session's system prompt. Each provider's 'Provider instructions' come after these, and a project's moxen.json after that.",
                 "section": "agent", "kind": {"type": "string", "placeholder": "Appended to every session", "multiline": true}},
              "explicit": false},
             {"descriptor": {"key": "branchPruneDays", "label": "Delete finished worktree branches after",
@@ -133,7 +133,7 @@ pub fn snapshot_fixture() -> Snapshot {
                      {"path": "apiKey", "value": "keychain:providers.harness.profiles[office].apiKey", "explicit": true},
                      {"path": "apiKeyEnv", "value": "", "explicit": false},
                      {"path": "slots", "value": 4, "explicit": false,
-                      "effective": {"value": 4, "label": "4", "origin": "the Moxen Harness's own Requests at once"}}],
+                      "effective": {"value": 4, "origin": "the Moxen Harness's own Requests at once"}}],
                  "resolved": [
                      {"label": "large", "value": "ready", "origin": "the last probe"},
                      {"label": "small", "value": "not probed", "origin": "no probe yet"}]}]},

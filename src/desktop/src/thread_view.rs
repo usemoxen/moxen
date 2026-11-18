@@ -872,6 +872,14 @@ fn attachment_menu(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         })
 }
 
+fn improve_draft_label() -> String {
+    if crate::language::spanish() {
+        crate::language::capitalized(crate::language::message("composer.improve"))
+    } else {
+        "Improve draft".to_owned()
+    }
+}
+
 fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let composer = w.active_composer().read(cx);
     let undo = composer.undo_improvement.is_some();
@@ -891,7 +899,7 @@ fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         } else if undo {
             crate::language::capitalized(crate::language::message("composer.undoImprove"))
         } else {
-            "Improve draft".to_owned()
+            improve_draft_label()
         });
     if w.improving
         || composer.text().trim().is_empty()
@@ -1705,10 +1713,7 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .when(background > 0, |s| {
             s.child(
                 chip("background", "Open background tasks")
-                    .child(crate::language::fill(
-                        "bg.runningCount",
-                        &[("{count}", &background.to_string())],
-                    ))
+                    .child(background_chip_label(background))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = 4;
                         this.set_inspector(true);
@@ -1736,8 +1741,26 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         })
 }
 
+fn background_chip_label(count: usize) -> String {
+    if crate::language::spanish() {
+        crate::language::fill("bg.runningCount", &[("{count}", &count.to_string())])
+    } else {
+        format!("{count} background")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn composer_and_background_chip_keep_desktop_english_and_use_catalog_spanish() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::background_chip_label(2), "2 background");
+        assert_eq!(super::improve_draft_label(), "Improve draft");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::background_chip_label(2), "2 en marcha");
+        assert_eq!(super::improve_draft_label(), "Mejorar");
+    }
+
     #[test]
     fn run_summary_counts_each_kind() {
         let source = crate::mock::MockSource::preview();

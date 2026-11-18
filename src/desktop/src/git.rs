@@ -741,8 +741,7 @@ pub enum Patch {
 
 // -- words --------------------------------------------------------------------
 
-/// "3 minutes ago", "1 week ago", "2 months ago": how the TUI words an age
-/// (`ago.*`), so the commit rows read the same in both clients.
+/// Commit ages use the desktop's English day counts and the TUI's Spanish wording.
 pub fn ago(iso: &str, now_ms: i64) -> String {
     use crate::language::plural;
     let Some(at) = parse_iso_ms(iso) else {
@@ -761,7 +760,11 @@ pub fn ago(iso: &str, now_ms: i64) -> String {
         return plural("ago.hour.one", "ago.hour.other", hours as usize);
     }
     let days = hours / 24;
-    if days < 7 {
+    let spanish = crate::language::spanish();
+    if !spanish && days == 1 {
+        return "yesterday".into();
+    }
+    if days < 7 || (!spanish && days < 30) {
         return plural("ago.day.one", "ago.day.other", days as usize);
     }
     if days < 30 {
@@ -1056,18 +1059,20 @@ mod tests {
     }
 
     #[test]
-    fn ages_read_like_the_tui() {
+    fn commit_ages_keep_english_day_counts_and_the_tuis_spanish() {
+        crate::language::apply(Some("en"), None);
         let now = parse_iso_ms("2026-11-17T12:00:00Z").unwrap();
         let at = |iso: &str| ago(iso, now);
         assert_eq!(at("2026-11-17T11:59:30Z"), "just now");
         assert_eq!(at("2026-11-17T11:59:00Z"), "1 minute ago");
         assert_eq!(at("2026-11-17T09:00:00Z"), "3 hours ago");
-        // The TUI has no "yesterday": one day reads "1 day ago", and weeks
-        // cover 7 to 29 days.
-        assert_eq!(at("2026-11-16T09:00:00Z"), "1 day ago");
-        assert_eq!(at("2026-11-07T12:00:00Z"), "1 week ago");
+        assert_eq!(at("2026-11-16T09:00:00Z"), "yesterday");
+        assert_eq!(at("2026-11-07T12:00:00Z"), "10 days ago");
         assert_eq!(at("2026-08-17T12:00:00Z"), "3 months ago");
         assert_eq!(at("not a date"), "");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(at("2026-11-16T09:00:00Z"), "hace 1 día");
+        assert_eq!(at("2026-11-07T12:00:00Z"), "hace 1 semana");
     }
 
     #[test]
