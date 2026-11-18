@@ -204,7 +204,10 @@ impl Workspace {
         Self::with_source(source, demo, window, cx)
     }
 
-    fn with_source(
+    /// The window over either source, for the render harness and the
+    /// connected-inspector test: the production `new` picks the source from
+    /// the process arguments instead.
+    pub(crate) fn with_source(
         source: Box<dyn ThreadSource>,
         demo: bool,
         window: &Window,
@@ -1949,9 +1952,11 @@ impl Render for Workspace {
                         !self.creating && (!has_thread || self.source.order(false).is_empty()),
                         |s| s.child(crate::connection::render(self, cx)),
                     )
-                    .when(has_thread && shown > 0. && self.source.preview(), |s| {
+                    .when(has_thread && shown > 0. && !self.creating, |s| {
                         // Slides in from the window's right edge: the pane
-                        // keeps its width and the clip around it grows.
+                        // keeps its width and the clip around it grows. A
+                        // new-thread draft hides the old thread's pane; its
+                        // visibility and tab survive for the return.
                         s.child(
                             div()
                                 .h_full()
@@ -2092,6 +2097,47 @@ mod tests {
         });
         #[cfg(debug_assertions)]
         assert!(cx.debug_bounds("status-usage").is_none());
+    }
+
+    #[gpui::test]
+    fn drafting_hides_the_inspector_and_reselecting_restores_it(cx: &mut TestAppContext) {
+        let (workspace, cx) = mock_workspace(cx);
+        cx.update(|_, cx| {
+            workspace.update(cx, |w, cx| {
+                w.set_inspector(true);
+                w.tab = 2;
+                w.select(0, cx);
+            });
+        });
+        cx.run_until_parked();
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("inspector").is_some());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.new_thread(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.creating);
+            // The draft hides the old thread's inspector but keeps its
+            // place: the tab and the open preference survive for the return.
+            assert!(w.inspector_open);
+            assert_eq!(w.tab, 2);
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("inspector").is_none());
+        cx.update(|_, cx| {
+            workspace.update(cx, |w, cx| w.select(0, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(!w.creating);
+            assert!(w.inspector_open);
+            assert_eq!(w.tab, 2);
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("inspector").is_some());
     }
 
     #[gpui::test]

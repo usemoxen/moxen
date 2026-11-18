@@ -236,6 +236,9 @@ fn context_tab(w: &Workspace) -> impl IntoElement {
 pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
     let mut pane = div()
         .id("inspector")
+        // The render-harness tests find the pane by this name, like
+        // `composer-problem` and `status-usage` for their elements.
+        .debug_selector(|| "inspector".into())
         .relative()
         .w(px(width))
         .h_full()
