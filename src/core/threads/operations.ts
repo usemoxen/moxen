@@ -973,6 +973,22 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   const source = await store.readThreadRecord(threadId);
   let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
   if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
+  // A moved entry's own onward handoff waits like its dispatch does: no
+  // summary turn and no next destination until the destination's first
+  // turn settles and the entry's message reads durable. The admission
+  // gate only covers same-thread dispatch while preparation runs before
+  // it, so transfer entries gate here; ordinary model/stored handoffs
+  // keep their existing prep semantics untouched.
+  if (isTransferDestinationRequestId(turn.queue?.requestId)) {
+    const entry = turn;
+    const siblings = await store.readTurns(threadId);
+    const handoffTurn = [...siblings]
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+      .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
+    const handoffSettled = handoffTurn !== undefined && (handoffTurn.status === "completed" || handoffTurn.status === "failed" || handoffTurn.status === "interrupted");
+    const landed = handoffSettled && (await store.readMessages(threadId)).some((message) => message.id === entry.messageId);
+    if (!landed) return;
+  }
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
     await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
@@ -1025,7 +1041,10 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   }
   if (openTurn(await store.readTurns(threadId))) return;
   const policy: QueuePolicy = { ...turn.queue!, continuation: "same-thread", requestId: `handoff:${handoff.requestId}`, eventAfter: turn.queue!.eventAfter ?? turn.createdAt };
-  const continued = await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}) });
+  // A moved entry keeps its own schedule: wrapping it in a next destination
+  // before its due time would lose the move's time constraint. Ordinary
+  // handoffs pass no schedule here, as before.
+  const continued = await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}), ...(isTransferDestinationRequestId(turn.queue?.requestId) && typeof turn.scheduledFor === "string" ? { scheduledFor: turn.scheduledFor } : {}) });
   if (continued.threadId !== handoff.destinationThreadId) {
     // The call joined another run's destination instead of preparing this
     // entry's own: leave the entry queued for a later pass rather than
