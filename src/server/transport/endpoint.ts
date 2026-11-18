@@ -36,7 +36,8 @@ export function isNamedPipe(endpoint: string): boolean {
 export function validateEndpoint(endpoint: string, platform = process.platform): void {
   if (platform === "win32" || isNamedPipe(endpoint)) return;
   // One byte of sockaddr_un.sun_path is reserved for the terminating NUL.
-  const limit = platform === "linux" ? 107 : 103;
+  // Linux, Android and SunOS give sun_path 108 bytes; macOS and the BSDs 104.
+  const limit = platform === "linux" || platform === "android" || platform === "sunos" ? 107 : 103;
   const bytes = Buffer.byteLength(endpoint, "utf8");
   if (bytes > limit) {
     throw new CliError(
