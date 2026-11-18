@@ -86,25 +86,50 @@ export function liveTurn(turns: StoredTurn[]): StoredTurn | null {
 }
 
 /**
- * How long a continuation claim blocks admissions after its handoff stopped
- * being provably alive: long enough to cover a slow provider session start,
- * short enough that a crashed handoff never wedges the thread for long.
+ * How long an unregistered continuation claim blocks admissions: a backstop
+ * for claims no live handoff owns (a clear that failed to write, a reused
+ * pid, a writer this process cannot see). A handoff running in this process
+ * is registered below and never expires by age.
  */
 export const CONTINUE_CLAIM_TTL_MS = 60_000;
 
 /**
+ * Claim tokens with a manual handoff running in this process. Production
+ * keeps one server per store (`claimStore` refuses a second; the CLI always
+ * dispatches to a server, never in-process), so the handoff and every
+ * admission it races run here and a registered token is proof of life —
+ * regardless of how long provider startup takes. A restart empties this
+ * (and changes pid), so a leftover claim heals by pid below.
+ */
+const liveContinuations = new Set<string>();
+
+/** Mark a manual handoff running here; admission blocks on its token until released. */
+export function trackContinuation(token: string): void {
+  liveContinuations.add(token);
+}
+
+/** Release a manual handoff that ended here; admission heals any leftover record on its own. */
+export function untrackContinuation(token: string): void {
+  liveContinuations.delete(token);
+}
+
+/**
  * Whether a manual continuation in flight forbids starting a turn on this
- * thread now. A claim from a live process on this host blocks; one whose
- * owner is gone, or older than `CONTINUE_CLAIM_TTL_MS`, is dead and cleared
- * here so a crashed handoff never wedges the thread (a reused pid cannot
- * block past the TTL either). A claim from another host cannot be judged by
- * pid, so only its age decides. Returns the thread as admission must see it
- * (healed when it was dead), since the caller holds the lock and writes its
- * own copy back afterwards. Caller must hold the thread lock.
+ * thread now. A claim whose handoff runs in this process blocks for as long
+ * as it runs. Otherwise the owner is judged by pid (same host) or age
+ * alone (another host, which production never writes — paired servers keep
+ * their own stores): a dead or stale claim is cleared here so a crashed
+ * handoff never wedges the thread, and a reused pid cannot block past the
+ * TTL. Returns the thread as admission must see it (healed when it was
+ * dead), since the caller holds the lock and writes its own copy back
+ * afterwards. Caller must hold the thread lock.
  */
 export async function continuationInFlight(store: ThreadStore, thread: StoredThread): Promise<{ blocked: boolean; thread: StoredThread }> {
   const claim = thread.continueClaim;
   if (!claim) return { blocked: false, thread };
+  // The handoff runs here: effective for its whole life, however long
+  // provider startup takes — never expired by age.
+  if (liveContinuations.has(claim.token)) return { blocked: true, thread };
   const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
   const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
   if (alive && fresh) return { blocked: true, thread };

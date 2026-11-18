@@ -505,6 +505,18 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toEqual(expect.any(String));
     expect(openTurn(await w.store.readTurns(source.id))).toBeNull();
     expect(await w.store.listThreadIds()).toHaveLength(2);
+    // Age the live claim past the stale-claim TTL: the handoff is still
+    // running here, so admission still refuses — liveness is the
+    // registration, not the clock.
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({
+        ...current,
+        continueClaim: { ...current.continueClaim!, at: new Date(Date.now() - 120_000).toISOString() },
+        updatedAt: w.store.nowIso(),
+      });
+    });
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toEqual(expect.any(String));
     await expect(sendTurn(w.store, source.id, { prompt: "Racing send" })).rejects.toThrow("being continued");
     await expect(
       startBackgroundTurn(w.store, source.id, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } }),

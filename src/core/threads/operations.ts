@@ -92,7 +92,9 @@ import {
   sendTurn,
   settleThread,
   threadFamily,
+  trackContinuation,
   turnPrompt,
+  untrackContinuation,
   updateThreadMeta,
   wakeUpHasRiders,
   type SendTurnResult,
@@ -1272,10 +1274,12 @@ const continuationRuns = new Map<string, Promise<ContinuedThread>>();
  * queued handoff or an agent's) refuses a source with an active turn
  * (`THREAD_BUSY`), then claims the source until the handoff lands: while
  * the claim stands, admission starts no turn there, so the destination
- * never runs beside one. The claim clears when this returns (or fails) —
- * a later send on the old thread is the user's own choice — and heals
- * itself if the handoff died with it. Queued or scheduled work is not
- * active, so an idle thread with schedules still continues.
+ * never runs beside one. The claim is registered against this process for
+ * the handoff's whole life — no timeout bounds a live handoff — and clears
+ * when this returns (or fails): a later send on the old thread is the
+ * user's own choice. A claim whose handoff died with it heals on the next
+ * admission. Queued or scheduled work is not active, so an idle thread with
+ * schedules still continues.
  *
  * Concurrent calls on one source share a single destination (see
  * `continuationRuns`), and a retry after a crash rejoins the reserved
@@ -1342,14 +1346,17 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
       }
       // Claim the source before any note or destination exists: from here
       // until the handoff lands, admission starts no turn here (see
-      // `continuationInFlight`). The claim heals itself if this handoff
-      // dies with it, and the handoff clears it when it lands.
+      // `continuationInFlight`). Registered against this process, so the
+      // claim stays effective however long the handoff takes; the handoff
+      // clears it when it lands, and admission heals it if this handoff
+      // dies with it.
       claimToken = store.newId();
       await store.writeThreadRecord({
         ...live,
         continueClaim: { token: claimToken, pid: process.pid, host: os.hostname(), at: store.nowIso() },
         updatedAt: store.nowIso(),
       });
+      trackContinuation(claimToken);
       if (live.usagePause?.continuedThreadId) return { destinationId: live.usagePause.continuedThreadId, claimToken };
     } else if (current?.usagePause?.continuedThreadId) return { destinationId: current.usagePause.continuedThreadId, claimToken: null };
     const notes = await store.readActivities(source.id);
@@ -1497,8 +1504,13 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     return await continueThreadReserved(ctx, request, source, title, interactionMode, noteSummary, destinationId);
   } finally {
     // The handoff landed (or failed): the source takes work again. A later
-    // send on the old thread is the user's own choice, as before.
-    if (claimToken !== null) await clearContinuationClaim(store, source.id, claimToken).catch(() => undefined);
+    // send on the old thread is the user's own choice, as before. Untrack
+    // first — a racing admission still sees a live owner and blocks — then
+    // clear the record, which admission heals on its own if this write dies.
+    if (claimToken !== null) {
+      untrackContinuation(claimToken);
+      await clearContinuationClaim(store, source.id, claimToken).catch(() => undefined);
+    }
   }
 }
 
