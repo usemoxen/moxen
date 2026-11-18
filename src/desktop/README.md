@@ -170,6 +170,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features render-harness -- -D warnings
 cargo fmt --check
 cargo test
+cargo test --features render-harness
 ```
 
 GPUI and gpui_platform remain pinned to Zed
@@ -216,7 +217,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
 - Cmd+K, Ctrl+P, or the search field opens the thread and action palette.
-  Type to filter and press Enter to pick the first match. With text typed the
+  Type to filter and press Enter to pick the first match; Enter on an empty
+  query does nothing. With text typed the
   store is searched (`threads.search`, the TUI picker's Active/Settled
   sections and `where: snippet (+N)` rows); an empty query lists actions and
   threads by title as before. Right-click a

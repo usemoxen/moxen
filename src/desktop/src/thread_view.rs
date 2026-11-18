@@ -1457,6 +1457,7 @@ fn new_thread(w: &Workspace) -> impl IntoElement {
 
 fn problem(message: String, cx: &mut Context<Workspace>) -> impl IntoElement {
     div()
+        .debug_selector(|| "composer-problem".into())
         .flex()
         .items_center()
         .gap(px(10.))

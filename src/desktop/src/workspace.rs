@@ -173,6 +173,15 @@ impl Workspace {
         } else {
             Box::new(ServerSource::connect(crate::wire::default_endpoint()))
         };
+        Self::with_source(source, demo, window, cx)
+    }
+
+    fn with_source(
+        source: Box<dyn ThreadSource>,
+        demo: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut subscriptions = vec![];
         let new_composer = cx.new(|cx| {
             let mut c = Composer::new(cx);
@@ -1774,5 +1783,103 @@ impl Render for Workspace {
                 s.child(crate::image_view::render(self, viewer, window, cx))
             })
             .into_any_element()
+    }
+}
+
+#[cfg(all(test, feature = "render-harness"))]
+mod tests {
+    use super::{MockSource, Workspace};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn mock_workspace(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.update(crate::composer::bind_keys);
+        let source = MockSource::new().with_project_title("moxen-chat", "a  b");
+        cx.add_window_view(|window, cx| Workspace::with_source(Box::new(source), false, window, cx))
+    }
+
+    #[gpui::test]
+    fn enter_on_an_empty_palette_does_not_activate_a_row(cx: &mut TestAppContext) {
+        let (workspace, cx) = mock_workspace(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.open_palette(window, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.palette_open);
+            assert!(w.thread_form.is_none());
+            assert!(w.project_form.is_none());
+        });
+
+        cx.update(|_, cx| {
+            workspace.read(cx).search.clone().update(cx, |search, cx| {
+                search.set_text("Rename thread".into(), cx);
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| assert!(workspace.read(cx).thread_form.is_some()));
+    }
+
+    #[gpui::test]
+    fn duplicate_project_rename_keeps_the_normalized_name_and_retry_clears_the_error(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, cx) = mock_workspace(cx);
+        #[cfg(debug_assertions)]
+        {
+            cx.update(|_, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.problem = Some("An earlier error".into());
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("composer-problem").is_some());
+        }
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.pick_project_action("moxen-agent", true, window, cx)
+            });
+            workspace
+                .read(cx)
+                .action_input
+                .clone()
+                .update(cx, |input, cx| {
+                    input.set_text("  a   b  ".into(), cx);
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.project_form.is_some());
+            assert_eq!(w.action_input.read(cx).text(), "a b");
+            assert_eq!(
+                w.problem.as_deref(),
+                Some("A project already exists with title \"a b\".")
+            );
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("composer-problem").is_none());
+
+        cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .action_input
+                .clone()
+                .update(cx, |input, cx| {
+                    input.set_text("Unique project".into(), cx);
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.project_form.is_none());
+            assert!(w.problem.is_none());
+            assert!(w.source.projects().iter().any(|project| {
+                project.id == "moxen-agent" && project.title == "Unique project"
+            }));
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("composer-problem").is_none());
     }
 }

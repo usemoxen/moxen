@@ -129,6 +129,12 @@ fn opus() -> Selection {
     }
 }
 impl MockSource {
+    #[cfg(all(test, feature = "render-harness"))]
+    pub fn with_project_title(mut self, id: &str, title: &str) -> Self {
+        self.renamed_projects.insert(id.into(), title.into());
+        self
+    }
+
     pub fn new() -> Self {
         let fixtures = [
             (

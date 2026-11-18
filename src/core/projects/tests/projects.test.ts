@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureStoredProject,
   listStoredProjects,
+  registryFile,
   removeStoredProject,
   renameStoredProject,
   resolveStoredProject,
@@ -144,6 +145,25 @@ describe("projects registry", () => {
     const second = await ensureStoredProject(root, { workspaceRoot: "/two" });
     await expect(renameStoredProject(root, second.project.id, "a   b")).rejects.toMatchObject({
       code: "PROJECT_ALREADY_EXISTS",
+    });
+  });
+
+  it("refuses a rename onto a legacy title with extra whitespace but allows renaming it in place", async () => {
+    const root = await tmpRoot();
+    const first = await ensureStoredProject(root, { workspaceRoot: path.join(root, "one") });
+    const second = await ensureStoredProject(root, { workspaceRoot: path.join(root, "two") });
+    await writeFile(registryFile(root), JSON.stringify({
+      version: 1,
+      projects: [{ ...first.project, title: "a  b" }, second.project],
+    }));
+
+    await expect(renameStoredProject(root, second.project.id, "a b")).rejects.toMatchObject({
+      code: "PROJECT_ALREADY_EXISTS",
+      details: { conflictingProjectId: first.project.id },
+    });
+    await expect(renameStoredProject(root, first.project.id, "a b")).resolves.toMatchObject({
+      id: first.project.id,
+      title: "a b",
     });
   });
 });

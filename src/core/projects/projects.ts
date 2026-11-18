@@ -154,7 +154,7 @@ export function projectTitle(workspaceRoot: string): string {
 
 /**
  * Project-title equality: trim and collapse inner whitespace runs, like the
- * thread seed and provider titles (`threads.ts`) and the desktop's rename
+ * `oneLine` helper in `src/core/memory/memory.ts` and the desktop's rename
  * field. Comparisons stay case-sensitive.
  */
 export function normalizeProjectTitle(title: string): string {
@@ -243,7 +243,7 @@ export async function renameStoredProject(
     });
   }
   const conflict = all.find(
-    (entry) => entry.id !== projectId && entry.deletedAt == null && entry.title === normalized,
+    (entry) => entry.id !== projectId && entry.deletedAt == null && normalizeProjectTitle(entry.title) === normalized,
   );
   if (conflict) {
     throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with title "${normalized}".`, {

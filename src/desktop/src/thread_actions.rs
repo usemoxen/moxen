@@ -265,6 +265,7 @@ impl Workspace {
         };
         if let Some(action) = immediate {
             self.source.thread_action(id, action);
+            self.problem = None;
             window.focus(&self.sidebar_focus, cx);
             cx.notify();
         } else {
@@ -340,6 +341,7 @@ impl Workspace {
                     draft: draft.clone(),
                 },
             );
+            self.problem = None;
             self.close_thread_action(window, cx);
             return;
         }
@@ -406,6 +408,7 @@ impl Workspace {
             _ => return,
         };
         self.source.thread_action(id, action);
+        self.problem = None;
         if !matches!(item, Item::Continue | Item::Handover | Item::Delegate) {
             self.close_thread_action(window, cx);
         } else if let Some(text) = submitted {
@@ -426,6 +429,7 @@ impl Workspace {
         let until = (chrono::Utc::now() + chrono::TimeDelta::hours(hours))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.source.thread_action(id, ThreadAction::Snooze(until));
+        self.problem = None;
         self.close_thread_action(window, cx);
     }
 }
@@ -645,6 +649,7 @@ pub fn form(
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.source
                             .thread_action(id, ThreadAction::CancelContinue { notify_parent });
+                        this.problem = None;
                         this.close_thread_action(window, cx);
                     })),
                 );
@@ -820,6 +825,7 @@ impl Workspace {
                     return;
                 }
                 if title == project_title(self, &id) {
+                    self.problem = None;
                     self.close_project_action(window, cx);
                     return;
                 }
@@ -829,7 +835,7 @@ impl Workspace {
                     .source
                     .projects()
                     .iter()
-                    .any(|project| project.id != id && project.title == title)
+                    .any(|project| project.id != id && normalize_title(&project.title) == title)
                 {
                     self.problem =
                         Some(format!("A project already exists with title \"{title}\"."));
@@ -842,6 +848,7 @@ impl Workspace {
                     return;
                 }
                 self.source.rename_project(&id, title);
+                self.problem = None;
                 self.close_project_action(window, cx);
             }
             ProjectForm::Remove(id) => {
