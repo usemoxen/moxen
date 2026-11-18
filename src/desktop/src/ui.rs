@@ -108,7 +108,7 @@ impl Render for Tooltip {
     }
 }
 impl Tooltip {
-    fn body(&self) -> Div {
+    pub(crate) fn body(&self) -> Div {
         div()
             .flex()
             .items_center()

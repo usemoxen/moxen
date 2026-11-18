@@ -183,8 +183,8 @@ export interface ListField {
 
 export type ListFieldKind =
   | { readonly type: "string"; readonly placeholder?: string; readonly multiline?: boolean }
-  | { readonly type: "integer"; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
-  | { readonly type: "number"; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "integer"; readonly min?: number; readonly max?: number; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "number"; readonly min?: number; readonly max?: number; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
   | { readonly type: "boolean" }
   | { readonly type: "secret" }
   | { readonly type: "enum"; readonly choices: readonly SettingChoice[] }

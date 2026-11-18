@@ -1,5 +1,9 @@
 pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
+pub use crate::settings::{
+    Discovery, Embeddings, HarnessRun, ManagedSkill, MemoryDraft, MemoryEntry, MemoryList,
+    MemorySearch, RemoteState, SettingsNotice, Snapshot, UpdateState,
+};
 pub use crate::stats::{CardState, StatsData, StatsRange, StatsState};
 pub use crate::usage::{ContextData, Hold, LimitsData, ProtectionData, QueueMove, SnapshotUsage};
 use crate::work::{Delegated, InspectorData, Read, View};
@@ -609,6 +613,156 @@ pub trait ThreadSource {
         None
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool);
+
+    /// Reads the server's settings table; `settings` holds the answer.
+    fn read_settings(&mut self) {}
+    /// The settings snapshot, once read: every descriptor and its value.
+    fn settings(&self) -> Option<Arc<Result<Snapshot, String>>> {
+        None
+    }
+    /// The key a `settings.set` is writing now, for the row's pending mark.
+    fn settings_saving(&self) -> Option<String> {
+        None
+    }
+    fn take_settings_write(&mut self) -> Option<Result<(), String>> {
+        None
+    }
+    fn clear_settings_transients(&mut self) {}
+    /// Writes one key through the server; the snapshot refreshes from its answer.
+    fn set_setting(&mut self, _key: &str, _value: &str) {}
+    /// Copies one list entry under a new id.
+    fn duplicate_setting(&mut self, _key: &str, _id: &str, _new_id: &str) {}
+    /// One tiny request to a Harness profile's endpoint.
+    fn test_harness(&mut self, _profile: &str, _model: Option<String>) {}
+    /// The probe battery against one profile's model; the snapshot reloads after.
+    fn probe_harness(&mut self, _profile: &str, _model: Option<String>) {}
+    /// Starts one MCP server, lists its tools and stops it again.
+    fn test_mcp(&mut self, _name: &str) {}
+    /// The last harness or MCP test or probe, while it runs and after.
+    fn harness_run(&self) -> Option<HarnessRun> {
+        None
+    }
+    /// Which models a server lists, before a profile for it exists.
+    fn discover_models(
+        &mut self,
+        _base_url: &str,
+        _api_format: &str,
+        _api_key_env: Option<String>,
+    ) {
+    }
+    /// Takes the last discovery answer.
+    fn take_discovered(&mut self) -> Option<Discovery> {
+        None
+    }
+    /// Shares one profile as a JSON document (no saved key, no probe results).
+    fn export_profile(&mut self, _profile: &str) {}
+    /// Takes the last export: the profile and its document.
+    fn take_profile_document(&mut self) -> Option<(String, String)> {
+        None
+    }
+    /// Adds a profile from an exported document; renames on a taken id.
+    fn import_profile(&mut self, _text: &str) {}
+    /// The last export or import, in a line.
+    fn take_settings_notice(&mut self) -> Option<SettingsNotice> {
+        None
+    }
+    /// Reads every memory the thread sees, global first.
+    fn read_memories(&mut self, _thread: Option<ThreadId>) {}
+    fn memories(&self) -> Option<Arc<Result<MemoryList, String>>> {
+        None
+    }
+    /// Reads one memory in full.
+    fn read_memory(&mut self, _thread: Option<ThreadId>, _name: &str, _scope: &str) {}
+    fn memory_detail(&self, _name: &str, _scope: &str) -> Option<Arc<Result<MemoryEntry, String>>> {
+        None
+    }
+    /// Keyword matches with excerpts.
+    fn search_memories(&mut self, _thread: Option<ThreadId>, _query: &str) {}
+    fn memory_search(&self) -> Option<Arc<Result<MemorySearch, String>>> {
+        None
+    }
+    fn save_memory(&mut self, _thread: Option<ThreadId>, _draft: MemoryDraft) {}
+    fn delete_memory(&mut self, _thread: Option<ThreadId>, _name: &str, _scope: &str) {}
+    fn edit_memory(
+        &mut self,
+        _thread: Option<ThreadId>,
+        _name: &str,
+        _scope: &str,
+        _old: &str,
+        _new: &str,
+        _description: Option<String>,
+    ) {
+    }
+    fn append_memory(&mut self, _thread: Option<ThreadId>, _name: &str, _scope: &str, _text: &str) {
+    }
+    /// Copies Claude Code's auto memory for the project into Moxen's.
+    fn import_claude_memory(&mut self, _thread: Option<ThreadId>) {}
+    /// Reads the embeddings engine behind semantic search.
+    fn read_embeddings(&mut self) {}
+    fn embeddings(&self) -> Option<Arc<Result<Embeddings, String>>> {
+        None
+    }
+    fn setup_embeddings(&mut self, _all: bool) {}
+    fn rebuild_embeddings(&mut self, _all: bool) {}
+    fn unload_embeddings(&mut self) {}
+    /// Reads the skills under the thread's project (or the user's own).
+    fn read_managed_skills(&mut self, _thread: Option<ThreadId>) {}
+    fn managed_skills(&self) -> Option<Arc<Result<Vec<ManagedSkill>, String>>> {
+        None
+    }
+    /// Reads one skill's text.
+    fn read_skill_text(&mut self, _thread: Option<ThreadId>, _source: &str, _folder: &str) {}
+    fn skill_text(&self, _source: &str, _folder: &str) -> Option<Arc<Result<String, String>>> {
+        None
+    }
+    fn save_skill(
+        &mut self,
+        _thread: Option<ThreadId>,
+        _source: &str,
+        _folder: &str,
+        _text: &str,
+        _previous: &str,
+    ) {
+    }
+    fn set_skill_enabled(
+        &mut self,
+        _thread: Option<ThreadId>,
+        _source: &str,
+        _folder: &str,
+        _enabled: bool,
+    ) {
+    }
+    fn set_skill_providers(
+        &mut self,
+        _thread: Option<ThreadId>,
+        _source: &str,
+        _folder: &str,
+        _providers: Vec<String>,
+    ) {
+    }
+    fn remove_skill(&mut self, _thread: Option<ThreadId>, _source: &str, _folder: &str) {}
+    fn import_skill(&mut self, _thread: Option<ThreadId>, _source: &str, _from: &str) {}
+    /// Reads remote access and the paired devices together.
+    fn read_remote(&mut self) {}
+    fn remote(&self) -> Option<Arc<Result<RemoteState, String>>> {
+        None
+    }
+    /// Starts pairing; the code shows until it is cancelled or expires.
+    fn pair_remote(&mut self) {}
+    fn cancel_pairing(&mut self) {}
+    /// Forgets one paired device.
+    fn revoke_device(&mut self, _device_id: &str) {}
+    /// Reads the providers' newest versions and Moxen's own update check.
+    fn read_updates(&mut self) {}
+    fn updates(&self) -> Option<Arc<Result<UpdateState, String>>> {
+        None
+    }
+    /// Runs a provider CLI's own updater.
+    fn update_provider(&mut self, _provider: &str) {}
+    /// Downloads, tests and switches to the newest Moxen release.
+    fn apply_update(&mut self) {}
+    /// Goes back to the version the update replaced.
+    fn rollback_update(&mut self) {}
 }
 
 pub struct SideAnswer {

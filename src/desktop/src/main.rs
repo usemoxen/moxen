@@ -15,10 +15,13 @@ mod inspector;
 mod live;
 mod mock;
 mod mock_git;
+mod mock_settings;
 mod model;
 mod model_picker;
 mod palette;
 mod pending;
+mod settings;
+mod settings_view;
 mod sidebar;
 mod stats;
 mod steps;
@@ -87,6 +90,7 @@ fn main() {
                     Some("ThreadActionConfirm"),
                 ),
                 KeyBinding::new("cmd-m", model_picker::TogglePicker, None),
+                KeyBinding::new("cmd-,", settings_view::OpenSettings, None),
                 KeyBinding::new("escape", palette::Dismiss, None),
                 KeyBinding::new("tab", palette::NextFocus, None),
                 KeyBinding::new("shift-tab", palette::PreviousFocus, None),

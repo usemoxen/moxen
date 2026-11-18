@@ -279,8 +279,14 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 
 The interaction below describes the mock window (`--mock`).
 
-Settings, access selection, commit history, queued-send execution and forge
-actions are not wired to a backend; their controls say so in a tooltip. The initial running fixture stays
+Open Settings from the sidebar, or with Cmd+, on macOS. In a live window,
+its pages read and write through the Moxen server.
+In the mock window, edits change only the fixture and do not persist.
+The Interface page's Theme setting applies to the terminal UI only.
+
+Commit history, queued-send execution and forge actions are not
+wired to a backend in the mock window; their controls say so in a tooltip.
+The initial running fixture stays
 live until Stop is clicked.
 
 ## Look and motion
