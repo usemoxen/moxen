@@ -116,13 +116,6 @@ export interface HandoffOptions {
   readonly preferModelSummary?: boolean;
   readonly modelSummary?: string;
   readonly queuedTurnIds?: readonly string[];
-  /**
-   * Source turns a manual continue is moving to the new thread's Work queue:
-   * already claimed (or marked transferred on a retry), so neither history
-   * nor an immediate task here. A retry re-marks the same rows, which
-   * `isTransferredTurn` keeps out even without this list.
-   */
-  readonly excludedTurnIds?: readonly string[];
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
@@ -146,9 +139,9 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   const terminal = (turn: StoredTurn): boolean => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted";
   const reached = (turn: StoredTurn): boolean => terminal(turn) || produced.has(turn.id);
   // Moved messages run as Work queue entries on the new thread: they are
-  // neither history to retell nor immediate work for this turn.
-  const excluded = new Set(options.excludedTurnIds ?? []);
-  const moved = turns.filter((turn) => excluded.has(turn.id) || isTransferredTurn(turn));
+  // neither history to retell nor immediate work for this turn. The staging
+  // claim lands before this read, so the marker alone draws the boundary.
+  const moved = turns.filter((turn) => isTransferredTurn(turn));
   const movedIds = new Set(moved.map((turn) => turn.id));
   const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id));
   const blocks: TurnBlock[] = sent.map((turn) => ({

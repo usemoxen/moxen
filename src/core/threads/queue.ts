@@ -70,6 +70,11 @@ export function isTransferredTurn(turn: StoredTurn): boolean {
   return turn.handoff?.requestId?.startsWith(TRANSFER_REQUEST_PREFIX) === true;
 }
 
+/** Whether this queue request id is a manual-continue transfer's destination entry. */
+export function isTransferDestinationRequestId(requestId: string | undefined): boolean {
+  return requestId?.startsWith(`handoff:${TRANSFER_REQUEST_PREFIX}`) === true;
+}
+
 export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
   readonly provider: string; readonly status: string; readonly policy: QueuePolicy;

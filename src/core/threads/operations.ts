@@ -98,7 +98,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, TRANSFER_REQUEST_PREFIX, isTransferredTurn, queueAdmission, parseQueuePolicy, providerExhausted, transferDestinationRequestId, transferRequestId, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferredTurn, queueAdmission, parseQueuePolicy, providerExhausted, transferDestinationRequestId, transferRequestId, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -463,6 +463,22 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // One message, or several queued ones batched into this turn at promotion.
     const message = turnPrompt(await store.readMessages(threadId), turn);
     if (message === null) {
+      // A moved entry still being repaired (a crash between its turn and
+      // message writes) must wait for the repair, not fail and not run: put
+      // it back queued for the next continue on its source to complete.
+      if (isTransferDestinationRequestId(turn.queue?.requestId)) {
+        try {
+          await store.withThreadLock(threadId, async () => {
+            const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
+            if (fresh && fresh.status === "running") {
+              await store.updateTurn(threadId, turn.id, { status: "queued", owner: null, updatedAt: store.nowIso() });
+            }
+          });
+        } finally {
+          store.untrackRunning(turn.id);
+        }
+        return;
+      }
       await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
       store.untrackRunning(turn.id);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
@@ -728,7 +744,16 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     await ctx.store.withThreadLock(threadId, async () => {
       const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
       if (!turn || turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
-      if (turn.handoff && (await ctx.store.readTurns(turn.handoff.destinationThreadId)).length) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
+      if (turn.handoff) {
+        const destinationTurns = await ctx.store.readTurns(turn.handoff.destinationThreadId).catch(() => [] as StoredTurn[]);
+        // A staged transfer whose entry does not exist yet is still this
+        // thread's to edit: the migration copies the fresh policy. Anything
+        // already prepared is managed on the destination instead.
+        const prepared = isTransferredTurn(turn)
+          ? destinationTurns.some((candidate) => candidate.queue?.requestId === transferDestinationRequestId(turn.id))
+          : destinationTurns.length > 0;
+        if (prepared) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
+      }
       const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
       const row = rows.find((candidate) => candidate.thread.id === threadId);
       const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
@@ -1445,8 +1470,20 @@ function transfersQueuedMessages(request: ContinueThreadRequest): boolean {
  * already-moved turns.
  */
 function isTransferableQueuedTurn(turn: StoredTurn, primary: StoredMessage | undefined): boolean {
-  if (turn.status !== "queued" || turn.queue?.removed === true) return false;
-  if (isTransferredTurn(turn) || turn.handoff !== undefined || turn.queue?.summaryFor !== undefined) return false;
+  if (turn.queue?.removed === true) return false;
+  if (isTransferredTurn(turn) || turn.handoff !== undefined) return false;
+  return isMovableTurnShape(turn, primary);
+}
+
+/**
+ * The shape a staged turn must still have to move: ordinary and pending,
+ * ignoring the staging marker and its removed flag (both expected by then).
+ * A staged entry the user reconfigured onto another continuation, or onto
+ * wake-up/automatic traffic, no longer qualifies — its own flow owns it.
+ */
+function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined): boolean {
+  if (turn.status !== "queued") return false;
+  if (turn.queue?.summaryFor !== undefined) return false;
   if (turn.queue?.wakeUp === true || turn.queue?.automatic === true) return false;
   if (turn.scheduleReason === "usage-reset") return false;
   if (turn.queue !== undefined && turn.queue.continuation !== "same-thread") return false;
@@ -1454,191 +1491,433 @@ function isTransferableQueuedTurn(turn: StoredTurn, primary: StoredMessage | und
   return primary.origin === undefined || primary.origin === "agent-message";
 }
 
-/** The source's pending ordinary turns, oldest first, for a manual continue to move. */
-async function transferableQueuedTurns(store: ThreadStore, sourceId: string): Promise<StoredTurn[]> {
-  const [turns, messages] = await Promise.all([store.readTurns(sourceId), store.readMessages(sourceId)]);
-  const byId = new Map(messages.map((message) => [message.id, message]));
-  return turns
-    .filter((turn) => isTransferableQueuedTurn(turn, byId.get(turn.messageId)))
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+/**
+ * The claim every view of a manual continue shares — eligibility, the
+ * handoff document, and the migration below. Under the queue admission
+ * lock and the source lock, each transferable turn is staged: removed from
+ * the runnable set and marked with the transfer, keeping status `queued`
+ * so entry conditions elsewhere stay blocked on it until the destination
+ * entry exists, and so the handoff (which reads post-claim state) excludes
+ * exactly what will move. A message sent after the claim is neither claimed
+ * nor excluded: it keeps the old behavior, embedded in the handoff and
+ * staying runnable on the source. A claimed turn can no longer be admitted
+ * on the source, so promotion between claim and migration simply cannot
+ * take one. Returns the claimed turn ids, oldest first.
+ */
+export async function stageQueuedMessages(ctx: OperationContext, sourceId: string, destinationId: string): Promise<string[]> {
+  const { store } = ctx;
+  return await store.withThreadLock(QUEUE_ADMISSION_LOCK, async () =>
+    store.withThreadLock(sourceId, async () => {
+      const [turns, messages] = await Promise.all([store.readTurns(sourceId), store.readMessages(sourceId)]);
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      const claimed: string[] = [];
+      for (const turn of turns
+        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))) {
+        const queue = turn.queue ?? {
+          conditions: [],
+          held: false,
+          order: Date.parse(turn.createdAt),
+          sequential: false,
+          continuation: "same-thread" as const,
+        };
+        await store.updateTurn(sourceId, turn.id, {
+          queue: { ...queue, removed: true },
+          handoff: { requestId: transferRequestId(turn.id), destinationThreadId: destinationId },
+        });
+        claimed.push(turn.id);
+      }
+      if (claimed.length > 0) store.emit(sourceId, "queue-changed");
+      return claimed;
+    }),
+  );
+}
+
+/** One moved message as the destination stores it. */
+interface TransferMessage {
+  readonly text: string;
+  readonly createdAt: string;
+  readonly attachments?: StoredMessage["attachments"];
+  readonly origin?: StoredMessage["origin"];
+  readonly notification?: StoredMessage["notification"];
 }
 
 /**
- * Move the source's pending ordinary messages to the destination's Work
- * queue as entries of their own, preserving each one's scheduled time,
- * queue conditions and latched state, user hold, order, per-turn overrides
- * (model, runtime and interaction modes, schedule reason), origin and
- * notification facts, and attachments. Every entry also waits on the
- * destination's first (handoff) turn, so a scheduled continuation still
- * runs its handoff before anything that moved — the appended condition
- * keeps the original indices, and with them the latched positions, intact.
- *
- * The source rows stay as history but can never run: interrupted, removed,
- * and marked with the transfer, whose destination request id lets entry
- * conditions elsewhere follow the move to the new thread. The whole move
- * runs under the queue admission lock, and every source row is re-checked
- * there, so admission promoting a turn mid-continue simply leaves that turn
- * on the source, and a retry or restart finds destination rows by their
- * request id instead of duplicating them.
+ * The destination rows for one staged turn: the entry (waiting on the
+ * handoff first), its messages, and its queued/scheduled activity. The
+ * source's staged `removed` flag never travels: the entry is live.
  */
-async function transferQueuedMessages(
-  ctx: OperationContext,
-  sourceId: string,
+function buildTransferEntry(
+  store: ThreadStore,
+  destination: StoredThread,
+  sourceTurn: StoredTurn,
+  primary: TransferMessage,
+  riders: readonly TransferMessage[],
+  requestId: string,
   destinationId: string,
   handoffTurnId: string,
-  candidateIds: ReadonlySet<string>,
+  now: string,
+): { turn: StoredTurn; messages: StoredMessage[]; activity: StoredActivity } {
+  const primaryId = store.newId();
+  const base: QueuePolicy = sourceTurn.queue
+    ? { ...sourceTurn.queue, removed: false }
+    : {
+        conditions: [],
+        held: false,
+        order: Date.parse(sourceTurn.createdAt),
+        sequential: false,
+        continuation: "same-thread" as const,
+      };
+  const policy: QueuePolicy = {
+    ...base,
+    requestId,
+    // Latched "after" observations were made against the source turn's own
+    // time: without the same baseline a refresh would read them as not yet
+    // happened and drop the latch.
+    eventAfter: base.eventAfter ?? sourceTurn.createdAt,
+    conditions: [...base.conditions, { type: "entry", threadId: destinationId, turnId: handoffTurnId }],
+  };
+  const turn: StoredTurn = {
+    id: store.newId(),
+    threadId: destinationId,
+    status: "queued",
+    delivery: "queued",
+    queue: policy,
+    messageId: primaryId,
+    runtimeMode: sourceTurn.runtimeMode,
+    interactionMode: sourceTurn.interactionMode,
+    ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
+    modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
+    parentTurnId: sourceTurn.parentTurnId,
+    ...(sourceTurn.scheduledFor !== undefined && sourceTurn.scheduledFor !== null
+      ? {
+          scheduledFor: sourceTurn.scheduledFor,
+          ...(sourceTurn.scheduleReason !== undefined && sourceTurn.scheduleReason !== null ? { scheduleReason: sourceTurn.scheduleReason } : {}),
+          ...(sourceTurn.continueAttempt !== undefined ? { continueAttempt: sourceTurn.continueAttempt } : {}),
+        }
+      : {}),
+    error: null,
+    usage: null,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+  };
+  const messages: StoredMessage[] = [
+    {
+      id: primaryId,
+      threadId: destinationId,
+      turnId: turn.id,
+      role: "user",
+      text: primary.text,
+      createdAt: primary.createdAt,
+      ...(primary.attachments ? { attachments: primary.attachments } : {}),
+      ...(primary.origin !== undefined ? { origin: primary.origin } : {}),
+      ...(primary.notification ? { notification: primary.notification } : {}),
+    },
+    ...riders.map((rider) => ({
+      id: store.newId(),
+      threadId: destinationId,
+      turnId: turn.id,
+      role: "user" as const,
+      text: rider.text,
+      createdAt: rider.createdAt,
+      ...(rider.attachments ? { attachments: rider.attachments } : {}),
+      ...(rider.origin !== undefined ? { origin: rider.origin } : {}),
+      ...(rider.notification ? { notification: rider.notification } : {}),
+    })),
+  ];
+  const activity: StoredActivity = {
+    id: store.newId(),
+    threadId: destinationId,
+    turnId: turn.id,
+    kind: typeof turn.scheduledFor === "string" ? "turn.scheduled" : "turn.queued",
+    summary: primary.text.slice(0, 120),
+    ...(typeof turn.scheduledFor === "string" ? { payload: { scheduledFor: turn.scheduledFor, reason: turn.scheduleReason ?? "user" } } : {}),
+    createdAt: now,
+  };
+  return { turn, messages, activity };
+}
+
+/** Whether this destination entry has every row its turn needs to run. */
+function transferEntryComplete(
+  entry: StoredTurn,
+  destinationMessages: readonly StoredMessage[],
+  primaryText: string,
+  riderTexts: readonly string[],
+): boolean {
+  const own = destinationMessages.filter((message) => message.turnId === entry.id);
+  if (!own.some((message) => message.id === entry.messageId && message.text === primaryText)) return false;
+  const rest = own
+    .filter((message) => message.id !== entry.messageId)
+    .map((message) => message.text)
+    .sort();
+  const need = [...riderTexts].sort();
+  return rest.length === need.length && rest.every((text, index) => text === need[index]);
+}
+
+/**
+ * Fill the gaps a crash left in a destination entry — a turn row with no
+ * message, or a message set missing riders — reusing the turn's recorded
+ * message ids, so a retry never duplicates a row.
+ */
+async function repairTransferEntry(
+  store: ThreadStore,
+  destinationId: string,
+  entry: StoredTurn,
+  primary: TransferMessage,
+  riders: readonly TransferMessage[],
+  destinationMessages: StoredMessage[],
+  destinationActivities: StoredActivity[],
 ): Promise<void> {
+  const own = destinationMessages.filter((message) => message.turnId === entry.id);
+  const repairs: StoredMessage[] = [];
+  if (!own.some((message) => message.id === entry.messageId)) {
+    repairs.push({
+      id: entry.messageId,
+      threadId: destinationId,
+      turnId: entry.id,
+      role: "user",
+      text: primary.text,
+      createdAt: primary.createdAt,
+      ...(primary.attachments ? { attachments: primary.attachments } : {}),
+      ...(primary.origin !== undefined ? { origin: primary.origin } : {}),
+      ...(primary.notification ? { notification: primary.notification } : {}),
+    });
+  }
+  const surplus = own.filter((message) => message.id !== entry.messageId).map((message) => message.text);
+  for (const rider of riders) {
+    const at = surplus.indexOf(rider.text);
+    if (at >= 0) surplus.splice(at, 1);
+    else {
+      repairs.push({
+        id: store.newId(),
+        threadId: destinationId,
+        turnId: entry.id,
+        role: "user",
+        text: rider.text,
+        createdAt: rider.createdAt,
+        ...(rider.attachments ? { attachments: rider.attachments } : {}),
+        ...(rider.origin !== undefined ? { origin: rider.origin } : {}),
+        ...(rider.notification ? { notification: rider.notification } : {}),
+      });
+    }
+  }
+  for (const row of repairs) {
+    await store.appendLedger(destinationId, "messages", row);
+    destinationMessages.push(row);
+  }
+  if (!destinationActivities.some((activity) => activity.turnId === entry.id && (activity.kind === "turn.queued" || activity.kind === "turn.scheduled"))) {
+    const activity: StoredActivity = {
+      id: store.newId(),
+      threadId: destinationId,
+      turnId: entry.id,
+      kind: typeof entry.scheduledFor === "string" ? "turn.scheduled" : "turn.queued",
+      summary: primary.text.slice(0, 120),
+      ...(typeof entry.scheduledFor === "string" ? { payload: { scheduledFor: entry.scheduledFor, reason: entry.scheduleReason ?? "user" } } : {}),
+      createdAt: store.nowIso(),
+    };
+    await store.appendLedger(destinationId, "activity", activity);
+    destinationActivities.push(activity);
+  }
+}
+
+/** The source side of a completed move: inert history pointing at the new entry. */
+async function markTransferMoved(
+  store: ThreadStore,
+  sourceId: string,
+  sourceTurn: StoredTurn,
+  destinationId: string,
+  entryId: string,
+  now: string,
+): Promise<void> {
+  const queue = sourceTurn.queue ?? {
+    conditions: [],
+    held: false,
+    order: Date.parse(sourceTurn.createdAt),
+    sequential: false,
+    continuation: "same-thread" as const,
+  };
+  await store.updateTurn(sourceId, sourceTurn.id, {
+    status: "interrupted",
+    completedAt: now,
+    queue: { ...queue, removed: true },
+    handoff: { requestId: transferRequestId(sourceTurn.id), destinationThreadId: destinationId },
+  });
+  // A moved schedule must not fire on the source afterwards: the entry runs
+  // on the destination now. (A timer armed in another process finds nothing
+  // runnable and stands down on its own.)
+  if (typeof sourceTurn.scheduledFor === "string") disarmScheduledTurn(sourceId, sourceTurn.id);
+  await store.appendLedger(sourceId, "activity", {
+    id: store.newId(),
+    threadId: sourceId,
+    turnId: sourceTurn.id,
+    kind: "turn.interrupted",
+    summary: sourceTurn.id,
+    // Taken back before it ran: clients drop it from the transcript,
+    // while the ledger keeps the history and the transfer target.
+    payload: { beforeStart: true, transferredTo: { threadId: destinationId, turnId: entryId } },
+    createdAt: now,
+  });
+}
+
+/**
+ * Finish moving the staged turns to the destination's Work queue as entries
+ * of their own, preserving each one's scheduled time, queue conditions and
+ * latched state, user hold, order, per-turn overrides (model, runtime and
+ * interaction modes, schedule reason), origin and notification facts, and
+ * attachments. Every entry also waits on the destination's first (handoff)
+ * turn, so a scheduled continuation still runs its handoff before anything
+ * that moved — the appended condition keeps the original indices, and with
+ * them the latched positions, intact.
+ *
+ * Each staged source turn moves at most once: an entry already there is
+ * verified and repaired (a crash between its turn and message writes leaves
+ * a turn row with no message), never duplicated, and the source row is
+ * marked moved — interrupted, removed, keeping its transfer marker — only
+ * once its destination entry is whole. An entry that cannot be completed
+ * stays staged: still removed on the source, still excluded from handoffs,
+ * still blocking waiters, until a later continue repairs it. Staged turns
+ * the user took back meanwhile (no longer queued) are unmarked instead, so
+ * they read as ordinary removed history, and their destination entry — when
+ * one was already created — is taken back too.
+ *
+ * The whole migration runs under the queue admission lock, so admission
+ * cannot dispatch a half-written entry mid-loop; and a destination entry
+ * that somehow reaches a runner before its repair is skipped rather than
+ * failed (see `runRecoveredTurn`).
+ */
+export async function migrateQueuedMessages(ctx: OperationContext, sourceId: string, destinationId: string): Promise<void> {
   const { store } = ctx;
   await store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
     await store.withThreadLock(sourceId, async () => {
       const [turns, messages] = await Promise.all([store.readTurns(sourceId), store.readMessages(sourceId)]);
       const byId = new Map(messages.map((message) => [message.id, message]));
-      const candidates = turns
-        .filter((turn) => candidateIds.has(turn.id) && isTransferableQueuedTurn(turn, byId.get(turn.messageId)))
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-      if (candidates.length === 0) return;
+      const order = (left: StoredTurn, right: StoredTurn): number =>
+        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+      const staged = turns
+        .filter((turn) => {
+          if (turn.status !== "queued" || !isTransferredTurn(turn) || turn.handoff?.destinationThreadId !== destinationId || turn.queue === undefined) {
+            return false;
+          }
+          // Staged rows carry `removed`: judge the underlying entry with the shape check.
+          return isMovableTurnShape(turn, byId.get(turn.messageId));
+        })
+        .sort(order);
+      const abandoned = turns.filter(
+        (turn) =>
+          isTransferredTurn(turn) &&
+          turn.handoff?.destinationThreadId === destinationId &&
+          !(turn.status === "queued" && turn.queue !== undefined && isMovableTurnShape(turn, byId.get(turn.messageId))),
+      );
+      if (staged.length === 0 && abandoned.length === 0) return;
       await store.withThreadLock(destinationId, async () => {
         const destination = await store.readThreadRecord(destinationId);
         if (!destination) return;
         const existing = await store.readTurns(destinationId);
+        const destinationMessages = await store.readMessages(destinationId);
+        const destinationActivities = await store.readActivities(destinationId);
+        // The handoff turn stays first: moved entries wait on it even when
+        // the continuation itself is scheduled, so nothing runs ahead of it.
+        const handoffTurn = [...existing].sort(order).find((turn) => !isTransferDestinationRequestId(turn.queue?.requestId)) ?? null;
+        if (!handoffTurn) return;
+        const handoffTurnId = handoffTurn.id;
         const now = store.nowIso();
-        for (const sourceTurn of candidates) {
+        for (const sourceTurn of staged) {
           const requestId = transferDestinationRequestId(sourceTurn.id);
-          let moved = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
-          if (!moved) {
-            const primary = byId.get(sourceTurn.messageId);
-            // The ledger never drops a turn's own message, but a skipped bad
-            // line could: leave that turn on the source rather than fail the
-            // whole continue, so a retry can still move it.
-            if (!primary) continue;
-            const riders = messages
-              .filter(
-                (message) =>
-                  message.turnId === sourceTurn.id &&
-                  message.id !== sourceTurn.messageId &&
-                  message.role === "user" &&
-                  (message.origin === undefined || message.origin === "agent-message"),
-              )
-              .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-            const primaryId = store.newId();
-            const base: QueuePolicy = sourceTurn.queue
-              ? { ...sourceTurn.queue }
-              : {
-                  conditions: [],
-                  held: false,
-                  order: Date.parse(sourceTurn.createdAt),
-                  sequential: false,
-                  continuation: "same-thread" as const,
-                };
-            const policy: QueuePolicy = {
-              ...base,
-              requestId,
-              // Latched "after" observations were made against the source
-              // turn's own time: without the same baseline a refresh would
-              // read them as not yet happened and drop the latch.
-              eventAfter: base.eventAfter ?? sourceTurn.createdAt,
-              conditions: [...base.conditions, { type: "entry", threadId: destinationId, turnId: handoffTurnId }],
-            };
-            moved = {
-              id: store.newId(),
-              threadId: destinationId,
-              status: "queued",
-              delivery: "queued",
-              queue: policy,
-              messageId: primaryId,
-              runtimeMode: sourceTurn.runtimeMode,
-              interactionMode: sourceTurn.interactionMode,
-              ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
-              modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
-              parentTurnId: sourceTurn.parentTurnId,
-              ...(sourceTurn.scheduledFor !== undefined && sourceTurn.scheduledFor !== null
-                ? {
-                    scheduledFor: sourceTurn.scheduledFor,
-                    ...(sourceTurn.scheduleReason !== undefined && sourceTurn.scheduleReason !== null
-                      ? { scheduleReason: sourceTurn.scheduleReason }
-                      : {}),
-                    ...(sourceTurn.continueAttempt !== undefined ? { continueAttempt: sourceTurn.continueAttempt } : {}),
-                  }
-                : sourceTurn.scheduleReason === "usage-reset"
-                  ? {
-                      scheduleReason: "usage-reset" as const,
-                      ...(sourceTurn.continueAttempt !== undefined ? { continueAttempt: sourceTurn.continueAttempt } : {}),
-                    }
-                  : {}),
-              error: null,
-              usage: null,
-              createdAt: now,
-              updatedAt: now,
-              completedAt: null,
-            };
-            await store.appendLedger(destinationId, "turns", moved);
-            existing.push(moved);
-            const movedId = moved.id;
-            const rows: StoredMessage[] = [
-              {
-                id: primaryId,
-                threadId: destinationId,
-                turnId: moved.id,
-                role: "user",
-                text: primary.text,
-                createdAt: primary.createdAt,
-                ...(primary.attachments ? { attachments: primary.attachments } : {}),
-                ...(primary.origin !== undefined ? { origin: primary.origin } : {}),
-                ...(primary.notification ? { notification: primary.notification } : {}),
-              },
-              ...riders.map((rider) => ({
+          const entry = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
+          if (entry && (entry.status !== "queued" || entry.queue?.removed === true)) {
+            // Already settled or taken back on the destination: the move is
+            // over, whatever the source still says.
+            await markTransferMoved(store, sourceId, sourceTurn, destinationId, entry.id, now);
+            continue;
+          }
+          const primary = byId.get(sourceTurn.messageId);
+          // A source message lost to a skipped bad line stays staged: a
+          // retry can still move it once the ledger heals.
+          if (!primary) continue;
+          const riders = messages
+            .filter(
+              (message) =>
+                message.turnId === sourceTurn.id &&
+                message.id !== sourceTurn.messageId &&
+                message.role === "user" &&
+                (message.origin === undefined || message.origin === "agent-message"),
+            )
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+          if (!entry) {
+            const built = buildTransferEntry(store, destination, sourceTurn, primary, riders, requestId, destinationId, handoffTurnId, now);
+            await store.appendLedger(destinationId, "turns", built.turn);
+            existing.push(built.turn);
+            destinationMessages.push(...built.messages);
+            for (const row of built.messages) await store.appendLedger(destinationId, "messages", row);
+            await store.appendLedger(destinationId, "activity", built.activity);
+            destinationActivities.push(built.activity);
+          } else {
+            await repairTransferEntry(store, destinationId, entry, primary, riders, destinationMessages, destinationActivities);
+          }
+          const target = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
+          const riderTexts = riders.map((rider) => rider.text);
+          // A destination entry that is still incomplete stays staged: it
+          // must not run until its repair lands.
+          if (!target || !transferEntryComplete(target, destinationMessages, primary.text, riderTexts)) continue;
+          // A moved schedule fires on the destination now, so arm it where
+          // the scheduler owns this process (a no-op elsewhere); the source
+          // timer is disarmed with the moved mark below.
+          if (typeof target.scheduledFor === "string") armScheduledTurn(destinationId, target.id, target.scheduledFor);
+          await markTransferMoved(store, sourceId, sourceTurn, destinationId, target.id, now);
+        }
+        for (const sourceTurn of abandoned) {
+          // Taken back on the source after staging, or moved by an earlier
+          // pass: read as ordinary removed history from here on. A
+          // destination entry that is already whole stands — its move
+          // finished before the take-back — while a partial one, which can
+          // never complete now, is taken back too.
+          const current = await store.readTurns(sourceId);
+          await store.rewriteLedger(
+            sourceId,
+            "turns",
+            current.map((candidate) => {
+              if (candidate.id !== sourceTurn.id) return candidate;
+              const { handoff: _moved, ...rest } = candidate;
+              return rest;
+            }),
+          );
+          const primary = byId.get(sourceTurn.messageId);
+          const riders = messages
+            .filter(
+              (message) =>
+                message.turnId === sourceTurn.id &&
+                message.id !== sourceTurn.messageId &&
+                message.role === "user" &&
+                (message.origin === undefined || message.origin === "agent-message"),
+            )
+            .map((message) => message.text);
+          const requestId = transferDestinationRequestId(sourceTurn.id);
+          const entry = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
+          const whole = primary !== undefined && entry !== null && transferEntryComplete(entry, destinationMessages, primary.text, riders);
+          if (!whole && entry && entry.status === "queued" && entry.queue && entry.queue.removed !== true) {
+            const updated = await store.updateTurn(destinationId, entry.id, {
+              status: "interrupted",
+              completedAt: now,
+              queue: { ...entry.queue, removed: true },
+            });
+            if (updated) {
+              existing.splice(
+                existing.findIndex((turn) => turn.id === entry.id),
+                1,
+                updated,
+              );
+              await store.appendLedger(destinationId, "activity", {
                 id: store.newId(),
                 threadId: destinationId,
-                turnId: movedId,
-                role: "user" as const,
-                text: rider.text,
-                createdAt: rider.createdAt,
-                ...(rider.attachments ? { attachments: rider.attachments } : {}),
-                ...(rider.origin !== undefined ? { origin: rider.origin } : {}),
-                ...(rider.notification ? { notification: rider.notification } : {}),
-              })),
-            ];
-            for (const row of rows) await store.appendLedger(destinationId, "messages", row);
-            await store.appendLedger(destinationId, "activity", {
-              id: store.newId(),
-              threadId: destinationId,
-              turnId: moved.id,
-              kind: typeof moved.scheduledFor === "string" ? "turn.scheduled" : "turn.queued",
-              summary: primary.text.slice(0, 120),
-              ...(typeof moved.scheduledFor === "string"
-                ? { payload: { scheduledFor: moved.scheduledFor, reason: moved.scheduleReason ?? "user" } }
-                : {}),
-              createdAt: now,
-            });
+                turnId: entry.id,
+                kind: "turn.interrupted",
+                summary: entry.id,
+                payload: { beforeStart: true },
+                createdAt: now,
+              });
+            }
           }
-          const queue = sourceTurn.queue ?? {
-            conditions: [],
-            held: false,
-            order: Date.parse(sourceTurn.createdAt),
-            sequential: false,
-            continuation: "same-thread" as const,
-          };
-          await store.updateTurn(sourceId, sourceTurn.id, {
-            status: "interrupted",
-            completedAt: now,
-            queue: { ...queue, removed: true },
-            handoff: { requestId: transferRequestId(sourceTurn.id), destinationThreadId: destinationId },
-          });
-          // A moved schedule must not fire on the source afterwards: the
-          // entry runs on the destination now. (A timer armed in another
-          // process finds nothing runnable and stands down on its own.)
-          if (typeof sourceTurn.scheduledFor === "string") disarmScheduledTurn(sourceId, sourceTurn.id);
-          await store.appendLedger(sourceId, "activity", {
-            id: store.newId(),
-            threadId: sourceId,
-            turnId: sourceTurn.id,
-            kind: "turn.interrupted",
-            summary: sourceTurn.id,
-            // Taken back before it ran: clients drop it from the transcript,
-            // while the ledger keeps the history and the transfer target.
-            payload: { beforeStart: true, transferredTo: { threadId: destinationId, turnId: moved.id } },
-            createdAt: now,
-          });
         }
         store.emit(destinationId, "turn-queued");
       });
@@ -1660,10 +1939,11 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const destinationId = await reserveContinuation(store, source, request, title, noteSummary);
   const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
   // A manual continue moves the source's pending ordinary messages with it:
-  // claim the set before the handoff is written, so the document neither
-  // retells them as history nor assigns them as this turn's work.
-  const transferCandidates = transfersQueuedMessages(request) ? await transferableQueuedTurns(store, source.id) : [];
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(transferCandidates.length > 0 ? { excludedTurnIds: transferCandidates.map((turn) => turn.id) } : {}) });
+  // staging claims the set under lock before the handoff is written, so the
+  // document neither retells them as history nor assigns them as this
+  // turn's work.
+  if (transfersQueuedMessages(request)) await stageQueuedMessages(ctx, source.id, destinationId);
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
   const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
     id: destinationId,
@@ -1753,16 +2033,10 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     const parent = notifyParent ?? (await continuationNotifier(store, created.id));
     if (parent) await watchContinuation(ctx, parent, created.id);
   }
-  if (transferCandidates.length > 0) {
-    // The handoff turn stays first: moved entries wait on it even when the
-    // continuation itself is scheduled, so nothing runs ahead of the handoff.
-    const destinationTurns = [...(await store.readTurns(created.id))].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    const handoffPrefix = `handoff:${TRANSFER_REQUEST_PREFIX}`;
-    const handoffTurn = destinationTurns.find((turn) => !turn.queue?.requestId?.startsWith(handoffPrefix)) ?? destinationTurns[0];
-    if (handoffTurn) {
-      await transferQueuedMessages(ctx, source.id, created.id, handoffTurn.id, new Set(transferCandidates.map((turn) => turn.id)));
-    }
-  }
+  // The migration runs after the first turn exists, so moved entries can
+  // wait on it; it repairs and completes staged claims, including ones a
+  // crashed earlier attempt left behind.
+  if (transfersQueuedMessages(request)) await migrateQueuedMessages(ctx, source.id, created.id);
   if (scheduledHold) await linkScheduledContinuation(ctx, source.id, created.id);
   if (!(await store.readActivities(source.id)).some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === created.id)) {
     await store.appendLedger(source.id, "activity", {
