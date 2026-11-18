@@ -117,12 +117,51 @@ pub fn choices(prefix: &str, inventory: Option<&Inventory>, busy: bool) -> Vec<C
             }
         }
     }
-    let prefix = prefix.to_lowercase();
-    choices.retain(|choice| {
-        choice.invocation.to_lowercase().starts_with(&prefix)
-            || (prefix == "/" && choice.invocation.starts_with('$'))
-    });
-    choices
+    let dollar = prefix.starts_with('$');
+    let query = prefix
+        .strip_prefix(['/', '$'])
+        .unwrap_or(prefix)
+        .to_lowercase();
+    let mut scored: Vec<(usize, usize, Choice)> = vec![];
+    for (index, choice) in choices.into_iter().enumerate() {
+        let choice_dollar = choice.invocation.starts_with('$');
+        // Bare "/" still offers the provider's $-skills, as before.
+        if choice_dollar != dollar && !(query.is_empty() && !dollar && choice_dollar) {
+            continue;
+        }
+        let rank = if query.is_empty() {
+            0
+        } else {
+            let Some(rank) = rank_choice(&choice, &query) else {
+                continue;
+            };
+            rank
+        };
+        scored.push((rank, index, choice));
+    }
+    scored.sort_by_key(|(rank, index, _)| (*rank, *index));
+    scored.into_iter().map(|(_, _, choice)| choice).collect()
+}
+
+/// Where a query sits for the `/` picker: a name that starts with it, then one
+/// that contains it, then a description that does — the TUI's `filterSkills`
+/// order, so the most likely pick reads first. `None` matches nothing.
+fn rank_choice(choice: &Choice, query: &str) -> Option<usize> {
+    let name = choice
+        .invocation
+        .strip_prefix(['/', '$'])
+        .unwrap_or(&choice.invocation)
+        .to_lowercase();
+    if name.starts_with(query) {
+        return Some(0);
+    }
+    if name.contains(query) {
+        return Some(1);
+    }
+    if choice.description.to_lowercase().contains(query) {
+        return Some(2);
+    }
+    None
 }
 
 pub fn mode_command(text: &str) -> Option<(&'static str, &str)> {
@@ -195,8 +234,32 @@ mod tests {
             ["/research", "/orchestrate", "/review", "$check", "/compact"]
         );
         assert_eq!(names("$c", false), ["$check"]);
-        assert_eq!(names("/o", true), Vec::<String>::new());
+        assert_eq!(names("/o", true), ["/compact", "/review"]);
         assert!(Inventory::decode(&json!({"trigger":"?"})).is_err());
+    }
+
+    #[test]
+    fn slash_picker_ranks_name_prefix_then_contains_then_description() {
+        let inventory = Inventory::decode(&json!({
+            "trigger":"/",
+            "skills":[
+              {"name":"layout","enabled":true,"userInvocable":true,"description":"Grids"},
+              {"name":"relayout","enabled":true,"userInvocable":true,"description":"Move things"},
+              {"name":"design","enabled":true,"userInvocable":true,"description":"Page layout and spacing"},
+              {"name":"unrelated","enabled":true,"userInvocable":true,"description":"Something else entirely"}
+            ],
+            "commands":[]
+        }))
+        .unwrap();
+        let names = |prefix| {
+            choices(prefix, Some(&inventory), true)
+                .into_iter()
+                .map(|choice| choice.invocation)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("/layout"), ["/layout", "/relayout", "/design"]);
+        assert_eq!(names("/LAY"), ["/layout", "/relayout", "/design"]);
+        assert!(names("/zzz").is_empty());
     }
 
     #[test]

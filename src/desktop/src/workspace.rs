@@ -757,14 +757,29 @@ impl Workspace {
             c.loading_assets += 1;
             c.changed(cx);
         });
+        // Past 20 images the API allows 2000 px a side, not 8000: shrink for the set being built.
+        let existing = composer
+            .read(cx)
+            .assets
+            .iter()
+            .filter(|asset| matches!(asset, Asset::Image { .. }))
+            .count();
+        let many = existing
+            + images.len()
+            + paths
+                .iter()
+                .filter(|path| Asset::image_format(path).is_some())
+                .count()
+            > attachments::MANY_IMAGES;
         let loaded = cx.background_executor().spawn(async move {
             paths
                 .into_iter()
-                .map(Asset::local)
+                .map(|path| Asset::local(path, many))
                 .chain(images.into_iter().enumerate().map(|(at, image)| {
                     Asset::image(
                         format!("Clipboard {}.{}", at + 1, image.format.extension()),
                         image,
+                        many,
                     )
                 }))
                 .collect::<Vec<_>>()

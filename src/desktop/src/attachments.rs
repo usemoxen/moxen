@@ -11,6 +11,10 @@ use std::{
 const READ_LIMIT: usize = 40 * 1024 * 1024;
 const IMAGE_BYTES: usize = 15 * 1024 * 1024 / 2;
 const PREVIEW_EDGE: u32 = 1568;
+// The API allows 8000 px a side, or 2000 px once a message carries more than 20 images.
+pub const MANY_IMAGES: usize = 20;
+const SINGLE_EDGE: u32 = 8000;
+const MANY_EDGE: u32 = 2000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Asset {
@@ -30,24 +34,12 @@ impl Asset {
         }
     }
 
-    pub fn local(path: PathBuf) -> Result<Self, String> {
+    pub fn local(path: PathBuf, many: bool) -> Result<Self, String> {
         let meta = path
             .metadata()
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let format = match path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "gif" => Some(ImageFormat::Gif),
-            "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
-            "png" => Some(ImageFormat::Png),
-            "webp" => Some(ImageFormat::Webp),
-            _ => None,
-        };
-        let Some(format) = format.filter(|_| meta.is_file()) else {
+        let format = Self::image_format(&path).filter(|_| meta.is_file());
+        let Some(format) = format else {
             return Ok(Self::Path {
                 path,
                 directory: meta.is_dir(),
@@ -62,10 +54,27 @@ impl Asset {
         std::fs::File::open(&path)
             .and_then(|file| file.take((READ_LIMIT + 1) as u64).read_to_end(&mut bytes))
             .map_err(|e| format!("{name}: {e}"))?;
-        Self::image(name, Image::from_bytes(format, bytes))
+        Self::image(name, Image::from_bytes(format, bytes), many)
     }
 
-    pub fn image(mut name: String, mut image: Image) -> Result<Self, String> {
+    /// The image format a path's extension claims, before the read confirms it is a file.
+    pub fn image_format(path: &Path) -> Option<ImageFormat> {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "gif" => Some(ImageFormat::Gif),
+            "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+            "png" => Some(ImageFormat::Png),
+            "webp" => Some(ImageFormat::Webp),
+            _ => None,
+        }
+    }
+
+    pub fn image(mut name: String, mut image: Image, many: bool) -> Result<Self, String> {
         if image.bytes.is_empty() || image.bytes.len() > READ_LIMIT {
             return Err(format!(
                 "{name} is empty or exceeds the 40 MB image read limit."
@@ -88,7 +97,7 @@ impl Asset {
             == Some(image.format);
         if !supported
             || image.bytes.len() > IMAGE_BYTES
-            || decoded.width().max(decoded.height()) > 2000
+            || decoded.width().max(decoded.height()) > if many { MANY_EDGE } else { SINGLE_EDGE }
         {
             let mut bytes = Cursor::new(Vec::new());
             let resized = decoded.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE);
@@ -404,6 +413,7 @@ mod tests {
         let Asset::Image { name, image } = Asset::image(
             "clipboard.bmp".into(),
             Image::from_bytes(ImageFormat::Bmp, bytes.into_inner()),
+            false,
         )
         .unwrap() else {
             panic!("expected an image")
@@ -414,10 +424,63 @@ mod tests {
         assert!(
             Asset::image(
                 "bad.png".into(),
-                Image::from_bytes(ImageFormat::Png, vec![1, 2])
+                Image::from_bytes(ImageFormat::Png, vec![1, 2]),
+                false,
             )
             .is_err()
         );
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Cursor::new(vec![]);
+        image::RgbImage::new(width, height)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        assert!(bytes.len() <= super::IMAGE_BYTES);
+        bytes
+    }
+
+    fn attached(name: &str, width: u32, height: u32, many: bool) -> Asset {
+        Asset::image(
+            name.into(),
+            Image::from_bytes(ImageFormat::Png, png_bytes(width, height)),
+            many,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn keeps_images_up_to_8000_px_alone_and_shrinks_past_2000_px_in_large_sets() {
+        // 3000 px survives alone but is shrunk once the message holds many images.
+        let Asset::Image { name, image } = attached("photo.png", 3000, 10, false) else {
+            panic!("expected an image")
+        };
+        assert_eq!(name, "photo.png");
+        assert_eq!(image.bytes, png_bytes(3000, 10));
+        let Asset::Image { image, .. } = attached("photo.png", 3000, 10, true) else {
+            panic!("expected an image")
+        };
+        assert_eq!(image::load_from_memory(&image.bytes).unwrap().width(), 1568);
+        // 9000 px is shrunk either way; the edges themselves are kept.
+        let Asset::Image { image, .. } = attached("wide.png", 9000, 300, false) else {
+            panic!("expected an image")
+        };
+        assert_eq!(image::load_from_memory(&image.bytes).unwrap().width(), 1568);
+        let Asset::Image { image, .. } = attached("wide.png", 9000, 300, true) else {
+            panic!("expected an image")
+        };
+        assert_eq!(image::load_from_memory(&image.bytes).unwrap().width(), 1568);
+        let Asset::Image { name, image } = attached("edge.png", 8000, 10, false) else {
+            panic!("expected an image")
+        };
+        assert_eq!(name, "edge.png");
+        assert_eq!(image.bytes, png_bytes(8000, 10));
+        let Asset::Image { name, image } = attached("edge.png", 2000, 10, true) else {
+            panic!("expected an image")
+        };
+        assert_eq!(name, "edge.png");
+        assert_eq!(image.bytes, png_bytes(2000, 10));
     }
 
     #[test]
