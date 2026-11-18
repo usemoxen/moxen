@@ -16,7 +16,7 @@
  * so a long thread still fits a context window.
  */
 import type { ThreadStore } from "./store.js";
-import { isTransferredTurn } from "./queue.js";
+import { isTransferLanded } from "./queue.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 
 /** Turns kept word for word; older ones become a one-line summary each. */
@@ -124,6 +124,12 @@ export interface HandoffOptions {
    * their marker. Only the manual path passes it.
    */
   readonly knownTurnIds?: readonly string[];
+  /**
+   * Turns this call itself claimed for the move: hidden like moved turns,
+   * since the migration runs right after this read. Only the manual path
+   * passes it.
+   */
+  readonly excludedTurnIds?: readonly string[];
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
@@ -159,9 +165,11 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   const terminal = (turn: StoredTurn): boolean => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted";
   const reached = (turn: StoredTurn): boolean => terminal(turn) || produced.has(turn.id);
   // Moved messages run as Work queue entries on the new thread: they are
-  // neither history to retell nor immediate work for this turn. The staging
-  // claim lands before this read, so the marker alone draws the boundary.
-  const moved = turns.filter((turn) => isTransferredTurn(turn));
+  // neither history to retell nor immediate work for this turn. Only landed
+  // moves count — a staged claim alone is not a move — plus the turns this
+  // call itself claimed, whose migration follows this read.
+  const excluded = new Set(options.excludedTurnIds ?? []);
+  const moved = turns.filter((turn) => isTransferLanded(turn) || excluded.has(turn.id));
   const movedIds = new Set(moved.map((turn) => turn.id));
   const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id));
   const blocks: TurnBlock[] = sent.map((turn) => ({

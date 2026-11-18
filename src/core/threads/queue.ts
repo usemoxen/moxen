@@ -70,6 +70,16 @@ export function isTransferredTurn(turn: StoredTurn): boolean {
   return turn.handoff?.requestId?.startsWith(TRANSFER_REQUEST_PREFIX) === true;
 }
 
+/**
+ * Whether this turn's move actually landed on the destination: staged claims
+ * carry the marker without the flag, so only a completed markTransferMoved
+ * counts. Entries elsewhere that follow the handoff keep waiting on a
+ * landed move, never on a bare claim.
+ */
+export function isTransferLanded(turn: StoredTurn): boolean {
+  return isTransferredTurn(turn) && turn.handoff?.landed === true;
+}
+
 /** Whether this queue request id is a manual-continue transfer's destination entry. */
 export function isTransferDestinationRequestId(requestId: string | undefined): boolean {
   return requestId?.startsWith(`handoff:${TRANSFER_REQUEST_PREFIX}`) === true;

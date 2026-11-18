@@ -194,6 +194,12 @@ export interface StoredTurn {
     readonly summaryTurnId?: string;
     readonly summary?: string;
     readonly fallback?: boolean;
+    /**
+     * Set only when a manual-continue transfer actually landed its entry on
+     * the destination. A staged claim carries no flag: staging marks, moving
+     * lands.
+     */
+    readonly landed?: boolean;
   };
   readonly id: string;
   readonly threadId: string;
