@@ -65,7 +65,7 @@ fn tasks(
                         .text_size(px(11.5))
                         .line_height(px(12.))
                         .text_color(color("ink-2"))
-                        .child(format!("{done} of {}", tasks.len())),
+                        .child(crate::language::step_count(done, tasks.len())),
                 )
                 .child(
                     div()

@@ -241,7 +241,8 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                                     .text_color(color("live"))
                                                     .child(ui::state(Status::Running))
                                                     .child(format!(
-                                                        "working · {}m {:02}s",
+                                                        "{} · {}m {:02}s",
+                                                        crate::language::tr("working"),
                                                         seconds / 60,
                                                         seconds % 60
                                                     )),
@@ -620,7 +621,9 @@ fn card(
                     Dropdown::Mode,
                     "mode",
                     "Mode",
-                    mode_label(&INTERACTION_MODES, &mode_of(w, thread)),
+                    // The TUI's Spanish for the mode (settings "Build").
+                    crate::language::tr(&mode_label(&INTERACTION_MODES, &mode_of(w, thread)))
+                        .into_owned(),
                     running,
                     cx,
                 )),
@@ -1265,7 +1268,7 @@ pub fn actions_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             kind: Dropdown::Thread,
             id: "thread-actions",
             tooltip: "Thread actions",
-            label: "Actions".into(),
+            label: crate::language::tr("Actions").into_owned(),
             locked: items.is_empty(),
         },
         move |cx| crate::thread_actions::menu_rows("thread-actions", id, &items, cx),
@@ -1630,8 +1633,8 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .to_string();
     let changed = overview
         .and_then(|o| o.status.as_ref())
-        .map(|s| s.line())
-        .filter(|line| line != "clean");
+        .filter(|s| !s.is_clean())
+        .map(|s| s.line());
     let chip = |id: &'static str, tooltip: &'static str| {
         div()
             .id(id)
@@ -1666,7 +1669,10 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .when(background > 0, |s| {
             s.child(
                 chip("background", "Open background tasks")
-                    .child(format!("{background} background"))
+                    .child(crate::language::fill(
+                        "bg.runningCount",
+                        &[("{count}", &background.to_string())],
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = 4;
                         this.set_inspector(true);

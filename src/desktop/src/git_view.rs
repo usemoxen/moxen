@@ -968,12 +968,9 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                 action(
                     "branches-more",
                     &if w.git_ui.more_branches {
-                        "Show fewer branches".to_string()
+                        crate::language::show_fewer_branches()
                     } else {
-                        format!(
-                            "Show {hidden} more branch{}",
-                            if hidden == 1 { "" } else { "es" }
-                        )
+                        crate::language::show_more_branches(hidden)
                     },
                     "ink-2",
                 )

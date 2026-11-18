@@ -116,6 +116,10 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         seconds / 60,
                         seconds % 60
                     )
+                } else if t.status == Status::Idle {
+                    // The settled badge reads as the TUI does (status.idle),
+                    // not the desktop's old "Done".
+                    crate::language::message("status.idle").to_string()
                 } else {
                     crate::language::tr(t.status.label()).into_owned()
                 }),
@@ -146,11 +150,14 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(color("ink-2"))
                             .child(crate::language::tr("Tasks").into_owned())
-                            .child(div().text_color(color("ink")).child(format!(
-                                "{}/{}",
-                                crate::work::completed(&checklist.tasks),
-                                checklist.tasks.len()
-                            )))
+                            .child(
+                                div()
+                                    .text_color(color("ink"))
+                                    .child(crate::language::of_total(
+                                        crate::work::completed(&checklist.tasks),
+                                        checklist.tasks.len(),
+                                    )),
+                            )
                             .on_click(cx.listener(|_, _, window, cx| {
                                 window.dispatch_action(Box::new(ToggleTasks), cx);
                             })),

@@ -132,20 +132,28 @@ pub struct Worktree {
 }
 
 impl Worktree {
-    /// "2 staged · 1 changed", or "clean".
+    /// Whether nothing is uncommitted: the status line then reads the TUI's
+    /// clean word instead of a count.
+    pub fn is_clean(&self) -> bool {
+        self.staged == 0 && self.unstaged == 0 && self.untracked == 0 && self.conflicted == 0
+    }
+
+    /// "2 staged · 1 changed", or the TUI's clean word: each count in the
+    /// TUI's words (`git.staged`, `git.changed`, `git.untracked`,
+    /// `git.conflicted`, `git.clean`).
     pub fn line(&self) -> String {
         let parts: Vec<String> = [
-            (self.staged, "staged"),
-            (self.unstaged, "changed"),
-            (self.untracked, "untracked"),
-            (self.conflicted, "conflicted"),
+            (self.staged, "git.staged"),
+            (self.unstaged, "git.changed"),
+            (self.untracked, "git.untracked"),
+            (self.conflicted, "git.conflicted"),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{n} {what}"))
+        .map(|(n, key)| crate::language::fill(key, &[("{count}", &n.to_string())]))
         .collect();
         if parts.is_empty() {
-            "clean".into()
+            crate::language::message("git.clean").into()
         } else {
             parts.join(" · ")
         }
@@ -938,6 +946,21 @@ mod tests {
             "clean",
             "nothing uncommitted reads as clean"
         );
+    }
+
+    #[test]
+    fn the_worktree_line_reads_in_the_tuis_spanish() {
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(
+            overview().status.as_ref().unwrap().line(),
+            "1 preparados · 2 cambiados"
+        );
+        assert_eq!(
+            Worktree::default().line(),
+            "limpio",
+            "nothing uncommitted reads as the TUI's clean"
+        );
+        crate::language::apply(Some("en"), None);
     }
 
     #[test]

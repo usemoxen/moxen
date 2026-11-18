@@ -84,6 +84,56 @@ pub fn message(key: &'static str) -> &'static str {
         .map_or(key, String::as_str)
 }
 
+/// One TUI message with its `{placeholder}`s filled:
+/// `fill("git.staged", &[("{count}", "2")])` reads "2 staged" in English and
+/// "2 preparados" in Spanish.
+pub fn fill(key: &'static str, values: &[(&str, &str)]) -> String {
+    let mut text = message(key).to_string();
+    for (name, value) in values {
+        text = text.replace(name, value);
+    }
+    text
+}
+
+/// A "3 of 6" count in the TUI's words (`guide.stepCount`): the tasks panel's
+/// own done-of-total line.
+pub fn step_count(done: usize, total: usize) -> String {
+    let (done, total) = (done.to_string(), total.to_string());
+    fill(
+        "guide.stepCount",
+        &[("{n}", done.as_str()), ("{total}", total.as_str())],
+    )
+}
+
+/// A "3 of 6" count in the TUI's words (`settings.ofTotal`): the title bar's
+/// tasks tally.
+pub fn of_total(count: usize, total: usize) -> String {
+    let (count, total) = (count.to_string(), total.to_string());
+    fill(
+        "settings.ofTotal",
+        &[("{count}", count.as_str()), ("{total}", total.as_str())],
+    )
+}
+
+/// The Git panel's branches toggle in the TUI's words
+/// (`git.showMoreBranches`). The TUI value carries terminal indentation; the
+/// desktop supplies its own padding, so it is trimmed.
+pub fn show_more_branches(hidden: usize) -> String {
+    let hidden = hidden.to_string();
+    fill("git.showMoreBranches", &[("{count}", hidden.as_str())])
+        .trim_start()
+        .to_string()
+}
+
+/// The Git panel's collapse toggle in the TUI's words
+/// (`git.show_fewer_branches_3aea`): the other half of the branches toggle,
+/// so it never reads half-translated.
+pub fn show_fewer_branches() -> String {
+    message("git.show_fewer_branches_3aea")
+        .trim_start()
+        .to_string()
+}
+
 pub fn tr(text: &str) -> Cow<'_, str> {
     if spanish() {
         // The settings catalog names exact settings strings, so it stays
@@ -196,6 +246,38 @@ mod tests {
             labels.map(|label| tr(label).into_owned()),
             labels.map(str::to_string)
         );
+    }
+
+    #[test]
+    fn review_strings_resolve_to_the_tuis_spanish() {
+        // Every desktop string the MXN-345 review routes through the TUI's
+        // own Spanish rather than inventing its own: the chip, the counters,
+        // the mode, the branches toggle, the git words, the run header, the
+        // background count and the idle badge.
+        apply(Some("es-ES"), None);
+        assert_eq!(tr("Actions"), "Acciones");
+        assert_eq!(step_count(3, 6), "3 de 6");
+        assert_eq!(of_total(3, 6), "3 de 6");
+        assert_eq!(tr("Build"), "Construcción");
+        assert_eq!(show_more_branches(2), "Mostrar 2 más (con las remotas)");
+        assert_eq!(show_fewer_branches(), "Mostrar menos ramas");
+        assert_eq!(fill("git.staged", &[("{count}", "1")]), "1 preparados");
+        assert_eq!(fill("git.changed", &[("{count}", "2")]), "2 cambiados");
+        assert_eq!(fill("git.untracked", &[("{count}", "3")]), "3 sin seguir");
+        assert_eq!(
+            fill("git.conflicted", &[("{count}", "1")]),
+            "1 en conflicto"
+        );
+        assert_eq!(message("git.clean"), "limpio");
+        assert_eq!(tr("working"), "trabajando");
+        assert_eq!(fill("bg.runningCount", &[("{count}", "2")]), "2 en marcha");
+        assert_eq!(message("status.idle"), "inactivo");
+        // Desktop-only words with no TUI equivalent stay as they are.
+        assert_eq!(tr("Improve draft"), "Improve draft");
+        apply(Some("en"), None);
+        assert_eq!(step_count(3, 6), "3 of 6");
+        assert_eq!(of_total(3, 6), "3 of 6");
+        assert_eq!(show_more_branches(2), "Show 2 more (remotes included)");
     }
 
     #[test]
