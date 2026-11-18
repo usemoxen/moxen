@@ -631,10 +631,7 @@ export async function sendTurn(
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
       if (admission.blocked) {
-        throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
-          exitCode: 4,
-          details: { threadId },
-        });
+        throw continuationBusyError(threadId);
       }
     }
     const turn: StoredTurn = {
@@ -792,10 +789,7 @@ export async function startBackgroundTurn(
     const admission = await continuationInFlight(store, thread);
     const admitted = admission.thread;
     if (admission.blocked) {
-      throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
-        exitCode: 4,
-        details: { threadId },
-      });
+      throw continuationBusyError(threadId);
     }
     const unreadable = hiddenTurnsProblem(store, threadId);
     if (unreadable) throw unreadableTurnsError(threadId, unreadable);

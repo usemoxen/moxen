@@ -1397,7 +1397,12 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
       // turn hidden in an unreadable ledger line (it may be active), a
       // running turn, or a stuck one no build writes (it never settles on
       // its own, so the destination would start beside work that never ends).
-      const turns = await store.readTurns(live.id);
+      // The admission read reports even an unterminated torn tail at once:
+      // it runs under the reservation lock, where the handoff decision is
+      // made, so an unreadable snapshot fails closed here while
+      // observational reads keep their pending grace for a crash still in
+      // flight.
+      const turns = await store.readTurns(live.id, { reportTornTail: true });
       const unreadable = hiddenTurnsProblem(store, live.id);
       if (unreadable) throw unreadableTurnsError(live.id, unreadable);
       const running = liveTurn(turns);

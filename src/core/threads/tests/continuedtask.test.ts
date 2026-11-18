@@ -910,7 +910,6 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     expect(index).toBe(rows.length - 1);
     const replaced = [...rows.slice(0, index), "{torn"];
     await writeFile(file, replaced.join("\n"), "utf8");
-    await w.store.readTurns(source.id);
     await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toMatchObject({ code: "TURNS_LEDGER_CORRUPT" });
     await expect(sendTurn(w.store, source.id, { prompt: "More" })).rejects.toMatchObject({ code: "TURNS_LEDGER_CORRUPT" });
     expect(await w.store.listThreadIds()).toEqual(before);
