@@ -102,6 +102,10 @@ pub struct Workspace {
     pub inspector_at: Option<Instant>,
     pub tips: Tips,
     pub settled_open: bool,
+    /// The sidebar thread row the pointer hovers, with its window Y, when
+    /// its title is truncated: the full title shows beside the row instead
+    /// of a window tooltip over the rows below.
+    pub thread_tip: Option<(ThreadId, f32)>,
     pub inspector_width: f32,
     pub resizing_inspector: bool,
     /// The Git and Diff tabs' own state.
@@ -347,6 +351,7 @@ impl Workspace {
                 send: cx.focus_handle(),
             },
             settled_open: false,
+            thread_tip: None,
             inspector_width: theme::INSPECTOR,
             resizing_inspector: false,
             search,
@@ -1028,6 +1033,9 @@ impl Workspace {
         self.selected = id;
         self.creating = false;
         self.dropdown = None;
+        // A click selects the row, which drops its tip: the full title
+        // would otherwise stay where it opened, over the rows below.
+        self.thread_tip = None;
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1446,6 +1454,39 @@ impl Render for Workspace {
             })
             .when_some(self.viewer.as_ref(), |s, viewer| {
                 s.child(crate::image_view::render(self, viewer, window, cx))
+            })
+            .when_some(self.thread_tip, |s, (id, y)| {
+                // Beside the hovered sidebar row: a window tooltip here would
+                // hang over the rows below, and linger there after a click.
+                // Only a truncated, unselected title earns it.
+                if id == self.selected
+                    || self.thread_popup.is_some()
+                    || self.dropdown == Some(Dropdown::Thread)
+                {
+                    return s;
+                }
+                let Some(title) = self.source.list_threads().get(id).map(|t| t.title.clone())
+                else {
+                    return s;
+                };
+                s.child(
+                    div()
+                        .absolute()
+                        .left(px(theme::SIDEBAR + 8.))
+                        .top(px((y - 13.).max(0.)))
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(theme::px_token("radius", "radius-sm")))
+                        .bg(color("raised"))
+                        .shadow(theme::float_shadow())
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(color("ink"))
+                        .child(title),
+                )
             })
             .into_any_element()
     }

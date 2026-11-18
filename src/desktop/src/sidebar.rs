@@ -143,13 +143,37 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             );
         }
         let selected = w.selected == i;
-        let thread_row = row(("thread", i));
-        let thread_row =
-            if w.thread_popup.is_some() || w.dropdown == Some(crate::workspace::Dropdown::Thread) {
-                thread_row.plain_control()
-            } else {
-                thread_row.control(t.title.clone())
-            }
+        let menu_open =
+            w.thread_popup.is_some() || w.dropdown == Some(crate::workspace::Dropdown::Thread);
+        // A click selects the row, which drops its tip; only a truncated
+        // title earns one at all.
+        let hoverable = row_tip(
+            &t.title,
+            title_truncated(window, &t.title, &t.activity, t.depth),
+            selected,
+            menu_open,
+        )
+        .is_some();
+        let thread_row = row(("thread", i)).plain_control();
+        let thread_row = if hoverable {
+            thread_row
+                .on_hover(cx.listener(move |this, hovering, _, cx| {
+                    if !hovering && this.thread_tip.is_some_and(|(id, _)| id == i) {
+                        this.thread_tip = None;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                    let at = Some((i, f32::from(event.position.y)));
+                    if this.thread_tip != at {
+                        this.thread_tip = at;
+                        cx.notify();
+                    }
+                }))
+        } else {
+            thread_row
+        };
+        let thread_row = thread_row
             .when(t.depth > 0, |s| {
                 s.h(px(26.)).text_size(px(12.5)).text_color(color("ink-2"))
             })
@@ -354,4 +378,60 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .child(ui::kbd("⌘,")),
                 ),
         )
+}
+
+/// The activity stamp's width in a thread row: Mono 11.5, whose advance is
+/// six tenths of an em.
+fn activity_width(activity: &str) -> f32 {
+    activity.chars().count() as f32 * 11.5 * 0.6
+}
+
+/// Whether the row's title overflows the truncated label it is drawn in, so
+/// hovering the row earns the full title beside it. The label is the sidebar
+/// minus its chrome, the state glyph, the gaps and the activity stamp (plus
+/// the subthread indent); the title is measured with the window's text
+/// system at the row's size.
+fn title_truncated(window: &Window, title: &str, activity: &str, depth: usize) -> bool {
+    let size = if depth > 0 { 12.5 } else { 13.5 };
+    let run = window.text_style().to_run(title.len());
+    let width = f32::from(
+        window
+            .text_system()
+            .shape_line(title.into(), px(size), &[run], None)
+            .width(),
+    );
+    let indent = if depth > 0 { 24. } else { 0. };
+    width > theme::SIDEBAR - 16. - 20. - 14. - 16. - indent - activity_width(activity) - 1.
+}
+
+/// Whether the sidebar row shows its full title beside it: never for the
+/// selected row (a click would leave the tip lingering over the rows
+/// below), while a menu is open, or when the title fits its label — only a
+/// truncated title needs the full text.
+fn row_tip(title: &str, truncated: bool, selected: bool, menu_open: bool) -> Option<&str> {
+    if truncated && !selected && !menu_open {
+        Some(title)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::row_tip;
+
+    #[test]
+    fn the_tip_shows_a_truncated_title_and_nothing_else() {
+        assert_eq!(
+            row_tip("a very long thread title", true, false, false),
+            Some("a very long thread title")
+        );
+        assert_eq!(row_tip("short", false, false, false), None);
+    }
+
+    #[test]
+    fn selecting_the_row_or_opening_a_menu_drops_the_tip() {
+        assert_eq!(row_tip("a very long thread title", true, true, false), None);
+        assert_eq!(row_tip("a very long thread title", true, false, true), None);
+    }
 }
