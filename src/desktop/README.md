@@ -325,6 +325,12 @@ The Interface page's Theme (`ui.theme`) maps each shared TUI palette to the
 desktop design-system colour roles. Language (`ui.language`) switches the
 translated desktop controls, settings and release notes between English and
 Spanish. Both update as you choose them.
+Settings sections are grouped as in the TUI, and the Moxen Harness has a
+page per heading. Choices open below their row, switches change on/off directly,
+and an inherited switch can be reset to its default. Durations offer the
+server's presets, numbers have a stepper, and model and effort choices come
+from the provider catalog. A tag beside the value says when an edit waits
+for a new session or a restart.
 
 **Getting started** opens the first time the server reports that onboarding
 hasn't been completed. The guide walks through welcome, appearance, model,

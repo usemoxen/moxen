@@ -5538,7 +5538,7 @@ mod tests {
                         {"path": "baseUrl", "value": "http://localhost:8080", "explicit": true},
                         {"path": "apiKey", "value": "keychain:x", "explicit": true}],
                     "resolved": []}]},
-                {"descriptor": {"key": "mcp.servers", "label": "Servers", "description": "Programs.",
+                {"descriptor": {"key": "mcpServers", "label": "Servers", "description": "Programs.",
                     "section": "mcp",
                     "kind": {"type": "list", "noun": "server", "actions": ["test", "duplicate"], "fields": [
                         {"path": "url", "label": "URL", "description": "Address.", "group": "Connection", "kind": {"type": "string"}},

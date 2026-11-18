@@ -109,6 +109,25 @@ impl SettingValue {
 pub struct Choice {
     pub value: String,
     pub label: String,
+    pub description: Option<String>,
+}
+
+fn choices(value: &Value) -> Vec<Choice> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| {
+            if boolean(choice, "hidden") == Some(true) {
+                return None;
+            }
+            Some(Choice {
+                value: text(choice, "value")?,
+                label: text(choice, "label").unwrap_or_default(),
+                description: text(choice, "description"),
+            })
+        })
+        .collect()
 }
 
 /// One setting's editor kind, as its descriptor's `kind` says.
@@ -120,58 +139,61 @@ pub enum SettingKind {
     Text {
         multiline: bool,
     },
+    Catalog {
+        source: CatalogSource,
+        provider_kind: Option<String>,
+        provider_key: Option<String>,
+        provider_kinds: Vec<String>,
+    },
     Integer {
         min: f64,
         max: f64,
         unit: Option<String>,
     },
-    Duration,
-    Line,
+    Duration(Vec<String>),
+    Line(Vec<String>),
     List(ListSchema),
     /// A kind this client does not edit (a web order, a model map): drawn
     /// read-only from the snapshot's own words.
     Other(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CatalogSource {
+    Provider,
+    Model,
+    Effort,
+}
+
 impl SettingKind {
     fn from_json(kind: &Value) -> Self {
         let typed = kind.get("type").and_then(Value::as_str).unwrap_or_default();
         match typed {
-            "enum" => Self::Enum(
-                kind.get("choices")
-                    .and_then(Value::as_array)
-                    .map(|choices| {
-                        choices
-                            .iter()
-                            .filter_map(|choice| {
-                                Some(Choice {
-                                    value: choice.get("value")?.as_str()?.to_string(),
-                                    label: choice
-                                        .get("label")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            ),
+            "enum" => Self::Enum(choices(&kind["choices"])),
             "boolean" => Self::Boolean,
             "secret" => Self::Secret,
-            "string" => Self::Text {
-                multiline: kind
-                    .get("multiline")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+            "string" => match kind["source"].as_str() {
+                Some("provider" | "model" | "effort") => Self::Catalog {
+                    source: match kind["source"].as_str() {
+                        Some("provider") => CatalogSource::Provider,
+                        Some("model") => CatalogSource::Model,
+                        _ => CatalogSource::Effort,
+                    },
+                    provider_kind: text(kind, "providerKind"),
+                    provider_key: text(kind, "providerKey"),
+                    provider_kinds: strings(&kind["providerKinds"]),
+                },
+                _ => Self::Text {
+                    multiline: boolean(kind, "multiline").unwrap_or(false),
+                },
             },
             "integer" => Self::Integer {
                 min: number(kind, "min").unwrap_or(f64::MIN),
                 max: number(kind, "max").unwrap_or(f64::MAX),
                 unit: text(kind, "unit"),
             },
-            "duration" => Self::Duration,
-            "line" => Self::Line,
+            "duration" => Self::Duration(strings(&kind["presets"])),
+            "line" => Self::Line(strings(&kind["presets"])),
             "list" => Self::List(ListSchema::from_json(kind)),
             other => Self::Other(other.into()),
         }
@@ -183,7 +205,17 @@ impl SettingKind {
     }
 }
 
-/// The schema of a list setting (`providers.harness.profiles`, `mcp.servers`),
+fn strings(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The schema of a list setting (`providers.harness.profiles`, `mcpServers`),
 /// as the descriptor carries it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListSchema {
@@ -298,26 +330,7 @@ impl FieldKind {
             },
             "boolean" => Self::Boolean,
             "secret" => Self::Secret,
-            "enum" => Self::Enum(
-                kind.get("choices")
-                    .and_then(Value::as_array)
-                    .map(|choices| {
-                        choices
-                            .iter()
-                            .filter_map(|choice| {
-                                Some(Choice {
-                                    value: choice.get("value")?.as_str()?.to_string(),
-                                    label: choice
-                                        .get("label")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            ),
+            "enum" => Self::Enum(choices(&kind["choices"])),
             "words" => Self::Words,
             "pairs" => Self::Pairs {
                 secret: boolean(kind, "secret").unwrap_or(false),
@@ -348,6 +361,7 @@ impl FieldKind {
 /// What applies while a setting is unset, in the page's own words.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effective {
+    pub value: SettingValue,
     pub label: String,
     pub origin: Option<String>,
 }
@@ -359,6 +373,7 @@ impl Effective {
             return None;
         }
         Some(Self {
+            value: SettingValue::from_json(&value["value"]),
             label: text(value, "label").unwrap_or_default(),
             origin: text(value, "origin"),
         })
@@ -374,6 +389,10 @@ pub struct SettingView {
     pub section: String,
     pub group: Option<String>,
     pub kind: SettingKind,
+    pub default: SettingValue,
+    pub applies_at: Option<&'static str>,
+    pub hidden: bool,
+    visible_when: Option<(String, Vec<String>)>,
     pub value: SettingValue,
     pub explicit: bool,
     pub unavailable: Option<String>,
@@ -392,6 +411,16 @@ impl SettingView {
             section: text(descriptor, "section").unwrap_or_else(|| "general".into()),
             group: text(descriptor, "group"),
             kind: SettingKind::from_json(descriptor.get("kind")?),
+            default: SettingValue::from_json(&descriptor["defaultValue"]),
+            applies_at: match descriptor["appliesAt"].as_str() {
+                Some("next-session") => Some("next session"),
+                Some("provider-restart") => Some("restarts OpenCode"),
+                Some("server-restart") => Some("next server start"),
+                _ => None,
+            },
+            hidden: boolean(descriptor, "hidden").unwrap_or(false),
+            visible_when: text(&descriptor["visibleWhen"], "key")
+                .map(|key| (key, strings(&descriptor["visibleWhen"]["in"]))),
             value: view
                 .get("value")
                 .map_or(SettingValue::Unset, SettingValue::from_json),
@@ -413,6 +442,16 @@ impl SettingView {
             SettingKind::List(schema) => schema.fields.iter().find(|field| field.path == path),
             _ => None,
         }
+    }
+
+    pub fn visible(&self, snapshot: &Snapshot) -> bool {
+        !self.hidden
+            && self.visible_when.as_ref().is_none_or(|(key, allowed)| {
+                let value = snapshot
+                    .find(key)
+                    .map_or(String::new(), |view| view.value.wire());
+                allowed.contains(&value)
+            })
     }
 }
 
@@ -503,25 +542,7 @@ impl ListFieldValue {
                         .map_or(SettingValue::Unset, SettingValue::from_json),
                     origin: text(effective, "origin").unwrap_or_default(),
                 }),
-            choices: field
-                .get("choices")
-                .and_then(Value::as_array)
-                .map(|choices| {
-                    choices
-                        .iter()
-                        .filter_map(|choice| {
-                            Some(Choice {
-                                value: choice.get("value")?.as_str()?.to_string(),
-                                label: choice
-                                    .get("label")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            choices: choices(&field["choices"]),
             items: field
                 .get("items")
                 .and_then(Value::as_array)
@@ -587,7 +608,9 @@ impl Snapshot {
     pub fn sections(&self) -> Vec<&str> {
         let mut order: Vec<(&str, usize)> = vec![];
         for view in &self.settings {
-            if view.section == "skills" || order.iter().any(|(section, _)| *section == view.section)
+            if view.hidden
+                || view.section == "skills"
+                || order.iter().any(|(section, _)| *section == view.section)
             {
                 continue;
             }
@@ -692,12 +715,13 @@ pub fn normalize_setting_value(kind: &SettingKind, text: &str) -> Result<String,
             _ => Err("Use true or false.".into()),
         },
         SettingKind::Integer { min, max, .. } => {
-            normalize_number(trimmed, false, Some(*min), Some(*max))
+            normalize_number(trimmed, true, Some(*min), Some(*max))
         }
         SettingKind::Secret
         | SettingKind::Text { .. }
-        | SettingKind::Duration
-        | SettingKind::Line
+        | SettingKind::Catalog { .. }
+        | SettingKind::Duration(_)
+        | SettingKind::Line(_)
         | SettingKind::List(_)
         | SettingKind::Other(_) => Ok(trimmed.into()),
     }
@@ -1444,7 +1468,7 @@ mod tests {
                 {"descriptor": {"key": "providers.harness.apiKey", "label": "Missing", "description": "A key.",
                     "section": "provider:harness", "kind": {"type": "secret"}},
                  "value": "", "explicit": false},
-                {"descriptor": {"key": "mcp.servers", "label": "Servers", "description": "Servers.",
+                {"descriptor": {"key": "mcpServers", "label": "Servers", "description": "Servers.",
                     "section": "mcp", "kind": {"type": "list", "noun": "server",
                     "actions": ["test", "duplicate"], "fields": [
                         {"path": "url", "label": "Address", "description": "Where.", "group": "Connect", "kind": {"type": "string"}},
@@ -1493,7 +1517,7 @@ mod tests {
         assert_eq!(display_value(missing), "Not set");
         // The keychain reference itself is never drawn, only the fact one exists.
         assert!(!display_value(stored).contains("providers.harness"));
-        let servers = snapshot.find("mcp.servers").expect("servers");
+        let servers = snapshot.find("mcpServers").expect("servers");
         let item = &servers.items[0];
         let env = item
             .fields

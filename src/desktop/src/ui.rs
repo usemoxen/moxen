@@ -157,6 +157,24 @@ pub fn caps(label: &str) -> Div {
         .child(label.to_uppercase())
 }
 
+pub fn switch_track(on: bool) -> Div {
+    div()
+        .w(px(30.))
+        .h(px(16.))
+        .px(px(2.))
+        .flex()
+        .items_center()
+        .when(on, |track| track.justify_end())
+        .rounded_full()
+        .bg(color(if on { "live" } else { "rule" }))
+        .child(
+            div()
+                .size(px(12.))
+                .rounded_full()
+                .bg(color(if on { "ground" } else { "ink-2" })),
+        )
+}
+
 /// The design system's `Segmented`: options in a `sunk` tray, the chosen one
 /// raised on a hairline ring. `pad` is each option's inline padding (the
 /// design system's is 11; tight popovers use less).
