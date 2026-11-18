@@ -241,6 +241,42 @@ fn button(
         .on_click(click)
 }
 
+/// A guide step control: a click runs `action`, and so does Enter while the
+/// control is focused — mirroring the TUI, where Enter runs the focused
+/// control. The panel's own Enter handler stays out of the way unless the
+/// footer Continue/Start or the panel itself is focused (see
+/// `guide_enter_advances`).
+fn guide_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    primary: bool,
+    cx: &mut Context<Workspace>,
+    action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Clone + 'static,
+) -> Stateful<Div> {
+    let click = action.clone();
+    let press = action;
+    button(
+        id,
+        label,
+        primary,
+        cx.listener(move |w, _, window, cx| click(w, window, cx)),
+    )
+    .on_key_down(cx.listener(move |w, event: &KeyDownEvent, window, cx| {
+        if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+            press(w, window, cx);
+            cx.stop_propagation();
+        }
+    }))
+}
+
+/// Whether Enter on the guide step advances: only from the footer
+/// Continue/Start or when nothing in the step holds focus. A focused step
+/// control activates itself instead (see `guide_button`), so the panel must
+/// not advance first on key-down.
+fn guide_enter_advances(next_focused: bool, panel_focused: bool) -> bool {
+    next_focused || panel_focused
+}
+
 fn row() -> Div {
     div().flex().items_center().gap(px(8.))
 }
@@ -419,8 +455,21 @@ pub fn render(w: &Workspace, panel: Panel, window: &Window, cx: &mut Context<Wor
                                 w.mark_release();
                             }
                         }
-                        (Panel::Guide, "enter") if w.experience_focus.is_focused(window) => {
-                            w.guide_next()
+                        (Panel::Guide, "enter") => {
+                            // The TUI runs the focused control on Enter: a
+                            // focused step control activates itself (see
+                            // `guide_button`), so Enter advances only from
+                            // the footer Continue/Start or when nothing in
+                            // the step holds focus. Advancing moves focus to
+                            // the panel, so the focused Continue does not
+                            // also click itself on key-up.
+                            if guide_enter_advances(
+                                w.guide_next_focus.is_focused(window),
+                                w.experience_focus.is_focused(window),
+                            ) {
+                                w.guide_next();
+                                window.focus(&w.experience_focus, cx);
+                            }
                         }
                         (Panel::Update, "c") => w.source.check_app_update(),
                         (Panel::Update, "u") if w.can_update(false) => w.source.apply_update(),
@@ -571,16 +620,17 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                             .child(row().flex_wrap().children(choices.iter().map(|choice| {
                                 let value = choice.value.clone();
                                 let values = values.clone();
-                                button(
+                                guide_button(
                                     format!("guide-{key}-{value}"),
                                     tr(&choice.label).into_owned(),
                                     chosen == value,
-                                    cx.listener(move |w, _, _, cx| {
+                                    cx,
+                                    move |w, _, cx| {
                                         if !w.source.experience_saving() {
                                             w.source.set_setting(key, &value);
                                             cx.notify();
                                         }
-                                    }),
+                                    },
                                 )
                                 .on_key_down(cx.listener(
                                     move |w, event: &KeyDownEvent, _, cx| {
@@ -632,18 +682,19 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
             {
                 body = body.child(
                     row()
-                        .child(button(
+                        .child(guide_button(
                             ("guide-memory", index),
                             t(label),
                             memory_mode(w) == choice,
-                            cx.listener(move |w, _, _, cx| {
+                            cx,
+                            move |w, _, cx| {
                                 if !w.source.experience_saving() {
                                     w.experience_ui.memory = Some(choice);
                                     w.source.set_guide_memory(choice);
                                     w.source.read_embeddings();
                                     cx.notify();
                                 }
-                            }),
+                            },
                         ))
                         .child(
                             detail(t(explanation))
@@ -681,14 +732,15 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                                 }),
                         )
                         .when(state.busy || saving, |s| {
-                            s.child(row().child(button(
+                            s.child(row().child(guide_button(
                                 "guide-memory-cancel",
                                 t("memory.cancel"),
                                 false,
-                                cx.listener(|w, _, _, cx| {
+                                cx,
+                                |w, _, cx| {
                                     w.source.unload_embeddings();
                                     cx.notify();
-                                }),
+                                },
                             )))
                         }),
                 );
@@ -704,25 +756,27 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                     let id = item.id.clone();
                     body = body.child(
                         row()
-                            .child(button(
+                            .child(guide_button(
                                 format!("guide-mcp-{id}"),
                                 id.clone(),
                                 false,
-                                cx.listener(move |w, _, window, cx| {
+                                cx,
+                                move |w, window, cx| {
                                     w.guide_settings("mcp", window, cx);
                                     w.settings_item = Some(id.clone());
-                                }),
+                                },
                             ))
                             .child(detail(t("guide.connectedConfig"))),
                     );
                 }
             }
             body = body
-                .child(row().child(button(
+                .child(row().child(guide_button(
                     "guide-mcp",
                     t("guide.addMcp"),
                     false,
-                    cx.listener(|w, _, window, cx| w.guide_settings("mcp", window, cx)),
+                    cx,
+                    |w, window, cx| w.guide_settings("mcp", window, cx),
                 )))
                 .child(detail(t("guide.optionalTools")))
         }
@@ -732,37 +786,40 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                 .child(
                     row()
                         .flex_wrap()
-                        .child(button(
+                        .child(guide_button(
                             "guide-scratch",
                             t("guide.noProjectChoice"),
                             w.new_scratch,
-                            cx.listener(|w, _, _, cx| {
+                            cx,
+                            |w, _, cx| {
                                 w.new_project = None;
                                 w.new_scratch = true;
                                 cx.notify();
-                            }),
+                            },
                         ))
                         .children(w.source.projects().into_iter().map(|project| {
                             let chosen =
                                 w.new_project.as_deref() == Some(&project.id) && !w.new_scratch;
-                            button(
+                            guide_button(
                                 format!("guide-project-{}", project.id),
                                 project.title,
                                 chosen,
-                                cx.listener(move |w, _, _, cx| {
+                                cx,
+                                move |w, _, cx| {
                                     w.new_project = Some(project.id.clone());
                                     w.new_scratch = false;
                                     cx.notify();
-                                }),
+                                },
                             )
                         })),
                 )
                 .child(detail(t("guide.scratchProject")))
-                .child(row().child(button(
+                .child(row().child(guide_button(
                     "guide-folder",
                     t("guide.addFolder"),
                     false,
-                    cx.listener(|w, _, window, cx| {
+                    cx,
+                    |w, window, cx| {
                         if w.source.paired_name().is_some() {
                             w.experience_ui.folder = true;
                             window.focus(&w.guide_folder.read(cx).focus.clone(), cx);
@@ -784,9 +841,12 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                                 }
                             })
                             .detach();
+                            // The picker answers later: leave the step, so the
+                            // focused button does not also click itself on key-up.
+                            window.focus(&w.experience_focus, cx);
                         }
                         cx.notify();
-                    }),
+                    },
                 )))
                 .when(w.experience_ui.folder, |s| s.child(w.guide_folder.clone()))
                 .child(detail(
@@ -814,34 +874,39 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
     let footer = row()
         .child(detail(progress).flex_1())
         .when(step > 0, |s| {
-            s.child(button(
+            s.child(guide_button(
                 "guide-back",
                 t("guide.back"),
                 false,
-                cx.listener(|w, _, _, cx| {
+                cx,
+                |w, window, cx| {
                     if !w.source.experience_saving() {
                         w.experience_ui.step = w.experience_ui.step.saturating_sub(1);
                         w.experience_ui.folder = false;
+                        window.focus(&w.experience_focus, cx);
                         cx.notify();
                     }
-                }),
+                },
             ))
         })
-        .child(button(
-            "guide-next",
-            t(if saving {
-                "guide.saving"
-            } else if step + 1 == STEPS.len() {
-                "guide.finish"
-            } else {
-                "guide.next"
-            }),
-            true,
-            cx.listener(|w, _, _, cx| {
-                w.guide_next();
-                cx.notify();
-            }),
-        ));
+        .child(
+            button(
+                "guide-next",
+                t(if saving {
+                    "guide.saving"
+                } else if step + 1 == STEPS.len() {
+                    "guide.finish"
+                } else {
+                    "guide.next"
+                }),
+                true,
+                cx.listener(|w, _, _, cx| {
+                    w.guide_next();
+                    cx.notify();
+                }),
+            )
+            .track_focus(&w.guide_next_focus),
+        );
     (body, footer)
 }
 
@@ -910,16 +975,17 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         }
         provider_pane = provider_pane.children(providers.iter().map(|candidate| {
             let id = candidate.instance.clone();
-            button(
+            guide_button(
                 format!("guide-provider-{id}"),
                 candidate.name.clone(),
                 provider.is_some_and(|provider| provider.instance == id),
-                cx.listener(move |w, _, _, cx| {
+                cx,
+                move |w, _, cx| {
                     w.experience_ui.provider = Some(id.clone());
                     w.guide_model_filter
                         .update(cx, |input, cx| input.set_text(String::new(), cx));
                     cx.notify();
-                }),
+                },
             )
         }));
         if let Some(provider) = provider {
@@ -958,16 +1024,17 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                         .new_model
                         .as_ref()
                         .is_some_and(|selected| selected.same_as(&selection));
-                    button(
+                    guide_button(
                         ("guide-model", i),
                         model.name.clone(),
                         picked,
-                        cx.listener(move |w, _, _, cx| {
+                        cx,
+                        move |w, _, cx| {
                             if ready {
                                 w.new_model = Some(selection.clone());
                                 cx.notify();
                             }
-                        }),
+                        },
                     )
                 }),
             ));
@@ -977,22 +1044,22 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         .child(row().items_start().child(provider_pane).child(model_pane))
         .child(
             row()
-                .child(button(
+                .child(guide_button(
                     "guide-provider-refresh",
                     t("guide.refreshProviders"),
                     false,
-                    cx.listener(|w, _, _, cx| {
+                    cx,
+                    |w, _, cx| {
                         w.source.refresh_catalog();
                         cx.notify();
-                    }),
+                    },
                 ))
-                .child(button(
+                .child(guide_button(
                     "guide-harness",
                     t("guide.addModelServer"),
                     false,
-                    cx.listener(|w, _, window, cx| {
-                        w.guide_settings("provider:harness", window, cx)
-                    }),
+                    cx,
+                    |w, window, cx| w.guide_settings("provider:harness", window, cx),
                 )),
         )
         .when_some(status, |s, status| s.child(detail(status)))
@@ -1503,5 +1570,20 @@ impl Workspace {
             self.source.rollback_update();
             self.experience_ui.confirm_rollback = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guide_enter_advances;
+
+    #[test]
+    fn enter_on_a_focused_guide_control_does_not_advance() {
+        // A focused step control activates itself; only the footer
+        // Continue/Start or the panel itself advances the guide.
+        assert!(!guide_enter_advances(false, false));
+        assert!(guide_enter_advances(true, false));
+        assert!(guide_enter_advances(false, true));
+        assert!(guide_enter_advances(true, true));
     }
 }
