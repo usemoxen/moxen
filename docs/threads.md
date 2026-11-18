@@ -483,7 +483,8 @@ with `THREAD_BUSY`, before any destination or continuation note is written —
 the two workers would start in the same checkout side by side. Once the
 reservation wins, the source is claimed until the handoff lands: no turn may
 start there in the meantime (a racing send, background wake-up or scheduled
-admission is refused with `THREAD_BUSY`, queued work simply waits), so the
+admission is refused with `THREAD_BUSY`, and a queued handoff — stored or
+model — simply waits for a later pass instead of preparing beside it), so the
 destination never runs beside a turn the race admitted. The claim is
 registered against the server process running the handoff, so it stays
 effective for the whole handoff however long provider startup takes, and

@@ -5,9 +5,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
-import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation } from "../threads.js";
+import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -735,6 +735,92 @@ describe("a manual continue with an active turn (MXN-372)", () => {
       for (const turn of await w.store.readTurns(id)) {
         if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
       }
+    }
+  });
+
+  it("refuses a manual continue while an agent continuation is in flight on a running source", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    // The agent's run is in flight (not awaited): the manual request must not
+    // join it — no shared destination, no skipped busy check, no claim.
+    const agent = continueThread(w.ctx, { threadId: source.id, byAgent: true });
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    // The refused manual wrote nothing: the source carries no claim.
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    const continued = await agent;
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
+    await interruptTurn(w.store, source.id, running.id);
+    await flushTurnRunners();
+    for (const id of [source.id, continued.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
+  it("holds a stored queued handoff behind a live claim instead of preparing beside it", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const queued = (await sendTurn(w.store, source.id, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    expect(queued.status).toBe("queued");
+    const before = await w.store.listThreadIds();
+    // A live manual continuation claims the source: the queue pass leaves the
+    // entry queued and creates no second thread.
+    const token = w.store.newId();
+    trackContinuation(token);
+    try {
+      await w.store.withThreadLock(source.id, async () => {
+        const current = (await w.store.readThreadRecord(source.id))!;
+        await w.store.writeThreadRecord({ ...current, continueClaim: { token, pid: process.pid, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+      });
+      await runWorkQueue(w.ctx);
+      expect(await w.store.listThreadIds()).toEqual(before);
+      const waiting = (await w.store.readTurns(source.id)).find((t) => t.id === queued.id)!;
+      expect(waiting.status).toBe("queued");
+      expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toBe(token);
+    } finally {
+      untrackContinuation(token);
+    }
+    // Once the claim clears, the next pass prepares the handoff.
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: null, updatedAt: w.store.nowIso() });
+    });
+    await runWorkQueue(w.ctx);
+    const after = (await w.store.readTurns(source.id)).find((t) => t.id === queued.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoff).toBeDefined();
+    expect(await w.store.readThreadRecord(after.handoff!.destinationThreadId)).not.toBeNull();
+    await flushTurnRunners();
+    for (const id of [source.id, after.handoff!.destinationThreadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
+  it("refuses a wakeSettled send under a live claim without touching settlement", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    await settleThread(w.store, source.id);
+    const before = (await w.store.readThreadRecord(source.id))!;
+    expect(before.settledAt).not.toBeNull();
+    // A live manual continuation claims the settled source.
+    const token = w.store.newId();
+    trackContinuation(token);
+    try {
+      await w.store.withThreadLock(source.id, async () => {
+        const current = (await w.store.readThreadRecord(source.id))!;
+        await w.store.writeThreadRecord({ ...current, continueClaim: { token, pid: process.pid, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+      });
+      await expect(sendTurn(w.store, source.id, { prompt: "Wake", wakeSettled: true })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+      const after = (await w.store.readThreadRecord(source.id))!;
+      expect(after.settledAt).toBe(before.settledAt);
+      expect(after.settledOverride).toBe(before.settledOverride);
+      expect(await w.store.readTurns(source.id)).toHaveLength(0);
+    } finally {
+      untrackContinuation(token);
     }
   });
 });

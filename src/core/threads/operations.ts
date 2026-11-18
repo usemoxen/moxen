@@ -790,10 +790,18 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
       if (!entry.policy.held && entry.policy.continuation !== "same-thread") {
         try { await prepareQueuedHandoff(ctx, entry.threadId, entry.turnId, now); }
         catch (cause) {
-          // A manual handoff in flight on the source refuses the summary
-          // turn: leave the entry queued — a later pass prepares it, once
-          // the claim clears — instead of failing it for the user to re-add.
-          if (cause instanceof CliError && cause.code === "THREAD_BUSY" && (await ctx.store.readThreadRecord(entry.threadId))?.continueClaim) continue;
+          // A manual handoff in flight on the source refuses the handoff
+          // preparation: leave the entry queued — a later pass prepares it,
+          // once the claim clears — instead of failing it for the user to
+          // re-add. Admission judges the claim (healing a dead one) rather
+          // than trusting the raw record, which may outlive its handoff.
+          if (cause instanceof CliError && cause.code === "THREAD_BUSY") {
+            const blocked = await ctx.store.withThreadLock(entry.threadId, async () => {
+              const record = await ctx.store.readThreadRecord(entry.threadId);
+              return record ? (await continuationInFlight(ctx.store, record)).blocked : false;
+            });
+            if (blocked) continue;
+          }
           await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
           ctx.store.emit(entry.threadId, "handoff-failed");
           continue;
@@ -1265,12 +1273,16 @@ export interface ContinuedThread {
 
 /**
  * In-flight continuations by source thread. Overlapping `continueThread`
- * calls on one source (an agent's continuation racing the user's palette
- * action, two queue passes) share one execution: the second awaits the
- * first instead of creating a second destination. The reservation below
- * is what makes a retry after a crash rejoin rather than duplicate.
+ * calls on one source (two queue passes, two palette actions) share one
+ * execution: the second awaits the first instead of creating a second
+ * destination. The reservation below is what makes a retry after a crash
+ * rejoin rather than duplicate.
+ *
+ * A manual continue never joins a non-manual run: the agent's or server's
+ * handoff carries its own ordering, while the user's action must refuse a
+ * running source at once instead of inheriting the agent's destination.
  */
-const continuationRuns = new Map<string, Promise<ContinuedThread>>();
+const continuationRuns = new Map<string, { manual: boolean; run: Promise<ContinuedThread> }>();
 
 /**
  * A new thread that carries on from `threadId`: same project, model,
@@ -1291,16 +1303,24 @@ const continuationRuns = new Map<string, Promise<ContinuedThread>>();
  *
  * Concurrent calls on one source share a single destination (see
  * `continuationRuns`), and a retry after a crash rejoins the reserved
- * destination instead of creating another (`reserveContinuation`).
+ * destination instead of creating another (`reserveContinuation`) — except a
+ * manual request never joins an agent's or the server's in-flight run, so it
+ * always passes its own busy check and writes its own claim.
  */
 export function continueThread(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
+  const manual = isManualContinue(request);
   const ongoing = continuationRuns.get(request.threadId);
-  if (ongoing) return ongoing;
-  const run = continueThreadInner(ctx, request).finally(() => {
-    if (continuationRuns.get(request.threadId) === run) continuationRuns.delete(request.threadId);
+  // A manual request joins only an in-flight manual run. Joining an agent's
+  // or the server's run would hand its destination back with no busy check
+  // and no claim, so the manual request runs on its own and refuses a
+  // running source in reserveContinuation.
+  if (ongoing && (!manual || ongoing.manual)) return ongoing.run;
+  const entry: { manual: boolean; run: Promise<ContinuedThread> } = { manual, run: null! };
+  entry.run = continueThreadInner(ctx, request).finally(() => {
+    if (continuationRuns.get(request.threadId) === entry) continuationRuns.delete(request.threadId);
   });
-  continuationRuns.set(request.threadId, run);
-  return run;
+  continuationRuns.set(request.threadId, entry);
+  return entry.run;
 }
 
 /**

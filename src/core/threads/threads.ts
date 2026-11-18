@@ -404,30 +404,17 @@ export async function sendTurn(
         { exitCode: 4, details: { threadId, settledAt: thread.settledAt } },
       );
     }
-    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
-      thread = {
-        ...thread,
-        settledAt: null,
-        settledOverride: "active",
-        unsettledAt: now,
-        updatedAt: now,
-      };
-      await store.writeThreadRecord(thread);
-      store.emit(threadId, "unsettle");
-    }
-
-    const hidden = hiddenTurnsProblem(store, threadId);
-    if (hidden) throw unreadableTurnsError(threadId, hidden);
     // A manual continuation in flight owns the checkout: refuse a send that
-    // would start a running turn — or release usage protection, or touch a
-    // live turn — before it writes anything. The unsettle and the
-    // usage-protection release below must not run for a refused send (a
-    // refused send once destroyed protection and its recovery turn).
+    // would start a running turn — or release usage protection, wake a
+    // settled thread, or touch a live turn — before it writes anything. The
+    // unsettle and the usage-protection release below must not run for a
+    // refused send (a refused send once destroyed protection and its
+    // recovery turn, and once woke a settled thread it never started on).
     // Predicted from the same inputs the turn below is cut from: with no
     // live turn and no protection release, nothing between here and there
-    // changes the outcome (unsettling flips no input the status reads), so
-    // queued and scheduled sends pass through untouched. Keep beside the
-    // status computation below; if that formula changes, mirror it here.
+    // changes the outcome, so queued and scheduled sends pass through
+    // untouched. Keep beside the status computation below; if that formula
+    // changes, mirror it here.
     const live = liveTurn(turns);
     const duplicate = input.queue?.requestId ? turns.find((turn) => turn.queue?.requestId === input.queue!.requestId) : undefined;
     const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
@@ -450,6 +437,20 @@ export async function sendTurn(
         });
       }
     }
+    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
+      thread = {
+        ...thread,
+        settledAt: null,
+        settledOverride: "active",
+        unsettledAt: now,
+        updatedAt: now,
+      };
+      await store.writeThreadRecord(thread);
+      store.emit(threadId, "unsettle");
+    }
+
+    const hidden = hiddenTurnsProblem(store, threadId);
+    if (hidden) throw unreadableTurnsError(threadId, hidden);
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
       if (existing) {
