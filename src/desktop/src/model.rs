@@ -466,6 +466,19 @@ pub trait ThreadSource {
     fn projects(&self) -> Vec<Project> {
         vec![]
     }
+    /// The connection generation the search answer belongs to: the palette
+    /// re-issues its query when it changes, so a reconnect never leaves a
+    /// stale error or empty result.
+    fn wire_epoch(&self) -> u64 {
+        0
+    }
+    /// The project a thread belongs to, as the server lists it. The sidebar
+    /// groups by this id (titles can repeat for two checkouts with the same
+    /// basename); the title comes from `projects`.
+    fn project_id(&self, id: ThreadId) -> Option<String> {
+        let _ = id;
+        None
+    }
     /// Asks the server for threads holding `query` and reports the answer
     /// through `search_state` (`threads.search`, the TUI picker's semantics).
     fn search_threads(&mut self, _query: &str) {}
@@ -494,6 +507,10 @@ pub trait ThreadSource {
     }
     /// Reads the thread's research run and its role transcripts again.
     fn read_run(&mut self, _id: ThreadId) {}
+    /// Holds one subscription per visible role thread while the run view
+    /// shows it, with deltas, like the TUI's `useRoleTranscript`. Empty
+    /// releases them.
+    fn watch_roles(&mut self, _threads: Vec<String>) {}
     /// The thread's research run, once read (`research.run` projected like
     /// the TUI's run view).
     fn run_summary(&self, _id: ThreadId) -> Option<RunSummary> {

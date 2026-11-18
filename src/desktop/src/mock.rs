@@ -592,6 +592,9 @@ impl ThreadSource for MockSource {
             })
             .collect()
     }
+    fn project_id(&self, id: ThreadId) -> Option<String> {
+        self.threads.get(id).map(|thread| thread.project.clone())
+    }
     fn create_thread(&mut self, draft: NewThread) {
         let id = self.threads.len();
         let title: String = draft.prompt.text.chars().take(48).collect();
@@ -652,20 +655,12 @@ impl ThreadSource for MockSource {
         if title.is_empty() {
             return;
         }
-        let old = self
-            .projects()
-            .into_iter()
-            .find(|project| project.id == id)
-            .map(|project| project.title);
-        let Some(old) = old else {
+        let known = self.projects().into_iter().any(|project| project.id == id);
+        if !known {
             return;
-        };
-        self.renamed_projects.insert(id.into(), title.clone());
-        for thread in &mut self.threads {
-            if thread.project == old {
-                thread.project = title.clone();
-            }
         }
+        // The id stays: threads keep pointing at it, only the title changes.
+        self.renamed_projects.insert(id.into(), title);
     }
     fn remove_project(&mut self, id: &str) {
         if ["moxen-agent", "moxen-chat"].contains(&id) {

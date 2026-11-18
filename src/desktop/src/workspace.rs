@@ -101,6 +101,13 @@ pub struct Workspace {
     /// search goes out once the query holds still.
     searched: String,
     search_at: Option<(Instant, String)>,
+    /// The connection the palette's query was last sent on: a reconnect
+    /// re-issues it, so the palette never keeps a stale error or empty result.
+    search_epoch: u64,
+    /// The run-size proposal the window already focused, by thread: focusing
+    /// once when it first appears (like the TUI focuses its picker), not on
+    /// every redraw.
+    pub proposal_seen: Option<(ThreadId, String)>,
     /// The threads the server may ask this window for a run size, last sent.
     research_watching: Option<ThreadId>,
     /// The lead thread opened in full: its transcript shows, not its run.
@@ -447,6 +454,8 @@ impl Workspace {
             notice_at: None,
             searched: String::new(),
             search_at: None,
+            search_epoch: 0,
+            proposal_seen: None,
             research_watching: None,
             lead_full: None,
             role_full: None,
@@ -686,6 +695,15 @@ impl Workspace {
     /// Sends the palette's query once it holds still, like the TUI's picker
     /// waits for a pause in typing.
     fn sync_search(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.source.wire_epoch();
+        if epoch != self.search_epoch {
+            // A reconnect drops the last answer: ask again for what the
+            // palette still shows, instead of keeping a stale error or empty
+            // result until the query changes.
+            self.search_epoch = epoch;
+            self.searched = String::new();
+            self.search_at = None;
+        }
         if !self.palette_open {
             self.searched = String::new();
             self.search_at = None;
@@ -749,6 +767,41 @@ impl Workspace {
         if !self.creating && self.source.leads_run(self.selected) {
             self.source.read_run(self.selected);
         }
+        // One subscription per visible role thread while the run view shows
+        // it, with deltas; released when leaving the view, switching threads
+        // or disconnecting (the live source ends them).
+        let visible = self.visible_role_threads();
+        self.source.watch_roles(visible);
+    }
+
+    /// The role threads the run view shows now, by their id on the wire.
+    fn visible_role_threads(&self) -> Vec<String> {
+        if self.creating {
+            return vec![];
+        }
+        if let Some((lead, role, agent)) = self.role_full {
+            return self
+                .source
+                .run_summary(lead)
+                .and_then(|summary| summary.agents[role as usize].get(agent)?.thread_id.clone())
+                .into_iter()
+                .collect();
+        }
+        if !self.show_run_view() {
+            return vec![];
+        }
+        let Some(summary) = self.source.run_summary(self.selected) else {
+            return vec![];
+        };
+        crate::model::ROLES
+            .into_iter()
+            .filter_map(|role| {
+                let at = self
+                    .run_shown(self.selected, role)
+                    .min(summary.agents[role as usize].len().saturating_sub(1));
+                summary.agents[role as usize].get(at)?.thread_id.clone()
+            })
+            .collect()
     }
     /// The lead's run view replaces its transcript: the shell lists it
     /// leading a run and the run is read, and it is not opened in full.
@@ -789,16 +842,13 @@ impl Workspace {
             .clone()
             .filter(|id| projects.iter().any(|p| &p.id == id))
             .or_else(|| {
-                let open = self
-                    .source
-                    .list_threads()
-                    .get(self.selected)?
-                    .project
-                    .clone();
-                projects
-                    .iter()
-                    .find(|p| p.title == open)
-                    .map(|p| p.id.clone())
+                let pid = self.source.project_id(self.selected).or_else(|| {
+                    self.source
+                        .list_threads()
+                        .get(self.selected)
+                        .map(|thread| thread.project.clone())
+                })?;
+                projects.iter().any(|p| p.id == pid).then_some(pid)
             })
             .or_else(|| projects.first().map(|p| p.id.clone()))
     }
@@ -896,6 +946,9 @@ impl Workspace {
         cx.notify();
     }
     fn start_thread(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.trim().is_empty() && self.new_composer.read(cx).assets.is_empty() {
+            return;
+        }
         let Some(project) = self.new_project_id() else {
             self.problem = Some("There is no project to start a thread in.".into());
             self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
@@ -1312,9 +1365,23 @@ impl Workspace {
     }
     fn send(&mut self, id: ThreadId, text: String, delivery: Delivery, cx: &mut Context<Self>) {
         // The run-size question waits: Enter starts the run with the picked
-        // size, as the TUI's modal does.
+        // size, as the TUI's modal does. The typed draft stays in the
+        // composer: answering is not a send.
         if !self.creating && self.source.proposal(id).is_some() {
+            if !text.is_empty() {
+                self.composers[id].update(cx, |c, cx| c.set_text(text, cx));
+            }
             self.answer_size(id, cx);
+            return;
+        }
+        // An empty Enter with nothing waiting sends nothing: the composer
+        // already cleared its (empty) draft to get here.
+        if text.trim().is_empty()
+            && self
+                .composers
+                .get(id)
+                .is_none_or(|composer| composer.read(cx).assets.is_empty())
+        {
             return;
         }
         let busy = self

@@ -343,6 +343,11 @@ fn agent_state_of(session: &str, turn: &str) -> AgentState {
     if session.is_empty() {
         return AgentState::Working;
     }
+    // The TUI treats a role thread with a session but no latest turn as
+    // working (`agentStateOf` returns "working" when `!turn`).
+    if turn.is_empty() {
+        return AgentState::Working;
+    }
     match session {
         "running" | "starting" => AgentState::Working,
         _ => match turn {
@@ -614,8 +619,9 @@ mod tests {
     // Not a glob: `gpui::test` would shadow `#[test]`.
     use super::{
         AgentRef, MAX_RESEARCHERS, PickerRow, ResearchRole, ResearchSize, RunSummary,
-        column_widths, focus_role_of, initial_picker, lens_of, move_row, set_critics,
-        set_researchers, step_agent, step_picker, step_role, summarize_run, thread_count,
+        agent_state_of, column_widths, focus_role_of, initial_picker, lens_of, move_row,
+        set_critics, set_researchers, step_agent, step_picker, step_role, summarize_run,
+        thread_count,
     };
     use serde_json::json;
 
@@ -731,5 +737,13 @@ mod tests {
         let widths = column_widths(&summary, 800.0).expect("widths");
         assert!(widths[ResearchRole::Critic as usize] > widths[ResearchRole::Researcher as usize]);
         assert!(column_widths(&summary, 100.0).is_none());
+    }
+
+    #[test]
+    fn a_role_thread_with_a_session_but_no_turn_is_working() {
+        // The TUI's `agentStateOf` returns "working" when there is no latest
+        // turn; a session that has started but not yet turned must not read
+        // as stopped.
+        assert_eq!(agent_state_of("idle", ""), super::AgentState::Working);
     }
 }

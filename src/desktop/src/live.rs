@@ -592,10 +592,15 @@ struct State {
     run_requested: HashMap<ThreadId, Instant>,
     /// One role thread's transcript, once read, by its id on the wire.
     role_messages: HashMap<String, Option<Arc<Vec<Message>>>>,
-    /// Role threads with a transcript read in flight.
-    role_reads: HashSet<String>,
-    /// When each role's transcript was last read, for the run view's refresh.
-    role_requested: HashMap<String, Instant>,
+    /// Role threads with a live subscription, while the run view shows them:
+    /// one per visible role thread, with deltas, like the TUI's
+    /// `useRoleTranscript`. Empty when the run view is hidden.
+    role_watching: HashSet<String>,
+    /// Counts role subscription loops, so replacing the set ends the old ones.
+    role_watch_token: u64,
+    /// Each watched role's rows, by its id on the wire: snapshots replace
+    /// them, deltas extend them until the watcher ends.
+    role_rows: HashMap<String, Vec<crate::transcript::Row>>,
 }
 impl State {
     fn composer_directory(&self, target: &Destination) -> Option<&str> {
@@ -1172,7 +1177,10 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
         state.work.clear();
         state.work_reads.clear();
         state.run_reads.clear();
-        state.role_reads.clear();
+        state.role_watch_token += 1;
+        state.role_watching.clear();
+        state.role_rows.clear();
+        state.role_messages.clear();
         // A proposal answered before this connection is gone: the server
         // answered it or dropped it, so it is never shown again.
         state.research_proposals.clear();
@@ -1198,14 +1206,15 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
     })();
     shared.update(|state| {
         state.wire = None;
-        // Ends the open thread's watcher and the research loop; their answers
-        // belong to the closed connection.
+        // Ends the open thread's watcher, the research loop and the role
+        // watchers; their answers belong to the closed connection.
         state.watch += 1;
         state.research_token += 1;
         state.research_watching = None;
         state.research_proposals.clear();
         state.run_reads.clear();
-        state.role_reads.clear();
+        state.role_watch_token += 1;
+        state.role_watching.clear();
     });
     ended
 }
@@ -1450,6 +1459,17 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
             entry.messages = None;
         });
     }
+}
+
+/// What a `threads.search` answer becomes: its rows, or an error when the
+/// answer cannot be read (never idle, so a broken answer does not look like
+/// no search).
+fn decode_search(query: &str, found: &serde_json::Value) -> SearchState {
+    SearchResults::decode(query, found)
+        .map(SearchState::Done)
+        .unwrap_or(SearchState::Error(
+            "The server's search answer was not understood.".into(),
+        ))
 }
 
 impl ThreadSource for ServerSource {
@@ -2197,6 +2217,18 @@ impl ThreadSource for ServerSource {
         let state = self.shared.state.lock().expect("live state");
         state.projects.clone()
     }
+    fn wire_epoch(&self) -> u64 {
+        self.shared.state.lock().expect("live state").wire_epoch
+    }
+    fn project_id(&self, id: ThreadId) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .map(|slot| slot.project_id.clone())
+    }
     fn catalog(&self) -> CatalogState {
         match &self.shared.state.lock().expect("live state").catalog {
             None => CatalogState::Loading,
@@ -2386,9 +2418,7 @@ impl ThreadSource for ServerSource {
                         return;
                     }
                     state.search = match answer {
-                        Ok(found) => SearchResults::decode(&query, &found)
-                            .map(SearchState::Done)
-                            .unwrap_or(SearchState::Idle),
+                        Ok(found) => decode_search(&query, &found),
                         Err(error) => SearchState::Error(error.message),
                     };
                 });
@@ -2468,6 +2498,9 @@ impl ThreadSource for ServerSource {
     }
     fn read_run(&mut self, id: ThreadId) {
         read_run(&self.shared, id);
+    }
+    fn watch_roles(&mut self, threads: Vec<String>) {
+        watch_roles(&self.shared, threads);
     }
     fn leads_run(&self, id: ThreadId) -> bool {
         let state = self.shared.state.lock().expect("live state");
@@ -3144,13 +3177,13 @@ fn read_run(shared: &Arc<Shared>, id: ThreadId) {
     let shared = shared.clone();
     with_wire(&shared.clone(), move |wire| {
         let answer = wire.query("research.run", json!({ "threadId": uuid }));
-        let roles = target.update(|state| {
+        target.update(|state| {
             if state.wire_epoch != epoch {
-                return vec![];
+                return;
             }
             state.run_reads.remove(&id);
             if state.wire.is_none() {
-                return vec![];
+                return;
             }
             let summary = answer.ok().and_then(|run| {
                 if run.is_null() {
@@ -3187,84 +3220,130 @@ fn read_run(shared: &Arc<Shared>, id: ThreadId) {
                 let lead = text(&run, &["lead", "title"]).unwrap_or(&title).to_string();
                 research::summarize_run(&run, &lead, roles, &|uuid| titles.get(uuid).cloned())
             });
-            let threads: Vec<String> = summary
-                .as_ref()
-                .map(|summary| {
-                    summary
-                        .agents
-                        .iter()
-                        .flatten()
-                        .filter_map(|agent| agent.thread_id.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
             state.runs.insert(id, summary.map(Arc::new));
-            threads
         });
-        // The visible agents' transcripts refresh with the run.
-        for thread in roles {
-            read_role(&target, &thread);
-        }
     });
 }
 
-/// Reads one role thread's transcript for the run view, the way the open
-/// thread's own watcher reads it: its subscription's first snapshot,
-/// projected into rows. Guarded and dropped like every other read.
-fn read_role(shared: &Arc<Shared>, uuid: &str) {
-    let (uuid, epoch) = {
+/// Holds one subscription per visible role thread while the run view shows
+/// it, with deltas, like the TUI's `useRoleTranscript`. Replaces the set when
+/// it changes; empty releases them all.
+fn watch_roles(shared: &Arc<Shared>, threads: Vec<String>) {
+    let desired: std::collections::HashSet<String> = threads.into_iter().collect();
+    let (spawn, token, epoch) = {
         let mut state = shared.state.lock().expect("live state");
-        if state.wire.is_none() || !state.role_reads.insert(uuid.to_string()) {
+        if state.role_watching == desired {
             return;
         }
-        let fresh = state
-            .role_requested
-            .get(uuid)
-            .is_some_and(|at| at.elapsed() < RUN_REFRESH);
-        if fresh && state.role_messages.contains_key(uuid) {
-            state.role_reads.remove(uuid);
-            return;
-        }
+        let token = state.role_watch_token;
+        let epoch = state.wire_epoch;
+        let fresh: Vec<String> = desired.difference(&state.role_watching).cloned().collect();
+        state.role_watching = desired;
+        // Leaving the view drops the cached transcripts, so a later run does
+        // not show a previous one's rows while it reads.
+        let watching = state.role_watching.clone();
+        state.role_rows.retain(|uuid, _| watching.contains(uuid));
         state
-            .role_requested
-            .insert(uuid.to_string(), Instant::now());
-        (uuid.to_string(), state.wire_epoch)
+            .role_messages
+            .retain(|uuid, _| watching.contains(uuid));
+        (fresh, token, epoch)
     };
-    let target = shared.clone();
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let thread = wire.subscribe_thread(&uuid).ok().and_then(|subscription| {
-            loop {
-                match subscription.frames.recv_timeout(Duration::from_secs(10)) {
-                    Ok(Ok(frame)) if frame["kind"] == "snapshot" => {
-                        break Some(frame["snapshot"]["thread"].clone());
+    let Some(wire) = shared.state.lock().expect("live state").wire.clone() else {
+        return;
+    };
+    for uuid in spawn {
+        let shared = shared.clone();
+        let wire = wire.clone();
+        let _ = std::thread::Builder::new()
+            .name("moxen-role".into())
+            .spawn(move || watch_role(&shared, &wire, &uuid, token, epoch));
+    }
+}
+
+/// One role thread's live transcript: its subscription's snapshots replace
+/// its rows, and deltas extend them until another set takes over, the thread
+/// leaves the view, or the connection does.
+fn watch_role(shared: &Arc<Shared>, wire: &Wire, uuid: &str, token: u64, epoch: u64) {
+    let Ok(subscription) = wire.subscribe_thread(uuid) else {
+        return;
+    };
+    loop {
+        if shared.state.lock().expect("live state").role_watch_token != token {
+            return;
+        }
+        if shared.state.lock().expect("live state").wire_epoch != epoch {
+            return;
+        }
+        if !shared
+            .state
+            .lock()
+            .expect("live state")
+            .role_watching
+            .contains(uuid)
+        {
+            return;
+        }
+        let frame = match subscription.frames.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        };
+        let known = match frame["kind"].as_str() {
+            Some("snapshot") => true,
+            Some("event") => matches!(
+                frame["event"]["type"].as_str(),
+                Some("thread.message-sent" | "thread.reasoning-delta")
+            ),
+            _ => false,
+        };
+        if !known {
+            continue;
+        }
+        shared.update(|state| {
+            if state.role_watch_token != token || state.wire_epoch != epoch {
+                return;
+            }
+            if !state.role_watching.contains(uuid) {
+                return;
+            }
+            if frame["kind"] == "snapshot" {
+                let rows = transcript::project(&frame["snapshot"]["thread"]);
+                state.role_messages.insert(
+                    uuid.to_string(),
+                    Some(Arc::new(
+                        rows.iter().map(|row| row.message.clone()).collect(),
+                    )),
+                );
+                state.role_rows.insert(uuid.to_string(), rows);
+            } else {
+                let payload = &frame["event"]["payload"];
+                let rows = state.role_rows.entry(uuid.to_string()).or_default();
+                if frame["event"]["type"] == "thread.message-sent" {
+                    let message = &payload["message"];
+                    if text(message, &["role"]) == Some("assistant") {
+                        transcript::append(
+                            rows,
+                            text(message, &["id"]).unwrap_or_default(),
+                            text(message, &["text"]).unwrap_or_default(),
+                            transcript::created_ms(message),
+                        );
                     }
-                    Ok(Ok(_)) => continue,
-                    _ => break None,
+                } else {
+                    transcript::append_thought(
+                        rows,
+                        text(payload, &["toolCallId"]).unwrap_or_default(),
+                        text(payload, &["text"]).unwrap_or_default(),
+                    );
                 }
+                state.role_messages.insert(
+                    uuid.to_string(),
+                    Some(Arc::new(
+                        rows.iter().map(|row| row.message.clone()).collect(),
+                    )),
+                );
             }
         });
-        target.update(|state| {
-            if state.wire_epoch != epoch {
-                return;
-            }
-            state.role_reads.remove(&uuid);
-            if state.wire.is_none() {
-                return;
-            }
-            state.role_messages.insert(
-                uuid,
-                thread.map(|thread| {
-                    Arc::new(
-                        transcript::project(&thread)
-                            .into_iter()
-                            .map(|row| row.message)
-                            .collect(),
-                    )
-                }),
-            );
-        });
-    });
+    }
 }
 
 /// Runs a read on its own thread with the open connection; nothing if there is none.
@@ -6150,7 +6229,8 @@ mod tests {
                         "thinkingEffort": "medium"}}}})]
         );
 
-        // The run view reads the run, then its role's transcript.
+        // The run view reads the run, then holds one subscription per visible
+        // role thread while it shows it.
         source.read_run(0);
         wait_for("the run summary", || source.run_summary(0).is_some());
         let summary = source.run_summary(0).expect("run");
@@ -6163,6 +6243,7 @@ mod tests {
             summary.agents[0][0].state,
             crate::research::AgentState::Working
         );
+        source.watch_roles(vec!["role-1".to_string()]);
         wait_for("the role transcript", || {
             source.role_messages("role-1").is_some()
         });
@@ -6202,5 +6283,13 @@ mod tests {
             research_desired(&mut state),
             vec!["t1".to_string(), "new".to_string()]
         );
+    }
+
+    #[test]
+    fn a_broken_search_answer_is_an_error_not_idle() {
+        // A decode failure must surface as an error: idle would leave the
+        // palette showing the stale error or empty result.
+        let broken = decode_search("encoder", &serde_json::json!({"threads": "oops"}));
+        assert!(matches!(broken, SearchState::Error(_)));
     }
 }

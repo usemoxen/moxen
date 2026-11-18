@@ -168,7 +168,9 @@ impl Composer {
         {
             return;
         }
-        if self.enabled && self.loading_assets == 0 && self.marked.is_none() && !self.empty() {
+        if self.enabled && self.loading_assets == 0 && self.marked.is_none() {
+            // An empty Enter still reaches the workspace: with a run-size
+            // question waiting it starts the run, otherwise it is dropped.
             let text = std::mem::take(&mut self.text);
             self.selection = 0..0;
             self.changed(cx);

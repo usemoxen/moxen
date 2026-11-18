@@ -150,7 +150,7 @@ impl Workspace {
     }
 
     /// The agent a column shows now: the pick, else the one at work.
-    fn run_shown(&self, lead: ThreadId, role: ResearchRole) -> usize {
+    pub fn run_shown(&self, lead: ThreadId, role: ResearchRole) -> usize {
         if let Some(picked) = self.run_picks.get(&(lead, role)) {
             return *picked;
         }
@@ -204,7 +204,6 @@ pub fn proposal_panel(
             format!(" {count} ").into(),
         )
     });
-    let entity = cx.entity();
     let rows = [
         (
             PickerRow::Researchers,
@@ -238,15 +237,13 @@ pub fn proposal_panel(
             None,
         ),
     ];
-    let focus_panel = entity.clone();
     let panel = div()
         .id("research-proposal")
         .track_focus(&w.ask_focus)
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |_, _, window, cx| {
-                let focus = focus_panel.read(cx).ask_focus.clone();
-                window.focus(&focus, cx);
+            cx.listener(|this, _, window, cx| {
+                window.focus(&this.ask_focus, cx);
             }),
         )
         .border(px(theme::px_token("stroke", "stroke-rule")))
