@@ -4524,6 +4524,7 @@ mod tests {
     /// asked. Query payloads are recorded for the test thread to assert, so
     /// a mismatch fails with the diff rather than a timeout on a panicking
     /// server thread.
+    #[cfg(unix)]
     type Recorded = Arc<Mutex<Vec<Value>>>;
     #[cfg(unix)]
     fn settings_answer() -> Value {
