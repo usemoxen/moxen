@@ -116,17 +116,30 @@ export interface HandoffOptions {
   readonly preferModelSummary?: boolean;
   readonly modelSummary?: string;
   readonly queuedTurnIds?: readonly string[];
+  /**
+   * The source turns visible when a manual continue claimed its moves: the
+   * handoff projects exactly this set, so source work accepted after the
+   * claim belongs only to the source — never assigned as destination work
+   * nor captured in its snapshot — while claimed moves stay excluded by
+   * their marker. Only the manual path passes it.
+   */
+  readonly knownTurnIds?: readonly string[];
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
   const thread = (await store.readThreadRecord(threadId)) as StoredThread | null;
   if (!thread) throw new Error(`No thread ${threadId}.`);
-  const [turns, messages, activities, checkpoints] = await Promise.all([
+  const [allTurns, messages, activities, checkpoints] = await Promise.all([
     store.readTurns(threadId),
     store.readMessages(threadId),
     store.readActivities(threadId),
     store.readCheckpoints(threadId),
   ]);
+  // A manual continue pins the projection to its claim: turns accepted after
+  // the claim belong only to the source, so neither history nor an
+  // immediate task here, whether still queued or already promoted.
+  const known = options.knownTurnIds ? new Set(options.knownTurnIds) : null;
+  const turns = known ? allTurns.filter((turn) => known.has(turn.id)) : allTurns;
 
   // A turn has reached the agent once it produced something. One that is
   // queued, or was promoted to `running` by a settle but never ran (the
@@ -209,7 +222,10 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
       head.push(`- ${path} +${stat.additions} −${stat.deletions}`);
     }
   }
-  const images = messages.flatMap((message) => message.attachments ?? []).filter((attachment) => attachment.type === "image");
+  const images = messages
+    .filter((message) => !known || known.has(message.turnId))
+    .flatMap((message) => message.attachments ?? [])
+    .filter((attachment) => attachment.type === "image");
   if (images.length > 0) {
     head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
   }

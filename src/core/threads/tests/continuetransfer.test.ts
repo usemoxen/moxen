@@ -365,23 +365,25 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const handoff = await sendTurn(w.store, destination.id, { prompt: "Handoff" });
 
     // The claim, exactly as continueThreadInner takes it.
-    expect(await stageQueuedMessages(w.ctx, source.id, destination.id)).toEqual([staged.turn.id]);
+    const claim = await stageQueuedMessages(w.ctx, source.id, destination.id);
+    expect(claim.claimed).toEqual([staged.turn.id]);
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)).toMatchObject({
       status: "queued",
       queue: { removed: true },
     });
 
-    // A send landing after the claim keeps the old behavior: still queued
-    // and runnable on the source.
+    // A send landing after the claim belongs only to the source: still
+    // queued and runnable there, never in the destination snapshot.
     const late = await sendTurn(w.store, source.id, { prompt: "Late", delivery: "queue" });
     expect(late.turn.status).toBe("queued");
 
-    // Admission cannot take the claimed turn, and the handoff read excludes
-    // exactly the claimed set while embedding the late send.
+    // Admission cannot take the claimed turn, and the handoff projects
+    // exactly the claim-time source: the late send appears in neither
+    // history nor immediate work.
     await runWorkQueue(w.ctx);
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.status).toBe("queued");
-    const doc = await buildHandoff(w.store, source.id);
-    expect(doc).toContain("Late");
+    const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim.known });
+    expect(doc).not.toContain("Late");
     expect(doc).not.toContain("Second");
 
     // The migration moves only the claimed turn; the late send stays queued.
@@ -396,6 +398,60 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // running turn promotes it past the staged row, which admission skips.
     await completeTurn(w.store, source.id, running.id, { text: "Done." });
     expect(openTurn(await w.store.readTurns(source.id))?.id).toBe(late.turn.id);
+  });
+
+  it("keeps a post-claim send off the destination through the real continue path", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+
+    // Deterministic barrier: stage emits queue-changed on the source when it
+    // claims, so the late send injected on the next source turn-ledger read
+    // lands strictly between the claim and the handoff projection (the
+    // claim's own re-reads happen before the emit). Later reads pass through.
+    const readTurns = w.store.readTurns.bind(w.store);
+    const emit = w.store.emit.bind(w.store);
+    let armed = false;
+    let injected = false;
+    const emitSpy = vi.spyOn(w.store, "emit").mockImplementation((threadId: string, reason: string) => {
+      if (threadId === source.id && reason === "queue-changed") armed = true;
+      return emit(threadId, reason);
+    });
+    const spy = vi.spyOn(w.store, "readTurns").mockImplementation(async (threadId: string) => {
+      if (threadId === source.id && armed) {
+        armed = false;
+        await sendTurn(w.store, source.id, { prompt: "Late", delivery: "queue" });
+        injected = true;
+      }
+      return readTurns(threadId);
+    });
+    let continued;
+    try {
+      continued = await continueThread(w.ctx, { threadId: source.id });
+    } finally {
+      spy.mockRestore();
+      emitSpy.mockRestore();
+    }
+    expect(injected).toBe(true);
+
+    // The pre-claim message moved; the late prompt is nowhere on the
+    // destination — neither the handoff nor any other turn — while the moved
+    // message stays out of the handoff's immediate work.
+    const destTurns = await w.store.readTurns(continued.threadId);
+    expect(destTurns).toHaveLength(2);
+    const destMessages = await w.store.readMessages(continued.threadId);
+    expect(destMessages.map((message) => message.text).join("\n")).not.toContain("Late");
+    const handoffText = destMessages.find((message) => message.role === "user")!.text;
+    expect(handoffText).toContain("moved to the new thread's Work queue");
+    expect(handoffText).not.toContain("Second");
+
+    // The late send stays queued and runnable only on the source.
+    const late = (await w.store.readTurns(source.id)).find((turn) => turn.status === "queued")!;
+    expect((await w.store.readMessages(source.id)).find((message) => message.id === late.messageId)?.text).toBe("Late");
+    expect(destTurns.some((turn) => turn.messageId === late.messageId)).toBe(false);
+    await completeTurn(w.store, source.id, running.id, { text: "Done." });
+    expect(openTurn(await w.store.readTurns(source.id))?.id).toBe(late.id);
   });
 
   it("repairs a crash between destination turn and message writes, without dispatching or duplicating", async () => {

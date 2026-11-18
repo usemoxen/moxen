@@ -1504,7 +1504,18 @@ function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined
  * on the source, so promotion between claim and migration simply cannot
  * take one. Returns the claimed turn ids, oldest first.
  */
-export async function stageQueuedMessages(ctx: OperationContext, sourceId: string, destinationId: string): Promise<string[]> {
+/**
+ * The claim a manual continue stages: the set everything downstream agrees on.
+ * `claimed` holds the transferable turn ids, oldest first; `known` holds
+ * every source turn id visible at claim time, so the handoff projects
+ * exactly the pre-claim source — work accepted afterwards belongs only to
+ * the source, never to the destination snapshot.
+ */
+export interface StageClaim {
+  readonly claimed: string[];
+  readonly known: string[];
+}
+export async function stageQueuedMessages(ctx: OperationContext, sourceId: string, destinationId: string): Promise<StageClaim> {
   const { store } = ctx;
   return await store.withThreadLock(QUEUE_ADMISSION_LOCK, async () =>
     store.withThreadLock(sourceId, async () => {
@@ -1528,7 +1539,7 @@ export async function stageQueuedMessages(ctx: OperationContext, sourceId: strin
         claimed.push(turn.id);
       }
       if (claimed.length > 0) store.emit(sourceId, "queue-changed");
-      return claimed;
+      return { claimed, known: turns.map((turn) => turn.id) };
     }),
   );
 }
@@ -1939,11 +1950,11 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const destinationId = await reserveContinuation(store, source, request, title, noteSummary);
   const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
   // A manual continue moves the source's pending ordinary messages with it:
-  // staging claims the set under lock before the handoff is written, so the
-  // document neither retells them as history nor assigns them as this
-  // turn's work.
-  if (transfersQueuedMessages(request)) await stageQueuedMessages(ctx, source.id, destinationId);
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
+  // staging claims the set under lock before the handoff is written, and the
+  // handoff projects exactly the claim-time source, so work accepted after
+  // the claim stays on the source and out of the destination snapshot.
+  const claim = transfersQueuedMessages(request) ? await stageQueuedMessages(ctx, source.id, destinationId) : null;
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known } : {}) });
   const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
     id: destinationId,
