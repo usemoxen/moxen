@@ -600,7 +600,7 @@ impl Workspace {
             expanded: HashMap::new(),
             _subscriptions: subscriptions,
         };
-        if mock {
+        if this.source.preview() {
             use crate::experience::Panel;
             let case = std::env::args()
                 .skip_while(|arg| arg != "--mock-experience")

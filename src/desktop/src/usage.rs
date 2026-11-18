@@ -1234,7 +1234,7 @@ pub fn render(
                         .child(
                             div()
                                 .flex_1()
-                                .child(crate::language::tr(&share.name).into_owned()),
+                                .child(crate::language::tr(share.name).into_owned()),
                         )
                         .child(mono(format!(
                             "{} · {:.1}%",

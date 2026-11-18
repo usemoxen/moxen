@@ -653,8 +653,15 @@ fn role_rows(
         .flex()
         .flex_col()
         .gap(px(8.))
-        .children(messages.iter().enumerate().map(|(at, message)| {
-            match message.clone() {
+        .children(messages.iter().enumerate().map(|(at, row)| {
+            let notice = |label: String| {
+                div()
+                    .text_size(px(13.))
+                    .text_color(color("ink-2"))
+                    .child(label)
+                    .into_any_element()
+            };
+            match row.clone() {
                 Message::User { text, .. } => div()
                     .flex()
                     .flex_col()
@@ -704,6 +711,29 @@ fn role_rows(
                             .child(text),
                     )
                     .into_any_element(),
+                Message::UsageLimit { wrap_up, label, .. } => notice(if wrap_up {
+                    message("timeline.limitWrap").into()
+                } else if let Some(window) = label {
+                    fill("usage.windowLimit", &[("{window}", &window)])
+                } else {
+                    message("app.usage_limit_reached_301b").into()
+                }),
+                Message::TaskNotification { tasks, .. } => notice(
+                    tasks
+                        .into_iter()
+                        .map(|task| task.title)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                Message::UsageProtection { .. } => notice("Usage protection".into()),
+                Message::Continued { kind, .. } => notice(
+                    match kind {
+                        crate::model::ContinuedKind::Handoff => "Preparing a handoff",
+                        crate::model::ContinuedKind::Background => "Background task finished",
+                        crate::model::ContinuedKind::UsageReset => message("timeline.continued"),
+                    }
+                    .into(),
+                ),
                 Message::Tool {
                     name,
                     summary,

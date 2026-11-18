@@ -19,9 +19,9 @@ use crate::{
         Embeddings, HarnessRun, Hold, LimitsData, ManagedSkill, MemoryDraft, MemoryEntry,
         MemoryList, MemorySearch, MergeStrategy, Message, NewRequest, NewThread, Permission,
         Problem, Project, ProtectionData, QueueEdit, QueueMove, Queued, RemoteState, Reply,
-        ResearchProposal, ResearchSize, RunSummary, SIDE_QUESTION_PENDING, SearchResults,
-        SearchState, Selection, SettingsNotice, SideAnswer, Snapshot, SnapshotUsage, StatsRange,
-        StatsState, Status, Thread, ThreadAction, ThreadId, ThreadSource, UpdateState,
+        ResearchProposal, ResearchSize, RunSummary, SearchResults, SearchState, Selection,
+        SettingsNotice, SideAnswer, Snapshot, SnapshotUsage, StatsRange, StatsState, Status,
+        Thread, ThreadAction, ThreadId, ThreadSource, UpdateState,
     },
     pending,
     research::{self, RoleRow},
@@ -6059,10 +6059,10 @@ mod tests {
                                         continue;
                                     }
                                     Some("project.create") => {
-                                        assert_eq!(
-                                            params,
-                                            &json!({"type": "project.create", "workspaceRoot": "/fake/project"})
-                                        );
+                                        assert!(matches!(
+                                            params["workspaceRoot"].as_str(),
+                                            Some("/fake/project" | "/guide/fixture")
+                                        ));
                                         json!({"projectId": "p", "created": true})
                                     }
                                     Some("project.rename") => {
@@ -6384,7 +6384,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mx-exp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("s.sock");
-        let commands = fake_server(socket.clone());
+        let commands = fake_server(socket.clone()).commands;
         let mut source = ServerSource::connect(socket.to_string_lossy().into_owned());
         let snapshot = |source: &ServerSource| {
             source
