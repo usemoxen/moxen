@@ -208,6 +208,32 @@ describe("usage protection", () => {
     } finally { w.guard.close(); }
   });
 
+  it("parks the wrap-up with a visible error when a stuck turn refuses it", async () => {
+    const w = await world();
+    const id = await w.make("stuck wrap-up");
+    const first = openTurn(await w.store.readTurns(id))!;
+    await completeTurn(w.store, id, first.id, { text: "idle" });
+    const stuck = (await sendTurn(w.store, id, { prompt: "More" })).turn;
+    await w.store.withThreadLock(id, () => w.store.updateTurn(id, stuck.id, { status: "mystery" as "queued" }));
+    await w.store.withThreadLock(id, async () => {
+      const current = (await w.store.readThreadRecord(id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "pending", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    try {
+      await w.guard.tick();
+      // A stuck turn is a genuine failure, not handoff contention: the pause
+      // parks behind the visible recovery error instead of retrying pending.
+      expect(await w.store.readThreadRecord(id)).toMatchObject({
+        usagePause: { phase: "waiting", error: expect.stringContaining("Could not start wrap-up") },
+      });
+      expect(openTurn(await w.store.readTurns(id))).toBeNull();
+    } finally {
+      await interruptTurn(w.store, id, stuck.id).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
   it.each([false, true])("holds a delegated task notice on a protected parent until its next message", async (pending) => {
     const w = await world();
     const parent = await w.make("parent");

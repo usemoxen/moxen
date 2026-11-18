@@ -151,6 +151,32 @@ export function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreP
   return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
 }
 
+/**
+ * A THREAD_BUSY refusal raised because a manual continuation owns the
+ * checkout (see `continuationInFlight`), as opposed to one raised by a busy
+ * turn. Catch sites that must yield only to a handoff — the usage wrap-up,
+ * the queue pass — discriminate with `isContinuationBusy`, never on the
+ * message and never by re-reading the claim (which may not be persisted
+ * yet, or may already have cleared, when the refusal arrives).
+ */
+export function continuationBusyError(threadId: string): CliError {
+  return new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
+    exitCode: 4,
+    details: { threadId, continued: true },
+  });
+}
+
+/** Whether this failure is a manual-handoff contention refusal (see above). */
+export function isContinuationBusy(cause: unknown): cause is CliError {
+  return (
+    cause instanceof CliError &&
+    cause.code === "THREAD_BUSY" &&
+    typeof cause.details === "object" &&
+    cause.details !== null &&
+    (cause.details as { continued?: unknown }).continued === true
+  );
+}
+
 export function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
   return new CliError(
     "TURNS_LEDGER_CORRUPT",
@@ -431,10 +457,7 @@ export async function sendTurn(
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
       if (admission.blocked) {
-        throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
-          exitCode: 4,
-          details: { threadId },
-        });
+        throw continuationBusyError(threadId);
       }
     }
     if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {

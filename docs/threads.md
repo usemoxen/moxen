@@ -1140,10 +1140,13 @@ A `modelSelection` with `provider`/`model` together is refused.
 - Only the agent's own continue refuses those: a missing, deleted,
   archived or settled thread is refused with a clear error, as is a thread
   held by usage protection (its recovery runs first). The palette action
-  continues any idle thread that exists — archived, settled or usage-held —
-  refusing only a missing or deleted source (and a running one, above). A
-  research run's
-  roles and lead are refused (`THREAD_CONTINUE_RESEARCH`). Unlike the
+  continues any idle thread it can read — archived, settled, usage-held,
+  even soft-deleted by id — refusing only a missing source (and a running
+  one, above). While a manual handoff is in flight, the agent's continue is
+  refused with `THREAD_BUSY` like any other waiter, and goes through once
+  the handoff lands. A research run's
+  roles and lead are refused to the agent (`THREAD_CONTINUE_RESEARCH`); the
+  palette action is not subject to that restriction. Unlike the
   palette action, a running source is not refused: the caller's own turn is
   necessarily open, so the destination waits instead (see below).
 - An agent may continue its thread up to 3 times in a row

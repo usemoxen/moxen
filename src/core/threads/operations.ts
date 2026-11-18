@@ -76,10 +76,12 @@ import {
   adoptProviderTitle,
   continuationInFlight,
   createThread,
+  continuationBusyError,
   deleteThread,
   delegationForChild,
   failTurn,
   hiddenTurnsProblem,
+  isContinuationBusy,
   isStaleContinueTurn,
   reconcileOrphanedTurn,
   holdStrandedPromotions,
@@ -792,18 +794,15 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
       if (!entry.policy.held && entry.policy.continuation !== "same-thread") {
         try { await prepareQueuedHandoff(ctx, entry.threadId, entry.turnId, now); }
         catch (cause) {
-          // A manual handoff in flight on the source refuses the handoff
-          // preparation: leave the entry queued — a later pass prepares it,
-          // once the claim clears — instead of failing it for the user to
-          // re-add. Admission judges the claim (healing a dead one) rather
-          // than trusting the raw record, which may outlive its handoff.
-          if (cause instanceof CliError && cause.code === "THREAD_BUSY") {
-            const blocked = await ctx.store.withThreadLock(entry.threadId, async () => {
-              const record = await ctx.store.readThreadRecord(entry.threadId);
-              return record ? (await continuationInFlight(ctx.store, record)).blocked : false;
-            });
-            if (blocked) continue;
-          }
+          // A manual handoff in flight refuses the handoff preparation: leave
+          // the entry queued — a later pass prepares it, once the claim
+          // clears — instead of failing it for the user to re-add. The
+          // contention is classified at the throw site (see
+          // isContinuationBusy), never re-read here: the claim may not be
+          // persisted yet when a racing manual run refuses, or may already
+          // have cleared, and either re-read misclassifies a genuine
+          // handoff failure as contention or vice versa.
+          if (isContinuationBusy(cause)) continue;
           await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
           ctx.store.emit(entry.threadId, "handoff-failed");
           continue;
@@ -1334,10 +1333,7 @@ export function continueThread(ctx: OperationContext, request: ContinueThreadReq
   // work — the queue pass leaves the entry queued on THREAD_BUSY for a
   // later pass instead.
   if (ongoing && ongoing.manual && !manual) {
-    return Promise.reject(new CliError("THREAD_BUSY", `Thread ${request.threadId} is being continued in a new thread. Retry when it lands.`, {
-      exitCode: 4,
-      details: { threadId: request.threadId },
-    }));
+    return Promise.reject(continuationBusyError(request.threadId));
   }
   if (ongoing && (!manual || ongoing.manual)) return ongoing.run;
   if (ongoing) {
@@ -1396,13 +1392,15 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
     if (manual) {
-      // Refuse what a send would refuse: a turn hidden in an unreadable
-      // ledger line (it may be active), a running turn, or a stuck one no
-      // build writes (it never settles on its own, so the destination would
-      // start beside work that never ends).
+      // Refuse what a send would refuse: read the turns first — a first
+      // sight of corruption is reported by the read itself — then refuse a
+      // turn hidden in an unreadable ledger line (it may be active), a
+      // running turn, or a stuck one no build writes (it never settles on
+      // its own, so the destination would start beside work that never ends).
+      const turns = await store.readTurns(live.id);
       const unreadable = hiddenTurnsProblem(store, live.id);
       if (unreadable) throw unreadableTurnsError(live.id, unreadable);
-      const running = liveTurn(await store.readTurns(live.id));
+      const running = liveTurn(turns);
       if (running) {
         throw new CliError("THREAD_BUSY", `Thread ${live.id} has an active turn. Retry when idle.`, {
           exitCode: 4,
