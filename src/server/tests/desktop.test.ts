@@ -7,7 +7,7 @@ import { openClient } from "../client.js";
 import { desktopConnection } from "../desktop.js";
 import { DirectConnection } from "../connection.js";
 import { testHarness } from "../../core/testing/harness.js";
-import { defaultEndpoint, namedPipe } from "../transport/endpoint.js";
+import { defaultEndpoint, isNamedPipe, namedPipe } from "../transport/endpoint.js";
 import { encode, PROTOCOL_VERSION } from "../transport/wire.js";
 
 it("keeps a paired name on stdio and forwards the same hello, query and subscription contract", async () => {
@@ -62,4 +62,12 @@ it("reports a missing local listener before attempting any daemon launch", async
   await expect(openClient({ endpoint, mode: "daemon", onStarting: starting })).rejects.toBe(abort);
   expect(starting).toHaveBeenCalledTimes(1);
   expect(defaultEndpoint({ MOXEN_SERVER_ENDPOINT: ` ${endpoint} ` })).toBe(endpoint);
+});
+
+it("selects the real platform endpoint and ignores a blank override", () => {
+  const endpoint = defaultEndpoint({ MOXEN_SERVER_ENDPOINT: " " });
+  const user = (os.userInfo().username || "user").replace(/[^A-Za-z0-9_.-]/g, "_");
+  expect(endpoint).toBe(process.platform === "win32" ? namedPipe(`moxen-${user}`) : path.join(os.homedir(), ".moxen", "server.sock"));
+  expect(isNamedPipe(endpoint)).toBe(process.platform === "win32");
+  expect(isNamedPipe(namedPipe("moxen-A_B"))).toBe(true);
 });

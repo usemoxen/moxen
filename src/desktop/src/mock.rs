@@ -52,6 +52,11 @@ pub struct MockSource {
     embeddings: Option<Embeddings>,
     remote: Option<RemoteState>,
     updates: Option<UpdateState>,
+    experience: Value,
+    experience_case: Option<String>,
+    diagnosis: Option<Value>,
+    records: Vec<crate::experience::Record>,
+    app_update: Option<crate::experience::Update>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -271,6 +276,15 @@ impl MockSource {
             embeddings: None,
             remote: None,
             updates: None,
+            experience: json!({"onboardingCompleted":true,"seenReleases":["0.1.2"],"version":"0.1.5","releases":[
+                {"version":"0.1.2","title":{"en":"Make yourself at home","es":"Ponte a gusto"},
+                 "highlights":[{"title":{"en":"A place to start","es":"Por dónde empezar"},"body":{"en":"Walk through appearance, models, memory and tools.","es":"Repasa el aspecto, los modelos, la memoria y las herramientas."},"action":"onboarding"}],
+                 "sections":[{"title":{"en":"Added","es":"Novedades"},"entries":[{"en":"A full-page getting-started guide.","es":"Una guía a pantalla completa."}]}]}
+            ]}),
+            experience_case: None,
+            diagnosis: None,
+            records: Vec::new(),
+            app_update: None,
         }
     }
     pub fn preview() -> Self {
@@ -386,6 +400,62 @@ impl MockSource {
         });
         source
     }
+
+    pub fn with_experience(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--mock-theme" => {
+                    if let Some(value) = args.next() {
+                        self.set_setting("ui.theme", &value);
+                    }
+                }
+                "--mock-language" => {
+                    if let Some(value) = args.next() {
+                        self.set_setting("ui.language", &value);
+                    }
+                }
+                "--mock-experience" => self.experience_case = args.next(),
+                _ => {}
+            }
+        }
+        match self.experience_case.as_deref() {
+            Some("guide" | "guide-empty") => {
+                self.experience["onboardingCompleted"] = false.into();
+                if self.experience_case.as_deref() == Some("guide-empty") {
+                    self.threads.clear();
+                    self.messages.clear();
+                    self.running.clear();
+                    self.queues.clear();
+                    self.selections.clear();
+                    self.permissions.clear();
+                    self.asks.clear();
+                }
+            }
+            Some("releases") => self.experience["seenReleases"] = json!([]),
+            Some("problems") => {
+                let file = std::env::temp_dir()
+                    .join("moxen-preview")
+                    .join("store.json");
+                let config = std::env::temp_dir()
+                    .join("moxen-preview")
+                    .join("config.json");
+                self.records = crate::experience::problems(
+                    &json!({"problems":[{"id":"record","kind":"ledger","file":file,"line":7,"message":"A timeline record could not be read."}]}),
+                    &json!({"path":config,"problems":[{"path":"ui.theme","message":"The theme is not one of the supported choices."}]}),
+                );
+            }
+            Some("update") => {
+                self.app_update = Some(crate::experience::Update::Running {
+                    command_id: "mock-update".into(),
+                    rollback: false,
+                    progress: json!({"stage":"downloading","bytes":48,"total":128}),
+                });
+            }
+            _ => {}
+        }
+        self
+    }
 }
 fn tool(name: &str, summary: &str, output: &str) -> Message {
     let meta = match name {
@@ -493,7 +563,7 @@ impl ThreadSource for MockSource {
                 self.reverted = Some((id, draft));
             }
             ThreadAction::Continue { selection } => self.create_thread(NewThread {
-                project: self.threads[id].project.clone(),
+                project: Some(self.threads[id].project.clone()),
                 prompt: format!("Continue {}", self.threads[id].title).into(),
                 runtime_mode: Some(self.threads[id].runtime_mode.clone()),
                 interaction_mode: self.threads[id].interaction_mode.clone(),
@@ -504,7 +574,7 @@ impl ThreadSource for MockSource {
                 task: prompt,
                 selection,
             } => self.create_thread(NewThread {
-                project: self.threads[id].project.clone(),
+                project: Some(self.threads[id].project.clone()),
                 prompt: prompt.into(),
                 runtime_mode: Some(self.threads[id].runtime_mode.clone()),
                 interaction_mode: self.threads[id].interaction_mode.clone(),
@@ -550,6 +620,9 @@ impl ThreadSource for MockSource {
         self.send_message(id, text, Delivery::Steer)
     }
     fn projects(&self) -> Vec<Project> {
+        if self.experience_case.as_deref() == Some("guide-empty") {
+            return Vec::new();
+        }
         ["moxen-agent", "moxen-chat"]
             .into_iter()
             .map(|title| Project {
@@ -565,7 +638,9 @@ impl ThreadSource for MockSource {
         self.threads.push(Thread {
             id,
             title,
-            project: draft.project,
+            project: draft
+                .project
+                .unwrap_or_else(|| crate::language::message("guide.noProjectChoice").into()),
             status: Status::Idle,
             activity: "now".into(),
             depth: 0,
@@ -594,7 +669,7 @@ impl ThreadSource for MockSource {
         // Threads started here come first, newest first.
         (FIXTURES..self.threads.len())
             .rev()
-            .chain(0..FIXTURES)
+            .chain(0..FIXTURES.min(self.threads.len()))
             .filter(|id| !self.archived.contains(id) && !self.deleted.contains(id))
             .collect()
     }
@@ -829,6 +904,65 @@ impl ThreadSource for MockSource {
         if self.settings.is_none() {
             self.settings = Some(crate::mock_settings::snapshot_fixture());
         }
+    }
+    fn connection(&self) -> Connection {
+        match self.experience_case.as_deref() {
+            Some("no-server") => Connection::Failed("No Moxen server is running.".into()),
+            Some("starting") => Connection::Starting,
+            _ => Connection::Live,
+        }
+    }
+    fn retry(&mut self) {
+        if self.connection() == Connection::Failed("No Moxen server is running.".into()) {
+            self.experience_case = Some("starting".into());
+        }
+    }
+    fn paired_name(&self) -> Option<String> {
+        (self.experience_case.as_deref() == Some("paired")).then(|| "Studio Mac".into())
+    }
+    fn restart_required(&self) -> bool {
+        self.experience_case.as_deref() == Some("restart")
+    }
+    fn experience(&self) -> Option<Arc<Result<Value, String>>> {
+        Some(Arc::new(Ok(self.experience.clone())))
+    }
+    fn update_experience(&mut self, change: Value) {
+        if change["completeOnboarding"] == true {
+            self.experience["onboardingCompleted"] = true.into();
+        }
+        if let Some(version) = change["seenRelease"].as_str()
+            && !crate::experience::seen(&self.experience, version)
+        {
+            self.experience["seenReleases"]
+                .as_array_mut()
+                .unwrap()
+                .push(version.into());
+        }
+    }
+    fn set_guide_memory(&mut self, choice: crate::experience::Memory) {
+        for (key, value) in choice.writes() {
+            self.set_setting(key, value);
+        }
+    }
+    fn records(&self) -> Vec<crate::experience::Record> {
+        self.records.clone()
+    }
+    fn fix_record(&mut self, fix: crate::experience::Fix) {
+        self.records
+            .retain(|record| record.fix.as_ref() != Some(&fix));
+    }
+    fn diagnosis(&self) -> Option<Arc<Result<Value, String>>> {
+        self.diagnosis.clone().map(|value| Arc::new(Ok(value)))
+    }
+    fn read_diagnosis(&mut self) {
+        self.diagnosis = Some(
+            json!({"node":{"ok":true,"version":"1.3.13"}, "git":{"ok":true},
+            "providers":{"claude":{"ok":true,"installed":true,"version":"2.1.0"},"opencode":{"ok":false,"installed":false,"login":"Run opencode auth login"},"codex":{"ok":true,"installed":true,"version":"0.120.0"}},
+            "store":{"ok":true,"path":std::env::temp_dir().join("moxen-preview")}, "auth":{"ok":false,"providers":[],"types":{}}}),
+        );
+    }
+    fn app_update(&self) -> Option<crate::experience::Update> {
+        self.app_update.clone()
     }
     fn settings(&self) -> Option<Arc<Result<Snapshot, String>>> {
         self.settings.clone().map(|snapshot| Arc::new(Ok(snapshot)))
@@ -1091,6 +1225,7 @@ impl ThreadSource for MockSource {
     }
     fn unload_embeddings(&mut self) {
         self.embeddings = Some(Embeddings {
+            phase: "idle".into(),
             state: "stopped".into(),
             message: Some("Unloaded.".into()),
             percent: None,

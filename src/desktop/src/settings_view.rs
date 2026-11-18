@@ -124,8 +124,6 @@ pub enum SettingsConfirm {
     UpdateProvider {
         provider: String,
     },
-    ApplyUpdate,
-    RollbackUpdate,
     SetupEmbeddings {
         all: bool,
     },
@@ -240,7 +238,12 @@ impl Workspace {
         self.settings_profile_new = None;
         self.settings_mcp_new = None;
         self.clear_settings_transients();
-        window.focus(&self.sidebar_focus, cx);
+        let focus = if self.experience_ui.panel.is_some() {
+            &self.experience_focus
+        } else {
+            &self.sidebar_focus
+        };
+        window.focus(focus, cx);
         cx.notify();
     }
 
@@ -316,7 +319,12 @@ impl Workspace {
         let mut tabs: Vec<(String, String)> = snapshot
             .sections()
             .into_iter()
-            .map(|section| (section.to_string(), section_label(section).to_string()))
+            .map(|section| {
+                (
+                    section.to_string(),
+                    crate::language::tr(section_label(section)).into_owned(),
+                )
+            })
             .collect();
         tabs.push(("remote".into(), "Remote access".into()));
         tabs.push(("updates".into(), "Updates".into()));
@@ -613,8 +621,6 @@ impl Workspace {
             }
             SettingsConfirm::RevokeDevice { id } => self.source.revoke_device(&id),
             SettingsConfirm::UpdateProvider { provider } => self.source.update_provider(&provider),
-            SettingsConfirm::ApplyUpdate => self.source.apply_update(),
-            SettingsConfirm::RollbackUpdate => self.source.rollback_update(),
             SettingsConfirm::SetupEmbeddings { all } => self.source.setup_embeddings(all),
             SettingsConfirm::RebuildEmbeddings { all } => self.source.rebuild_embeddings(all),
             SettingsConfirm::UnloadEmbeddings => self.source.unload_embeddings(),
@@ -757,7 +763,7 @@ fn header(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(15.))
-                        .child("Settings"),
+                        .child(crate::language::message("settings.title")),
                 )
                 .when(!path.is_empty(), |s| {
                     s.child(
@@ -934,14 +940,17 @@ fn section_tab(
 }
 
 fn group_heading(group: &str) -> Div {
-    div().pt(px(10.)).pb(px(2.)).child(ui::caps(group))
+    div()
+        .pt(px(10.))
+        .pb(px(2.))
+        .child(ui::caps(&crate::language::tr(group)))
 }
 
 fn loading(text: &str) -> Div {
     div()
         .py(px(12.))
         .text_color(color("ink-2"))
-        .child(text.to_string())
+        .child(crate::language::tr(text).into_owned())
 }
 
 fn error_row(message: &str, w: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -978,9 +987,17 @@ fn setting_row(
     let control: AnyElement = match &view.kind {
         SettingKind::Enum(_) | SettingKind::Boolean => {
             let label = if pending {
-                "Saving…".to_string()
+                crate::language::message("guide.saving").to_owned()
             } else {
-                settings::display_value(view)
+                let value = settings::display_value(view);
+                let displayed = match &view.kind {
+                    SettingKind::Enum(choices) => choices
+                        .iter()
+                        .find(|choice| choice.value == value)
+                        .map_or(value.as_str(), |choice| &choice.label),
+                    _ => &value,
+                };
+                crate::language::tr(displayed).into_owned()
             };
             div()
                 .id(format!("settings-cycle-{key}"))
@@ -1043,17 +1060,12 @@ fn setting_row(
             .text_color(color("ink-2"))
             .text_size(px(12.5))
             .line_height(px(16.))
-            .child(view.description.clone()),
+            .child(crate::language::tr(&view.description).into_owned()),
     )
 }
 
 fn setting_label(view: &crate::settings::SettingView) -> String {
-    // GPUI draws from the desktop design tokens; only the TUI applies ui.theme.
-    if view.key == "ui.theme" {
-        format!("{} (TUI only)", view.label)
-    } else {
-        view.label.clone()
-    }
+    crate::language::tr(&view.label).into_owned()
 }
 
 fn sub_line(text: &str) -> Div {
@@ -1254,7 +1266,7 @@ fn small_button(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .control(tip)
+        .control(crate::language::tr(tip).into_owned())
         .h(px(28.))
         .px(px(10.))
         .flex()
@@ -1263,7 +1275,12 @@ fn small_button(
         .border_1()
         .border_color(color("rule"))
         .text_color(color("ink-2"))
-        .child(div().flex().items_center().child(label.to_string()))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(crate::language::tr(label).into_owned()),
+        )
         .on_click(on_click)
 }
 
@@ -3115,40 +3132,15 @@ fn updates_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                         }),
                     )),
             );
-            if state.updatable {
-                out = out.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .pt(px(2.))
-                        .child(small_button(
-                            ("settings-update-install", 0),
-                            "Install",
-                            "Download and switch to the newest release",
-                            cx.listener(move |this, _, _, cx| {
-                                this.confirm_settings(
-                                    "Download and switch to the newest release?".into(),
-                                    "Stages stream while it lands; a restart may follow.".into(),
-                                    SettingsConfirm::ApplyUpdate,
-                                    cx,
-                                );
-                            }),
-                        ))
-                        .child(small_button(
-                            ("settings-update-rollback", 0),
-                            "Roll back",
-                            "Go back to the previous version",
-                            cx.listener(move |this, _, _, cx| {
-                                this.confirm_settings(
-                                    "Go back to the previous version?".into(),
-                                    String::new(),
-                                    SettingsConfirm::RollbackUpdate,
-                                    cx,
-                                );
-                            }),
-                        )),
-                );
-            }
+            out = out.child(div().flex().child(small_button(
+                ("settings-update-open", 0),
+                crate::language::message("update.title"),
+                crate::language::message("update.title"),
+                cx.listener(|this, _, window, cx| {
+                    this.close_settings(window, cx);
+                    this.open_experience(crate::experience::Panel::Update, window, cx);
+                }),
+            )));
             out = out.child(div().pt(px(10.)).child(ui::caps("Providers")));
             for provider in &state.providers {
                 out = out.child(provider_row(w, provider, cx));
@@ -3214,12 +3206,9 @@ mod tests {
     };
 
     #[test]
-    fn desktop_labels_the_theme_setting_as_tui_only() {
+    fn the_interface_offers_the_same_theme_as_the_tui() {
         let snapshot = crate::mock_settings::snapshot_fixture();
-        assert_eq!(
-            setting_label(snapshot.find("ui.theme").unwrap()),
-            "Theme (TUI only)"
-        );
+        assert_eq!(setting_label(snapshot.find("ui.theme").unwrap()), "Theme");
     }
 
     #[test]

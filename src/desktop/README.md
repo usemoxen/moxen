@@ -7,18 +7,23 @@ numbers against a real server. The desktop parity work is tracked under MXN-30.
 
 ## The server connection
 
-`wire.rs` speaks the server's newline-delimited JSON protocol
-(`src/server/transport/wire.ts`) over its local endpoint: `MOXEN_SERVER_ENDPOINT`,
-else `~/.moxen/server.sock`. `live.rs` is the `ThreadSource` over the shell
+`wire.rs` speaks the server's newline-delimited JSON protocol over the Moxen
+launcher's private stdio bridge (`src/server/desktop.ts`). The bridge uses the
+same `openClient` as the TUI: it finds the local Unix socket or Windows named
+pipe, honours `MOXEN_SERVER_ENDPOINT`, and starts the detached local daemon
+only if there is no listener. `live.rs` is the `ThreadSource` over the shell
 subscription; its ordering, nesting and status rules follow the TUI's sidebar
 (`src/tui/model/sidebar.ts`, `shell.ts`). The thread subscription includes the
 same native subagent rows the TUI derives from the activity history.
 
-- The server refuses a client from another build. The desktop is not built
-  from the same code, so it asks once with a placeholder build, reads the
-  server's own build from the greeting (a local socket is greeted even on a
-  mismatch) and presents it on a second socket. The protocol version is the
-  compatibility check.
+- The desktop needs a matching Moxen launcher next to the desktop executable,
+  in the installed Moxen bin directory, or on `PATH`. Set `MOXEN_DESKTOP_CLI`
+  to use another launcher's full path. The bridge enforces the launcher's build
+  and requested config against the daemon without replacing a running server.
+- To use a paired server, launch with `--server <name-or-address>` or set
+  `MOXEN_SERVER` to its name. A flag wins over the environment. The launcher
+  handles TLS, the saved key pin and the device credential in the OS keychain.
+  A refused or unreachable paired server never falls back to a local server.
 - A thread's transcript is read over its own `subscribeThread` subscription for
   the thread on screen (`ThreadSource::focus`), dropped when another is opened.
   `transcript.rs` projects messages and activities into rows: a tool call's
@@ -125,7 +130,7 @@ same native subagent rows the TUI derives from the activity history.
   their diff; untracked files are not in it). No syntax highlighting yet.
   Not done: handing the request to another provider when the thread's own is
   at its limit (the TUI does), opening a request with a body, rebase merges,
-  deleting the branch on merge, and Windows.
+  and deleting the branch on merge. Git and forge operations were not verified on Windows.
 - **Tasks** pins a thread's latest checklist above the inspector tabs. The
   title-bar toggle and the checklist header count completed steps from the
   snapshot. The checklist is read-only. Escape dismisses an agent question
@@ -145,12 +150,12 @@ same native subagent rows the TUI derives from the activity history.
   refresh while the tab is visible (`thread.background.list`,
   `thread.background.output`). Stop dispatches `thread.background.stop` for
   that job, not the thread's turn. A partial list is marked as such.
-- With no server running the window says so and offers Retry. It does not
-  start the server (a later issue).
-- macOS and Linux (unix sockets) only. The Windows named pipe needs
-  overlapped I/O (a blocked read on a synchronous handle stalls a write), which
-  is not written; the connection fails with an explanatory message there.
-  Windows was not run.
+- The window shows startup only when it requests a local server start. When
+  a connection fails, Retry opens a new one; replies from the old connection
+  are ignored for application and settings reads. The desktop never restarts
+  the server by itself.
+- Windows named pipes use the server client's asynchronous transport. Desktop
+  shortcuts use Ctrl where macOS uses Cmd. Windows wasn't run for this change.
 - `cargo run -- --mock` shows the fixtures; `--demo live` is the screenshot stage
   for the real server.
 
@@ -242,14 +247,35 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   cap; the toolbar controls (search, Tasks, inspector, stop, send) show the
   same tip while they hold keyboard focus, since GPUI hides hover tooltips in
   keyboard mode.
-- Cmd+Q quits. Nothing persists after exit.
+- Cmd+Q (Ctrl+Q outside macOS) quits. Only edits to the mock fixtures are lost
+  on exit.
 
 The interaction below describes the mock window (`--mock`).
 
-Open Settings from the sidebar, or with Cmd+, on macOS. In a live window,
+Open Settings from the sidebar, or with Cmd+, on macOS (Ctrl+, elsewhere). In a live window,
 its pages read and write through the Moxen server.
 In the mock window, edits change only the fixture and do not persist.
-The Interface page's Theme setting applies to the terminal UI only.
+The Interface page's Theme (`ui.theme`) maps each shared TUI palette to the
+desktop design-system colour roles. Language (`ui.language`) switches the
+translated desktop controls, settings and release notes between English and
+Spanish. Both update as you choose them.
+
+**Getting started** opens the first time the server reports that onboarding
+hasn't been completed. The guide walks through welcome, appearance, model,
+memory, tools and project. It opens the existing Settings editor for model and
+MCP server setup, and finishes in a draft without sending a message. You can
+reopen it from the command palette. **What’s new** shows the releases shipped
+by the server; use the arrows or history to see other releases and **Mark read**
+to acknowledge the selected version. The server stores onboarding completion
+and release acknowledgements (`experience.read` and `experience.update`).
+
+Use **Update Moxen** in the command palette to check, install, or confirm a
+rollback. Update progress belongs to the command that started it; the shell
+subscription also carries a restart notice for all clients. A paired window
+can check the version but cannot update the remote installation. **Doctor**
+reads the connected server's runtime, Git, provider and store checks. A record
+warning opens **Records needing attention**; it offers only the fixes applicable
+to each record, using the same commands as the TUI.
 
 Commit history, real usage, queued-send execution and forge actions are not
 wired to a backend in the mock window; their controls say so in a tooltip.
@@ -288,6 +314,12 @@ focus. It is compiled only with the `render-harness` feature and runs only when
 ```sh
 python3 automate.py script.txt --mock     # --mock for fixtures, or omit for the real server
 ```
+
+With `--mock`, pass `--mock-theme <name>` or `--mock-language es-ES` to
+preview appearance. `--mock-experience` accepts `guide`, `releases`,
+`guide-empty`, `no-server`, `starting`, `paired`, `update`, `restart`, `problems`
+or `doctor`.
+These flags never contact a Moxen server.
 
 `automate.py` builds with the feature, runs the script and, on macOS, samples
 the frontmost application (`lsappinfo front`) for the whole run and fails if it
@@ -361,6 +393,8 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
 - `composer.rs`: native input, shaping, caret and hit testing.
 - `theme.rs`: colour, pixel-token, focus-ring and shadow resolution through the
   pinned tokens, and layout constants.
+- `language.rs`, `experience.rs`, `experience_view.rs`: shared TUI wording,
+  onboarding and release notes, update progress, and diagnostics.
 - `ui.rs`: shared primitives: icons, state glyphs, controls and tooltips, key
   caps, `Segmented`, section labels and transition timing.
 - `inspector.rs`, `usage.rs`: the pinned checklist, tabs and the Context view.

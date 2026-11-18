@@ -1,13 +1,73 @@
 use gpui::{FontWeight, Styled, px};
 use gpui::{Hsla, rgb};
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::LazyLock;
+
+#[derive(Clone, Copy)]
+struct Palette {
+    mode: &'static str,
+    colors: Option<&'static HashMap<&'static str, Hsla>>,
+}
+
+fn palette(setting: Option<&str>) -> Palette {
+    Palette {
+        mode: if setting == Some("catppuccin-latte") {
+            "light"
+        } else {
+            "dark"
+        },
+        colors: setting
+            .filter(|&name| name != "moxen")
+            .and_then(|name| SCHEMES.get(name)),
+    }
+}
+
+thread_local! { static THEME: Cell<Palette> = Cell::new(palette(None)); }
+
+pub fn apply(setting: Option<&str>) {
+    THEME.set(palette(setting));
+}
 
 static TOKENS: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../design-system/tokens.json"))
         .expect("pinned design tokens")
 });
 
+// Read only the literal roles of the same palettes the TUI uses. The
+// default, aliases and tokens without a palette counterpart still come
+// from the pinned design system.
+type Scheme = HashMap<&'static str, Hsla>;
+static SCHEMES: LazyLock<HashMap<&'static str, Scheme>> = LazyLock::new(|| {
+    let mut schemes = HashMap::new();
+    let mut name = None;
+    for line in include_str!("../../tui/themes.ts").lines() {
+        if let Some(header) = line
+            .strip_prefix("  ")
+            .and_then(|line| line.strip_suffix(": {"))
+        {
+            name = Some(header.trim_matches('"'));
+        } else if line.starts_with("  },") {
+            name = None;
+        } else if let Some(name) = name
+            && let Some((role, hex)) = line.trim().split_once(": \"#")
+            && let Some(hex) = hex.strip_suffix("\",")
+        {
+            let color = rgb(u32::from_str_radix(hex, 16).expect("TUI palette color")).into();
+            schemes
+                .entry(name)
+                .or_insert_with(HashMap::new)
+                .insert(role, color);
+        }
+    }
+    schemes
+});
+
 pub fn color(name: &str) -> Hsla {
+    token_color(name, THEME.get())
+}
+
+fn token_color(name: &str, palette: Palette) -> Hsla {
     let token = TOKENS["color"]["tokens"]
         .as_array()
         .unwrap()
@@ -15,9 +75,33 @@ pub fn color(name: &str) -> Hsla {
         .find(|t| t["name"] == name)
         .expect("known color token");
     if let Some(alias) = token["value"].as_str() {
-        return color(alias.trim_matches(['{', '}']));
+        return token_color(alias.trim_matches(['{', '}']), palette);
     }
-    let hex = token["value"]["dark"]
+    if let Some(colors) = palette.colors {
+        let role = match name {
+            "ground" => "base",
+            "raised" => "raised",
+            "sunk" => "hover",
+            "rule" => "border",
+            "edge" | "label-8" => "faint",
+            "ink" => "bright",
+            "ink-2" => "dim",
+            "live" => "accent",
+            "held" | "label-5" => "yellow",
+            "broken" => "red",
+            "added" | "label-3" => "green",
+            "label-1" => "orange",
+            "label-2" => "blue",
+            "label-4" => "purple",
+            "label-6" => "teal",
+            "label-7" => "pink",
+            _ => "",
+        };
+        if let Some(color) = colors.get(role) {
+            return *color;
+        }
+    }
+    let hex = token["value"][palette.mode]
         .as_str()
         .unwrap()
         .trim_start_matches('#');
@@ -101,7 +185,7 @@ pub fn focus_ring() -> Vec<gpui::BoxShadow> {
 }
 
 pub fn float_shadow() -> Vec<gpui::BoxShadow> {
-    let value = TOKENS["shadow"]["tokens"][0]["value"]["dark"]
+    let value = TOKENS["shadow"]["tokens"][0]["value"][THEME.get().mode]
         .as_str()
         .unwrap();
     let (geometry, rgba) = value.split_once("rgba(").expect("shadow-float rgba");
@@ -136,4 +220,33 @@ pub fn float_shadow() -> Vec<gpui::BoxShadow> {
         });
     }
     shadows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_schemes_use_the_design_system_and_unknown_ones_use_moxen() {
+        for name in [
+            "catppuccin-latte",
+            "catppuccin-frappe",
+            "catppuccin-macchiato",
+            "catppuccin-mocha",
+            "dracula",
+            "nord",
+            "gruvbox",
+            "tokyo-night",
+        ] {
+            apply(Some(name));
+            let chosen = palette(Some(name));
+            assert_eq!(color("live"), chosen.colors.unwrap()["accent"]);
+            assert_eq!(color("ground"), chosen.colors.unwrap()["base"]);
+            assert_eq!(color("provider-claude"), chosen.colors.unwrap()["orange"]);
+            assert_ne!(color("ground"), token_color("ground", palette(None)));
+        }
+        assert_eq!(palette(Some("catppuccin-latte")).mode, "light");
+        apply(Some("future-theme"));
+        assert_eq!(color("ground"), token_color("ground", palette(None)));
+    }
 }

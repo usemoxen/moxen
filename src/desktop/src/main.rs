@@ -4,14 +4,18 @@ mod attachments;
 #[cfg(feature = "render-harness")]
 mod automation;
 mod catalog;
+mod client;
 mod composer;
 mod composer_menu;
 mod connection;
 mod diff;
+mod experience;
+mod experience_view;
 mod git;
 mod git_view;
 mod image_view;
 mod inspector;
+mod language;
 mod live;
 mod mock;
 mod mock_git;
@@ -38,6 +42,14 @@ mod workspace;
 
 use gpui::*;
 actions!(app, [Quit]);
+
+fn primary_key(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        other
+    }
+}
 
 fn main() {
     let demo = std::env::args().any(|a| a == "--demo");
@@ -76,10 +88,14 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("up", sidebar::PreviousThread, Some("Sidebar")),
                 KeyBinding::new("down", sidebar::NextThread, Some("Sidebar")),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-i", title_bar::ToggleInspector, None),
+                KeyBinding::new(primary_key("cmd-q", "ctrl-q"), Quit, None),
+                KeyBinding::new(
+                    primary_key("cmd-i", "ctrl-i"),
+                    title_bar::ToggleInspector,
+                    None,
+                ),
                 KeyBinding::new("ctrl-t", title_bar::ToggleTasks, None),
-                KeyBinding::new("cmd-k", palette::OpenPalette, None),
+                KeyBinding::new(primary_key("cmd-k", "ctrl-k"), palette::OpenPalette, None),
                 KeyBinding::new("ctrl-p", palette::OpenPalette, None),
                 KeyBinding::new("shift-f10", thread_actions::OpenMenu, None),
                 KeyBinding::new("f2", thread_actions::RenameThread, None),
@@ -88,8 +104,16 @@ fn main() {
                     thread_actions::ConfirmAction,
                     Some("ThreadActionConfirm"),
                 ),
-                KeyBinding::new("cmd-m", model_picker::TogglePicker, None),
-                KeyBinding::new("cmd-,", settings_view::OpenSettings, None),
+                KeyBinding::new(
+                    primary_key("cmd-m", "ctrl-m"),
+                    model_picker::TogglePicker,
+                    None,
+                ),
+                KeyBinding::new(
+                    primary_key("cmd-,", "ctrl-,"),
+                    settings_view::OpenSettings,
+                    None,
+                ),
                 KeyBinding::new("escape", palette::Dismiss, None),
                 KeyBinding::new("tab", palette::NextFocus, None),
                 KeyBinding::new("shift-tab", palette::PreviousFocus, None),

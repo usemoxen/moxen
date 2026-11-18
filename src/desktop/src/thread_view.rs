@@ -78,16 +78,20 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
     let creating = w.creating;
     let draft = w.active_composer().read(cx);
     let draft_empty = draft.empty() || draft.loading_assets != 0;
-    let thread = w.source.list_threads()[id].clone();
-    let running = thread.status == Status::Running && !creating;
-    let messages = w.source.messages(id);
+    let threads = w.source.list_threads();
+    let thread = threads.get(id);
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
+    let messages = if creating {
+        Arc::default()
+    } else {
+        w.source.messages(id)
+    };
     let last_reply = messages
         .iter()
         .rposition(|m| matches!(m, Message::Assistant { .. }));
     let entity = cx.entity();
-    let state = w.lists[id].clone();
     let (model, model_tone) = w.model_label(w.source.selection(id).as_ref());
-    let started = thread.started_at;
+    let started = thread.and_then(|thread| thread.started_at);
     div()
         .relative()
         .flex_1()
@@ -104,7 +108,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                 .child(if creating {
                     new_thread(w).into_any_element()
                 } else {
-                    list(state, move |index, window, cx| {
+                    list(w.lists[id].clone(), move |index, window, cx| {
                         let this = entity.read(cx);
                         let Some(current) = messages.get(index) else {
                             return div().into_any_element();
@@ -462,7 +466,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                     .into_any_element()
                 }),
         )
-        .child(composer(w, &thread, draft_empty, window, cx))
+        .child(composer(w, thread, draft_empty, window, cx))
 }
 
 fn reply_body(
@@ -497,7 +501,8 @@ fn reply_body(
         .text_size(px(theme::BODY))
         .line_height(px(theme::LINE))
         .when(text.is_empty(), |s| {
-            s.text_color(color("ink-2")).child("Thinking…")
+            s.text_color(color("ink-2"))
+                .child(crate::language::tr("Thinking…").into_owned())
         })
         .children(blocks.into_iter().map(|block| match block {
             ReplyBlock::Text(text) => div().child(text).into_any_element(),
@@ -518,14 +523,14 @@ fn reply_body(
 
 fn composer(
     w: &Workspace,
-    thread: &crate::model::Thread,
+    thread: Option<&Thread>,
     draft_empty: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let id = w.selected;
     let creating = w.creating;
-    let running = thread.status == Status::Running && !creating;
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
     let waiting = if creating {
         vec![]
     } else {
@@ -555,22 +560,23 @@ fn composer(
                     Some(panel) => panel,
                     None => card(w, thread, draft_empty, window, cx).into_any_element(),
                 })
-                .when(w.source.preview() || has_branch(w), |s| {
-                    s.child(status_line(w, cx))
-                }),
+                .when(
+                    thread.is_some() && (w.source.preview() || has_branch(w)),
+                    |s| s.child(status_line(w, cx)),
+                ),
         )
 }
 
 /// The composer: model, access and mode chips, the draft and its buttons.
 fn card(
     w: &Workspace,
-    thread: &crate::model::Thread,
+    thread: Option<&Thread>,
     draft_empty: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
     let creating = w.creating;
-    let running = thread.status == Status::Running && !creating;
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
     let loading = w.active_composer().read(cx).loading_assets != 0;
     div()
         .id("composer-card")
@@ -699,7 +705,10 @@ fn card(
                     s.child(
                         div()
                             .id("queue")
-                            .shortcut("Queue for after this turn", "⌘↵")
+                            .shortcut(
+                                "Queue for after this turn",
+                                crate::primary_key("⌘↵", "Ctrl+Enter"),
+                            )
                             .h(px(30.))
                             .px(px(10.))
                             .border(px(theme::px_token("stroke", "stroke-rule")))
@@ -709,7 +718,7 @@ fn card(
                             .items_center()
                             .text_size(px(12.5))
                             .font_weight(FontWeight::MEDIUM)
-                            .child("Queue")
+                            .child(crate::language::tr("Queue").into_owned())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.focus(&this.active_composer().read(cx).focus.clone(), cx);
                                 window.dispatch_action(Box::new(crate::composer::QueueSend), cx);
@@ -1083,19 +1092,19 @@ fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
 }
 
 /// How the thread (or the one being drafted) may act on its own.
-fn access_of(w: &Workspace, thread: &Thread) -> String {
+fn access_of(w: &Workspace, thread: Option<&Thread>) -> String {
     if w.creating {
         w.new_runtime
             .map_or_else(String::new, |at| RUNTIME_MODES[at].0.into())
     } else {
-        thread.runtime_mode.clone()
+        thread.map_or_else(String::new, |thread| thread.runtime_mode.clone())
     }
 }
-fn mode_of(w: &Workspace, thread: &Thread) -> String {
+fn mode_of(w: &Workspace, thread: Option<&Thread>) -> String {
     if w.creating {
         INTERACTION_MODES[w.new_interaction].0.into()
     } else {
-        thread.interaction_mode.clone()
+        thread.map_or_else(String::new, |thread| thread.interaction_mode.clone())
     }
 }
 
@@ -1109,7 +1118,7 @@ fn model_pill(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .and_then(|(selection, catalog)| catalog.effort_label(selection));
     div()
         .id("model-pill")
-        .shortcut("Model and effort", "⌘M")
+        .shortcut("Model and effort", crate::primary_key("⌘M", "Ctrl+M"))
         .track_focus(&w.model_focus)
         .h(px(28.))
         .px(px(10.))
@@ -1353,6 +1362,13 @@ fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
         .iter()
         .map(|p| (p.title.clone(), Some(&p.id) == current.as_ref()))
         .collect();
+    items.insert(
+        0,
+        (
+            crate::language::message("guide.noProjectChoice").into(),
+            w.new_scratch,
+        ),
+    );
     items.push(("Add project…".into(), false));
     let menu = Menu {
         kind: Dropdown::Project,
@@ -1371,8 +1387,17 @@ fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 move |this, i, cx| {
                     let projects = this.source.projects();
                     this.dropdown = None;
-                    match projects.get(i) {
-                        Some(project) => this.new_project = Some(project.id.clone()),
+                    if i == 0 {
+                        this.new_project = None;
+                        this.new_scratch = true;
+                        cx.notify();
+                        return;
+                    }
+                    match projects.get(i - 1) {
+                        Some(project) => {
+                            this.new_project = Some(project.id.clone());
+                            this.new_scratch = false;
+                        }
                         None => this.add_project(cx),
                     }
                     cx.notify();
@@ -1396,19 +1421,21 @@ fn new_thread(w: &Workspace) -> impl IntoElement {
             div()
                 .text_size(px(20.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("New thread"),
+                .child(crate::language::tr("New thread").into_owned()),
         )
         .child(
             div()
                 .max_w(px(420.))
                 .text_center()
                 .text_color(color("ink-2"))
-                .child(match w.new_project_title() {
+                .child(if w.new_scratch {
+                    crate::language::message("guide.scratchProject").into()
+                } else { match w.new_project_title() {
                     Some(project) => format!(
                         "It starts in {project}. Choose how it runs below, then write the first message."
                     ),
                     None => "Add a project to start a thread in.".into(),
-                }),
+                }}),
         )
 }
 

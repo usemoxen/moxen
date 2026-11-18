@@ -113,6 +113,7 @@ pub struct Reply {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Connection {
     Connecting,
+    Starting,
     Live,
     /// The server could not be reached, or hung up; the text says why.
     Failed(String),
@@ -163,7 +164,7 @@ pub struct Project {
 /// The first message of a new thread and where and how it runs.
 #[derive(Clone, Debug)]
 pub struct NewThread {
-    pub project: String,
+    pub project: Option<String>,
     pub prompt: Prompt,
     /// `None` leaves it to the server's setting.
     pub runtime_mode: Option<String>,
@@ -364,6 +365,38 @@ pub trait ThreadSource {
     }
     fn connection(&self) -> Connection {
         Connection::Live
+    }
+    fn paired_name(&self) -> Option<String> {
+        None
+    }
+    fn client_locale(&self) -> Option<String> {
+        None
+    }
+    fn restart_required(&self) -> bool {
+        false
+    }
+    fn experience(&self) -> Option<Arc<Result<serde_json::Value, String>>> {
+        None
+    }
+    fn update_experience(&mut self, _change: serde_json::Value) {}
+    fn experience_saving(&self) -> bool {
+        false
+    }
+    fn set_guide_memory(&mut self, _choice: crate::experience::Memory) {}
+    fn add_guide_project(&mut self, path: String) {
+        self.add_project(path);
+    }
+    fn records(&self) -> Vec<crate::experience::Record> {
+        Vec::new()
+    }
+    fn read_records(&mut self) {}
+    fn fix_record(&mut self, _fix: crate::experience::Fix) {}
+    fn diagnosis(&self) -> Option<Arc<Result<serde_json::Value, String>>> {
+        None
+    }
+    fn read_diagnosis(&mut self) {}
+    fn app_update(&self) -> Option<crate::experience::Update> {
+        None
     }
     /// Changes whenever the source's data does, so the window knows to redraw.
     fn revision(&self) -> u64 {
@@ -645,6 +678,9 @@ pub trait ThreadSource {
     fn revoke_device(&mut self, _device_id: &str) {}
     /// Reads the providers' newest versions and Moxen's own update check.
     fn read_updates(&mut self) {}
+    fn check_app_update(&mut self) {
+        self.read_updates();
+    }
     fn updates(&self) -> Option<Arc<Result<UpdateState, String>>> {
         None
     }

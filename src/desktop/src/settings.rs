@@ -1092,6 +1092,7 @@ impl MemorySearch {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Embeddings {
     pub state: String,
+    pub phase: String,
     pub message: Option<String>,
     pub percent: Option<f64>,
     pub busy: bool,
@@ -1102,6 +1103,7 @@ impl Embeddings {
     pub fn from_json(value: &Value) -> Option<Self> {
         Some(Self {
             state: text(value, "state").unwrap_or_else(|| "stopped".into()),
+            phase: text(value, "phase").unwrap_or_else(|| "idle".into()),
             message: text(value, "message"),
             percent: number(value, "percent"),
             busy: boolean(value, "busy").unwrap_or(false),
@@ -1314,6 +1316,8 @@ pub struct UpdateState {
     pub latest: Option<String>,
     pub reason: Option<String>,
     pub updatable: bool,
+    pub install_kind: Option<String>,
+    pub release_notes: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1351,6 +1355,10 @@ impl UpdateState {
                 .and_then(|latest| text(latest, "version")),
             reason: text(value, "reason"),
             updatable: boolean(value, "updatable").unwrap_or(false),
+            install_kind: text(install, "kind"),
+            release_notes: value
+                .get("latest")
+                .and_then(|release| text(release, "notes")),
         })
     }
 

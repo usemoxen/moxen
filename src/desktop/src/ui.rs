@@ -168,7 +168,10 @@ pub fn segmented(
     cx: &mut Context<Workspace>,
     set: fn(&mut Workspace, usize),
 ) -> Div {
-    let labels: Vec<SharedString> = options.iter().map(|l| (*l).into()).collect();
+    let labels: Vec<SharedString> = options
+        .iter()
+        .map(|l| crate::language::tr(l).into_owned().into())
+        .collect();
     segments(id.into(), &labels, selected, pad, cx, move |this, i, _| {
         set(this, i)
     })

@@ -57,7 +57,7 @@ fn tasks(
                         .text_size(px(13.))
                         .line_height(px(13.))
                         .font_weight(FontWeight::BOLD)
-                        .child("Tasks"),
+                        .child(crate::language::tr("Tasks").into_owned()),
                 )
                 .child(
                     div()
@@ -164,7 +164,7 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .line_height(px(16.))
                         .text_color(color(if on { "ink" } else { "ink-2" }))
                         .when(on, |s| s.font_weight(FontWeight::SEMIBOLD))
-                        .child(label)
+                        .child(crate::language::tr(label).into_owned())
                         .when(count > 0, |s| {
                             s.child(
                                 div()
