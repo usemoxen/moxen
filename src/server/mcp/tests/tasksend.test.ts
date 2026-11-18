@@ -32,9 +32,16 @@ async function setup(options: TestHarnessOptions = {}) {
     const result = await callMoxenTool(connection, from, "task_send", { taskId, message, ...(wake === undefined ? {} : { wake }) });
     return { ...result, json: result.isError ? null : (JSON.parse(result.text) as Record<string, unknown>) };
   };
+  // MXN-372: a manual continue refuses a running source, so settle the
+  // source's own turn first; its tasks keep running.
+  const settleRunningTurns = async (threadId: string = orchestrator.threadId) => {
+    for (const turn of await store.readTurns(threadId)) {
+      if (turn.status === "running") await completeTurn(store, threadId, turn.id, { text: "Settled for the handoff." });
+    }
+  };
   const notifications = async (threadId = orchestrator.threadId) =>
     (await store.readMessages(threadId)).filter((message) => message.origin === "task-notification");
-  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, send, notifications };
+  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, send, settleRunningTurns, notifications };
 }
 
 describe("task_send: what happened to the message, per provider", () => {
@@ -167,6 +174,7 @@ describe("task_send: whose task it is", () => {
       expect(refused.text).toContain("TASK_NOT_FOUND");
       expect(await t.store.readTurns(taskId)).toHaveLength(1);
 
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const fromContinuation = await t.send(continued.threadId, taskId, "Carry on, I am the same orchestrator");
       expect(fromContinuation.isError).toBe(false);
@@ -197,7 +205,9 @@ describe("task_send: a task that is idle when the orchestrator continues", () =>
       // is queued only after the task's turn settles (and delivered after the
       // batch window), so seeing it already means the turn completed.
       await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      await t.settleRunningTurns(continued.threadId);
       const again = await t.connection.dispatch({ type: "thread.continue", threadId: continued.threadId });
       const stranger = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Someone else, same project", wait: false, threadEnvMode: "local" });
       expect((await t.send(stranger.threadId, taskId, "Take over", true)).text).toContain("TASK_NOT_FOUND");
@@ -245,6 +255,7 @@ describe("task handoff on continue (MXN-300)", () => {
       // Its first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
       await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
 
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const rows = await t.store.readDelegations();
       expect(rows.find((row) => row.childThreadId === running)?.parentThreadId).toBe(continued.threadId);
@@ -315,6 +326,7 @@ describe("task handoff on continue (MXN-300)", () => {
       const before = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId, waitMs: 0 })).text);
       expect(before.status).toBe("running");
 
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({
         type: "thread.continue",
         threadId: t.orchestrator,
@@ -340,6 +352,7 @@ describe("task handoff on continue (MXN-300)", () => {
     const t = await setup({ leaveTurnsRunning: true });
     try {
       await t.delegate();
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       const refused = await callMoxenTool(t.connection, t.orchestrator, "delegate", { task: "More work", title: "late", isolation: "shared" });
       expect(refused.isError).toBe(true);
@@ -444,6 +457,7 @@ describe("task_cancel: whose task it is", () => {
       expect(cancelled.isError).toBe(false);
       expect(JSON.parse(cancelled.text)).toMatchObject({ taskId: first, cancelRequested: true });
 
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       expect((await callMoxenTool(t.connection, t.orchestrator, "task_cancel", { taskId: second })).text).toContain("TASK_NOT_FOUND");
       expect((await t.store.readTurns(second)).map((turn) => turn.status)).toEqual(["running"]);

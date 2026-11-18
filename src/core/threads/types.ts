@@ -79,6 +79,17 @@ export interface StoredResearchRun {
   readonly startedAfterTurnId?: string | null;
 }
 
+/** A manual `thread.continue` preparing this thread's continuation. While present, no turn may start here. */
+export interface ContinueClaim {
+  /** Matches the reservation's id, so clearing never lifts a newer claim. */
+  readonly token: string;
+  /** Who set it, so a dead handoff heals instead of wedging the thread. */
+  readonly pid: number;
+  readonly host: string;
+  /** When it was set; a backstop when the owner cannot be judged. */
+  readonly at: string;
+}
+
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
@@ -87,6 +98,15 @@ export interface StoredThread {
   readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
   /** The thread this one continued (`thread.continue`): its finished tasks are still this thread's to reach. */
   readonly continuedFrom?: string;
+  /**
+   * A manual continuation in flight on this thread (`reserveContinuation`):
+   * while present, admission starts no turn here, so the new worker never
+   * runs beside one. Set and cleared under the thread lock around the
+   * handoff; absent afterwards — a later send on the old thread is the
+   * user's own choice. Absent on threads stored before claims existed, and
+   * on threads no manual continue ever touched.
+   */
+  readonly continueClaim?: ContinueClaim | null;
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;
