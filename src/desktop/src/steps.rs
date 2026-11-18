@@ -1,8 +1,5 @@
+use crate::theme::{self, color};
 use crate::ui::{self, Control};
-use crate::{
-    theme::{self, color},
-    workspace::Workspace,
-};
 use gpui::{prelude::*, *};
 
 /// A step row's height (`.b-row` in the mockup: min-height 32px).
@@ -18,7 +15,6 @@ pub struct Step {
     pub meta: String,
     pub failed: bool,
     pub running: bool,
-    pub id: usize,
     pub index: usize,
     /// How far the row itself has appeared, 0 to 1 (the fold opening).
     pub shown: f32,
@@ -26,7 +22,7 @@ pub struct Step {
     pub open: Option<f32>,
 }
 
-pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
+pub fn render(step: Step, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoElement {
     let Step {
         name,
         summary,
@@ -34,7 +30,6 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
         meta,
         failed,
         running,
-        id,
         index,
         shown,
         open,
@@ -147,13 +142,7 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                         .child(meta),
                 )
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        if this.expanded.remove(&(id, index)).is_none() {
-                            this.expanded.insert((id, index), std::time::Instant::now());
-                        }
-                        this.lists[id].splice(index..index + 1, 1);
-                        cx.notify();
-                    });
+                    on_toggle(cx);
                 }),
         )
         .when_some(open, |s, p| {
