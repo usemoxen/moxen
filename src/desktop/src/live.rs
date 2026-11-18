@@ -4022,14 +4022,22 @@ fn send_app_update(shared: &Arc<Shared>, command: &str) {
                     {
                         Update::Lost
                     }
-                    Err(error) => Update::Failed(error.message),
+                    Err(error) => Update::Failed {
+                        code: error.code,
+                        message: error.message,
+                        rollback,
+                    },
                 });
             });
         });
     if let Err(error) = spawned {
         shared.update(|state| {
             if state.wire_epoch == epoch {
-                state.app_update = Some(Update::Failed(error.to_string()));
+                state.app_update = Some(Update::Failed {
+                    code: String::new(),
+                    message: error.to_string(),
+                    rollback,
+                });
             }
         });
     }

@@ -175,13 +175,96 @@ pub enum Update {
         rollback: bool,
         result: Value,
     },
-    Failed(String),
+    Failed {
+        code: String,
+        message: String,
+        rollback: bool,
+    },
     Lost,
+}
+
+/// What the update panel may offer, following the TUI's screen: installing
+/// and rolling back act on this machine's own app folder, so a paired
+/// window or a source checkout gets neither. A failed apply can be
+/// retried, unless the server is busy with another update; a failed
+/// rollback only ever rolls back again.
+pub fn can_update(
+    paired: bool,
+    install_kind: Option<&str>,
+    updatable: bool,
+    available: bool,
+    update: Option<&Update>,
+    rollback: bool,
+) -> bool {
+    if paired || install_kind != Some("release") {
+        return false;
+    }
+    match update {
+        Some(Update::Running { .. } | Update::Lost) => false,
+        Some(Update::Finished { .. }) => rollback,
+        Some(Update::Failed {
+            rollback: failed_rollback,
+            code,
+            ..
+        }) => {
+            if rollback {
+                true
+            } else {
+                !failed_rollback && updatable && available && code != "SELF_UPDATE_BUSY"
+            }
+        }
+        _ => rollback || (updatable && available),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_offers_follow_the_failed_operation_and_a_busy_server() {
+        let ready = |update| can_update(false, Some("release"), true, true, update, false);
+        assert!(ready(None));
+        assert!(can_update(false, Some("release"), true, true, None, true));
+        assert!(!can_update(true, Some("release"), true, true, None, false));
+        assert!(!can_update(false, Some("source"), true, true, None, false));
+        let failed_apply = Some(&Update::Failed {
+            code: "BROKEN".into(),
+            message: "No.".into(),
+            rollback: false,
+        });
+        assert!(ready(failed_apply));
+        assert!(can_update(
+            false,
+            Some("release"),
+            true,
+            true,
+            failed_apply,
+            true
+        ));
+        let busy = Some(&Update::Failed {
+            code: "SELF_UPDATE_BUSY".into(),
+            message: "Another update is running.".into(),
+            rollback: false,
+        });
+        assert!(!ready(busy));
+        assert!(can_update(false, Some("release"), true, true, busy, true));
+        let failed_rollback = Some(&Update::Failed {
+            code: "BROKEN".into(),
+            message: "No.".into(),
+            rollback: true,
+        });
+        assert!(!ready(failed_rollback));
+        assert!(can_update(
+            false,
+            Some("release"),
+            true,
+            true,
+            failed_rollback,
+            true
+        ));
+        assert!(!ready(Some(&Update::Lost)));
+    }
 
     #[test]
     fn fixes_preserve_the_location_but_only_target_addressable_records() {

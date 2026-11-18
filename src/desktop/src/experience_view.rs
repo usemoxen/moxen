@@ -1380,9 +1380,9 @@ fn update(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                         .map(|warning| detail(t("update.warning").replace("{warning}", warning))),
                 );
         }
-        Some(Update::Failed(error)) => {
+        Some(Update::Failed { message, .. }) => {
             body = body
-                .child(div().text_color(color("broken")).child(error))
+                .child(div().text_color(color("broken")).child(message.clone()))
                 .child(detail(t("update.untouched")))
         }
         Some(Update::Lost) => {
@@ -1483,22 +1483,16 @@ fn update(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
 
 impl Workspace {
     fn can_update(&self, rollback: bool) -> bool {
-        if self.source.paired_name().is_some() {
-            return false;
-        }
         let updates = self.source.updates();
-        let Some(Ok(check)) = updates.as_deref() else {
-            return false;
-        };
-        if check.install_kind.as_deref() != Some("release") {
-            return false;
-        }
-        match self.source.app_update() {
-            Some(Update::Running { .. } | Update::Lost) => false,
-            Some(Update::Finished { .. }) => rollback,
-            Some(Update::Failed(_)) if rollback => false,
-            _ => rollback || (check.updatable && check.status.as_deref() == Some("available")),
-        }
+        let check = updates.as_deref().and_then(|result| result.as_ref().ok());
+        crate::experience::can_update(
+            self.source.paired_name().is_some(),
+            check.and_then(|check| check.install_kind.as_deref()),
+            check.is_some_and(|check| check.updatable),
+            check.is_some_and(|check| check.status.as_deref() == Some("available")),
+            self.source.app_update().as_ref(),
+            rollback,
+        )
     }
 
     fn confirm_rollback(&mut self) {
