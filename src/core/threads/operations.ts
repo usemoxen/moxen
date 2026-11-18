@@ -81,6 +81,7 @@ import {
   delegationForChild,
   failTurn,
   hiddenTurnsProblem,
+  hiddenLedgerProblem,
   isContinuationBusy,
   isStaleContinueTurn,
   reconcileOrphanedTurn,
@@ -729,7 +730,20 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
     for (const turn of row.turns) {
       if (turn.queue?.summaryFor || turn.status !== "queued" && !(turn.queue && turn.status !== "completed")) continue;
       const stopped = turn.status === "failed" || turn.status === "interrupted";
-      const policy = turn.queue ? { ...turn.queue, ...(stopped ? { removed: true } : {}) } : parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
+      let policy = turn.queue ? { ...turn.queue, ...(stopped ? { removed: true } : {}) } : parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
+      // The server-owned handoff wait is real for admission but hidden from
+      // the projected policy: clients must neither see it as removable nor
+      // echo it back through the 16-condition cap. Every core write
+      // reattaches it, so the projection never loses it.
+      if (isTransferDestinationRequestId(turn.queue?.requestId)) {
+        const handoffTurn = [...row.turns]
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+          .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
+        const last = policy.conditions.at(-1);
+        if (handoffTurn !== undefined && last?.type === "entry" && last.threadId === row.thread.id && last.turnId === handoffTurn.id) {
+          policy = { ...policy, conditions: policy.conditions.slice(0, -1) };
+        }
+      }
       const blocked = queueAdmission(row, turn, rows, ctx.config).blocked;
       if (stopped && !turn.queue?.removed) blocked.unshift(turn.error ?? "Stopped before completion; add back held to retry");
       if (policy.continuation !== "same-thread") blocked.unshift(turn.handoff?.fallback ? "Using stored handoff: model summary unavailable" : turn.handoff?.summary ? "Model handoff received" : policy.continuation === "model" ? "Preparing model handoff" : "Preparing stored handoff");
@@ -750,11 +764,31 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     if (!selected || selected.status !== "queued" && !selected.policy.removed) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
     const entries = allEntries.filter((entry) => !!entry.policy.removed === !!selected.policy.removed);
     let movedOrder: number | undefined;
+    // The projected policy hides the server-owned handoff wait of moved
+    // entries; reorder writes go through the real queue, so reattach it.
+    const waitsByThread = new Map<string, Extract<QueueCondition, { type: "entry" }> | null>();
+    const serverWait = async (threadId: string): Promise<Extract<QueueCondition, { type: "entry" }> | null> => {
+      if (!waitsByThread.has(threadId)) {
+        const siblings = await ctx.store.readTurns(threadId);
+        const handoffTurn = [...siblings]
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+          .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
+        waitsByThread.set(threadId, handoffTurn ? { type: "entry", threadId, turnId: handoffTurn.id } : null);
+      }
+      return waitsByThread.get(threadId)!;
+    };
     if (action === "up" || action === "down") {
       const at = entries.findIndex((entry) => entry.turnId === turnId && entry.threadId === threadId);
       const destination = at + (action === "up" ? -1 : 1);
       if (at >= 0 && destination >= 0 && destination < entries.length) {
-        for (const [index, entry] of entries.entries()) await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { queue: { ...entry.policy, order: index * 2 } }));
+        for (const [index, entry] of entries.entries()) {
+          let reordered: QueuePolicy = { ...entry.policy, order: index * 2 };
+          const wait = isTransferDestinationRequestId(reordered.requestId) ? await serverWait(entry.threadId) : null;
+          if (wait && !reordered.conditions.some((c) => c.type === "entry" && c.threadId === wait.threadId && c.turnId === wait.turnId)) {
+            reordered = { ...reordered, conditions: [...reordered.conditions, wait] };
+          }
+          await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { queue: reordered }));
+        }
         movedOrder = destination * 2 + (action === "up" ? -1 : 1);
       }
     }
@@ -768,9 +802,14 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       if (turn.handoff) {
         let destinationTurns: StoredTurn[] | null;
         try {
-          destinationTurns = await ctx.store.readTurns(turn.handoff.destinationThreadId);
+          destinationTurns = await ctx.store.readTurns(turn.handoff.destinationThreadId, { reportTornTail: true });
         } catch (cause) {
           throw new CliError("STORE_READ_FAILED", `Could not read the turns ledger for thread ${turn.handoff.destinationThreadId}.`, { cause });
+        }
+        if (hiddenTurnsProblem(ctx.store, turn.handoff.destinationThreadId)) {
+          // A skipped destination row could be the entry itself: unknown,
+          // not absent. Refuse before any change, like a failed read.
+          throw new CliError("STORE_READ_FAILED", `Could not verify the turns ledger for thread ${turn.handoff.destinationThreadId}: it skips unreadable rows.`, { details: { threadId: turn.handoff.destinationThreadId } });
         }
         // A staged transfer whose entry does not exist yet is still this
         // thread's to edit: the migration copies the fresh policy. Anything
@@ -787,29 +826,30 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       const row = rows.find((candidate) => candidate.thread.id === threadId);
       const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
       // A moved entry carries one internal condition — the wait on the
-      // destination's first turn — that must not count against the client cap
-      // and must survive edits. Strip it before validating, re-append after.
+      // destination's first turn. It is an invariant, not a user condition:
+      // retain it exactly once whether the incoming policy echoed it, moved
+      // it, or omitted it. Client conditions alone must fit the 16-cap, so
+      // strip the wait before validating and re-append it after.
       let incoming = policy;
-      let internalOrdering: QueueCondition | undefined;
+      let internalWait: Extract<QueueCondition, { type: "entry" }> | undefined;
       if (policy && isTransferDestinationRequestId(turn.queue?.requestId)) {
         const siblings = await ctx.store.readTurns(threadId);
         const handoffTurn = [...siblings]
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
           .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
-        const last = policy.conditions[policy.conditions.length - 1];
-        if (
-          policy.conditions.length > 16 &&
-          handoffTurn !== undefined &&
-          last?.type === "entry" &&
-          last.threadId === threadId &&
-          last.turnId === handoffTurn.id
-        ) {
-          internalOrdering = last;
-          incoming = { ...policy, conditions: policy.conditions.slice(0, -1) };
+        if (handoffTurn !== undefined) {
+          const isWait = (condition: QueueCondition): boolean =>
+            condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn.id;
+          incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
+          internalWait = { type: "entry", threadId, turnId: handoffTurn.id };
         }
       }
-      let next: QueuePolicy = incoming ? { ...existing, ...parseQueuePolicy(incoming), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(incoming!.conditions[index])) } : existing;
-      if (internalOrdering) next = { ...next, conditions: [...next.conditions, internalOrdering] };
+      const stripWait = (conditions: readonly QueueCondition[]): QueueCondition[] =>
+        internalWait === undefined
+          ? [...conditions]
+          : conditions.filter((condition) => !(condition.type === "entry" && condition.threadId === threadId && condition.turnId === internalWait!.turnId));
+      let next: QueuePolicy = incoming ? { ...existing, ...parseQueuePolicy(incoming), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(incoming!.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
+      if (internalWait) next = { ...next, conditions: [...stripWait(next.conditions), internalWait] };
       if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
       if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
       if (movedOrder !== undefined) next = { ...next, order: movedOrder };
@@ -1676,15 +1716,19 @@ function isTransferableQueuedTurn(turn: StoredTurn, primary: StoredMessage | und
 /**
  * The shape a staged turn must still have to move: ordinary and pending,
  * ignoring the staging marker and its removed flag (both expected by then).
- * A staged entry the user reconfigured onto another continuation, or onto
- * wake-up/automatic traffic, no longer qualifies — its own flow owns it.
+ * A staged entry the user reconfigured onto wake-up or automatic traffic,
+ * or onto a summary, no longer qualifies — its own flow owns it. A changed
+ * continuation alone does not disqualify: completing the in-flight move
+ * with the user's policy (preparable on the destination by its own flow)
+ * beats stranding the entry removed forever, while staging itself never
+ * claims such entries.
  */
-function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined): boolean {
+function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined, ignoreContinuation = false): boolean {
   if (turn.status !== "queued") return false;
   if (turn.queue?.summaryFor !== undefined) return false;
   if (turn.queue?.wakeUp === true || turn.queue?.automatic === true) return false;
   if (turn.scheduleReason === "usage-reset") return false;
-  if (turn.queue !== undefined && turn.queue.continuation !== "same-thread") return false;
+  if (!ignoreContinuation && turn.queue !== undefined && turn.queue.continuation !== "same-thread") return false;
   if (primary === undefined || primary.role !== "user" || primary.text.trim().length === 0) return false;
   return primary.origin === undefined || primary.origin === "agent-message";
 }
@@ -1706,6 +1750,14 @@ function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined
  */
 export interface StageClaim {
   readonly claimed: string[];
+  /**
+   * Turns an earlier attempt already staged for this same destination (an
+   * abort between staging and migration): still claimed, so the handoff
+   * must exclude them too — otherwise the retry assigns their text as
+   * immediate work while the migration also moves them. Never spans
+   * destinations, and staging touches nothing here (no un-removing).
+   */
+  readonly restaged: string[];
   readonly known: string[];
 }
 export async function stageQueuedMessages(ctx: OperationContext, sourceId: string, destinationId: string): Promise<StageClaim | null> {
@@ -1732,8 +1784,17 @@ export async function stageQueuedMessages(ctx: OperationContext, sourceId: strin
         });
         claimed.push(turn.id);
       }
+      // Prior valid staging for this same destination survives the retry:
+      // still queued and removed under this destination's marker, so the
+      // handoff below keeps excluding it. Another target's abandoned
+      // staging never matches the destination filter.
+      const claimedNow = new Set(claimed);
+      const restaged = turns
+        .filter((turn) => turn.status === "queued" && turn.queue !== undefined && isTransferredTurn(turn) && turn.handoff?.destinationThreadId === destinationId && !claimedNow.has(turn.id))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+        .map((turn) => turn.id);
       if (claimed.length > 0) store.emit(sourceId, "queue-changed");
-      return { claimed, known: turns.map((turn) => turn.id) };
+      return { claimed, restaged, known: turns.map((turn) => turn.id) };
     }),
   );
 }
@@ -2045,7 +2106,7 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
           return false;
         }
         const primary = byId.get(turn.messageId);
-        return primary === undefined || isMovableTurnShape(turn, primary);
+        return primary === undefined || isMovableTurnShape(turn, primary, true);
       };
       const staged = turns.filter(isStaged).sort(order);
       const stagedIds = new Set(staged.map((turn) => turn.id));
@@ -2056,9 +2117,30 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
       await store.withThreadLock(destinationId, async () => {
         const destination = await store.readThreadRecord(destinationId);
         if (!destination) return;
-        const existing = await store.readTurns(destinationId);
-        const destinationMessages = await store.readMessages(destinationId);
-        const destinationActivities = await store.readActivities(destinationId);
+        // Fail closed on an unreadable destination snapshot: a skipped row
+        // could be the entry being moved, and appending into a torn tail
+        // would concatenate garbage instead of a readable row. No writes
+        // until a readable durable snapshot exists; a later retry completes
+        // the move.
+        let existing: StoredTurn[];
+        let destinationMessages: StoredMessage[];
+        let destinationActivities: StoredActivity[];
+        try {
+          [existing, destinationMessages, destinationActivities] = await Promise.all([
+            store.readTurns(destinationId, { reportTornTail: true }),
+            store.readMessages(destinationId, { reportTornTail: true }),
+            store.readActivities(destinationId, { reportTornTail: true }),
+          ]);
+        } catch {
+          return;
+        }
+        if (
+          hiddenTurnsProblem(store, destinationId) !== null ||
+          hiddenLedgerProblem(store, destinationId, store.messagesFile(destinationId)) !== null ||
+          hiddenLedgerProblem(store, destinationId, store.activitiesFile(destinationId)) !== null
+        ) {
+          return;
+        }
         // The handoff turn stays first: moved entries wait on it even when
         // the continuation itself is scheduled, so nothing runs ahead of it.
         const handoffTurn = [...existing].sort(order).find((turn) => !isTransferDestinationRequestId(turn.queue?.requestId)) ?? null;
@@ -2232,7 +2314,7 @@ async function continueThreadReserved(
   // handoff projects exactly the claim-time source, so work accepted after
   // the claim stays on the source and out of the destination snapshot.
   const claim = transfersQueuedMessages(request) ? await stageQueuedMessages(ctx, source.id, destinationId) : null;
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: claim.claimed } : {}) });
+  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: [...claim.claimed, ...claim.restaged] } : {}) });
   const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
     id: destinationId,

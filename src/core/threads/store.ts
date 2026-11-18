@@ -289,6 +289,16 @@ export class ThreadStore {
     return ledgerFile(this.root, threadId, "turns");
   }
 
+  /** Absolute path of a thread's messages ledger, for problem reports. */
+  messagesFile(threadId: string): string {
+    return ledgerFile(this.root, threadId, "messages");
+  }
+
+  /** Absolute path of a thread's activity ledger, for problem reports. */
+  activitiesFile(threadId: string): string {
+    return ledgerFile(this.root, threadId, "activity");
+  }
+
   /**
    * A build never writes data newer than it knows: every mutation re-reads
    * the store's marker (usually stamped at open), so a store that became
@@ -776,12 +786,12 @@ export class ThreadStore {
     return updated;
   }
 
-  async readMessages(threadId: string): Promise<StoredMessage[]> {
-    return await this.readLedger<StoredMessage>(threadId, "messages");
+  async readMessages(threadId: string, options?: { reportTornTail?: boolean }): Promise<StoredMessage[]> {
+    return await this.readLedger<StoredMessage>(threadId, "messages", options);
   }
 
-  async readActivities(threadId: string): Promise<StoredActivity[]> {
-    return await this.readLedger<StoredActivity>(threadId, "activity");
+  async readActivities(threadId: string, options?: { reportTornTail?: boolean }): Promise<StoredActivity[]> {
+    return await this.readLedger<StoredActivity>(threadId, "activity", options);
   }
 
   async readCheckpoints(threadId: string): Promise<StoredCheckpoint[]> {
