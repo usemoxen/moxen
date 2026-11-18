@@ -74,6 +74,7 @@ import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
 import {
   adoptProviderTitle,
+  continuationInFlight,
   createThread,
   deleteThread,
   delegationForChild,
@@ -84,6 +85,7 @@ import {
   inspectThread,
   interruptTurn,
   listThreads,
+  liveTurn,
   openTurn,
   promoteDueScheduledTurn,
   promoteQueuedTurn,
@@ -831,7 +833,8 @@ export async function submitHandoff(ctx: OperationContext, threadId: string, req
 
 const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
 
-async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
+/** @internal Exported for tests: the queue pass prepares one entry's handoff. */
+export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
   const store = ctx.store;
   const source = await store.readThreadRecord(threadId);
   let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
@@ -849,15 +852,20 @@ async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, tur
       await interruptTurn(store, threadId, summaryTurn.id);
     }
   }
+  // A manual handoff in flight owns the checkout: the queue pass waits for
+  // its claim to clear rather than preparing beside it, and a dead claim
+  // heals here instead of deferring the entry. The queue pass retries this
+  // entry once a live claim clears.
+  const claimBlocked = await store.withThreadLock(threadId, async () => {
+    const record = await store.readThreadRecord(threadId);
+    return record ? (await continuationInFlight(store, record)).blocked : false;
+  });
+  if (claimBlocked) return;
   if (turn.queue!.continuation === "model" && !handoff.summary && !handoff.fallback) {
     const summaryProvider = usageKeyForInstance(source.modelSelection.instanceId);
     const exhausted = providerExhausted(summaryProvider, now);
     if (!handoff.summaryTurnId && !exhausted) {
       if (openTurn(await store.readTurns(threadId))) return;
-      // A manual handoff in flight owns the checkout: the summary turn
-      // waits for its claim to clear rather than starting beside it. The
-      // queue pass retries this entry once it does.
-      if ((await store.readThreadRecord(threadId))?.continueClaim) return;
       const sent = await sendTurn(store, threadId, {
         prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
         origin: "handoff-summary", usageControl: true,
@@ -1339,7 +1347,10 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
     if (manual) {
-      const running = openTurn(await store.readTurns(live.id));
+      // Refuse what a send would refuse: a running turn, or a stuck one no
+      // build writes (it never settles on its own, so the destination would
+      // start beside work that never ends).
+      const running = liveTurn(await store.readTurns(live.id));
       if (running) {
         throw new CliError("THREAD_BUSY", `Thread ${live.id} has an active turn. Retry when idle.`, {
           exitCode: 4,
@@ -1513,9 +1524,14 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
     // The handoff landed (or failed): the source takes work again. A later
     // send on the old thread is the user's own choice, as before. Untrack
     // first — a racing admission still sees a live owner and blocks — then
-    // clear the record, which admission heals on its own if this write dies.
+    // clear the record, which admission heals on its own if this write dies
+    // (a stall of at most CONTINUE_CLAIM_TTL_MS, never a wedge; our own dead
+    // claim heals immediately without waiting out the TTL).
     if (claimToken !== null) {
       untrackContinuation(claimToken);
+      // Best effort by design: if this write dies, the record keeps a claim
+      // whose owner is gone, so the next admission heals it instead of
+      // blocking — a stall of at most CONTINUE_CLAIM_TTL_MS, never a wedge.
       await clearContinuationClaim(store, source.id, claimToken).catch(() => undefined);
     }
   }

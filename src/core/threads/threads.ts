@@ -130,9 +130,14 @@ export async function continuationInFlight(store: ThreadStore, thread: StoredThr
   // The handoff runs here: effective for its whole life, however long
   // provider startup takes — never expired by age.
   if (liveContinuations.has(claim.token)) return { blocked: true, thread };
+  // Same host, our own pid, but no live handoff owns the token: its cleanup
+  // already ran (untrack precedes the record clear), so the record write
+  // must have died with the handoff. Heal at once rather than stalling
+  // until the TTL lapses.
+  const ownDeadHandoff = claim.host === os.hostname() && claim.pid === process.pid;
   const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
   const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
-  if (alive && fresh) return { blocked: true, thread };
+  if (!ownDeadHandoff && alive && fresh) return { blocked: true, thread };
   const current = await store.readThreadRecord(thread.id);
   if (current?.continueClaim?.token !== claim.token) return { blocked: false, thread: current ?? thread };
   const healed = { ...current, continueClaim: null, updatedAt: store.nowIso() };
@@ -390,6 +395,8 @@ export async function sendTurn(
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
     if (usageHeld) delivery = "queue";
 
+    let turns = await store.readTurns(threadId);
+
     if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld) {
       throw new CliError(
         "SETTLED_THREAD_CONFIRMATION_REQUIRED",
@@ -409,9 +416,40 @@ export async function sendTurn(
       store.emit(threadId, "unsettle");
     }
 
-    let turns = await store.readTurns(threadId);
     const hidden = hiddenTurnsProblem(store, threadId);
     if (hidden) throw unreadableTurnsError(threadId, hidden);
+    // A manual continuation in flight owns the checkout: refuse a send that
+    // would start a running turn — or release usage protection, or touch a
+    // live turn — before it writes anything. The unsettle and the
+    // usage-protection release below must not run for a refused send (a
+    // refused send once destroyed protection and its recovery turn).
+    // Predicted from the same inputs the turn below is cut from: with no
+    // live turn and no protection release, nothing between here and there
+    // changes the outcome (unsettling flips no input the status reads), so
+    // queued and scheduled sends pass through untouched. Keep beside the
+    // status computation below; if that formula changes, mirror it here.
+    const live = liveTurn(turns);
+    const duplicate = input.queue?.requestId ? turns.find((turn) => turn.queue?.requestId === input.queue!.requestId) : undefined;
+    const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
+    const gateWaitingOut = scheduledFor === null && !openTurn(turns) && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
+    const gateHoldUntil = gateWaitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
+    const gateHeldQueue = (usageHeld && !input.queue && origin !== undefined) || input.queue !== undefined;
+    const gateHeldBehind =
+      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
+      turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
+    const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
+    const gateQueued =
+      gateHeldQueue || usageHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+    if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
+      const admission = await continuationInFlight(store, thread);
+      thread = admission.thread;
+      if (admission.blocked) {
+        throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
+          exitCode: 4,
+          details: { threadId },
+        });
+      }
+    }
     if (input.queue?.requestId) {
       const existing = turns.find((turn) => turn.queue?.requestId === input.queue!.requestId);
       if (existing) {

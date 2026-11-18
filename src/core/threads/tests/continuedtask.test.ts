@@ -5,10 +5,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
-import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta } from "../threads.js";
+import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, flushTaskNotifications, queueTaskNotification, runDueScheduledTurn, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runningTasksNote, type OperationContext } from "../operations.js";
+import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
+import type { StoredThread } from "../types.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -621,5 +623,118 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     });
     await expect(sendTurn(w.store, source.id, { prompt: "Work" })).rejects.toThrow("being continued");
     expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toBe("remote");
+  });
+
+  it("refuses a plain send under a live claim without touching usage protection", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done for now." });
+    const recovery = (await sendTurn(w.store, source.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() })).turn;
+    expect(recovery.status).toBe("queued");
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt: new Date(Date.now() + 3_600_000).toISOString(), order: 1, phase: "waiting", handoff: false, recoveryTurnId: recovery.id }, updatedAt: w.store.nowIso() });
+    });
+    // A live manual-continuation claim stands on the source.
+    const token = w.store.newId();
+    trackContinuation(token);
+    try {
+      await w.store.withThreadLock(source.id, async () => {
+        const current = (await w.store.readThreadRecord(source.id))!;
+        await w.store.writeThreadRecord({ ...current, continueClaim: { token, pid: process.pid, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+      });
+      // The plain send would release the hold and start a turn: refused
+      // before it writes anything.
+      await expect(sendTurn(w.store, source.id, { prompt: "Work now" })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+      const record = (await w.store.readThreadRecord(source.id))!;
+      expect(record.usagePause).toMatchObject({ provider: "codex", phase: "waiting", recoveryTurnId: recovery.id });
+      expect(record.settledAt).toBeNull();
+      const turns = await w.store.readTurns(source.id);
+      expect(turns.find((t) => t.id === recovery.id)).toMatchObject({ status: "queued" });
+      expect(turns.filter((t) => t.queue?.removed === true)).toHaveLength(0);
+      // A queued delivery still goes through behind the claim.
+      const queued = await sendTurn(w.store, source.id, { prompt: "Queued", delivery: "queue" });
+      expect(queued.turn.status).toBe("queued");
+      await interruptTurn(w.store, source.id, queued.turn.id);
+    } finally {
+      untrackContinuation(token);
+    }
+  });
+
+  it("prepares a queued handoff past a dead claim instead of deferring it", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const queued = (await sendTurn(w.store, source.id, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    expect(queued.status).toBe("queued");
+    // A dead claim (crashed handoff, unregistered token): the queue pass
+    // heals it and prepares the handoff instead of deferring the entry.
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: { token: "dead", pid: 999_999_999, host: os.hostname(), at: new Date(Date.now() - 3_600_000).toISOString() }, updatedAt: w.store.nowIso() });
+    });
+    await prepareQueuedHandoff(w.ctx, source.id, queued.id, Date.now());
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    const after = (await w.store.readTurns(source.id)).find((t) => t.id === queued.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoff).toBeDefined();
+    expect(await w.store.readThreadRecord(after.handoff!.destinationThreadId)).not.toBeNull();
+    await flushTurnRunners();
+    for (const id of [source.id, after.handoff!.destinationThreadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
+  it("refuses a manual continue on a stuck unknown-status turn", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await w.store.withThreadLock(source.id, () => w.store.updateTurn(source.id, running.id, { status: "mystery" as "queued" }));
+    const before = await w.store.listThreadIds();
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readActivities(source.id)).filter((a) => a.kind === "thread.continued")).toHaveLength(0);
+  });
+
+  it("admits a send right after a failed claim clear, without waiting out the TTL", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done for now." });
+    // Fail only the claim-clearing write: the handoff lands, but its record
+    // keeps a claim whose owner is already gone.
+    const realWrite = w.store.writeThreadRecord.bind(w.store);
+    let failedOnce = false;
+    w.store.writeThreadRecord = (async (record: StoredThread) => {
+      if (!failedOnce && record.id === source.id && record.continueClaim == null) {
+        const current = await w.store.readThreadRecord(source.id);
+        if (current?.continueClaim) {
+          failedOnce = true;
+          throw new Error("injected clear failure");
+        }
+      }
+      return realWrite(record);
+    }) as typeof w.store.writeThreadRecord;
+    try {
+      const continued = await continueThread(w.ctx, { threadId: source.id });
+      expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
+    } finally {
+      delete (w.store as unknown as Record<string, unknown>).writeThreadRecord;
+    }
+    expect(failedOnce).toBe(true);
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).not.toBeNull();
+    // Admission heals the dead claim at once instead of stalling to the TTL.
+    const sent = await sendTurn(w.store, source.id, { prompt: "Work again" });
+    expect(sent.turn.status).toBe("running");
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    await interruptTurn(w.store, source.id, sent.turn.id);
+    await flushTurnRunners();
+    for (const id of [source.id]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
   });
 });
