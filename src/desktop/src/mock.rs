@@ -2,6 +2,7 @@ use crate::attachments::{Asset, Picture, Prompt, Thumbnail};
 use crate::catalog::{Catalog, OptionValue};
 use crate::composer_menu::{Destination, Improvement, Inventory};
 use crate::model::*;
+use crate::settings::MemoryMatch;
 use crate::work::{
     self, Agent, Background, BackgroundTask, Delegated, Delegation, InspectorData, Read, View,
 };
@@ -37,6 +38,19 @@ pub struct MockSource {
     settled: Option<ThreadId>,
     side_answers: HashMap<ThreadId, SideAnswer>,
     reverted: Option<(ThreadId, Option<String>)>,
+    settings: Option<Snapshot>,
+    settings_notice: Option<SettingsNotice>,
+    harness_run: Option<HarnessRun>,
+    discovered: Option<Discovery>,
+    profile_document: Option<(String, String)>,
+    memories: Option<MemoryList>,
+    memory_details: HashMap<(String, String), MemoryEntry>,
+    memory_search: Option<MemorySearch>,
+    managed_skills: Option<Vec<ManagedSkill>>,
+    skill_texts: HashMap<(String, String), String>,
+    embeddings: Option<Embeddings>,
+    remote: Option<RemoteState>,
+    updates: Option<UpdateState>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -242,6 +256,19 @@ impl MockSource {
             settled: None,
             side_answers: HashMap::new(),
             reverted: None,
+            settings: None,
+            settings_notice: None,
+            harness_run: None,
+            discovered: None,
+            profile_document: None,
+            memories: None,
+            memory_details: HashMap::new(),
+            memory_search: None,
+            managed_skills: None,
+            skill_texts: HashMap::new(),
+            embeddings: None,
+            remote: None,
+            updates: None,
         }
     }
     pub fn preview() -> Self {
@@ -795,6 +822,405 @@ impl ThreadSource for MockSource {
         self.running[id] = None;
         self.threads[id].status = Status::Idle;
         self.threads[id].started_at = None;
+    }
+    fn read_settings(&mut self) {
+        if self.settings.is_none() {
+            self.settings = Some(crate::mock_settings::snapshot_fixture());
+        }
+    }
+    fn settings(&self) -> Option<Arc<Result<Snapshot, String>>> {
+        self.settings.clone().map(|snapshot| Arc::new(Ok(snapshot)))
+    }
+    fn set_setting(&mut self, key: &str, value: &str) {
+        self.read_settings();
+        if let Some(snapshot) = self.settings.as_mut() {
+            crate::mock_settings::apply_set(snapshot, key, value);
+        }
+    }
+    fn duplicate_setting(&mut self, key: &str, id: &str, new_id: &str) {
+        self.read_settings();
+        if let Some(snapshot) = self.settings.as_mut() {
+            crate::mock_settings::duplicate_item(snapshot, key, id, new_id);
+        }
+    }
+    fn test_harness(&mut self, profile: &str, _model: Option<String>) {
+        self.harness_run = Some(HarnessRun::Done {
+            scope: "harness".into(),
+            kind: "test".into(),
+            name: profile.into(),
+            ok: true,
+            message: "Answered in 1.2s.".into(),
+            tools: vec!["read".into(), "bash".into()],
+        });
+    }
+    fn probe_harness(&mut self, profile: &str, _model: Option<String>) {
+        self.harness_run = Some(HarnessRun::Done {
+            scope: "harness".into(),
+            kind: "probe".into(),
+            name: profile.into(),
+            ok: true,
+            message: "2 checks ran.".into(),
+            tools: vec![],
+        });
+    }
+    fn test_mcp(&mut self, name: &str) {
+        self.harness_run = Some(HarnessRun::Done {
+            scope: "mcp".into(),
+            kind: "test".into(),
+            name: name.into(),
+            ok: true,
+            message: "Listed 3 tools.".into(),
+            tools: vec!["lookup".into(), "fetch".into(), "search".into()],
+        });
+    }
+    fn harness_run(&self) -> Option<HarnessRun> {
+        self.harness_run.clone()
+    }
+    fn discover_models(
+        &mut self,
+        _base_url: &str,
+        _api_format: &str,
+        _api_key_env: Option<String>,
+    ) {
+        self.discovered = Some(crate::mock_settings::discovery_fixture());
+    }
+    fn take_discovered(&mut self) -> Option<Discovery> {
+        self.discovered.take()
+    }
+    fn export_profile(&mut self, profile: &str) {
+        self.profile_document = Some((
+            profile.into(),
+            format!(
+                "{{\n  \"id\": \"{profile}\",\n  \"apiFormat\": \"chat\",\n  \"baseUrl\": \"http://localhost:8080\",\n  \"models\": [{{\"id\": \"large\"}}]\n}}"
+            ),
+        ));
+    }
+    fn take_profile_document(&mut self) -> Option<(String, String)> {
+        self.profile_document.take()
+    }
+    fn import_profile(&mut self, _text: &str) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "Imported profile branch.".into(),
+            error: false,
+        });
+    }
+    fn take_settings_notice(&mut self) -> Option<SettingsNotice> {
+        self.settings_notice.take()
+    }
+    fn read_memories(&mut self, _thread: Option<ThreadId>) {
+        if self.memories.is_none() {
+            self.memories = Some(crate::mock_settings::memory_fixture());
+        }
+    }
+    fn memories(&self) -> Option<Arc<Result<MemoryList, String>>> {
+        self.memories.clone().map(|list| Arc::new(Ok(list)))
+    }
+    fn read_memory(&mut self, _thread: Option<ThreadId>, name: &str, scope: &str) {
+        self.read_memories(None);
+        if let Some(entry) = self
+            .memories
+            .clone()
+            .unwrap_or_else(crate::mock_settings::memory_fixture)
+            .memories
+            .into_iter()
+            .find(|entry| entry.name == name && entry.scope == scope)
+        {
+            self.memory_details
+                .insert((name.into(), scope.into()), entry);
+        }
+    }
+    fn memory_detail(&self, name: &str, scope: &str) -> Option<Arc<Result<MemoryEntry, String>>> {
+        self.memory_details
+            .get(&(name.to_string(), scope.to_string()))
+            .cloned()
+            .map(|entry| Arc::new(Ok(entry)))
+    }
+    fn search_memories(&mut self, _thread: Option<ThreadId>, query: &str) {
+        self.read_memories(None);
+        let needle = query.to_lowercase();
+        let matches: Vec<MemoryMatch> = self
+            .memories
+            .clone()
+            .map(|list| list.memories)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                entry.name.to_lowercase().contains(&needle)
+                    || entry.description.to_lowercase().contains(&needle)
+            })
+            .map(|entry| MemoryMatch {
+                name: entry.name,
+                description: entry.description,
+                scope: entry.scope,
+                excerpt: "…matches here…".into(),
+            })
+            .collect();
+        self.memory_search = Some(MemorySearch {
+            total: matches.len(),
+            matches,
+        });
+    }
+    fn memory_search(&self) -> Option<Arc<Result<MemorySearch, String>>> {
+        self.memory_search
+            .clone()
+            .map(|search| Arc::new(Ok(search)))
+    }
+    fn save_memory(&mut self, _thread: Option<ThreadId>, draft: MemoryDraft) {
+        self.read_memories(None);
+        if let Some(list) = self.memories.as_mut() {
+            let entry = MemoryEntry {
+                name: draft.name,
+                description: draft.description,
+                memory_type: draft.memory_type,
+                scope: draft.scope,
+                body: Some(draft.body),
+            };
+            if let Some(at) = list
+                .memories
+                .iter()
+                .position(|old| old.name == entry.name && old.scope == entry.scope)
+            {
+                list.memories[at] = entry;
+            } else {
+                list.memories.push(entry);
+            }
+        }
+    }
+    fn delete_memory(&mut self, _thread: Option<ThreadId>, name: &str, scope: &str) {
+        self.read_memories(None);
+        if let Some(list) = self.memories.as_mut() {
+            list.memories
+                .retain(|entry| !(entry.name == name && entry.scope == scope));
+        }
+        self.memory_details
+            .remove(&(name.to_string(), scope.to_string()));
+    }
+    fn edit_memory(
+        &mut self,
+        _thread: Option<ThreadId>,
+        name: &str,
+        scope: &str,
+        old: &str,
+        new: &str,
+        _description: Option<String>,
+    ) {
+        self.read_memories(None);
+        if let Some(list) = self.memories.as_mut()
+            && let Some(entry) = list
+                .memories
+                .iter_mut()
+                .find(|entry| entry.name == name && entry.scope == scope)
+        {
+            let body = entry.body.clone().unwrap_or_default();
+            entry.body = Some(if body.contains(old) {
+                body.replacen(old, new, 1)
+            } else {
+                new.into()
+            });
+        }
+        self.memory_details
+            .remove(&(name.to_string(), scope.to_string()));
+    }
+    fn append_memory(&mut self, _thread: Option<ThreadId>, name: &str, scope: &str, text: &str) {
+        self.read_memories(None);
+        if let Some(list) = self.memories.as_mut()
+            && let Some(entry) = list
+                .memories
+                .iter_mut()
+                .find(|entry| entry.name == name && entry.scope == scope)
+        {
+            let body = entry.body.clone().unwrap_or_default();
+            entry.body = Some(if body.is_empty() {
+                text.into()
+            } else {
+                format!("{body}\n{text}")
+            });
+        }
+    }
+    fn import_claude_memory(&mut self, _thread: Option<ThreadId>) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "Imported CLAUDE.md.".into(),
+            error: false,
+        });
+    }
+    fn read_embeddings(&mut self) {
+        if self.embeddings.is_none() {
+            self.embeddings = Some(crate::mock_settings::embeddings_fixture());
+        }
+    }
+    fn embeddings(&self) -> Option<Arc<Result<Embeddings, String>>> {
+        self.embeddings.clone().map(|state| Arc::new(Ok(state)))
+    }
+    fn setup_embeddings(&mut self, _all: bool) {
+        self.read_embeddings();
+        self.settings_notice = Some(SettingsNotice {
+            text: "Indexed 2 memories.".into(),
+            error: false,
+        });
+    }
+    fn rebuild_embeddings(&mut self, _all: bool) {
+        self.read_embeddings();
+        self.settings_notice = Some(SettingsNotice {
+            text: "Indexed 2 memories.".into(),
+            error: false,
+        });
+    }
+    fn unload_embeddings(&mut self) {
+        self.embeddings = Some(Embeddings {
+            state: "stopped".into(),
+            message: Some("Unloaded.".into()),
+            percent: None,
+            busy: false,
+            indexed: 0,
+        });
+    }
+    fn read_managed_skills(&mut self, _thread: Option<ThreadId>) {
+        if self.managed_skills.is_none() {
+            let (skills, texts) = crate::mock_settings::skill_fixture();
+            for (source, folder, text) in texts {
+                self.skill_texts.insert((source, folder), text);
+            }
+            self.managed_skills = Some(skills);
+        }
+    }
+    fn managed_skills(&self) -> Option<Arc<Result<Vec<ManagedSkill>, String>>> {
+        self.managed_skills
+            .clone()
+            .map(|skills| Arc::new(Ok(skills)))
+    }
+    fn read_skill_text(&mut self, _thread: Option<ThreadId>, _source: &str, _folder: &str) {}
+    fn skill_text(&self, source: &str, folder: &str) -> Option<Arc<Result<String, String>>> {
+        self.skill_texts
+            .get(&(source.to_string(), folder.to_string()))
+            .cloned()
+            .map(|text| Arc::new(Ok(text)))
+    }
+    fn save_skill(
+        &mut self,
+        _thread: Option<ThreadId>,
+        source: &str,
+        folder: &str,
+        text: &str,
+        _previous: &str,
+    ) {
+        self.skill_texts
+            .insert((source.into(), folder.into()), text.into());
+    }
+    fn set_skill_enabled(
+        &mut self,
+        _thread: Option<ThreadId>,
+        source: &str,
+        folder: &str,
+        enabled: bool,
+    ) {
+        self.read_managed_skills(None);
+        if let Some(skills) = self.managed_skills.as_mut()
+            && let Some(skill) = skills
+                .iter_mut()
+                .find(|skill| skill.source == source && skill.folder == folder)
+        {
+            skill.enabled = enabled;
+        }
+    }
+    fn set_skill_providers(
+        &mut self,
+        _thread: Option<ThreadId>,
+        source: &str,
+        folder: &str,
+        providers: Vec<String>,
+    ) {
+        self.read_managed_skills(None);
+        if let Some(skills) = self.managed_skills.as_mut()
+            && let Some(skill) = skills
+                .iter_mut()
+                .find(|skill| skill.source == source && skill.folder == folder)
+        {
+            skill.providers = providers;
+        }
+    }
+    fn remove_skill(&mut self, _thread: Option<ThreadId>, source: &str, folder: &str) {
+        self.read_managed_skills(None);
+        if let Some(skills) = self.managed_skills.as_mut() {
+            skills.retain(|skill| !(skill.source == source && skill.folder == folder));
+        }
+        self.skill_texts
+            .remove(&(source.to_string(), folder.to_string()));
+    }
+    fn import_skill(&mut self, _thread: Option<ThreadId>, source: &str, from: &str) {
+        self.read_managed_skills(None);
+        let folder = from.rsplit('/').next().unwrap_or(from).to_string();
+        if let Some(skills) = self.managed_skills.as_mut() {
+            skills.push(ManagedSkill {
+                source: source.into(),
+                folder: folder.clone(),
+                name: folder.clone(),
+                description: "Imported here.".into(),
+                path: from.into(),
+                enabled: true,
+                editable: true,
+                providers: vec![],
+            });
+        }
+        self.skill_texts
+            .insert((source.into(), folder), "# Imported\n".into());
+    }
+    fn read_remote(&mut self) {
+        if self.remote.is_none() {
+            self.remote = Some(crate::mock_settings::remote_fixture());
+        }
+    }
+    fn remote(&self) -> Option<Arc<Result<RemoteState, String>>> {
+        self.remote.clone().map(|state| Arc::new(Ok(state)))
+    }
+    fn pair_remote(&mut self) {
+        self.read_remote();
+        if let Some(state) = self.remote.as_mut() {
+            state.pairing = Some(crate::settings::Pairing {
+                code: "ABCD-EFGH".into(),
+                addresses: vec!["192.168.1.2:47317".into()],
+            });
+        }
+    }
+    fn cancel_pairing(&mut self) {
+        if let Some(state) = self.remote.as_mut() {
+            state.pairing = None;
+        }
+    }
+    fn revoke_device(&mut self, device_id: &str) {
+        self.read_remote();
+        if let Some(state) = self.remote.as_mut() {
+            state.devices.retain(|device| device.id != device_id);
+        }
+    }
+    fn read_updates(&mut self) {
+        if self.updates.is_none() {
+            self.updates = Some(crate::mock_settings::updates_fixture());
+        }
+    }
+    fn updates(&self) -> Option<Arc<Result<UpdateState, String>>> {
+        self.updates.clone().map(|state| Arc::new(Ok(state)))
+    }
+    fn update_provider(&mut self, _provider: &str) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "Already current.".into(),
+            error: false,
+        });
+    }
+    fn apply_update(&mut self) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "Updated to 0.3.0.".into(),
+            error: false,
+        });
+        if let Some(state) = self.updates.as_mut() {
+            state.status = Some("up-to-date".into());
+            state.current = state.latest.clone();
+        }
+    }
+    fn rollback_update(&mut self) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "Rolled back.".into(),
+            error: false,
+        });
     }
 }
 

@@ -347,11 +347,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 })
                 .child(
                     row("settings")
-                        .control("Settings are unavailable in this preview")
-                        .cursor(CursorStyle::Arrow)
+                        .shortcut("Settings", "⌘,")
                         .child(ui::icon("settings", "ink-2"))
                         .child(div().flex_1().child("Settings"))
-                        .child(ui::kbd("⌘,")),
+                        .child(ui::kbd("⌘,"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        ),
                 ),
         )
 }

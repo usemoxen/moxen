@@ -6,8 +6,8 @@ use crate::{
     live::ServerSource,
     mock::MockSource,
     model::{
-        CatalogState, Delivery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES, Reply,
-        Selection, Status, ThreadId, ThreadSource,
+        CatalogState, Delivery, Discovery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES,
+        Reply, Selection, Status, ThreadId, ThreadSource,
     },
     theme::{self, color},
     thread_actions,
@@ -108,6 +108,26 @@ pub struct Workspace {
     pub git_ui: crate::git_view::GitUi,
     pub work_ui: crate::work_view::WorkUi,
     pub work_focus: FocusHandle,
+    /// The settings window: open, on a tab, with a list entry, skill or
+    /// memory open inside it, and a form, confirmation or add-flow below.
+    pub settings_open: bool,
+    pub settings_tab: usize,
+    pub settings_entry: Option<String>,
+    pub settings_item: Option<String>,
+    pub settings_skill: Option<(String, String)>,
+    pub settings_memory: Option<(String, String)>,
+    pub settings_form: Option<crate::settings_view::SettingsForm>,
+    pub settings_confirm: Option<(String, String, crate::settings_view::SettingsConfirm)>,
+    pub settings_error: Option<String>,
+    pub settings_notice: Option<(String, bool)>,
+    pub settings_input: Entity<Composer>,
+    pub settings_find: Entity<Composer>,
+    pub settings_export: Option<(String, String)>,
+    pub settings_discovered: Option<Discovery>,
+    pub settings_memory_new: Option<crate::settings_view::MemoryWizard>,
+    pub settings_profile_new: Option<crate::settings_view::ProfileWizard>,
+    pub settings_mcp_new: Option<crate::settings_view::McpWizard>,
+    pub settings_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -218,6 +238,43 @@ impl Workspace {
             window,
             |this, _, e: &Submitted, window, cx| {
                 this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
+            },
+        ));
+        let settings_input = cx.new(|cx| {
+            let mut input = Composer::new(cx);
+            input.height = 44.;
+            input
+        });
+        subscriptions.push(
+            cx.subscribe(&settings_input, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.subscribe_in(
+            &settings_input,
+            window,
+            |this, _, e: &Submitted, window, cx| {
+                this.submit_settings_text(e.0.clone(), window, cx);
+            },
+        ));
+        let settings_find = cx.new(|cx| {
+            let mut input = Composer::new(cx);
+            input.placeholder = "Search memories";
+            input.surface = "raised";
+            input.height = 24.;
+            input.size = 14.;
+            input
+        });
+        subscriptions.push(
+            cx.subscribe(&settings_find, |_, _, _: &crate::composer::Changed, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.subscribe_in(
+            &settings_find,
+            window,
+            |this, _, e: &Submitted, _window, cx| {
+                this.submit_memory_search(e.0.clone(), cx);
             },
         ));
         // Redraws when the source's data changes, and each second while a turn
@@ -355,6 +412,24 @@ impl Workspace {
             action_model: None,
             action_input,
             thread_action_focus: cx.focus_handle(),
+            settings_open: false,
+            settings_tab: 0,
+            settings_entry: None,
+            settings_item: None,
+            settings_skill: None,
+            settings_memory: None,
+            settings_form: None,
+            settings_confirm: None,
+            settings_error: None,
+            settings_notice: None,
+            settings_input,
+            settings_find,
+            settings_export: None,
+            settings_discovered: None,
+            settings_memory_new: None,
+            settings_profile_new: None,
+            settings_mcp_new: None,
+            settings_focus: cx.focus_handle(),
             focus_new_draft: false,
             inspector_open: true,
             tasks_open: true,
@@ -1270,6 +1345,13 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &crate::settings_view::OpenSettings, window, cx| {
+                    if !this.settings_open {
+                        this.open_settings(window, cx);
+                    }
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &thread_actions::OpenMenu, window, cx| {
                     if this.thread_form.is_none()
                         && !this.creating
@@ -1310,6 +1392,8 @@ impl Render for Workspace {
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
                     if this.viewer.is_some() {
                         this.close_viewer(window, cx);
+                    } else if this.settings_open {
+                        this.close_settings_over(window, cx);
                     } else if this.thread_form.is_some() || this.thread_popup.is_some() {
                         this.close_thread_action(window, cx);
                     } else if this.custom_open {
@@ -1428,6 +1512,9 @@ impl Render for Workspace {
             })
             .when_some(self.thread_form.as_ref(), |s, form| {
                 s.child(crate::thread_actions::form(self, form, window, cx))
+            })
+            .when(self.settings_open, |s| {
+                s.child(crate::settings_view::render(self, window, cx))
             })
             .when_some(self.viewer.as_ref(), |s, viewer| {
                 s.child(crate::image_view::render(self, viewer, window, cx))

@@ -27,6 +27,9 @@ pub struct Composer {
     pub surface: &'static str,
     /// Text size: transcript prose (15) in the composer, 14 in search fields.
     pub size: f32,
+    /// A secret entry: drawn as bullets, and the platform (clipboard, screen
+    /// readers, IME) only ever sees bullets — never the key being typed.
+    pub masked: bool,
     pub accepts_assets: bool,
     pub assets: Vec<Asset>,
     pub loading_assets: usize,
@@ -60,6 +63,7 @@ impl Composer {
             height: theme::COMPOSER,
             surface: "ground",
             size: theme::BODY,
+            masked: false,
             accepts_assets: false,
             assets: vec![],
             loading_assets: 0,
@@ -278,31 +282,93 @@ impl Composer {
     fn bytes(&self, r: Range<usize>) -> Range<usize> {
         self.byte(r.start)..self.byte(r.end)
     }
+    /// What lands for typed or pasted text: a masked entry is one line, so
+    /// pasted newlines never land (they would desync the bullet mapping).
+    fn scrub(&self, text: &str) -> String {
+        if self.masked {
+            text.replace(['\r', '\n'], "")
+        } else {
+            text.to_string()
+        }
+    }
     fn units(&self, r: Range<usize>) -> Range<usize> {
         self.utf16(r.start)..self.utf16(r.end)
     }
+    /// What the canvas shapes: bullets per character while masked, so the
+    /// layout's byte offsets are in display coordinates.
+    fn display(&self) -> std::borrow::Cow<'_, str> {
+        if self.masked {
+            std::borrow::Cow::Owned(mask_display(&self.text))
+        } else {
+            std::borrow::Cow::Borrowed(&self.text)
+        }
+    }
+    /// A real byte offset as a display one (masked: one bullet per character).
+    fn display_end(&self, byte: usize) -> usize {
+        if self.masked {
+            masked_end(&self.text, byte)
+        } else {
+            byte
+        }
+    }
+    /// A display byte offset back to a real one.
+    fn real_end(&self, masked: usize) -> usize {
+        if self.masked {
+            unmasked_end(&self.text, masked)
+        } else {
+            masked.min(self.text.len())
+        }
+    }
     fn caret(&self) -> Option<Point<Pixels>> {
+        let end = self.display_end(self.selection.end);
         self.layout
             .iter()
             .rev()
-            .find(|(start, _, _)| *start <= self.selection.end)
+            .find(|(start, _, _)| *start <= end)
             .and_then(|(start, line, origin)| {
-                line.position_for_index(self.selection.end - start, px(theme::LINE))
+                line.position_for_index(end - start, px(theme::LINE))
                     .map(|p| p + *origin)
             })
     }
     fn index_at(&self, p: Point<Pixels>) -> usize {
         for (start, line, origin) in &self.layout {
             if p.y < origin.y + line.size(px(theme::LINE)).height {
-                return (start
+                let at = (start
                     + line
                         .closest_index_for_position(p - *origin, px(theme::LINE))
                         .unwrap_or_else(|i| i))
-                .min(self.text.len());
+                .min(self.display().len());
+                return self.real_end(at);
             }
         }
         self.text.len()
     }
+}
+
+/// The masking bridge: one bullet per character, so a masked field leaks
+/// nothing — not even its length in bytes — while the caret still tracks.
+const MASK: char = '•';
+
+fn mask_display(text: &str) -> String {
+    text.chars().map(|_| MASK).collect()
+}
+
+/// Display byte offset of a real one: characters before it, times the bullet.
+fn masked_end(text: &str, byte: usize) -> usize {
+    text.get(..byte.min(text.len()))
+        .map_or(0, |before| before.chars().count() * MASK.len_utf8())
+}
+
+/// Real byte offset of a display one: the nth character's start.
+fn unmasked_end(text: &str, masked: usize) -> usize {
+    let mut chars = masked / MASK.len_utf8();
+    for (i, _) in text.char_indices() {
+        if chars == 0 {
+            return i;
+        }
+        chars -= 1;
+    }
+    text.len()
 }
 impl EntityInputHandler for Composer {
     fn text_for_range(
@@ -314,7 +380,13 @@ impl EntityInputHandler for Composer {
     ) -> Option<String> {
         let r = self.bytes(r);
         *actual = Some(self.units(r.clone()));
-        Some(self.text[r].into())
+        // Masked fields never hand the platform their text: clipboard,
+        // screen readers and IME see bullets, like the canvas does.
+        Some(if self.masked {
+            mask_display(&self.text[r])
+        } else {
+            self.text[r].into()
+        })
     }
     fn selected_text_range(
         &mut self,
@@ -355,7 +427,10 @@ impl EntityInputHandler for Composer {
             .map(|r| self.bytes(r))
             .or(self.marked.clone())
             .unwrap_or(self.selection.clone());
-        self.text.replace_range(r.clone(), text);
+        // A masked entry is one line: pasted newlines would desync the
+        // bullet mapping, so they never land.
+        let text = self.scrub(text);
+        self.text.replace_range(r.clone(), &text);
         self.selection = r.start + text.len()..r.start + text.len();
         self.marked = None;
         self.changed(cx);
@@ -374,7 +449,8 @@ impl EntityInputHandler for Composer {
             .map(|r| self.byte(r.start))
             .or(self.marked.as_ref().map(|r| r.start))
             .unwrap_or(self.selection.start);
-        self.replace_text_in_range(r, text, w, cx);
+        let text = self.scrub(text);
+        self.replace_text_in_range(r, &text, w, cx);
         self.marked = (!text.is_empty()).then_some(start..start + text.len());
         if let Some(r) = selected {
             let base = self.utf16(start);
@@ -434,9 +510,9 @@ impl Render for Composer {
                     move |bounds, window, cx| {
                         entity.update(cx, |this, _| {
                             let display = if this.text.is_empty() {
-                                this.placeholder
+                                std::borrow::Cow::Borrowed(this.placeholder)
                             } else {
-                                &this.text
+                                this.display()
                             };
                             let style = window.text_style();
                             let run = TextRun {
@@ -533,4 +609,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some("Composer")),
         KeyBinding::new("ctrl-v", Paste, Some("Composer")),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MASK, mask_display, masked_end, unmasked_end};
+
+    #[test]
+    fn masked_offsets_track_characters_not_bytes() {
+        let text = "aé…b";
+        let masked = mask_display(text);
+        assert_eq!(masked.chars().count(), text.chars().count());
+        assert!(masked.chars().all(|ch| ch == MASK));
+        assert!(!masked.contains('a'));
+        // Real byte offset of "é" (2 bytes in) maps to one bullet (3 bytes out).
+        assert_eq!(masked_end(text, 1), MASK.len_utf8());
+        assert_eq!(masked_end(text, 3), 2 * MASK.len_utf8());
+        // Display bytes map back to the character's real start.
+        assert_eq!(unmasked_end(text, 0), 0);
+        assert_eq!(unmasked_end(text, MASK.len_utf8()), 1);
+        assert_eq!(unmasked_end(text, 2 * MASK.len_utf8()), 3);
+        assert_eq!(unmasked_end(text, usize::MAX / 2), text.len());
+    }
 }
