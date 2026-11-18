@@ -64,19 +64,12 @@ pub trait Control: Sized {
     fn quiet(self) -> Self;
     /// Unavailable right now: dimmed, with a tooltip saying why.
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self;
-    /// Shown at full strength but not wired in this preview.
-    fn inert(self, tooltip: impl Into<SharedString>) -> Self;
 }
 impl Control for Stateful<Div> {
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         self.opacity(0.45)
             .cursor(CursorStyle::Arrow)
-            .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
-    }
-    fn inert(self, tooltip: impl Into<SharedString>) -> Self {
-        let text = tooltip.into();
-        self.cursor(CursorStyle::Arrow)
             .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
     }
     fn quiet(self) -> Self {

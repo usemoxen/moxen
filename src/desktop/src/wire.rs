@@ -254,6 +254,15 @@ impl Wire {
 
     /// Sends one request and waits for its answer.
     pub fn request(&self, method: &str, params: Option<Value>) -> Result<Value, WireError> {
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, WireError> {
         let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
         let (reply, answer) = mpsc::channel();
         self.shared
@@ -277,7 +286,7 @@ impl Wire {
                 .remove(&id);
             return Err(error);
         }
-        match answer.recv_timeout(REQUEST_TIMEOUT) {
+        match answer.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.shared
@@ -303,7 +312,13 @@ impl Wire {
     /// A command (`type` names it, the rest are its fields).
     #[allow(dead_code)]
     pub fn dispatch(&self, kind: &str, fields: Value) -> Result<Value, WireError> {
-        self.request("dispatch", Some(typed(kind, fields)))
+        let timeout = if kind == "prompt.improve" {
+            // The server gives the provider completion 90 seconds.
+            Duration::from_secs(100)
+        } else {
+            REQUEST_TIMEOUT
+        };
+        self.request_with_timeout("dispatch", Some(typed(kind, fields)), timeout)
     }
 
     /// Opens the shell subscription. Frames (and a final error) arrive on the

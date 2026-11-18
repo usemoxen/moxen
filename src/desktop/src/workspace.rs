@@ -1,6 +1,8 @@
 use crate::{
+    attachments::{self, Asset, Prompt},
     catalog::{Catalog, prettify, provider_color},
-    composer::{Composer, Queued, Submitted},
+    composer::{Composer, Pasted, Queued, Submitted},
+    composer_menu::{self, Destination, Improvement},
     live::ServerSource,
     mock::MockSource,
     model::{
@@ -13,6 +15,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -27,6 +30,7 @@ pub enum Dropdown {
     Access,
     Mode,
     Thread,
+    Attach,
 }
 
 /// Focus handles for toolbar controls that show a tip under keyboard focus.
@@ -49,6 +53,10 @@ pub struct Workspace {
     /// the new-thread composer and its choices.
     pub creating: bool,
     pub new_composer: Entity<Composer>,
+    new_sending: bool,
+    pub improving: bool,
+    pub viewer: Option<crate::image_view::Viewer>,
+    pub viewer_focus: FocusHandle,
     /// The project a new thread starts in (a project id), until one is picked.
     pub new_project: Option<String>,
     /// The access chosen for the new thread; none leaves it to the server.
@@ -118,6 +126,7 @@ impl Workspace {
         let new_composer = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.placeholder = "What should the agent do?";
+            c.accepts_assets = true;
             c
         });
         subscriptions.push(
@@ -133,6 +142,11 @@ impl Workspace {
         subscriptions.push(cx.subscribe(&new_composer, |this, _, event: &Queued, cx| {
             this.start_thread(event.0.clone(), cx)
         }));
+        subscriptions.push(
+            cx.subscribe(&new_composer, |this, composer, event: &Pasted, cx| {
+                this.paste_assets(composer, event.0.clone(), cx);
+            }),
+        );
         let custom_input = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.placeholder = "Write your answer";
@@ -314,6 +328,10 @@ impl Workspace {
             custom_open: false,
             custom_input,
             problem: None,
+            new_sending: false,
+            improving: false,
+            viewer: None,
+            viewer_focus: cx.focus_handle(),
             source,
             fold_toggled: HashSet::new(),
             unfolded_at: HashMap::new(),
@@ -360,10 +378,17 @@ impl Workspace {
     /// and keeps the selection on a thread that is still listed. Threads only
     /// ever appear: the source keeps a gone thread's id.
     pub fn sync_threads(&mut self, cx: &mut Context<Self>) {
+        // A later snapshot may name another thread; keep that event queued
+        // until the next redraw has sized its per-thread UI.
+        let opened = self.source.take_opened();
         let count = self.source.list_threads().len();
         while self.composers.len() < count {
             let id = self.composers.len();
-            let composer = cx.new(Composer::new);
+            let composer = cx.new(|cx| {
+                let mut composer = Composer::new(cx);
+                composer.accepts_assets = true;
+                composer
+            });
             self._subscriptions.push(
                 cx.subscribe(&composer, |_, _, _: &crate::composer::Changed, cx| {
                     cx.notify()
@@ -373,6 +398,12 @@ impl Workspace {
                 &composer,
                 move |this, _, event: &Submitted, cx| {
                     this.send(id, event.0.clone(), Delivery::Steer, cx)
+                },
+            ));
+            self._subscriptions.push(cx.subscribe(
+                &composer,
+                |this, composer, event: &Pasted, cx| {
+                    this.paste_assets(composer, event.0.clone(), cx);
                 },
             ));
             self._subscriptions.push(cx.subscribe(
@@ -422,21 +453,18 @@ impl Workspace {
             self.source.focus(self.selected);
         }
         self.sync_transcript();
-        self.take_news(cx);
+        self.take_news(opened, cx);
     }
     /// What the source reports since the last look: a thread this window
     /// started, a project it added, and anything that failed.
-    fn take_news(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.source.take_opened()
-            && id < self.composers.len()
-        {
+    fn take_news(&mut self, opened: Option<ThreadId>, cx: &mut Context<Self>) {
+        if let Some(id) = opened {
             self.thread_form = None;
             self.action_model = None;
             self.creating = false;
             self.selected = id;
             self.focused = None;
-            self.new_composer
-                .update(cx, |c, cx| c.set_text(String::new(), cx));
+            self.new_sending = false;
         }
         if self.source.take_settled() == Some(self.selected) && !self.creating {
             self.creating = true;
@@ -448,6 +476,7 @@ impl Workspace {
                 .position(|(mode, _)| *mode == thread.runtime_mode);
             self.new_interaction = INTERACTION_MODES
                 .iter()
+                .take(3)
                 .position(|(mode, _)| *mode == thread.interaction_mode)
                 .unwrap_or(0);
             self.focus_new_draft = true;
@@ -485,28 +514,38 @@ impl Workspace {
         }
         while let Some(problem) = self.source.take_problem() {
             self.problem = Some(problem.message);
-            let Some((at, text)) = problem.unsent else {
+            let Some((at, prompt)) = problem.unsent else {
                 continue;
             };
             let composer = match at {
                 Some(id) if id < self.composers.len() => self.composers[id].clone(),
                 _ => {
-                    self.creating = true;
+                    self.new_sending = false;
                     self.new_composer.clone()
                 }
             };
-            composer.update(cx, |c, cx| {
-                // Anything typed since stays after the text that did not go.
-                let typed = c.text().to_string();
-                c.set_text(
-                    if typed.is_empty() {
-                        text
-                    } else {
-                        format!("{text}\n{typed}")
-                    },
-                    cx,
-                );
-            });
+            composer.update(cx, |c, cx| c.restore(prompt, cx));
+        }
+        while let Some((request, improved)) = self.source.take_improvement() {
+            self.improving = false;
+            if let Some(improved) = improved {
+                let composer = self.active_composer().clone();
+                if request.still_matches(
+                    self.destination().as_ref(),
+                    self.effective_selection().as_ref(),
+                    self.source
+                        .composer_directory(&request.destination)
+                        .as_deref(),
+                    composer.read(cx).revision,
+                ) {
+                    composer.update(cx, |c, cx| {
+                        c.set_text(improved, cx);
+                        c.undo_improvement = Some(request.original);
+                    });
+                } else {
+                    self.problem = Some("The draft changed while it was being improved. Your current draft was kept.".into());
+                }
+            }
         }
     }
     /// The project a new thread starts in: the one picked, else the open
@@ -630,9 +669,17 @@ impl Workspace {
             cx.notify();
             return;
         };
+        if self.new_sending {
+            self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
+            return;
+        }
+        let Some(prompt) = self.take_prompt(self.new_composer.clone(), text, false, cx) else {
+            return;
+        };
+        self.new_sending = true;
         self.source.create_thread(NewThread {
             project,
-            text,
+            prompt,
             runtime_mode: self.new_runtime.map(|at| RUNTIME_MODES[at].0.into()),
             interaction_mode: INTERACTION_MODES[self.new_interaction].0.into(),
             model: self.new_model.clone(),
@@ -640,6 +687,186 @@ impl Workspace {
         // Stays in the draft view until the thread is listed; the source then
         // names it (`take_opened`), which the redraw loop picks up.
         cx.notify();
+    }
+    fn destination(&self) -> Option<Destination> {
+        if self.creating {
+            self.new_project_id().map(Destination::Project)
+        } else {
+            Some(Destination::Thread(self.selected))
+        }
+    }
+    pub fn pick_attachments(&mut self, directories: bool, cx: &mut Context<Self>) {
+        let composer = self.active_composer().clone();
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: !directories,
+            directories,
+            multiple: true,
+            prompt: Some(
+                if directories {
+                    "Attach folders"
+                } else {
+                    "Attach files or images"
+                }
+                .into(),
+            ),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = picked.await {
+                this.update(cx, |this, cx| match result {
+                    Ok(Some(paths)) => this.load_assets(composer, paths, vec![], cx),
+                    Ok(None) => {}
+                    Err(error) => {
+                        this.problem =
+                            Some(format!("Could not open the attachment picker: {error}"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+    pub fn drop_attachments(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.load_assets(self.active_composer().clone(), paths, vec![], cx);
+    }
+    fn paste_assets(
+        &mut self,
+        composer: Entity<Composer>,
+        entries: Vec<ClipboardEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut paths = vec![];
+        let mut images = vec![];
+        for entry in entries {
+            match entry {
+                ClipboardEntry::ExternalPaths(files) => paths.extend_from_slice(files.paths()),
+                ClipboardEntry::Image(image) => images.push(image),
+                _ => {}
+            }
+        }
+        self.load_assets(composer, paths, images, cx);
+    }
+    fn load_assets(
+        &mut self,
+        composer: Entity<Composer>,
+        paths: Vec<PathBuf>,
+        images: Vec<Image>,
+        cx: &mut Context<Self>,
+    ) {
+        composer.update(cx, |c, cx| {
+            c.loading_assets += 1;
+            c.changed(cx);
+        });
+        let loaded = cx.background_executor().spawn(async move {
+            paths
+                .into_iter()
+                .map(Asset::local)
+                .chain(images.into_iter().enumerate().map(|(at, image)| {
+                    Asset::image(
+                        format!("Clipboard {}.{}", at + 1, image.format.extension()),
+                        image,
+                    )
+                }))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let loaded = loaded.await;
+            this.update(cx, |this, cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.loading_assets -= 1;
+                    let mut added = false;
+                    for result in loaded {
+                        match result {
+                            Ok(asset) if !composer.assets.contains(&asset) => {
+                                composer.assets.push(asset);
+                                if let Err(error) = attachments::limit(&composer.assets) {
+                                    composer.assets.pop();
+                                    this.problem = Some(error.into());
+                                } else {
+                                    added = true;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => this.problem = Some(error),
+                        }
+                    }
+                    if added {
+                        composer.changed(cx);
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+    pub fn improve_draft(&mut self, cx: &mut Context<Self>) {
+        if self.improving {
+            return;
+        }
+        let Some(destination) = self.destination() else {
+            return;
+        };
+        let Some(directory) = self.source.composer_directory(&destination) else {
+            self.problem = Some("Choose a project before improving the draft.".into());
+            cx.notify();
+            return;
+        };
+        let c = self.active_composer().read(cx);
+        if c.text().trim().is_empty() || composer_menu::mode_command(c.text()).is_some() {
+            return;
+        }
+        let request = Improvement {
+            destination,
+            directory,
+            revision: c.revision,
+            selection: self.effective_selection(),
+            original: c.text().into(),
+        };
+        self.improving = true;
+        self.source.improve(request);
+        cx.notify();
+    }
+    fn sync_slash(&mut self, cx: &mut Context<Self>) {
+        if !self.composer_visible() {
+            return;
+        }
+        let composer = self.active_composer().clone();
+        let Some((_, prefix)) = composer.read(cx).slash() else {
+            if !composer.read(cx).choices.is_empty() {
+                composer.update(cx, |c, _| c.choices.clear());
+            }
+            return;
+        };
+        let prefix = prefix.to_owned();
+        let inventory = self.destination().and_then(|destination| {
+            let selection = self.effective_selection();
+            self.source.read_skills(&destination, selection.as_ref());
+            self.source.skills(&destination, selection.as_ref())
+        });
+        let choices = composer_menu::choices(
+            &prefix,
+            inventory.as_deref().and_then(|result| result.as_ref().ok()),
+            self.composer_busy(),
+        );
+        composer.update(cx, |c, _| {
+            c.choice = c.choice.min(choices.len().saturating_sub(1));
+            c.choices = choices;
+        });
+    }
+    pub fn composer_busy(&self) -> bool {
+        !self.creating
+            && self
+                .source
+                .list_threads()
+                .get(self.selected)
+                .is_some_and(|thread| matches!(thread.status, Status::Running | Status::Held))
+    }
+    fn composer_visible(&self) -> bool {
+        self.creating
+            || (!self.composers.is_empty()
+                && self.source.permission(self.selected).is_none()
+                && self.source.ask(self.selected).is_none())
     }
     /// Adds a folder as a project, asking for it with the system's picker.
     pub fn add_project(&mut self, cx: &mut Context<Self>) {
@@ -698,19 +925,38 @@ impl Workspace {
     }
     /// Takes a waiting message back into the draft to change it.
     pub fn edit_queued_text(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.source.take_queued(self.selected, key) {
-            let composer = self.composers[self.selected].clone();
-            composer.update(cx, |c, cx| {
-                let typed = c.text().to_string();
-                c.set_text(
-                    if typed.is_empty() {
-                        text
-                    } else {
-                        format!("{text}\n{typed}")
-                    },
-                    cx,
+        let queued = self
+            .source
+            .queued(self.selected)
+            .into_iter()
+            .find(|queued| queued.key == key);
+        if let Some(queued) = queued {
+            let mut loading = false;
+            for image in &queued.images {
+                match self.source.image(&image.source) {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        self.problem = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                    None => {
+                        self.source.read_image(&image.source);
+                        loading = true;
+                    }
+                }
+            }
+            if loading {
+                self.problem = Some(
+                    "Loading the queued attachments. Choose Edit again once they load.".into(),
                 );
-            });
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(prompt) = self.source.take_queued(self.selected, key) {
+            let composer = self.composers[self.selected].clone();
+            composer.update(cx, |c, cx| c.restore(prompt, cx));
             window.focus(&composer.read(cx).focus.clone(), cx);
             cx.notify();
         }
@@ -830,8 +1076,50 @@ impl Workspace {
         cx.notify();
     }
     fn send(&mut self, id: ThreadId, text: String, delivery: Delivery, cx: &mut Context<Self>) {
-        let reply = self.source.send_message(id, text, delivery);
+        let busy = self
+            .source
+            .list_threads()
+            .get(id)
+            .is_some_and(|thread| matches!(thread.status, Status::Running | Status::Held));
+        let Some(prompt) = self.take_prompt(self.composers[id].clone(), text, busy, cx) else {
+            return;
+        };
+        let reply = self.source.send_message(id, prompt, delivery);
         self.animate(id, reply, cx);
+    }
+    fn take_prompt(
+        &mut self,
+        composer: Entity<Composer>,
+        mut text: String,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Prompt> {
+        composer.update(cx, |c, cx| {
+            if let Err(error) = attachments::limit(&c.assets) {
+                self.problem = Some(error.into());
+                c.set_text(text, cx);
+                return None;
+            }
+            if let Some((mode, rest)) = composer_menu::mode_command(&text) {
+                if busy {
+                    self.problem =
+                        Some("Use a one-off mode after the current turn finishes.".into());
+                    c.set_text(text, cx);
+                    return None;
+                }
+                c.once = Some(mode.into());
+                if rest.is_empty() && c.assets.is_empty() {
+                    c.changed(cx);
+                    return None;
+                }
+                text = rest.into();
+            }
+            Some(Prompt {
+                text,
+                assets: std::mem::take(&mut c.assets),
+                once: if busy { None } else { c.once.take() },
+            })
+        })
     }
     /// Plays a simulated reply (the mock's); a live source has none.
     fn animate(&mut self, id: ThreadId, reply: Option<Reply>, cx: &mut Context<Self>) {
@@ -914,6 +1202,9 @@ impl Render for Workspace {
             self.sync_inspector();
             self.sync_work();
         }
+        if self.creating || (has_thread && !self.source.order(false).is_empty()) {
+            self.sync_slash(cx);
+        }
         if self.focus_new_draft {
             self.focus_new_draft = false;
             window.focus(&self.new_composer.read(cx).focus.clone(), cx);
@@ -940,11 +1231,42 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
-                cx.listener(|_, _: &crate::palette::NextFocus, window, cx| window.focus_next(cx)),
+                cx.listener(|this, _: &crate::palette::NextFocus, window, cx| {
+                    if this.composer_visible() && this.dropdown.is_none() {
+                        let composer = this.active_composer();
+                        let draft = composer.read(cx);
+                        if draft.focus.is_focused(window)
+                            && !draft.choices.is_empty()
+                            && composer.update(cx, |c, cx| c.choose(c.choice, window, cx))
+                        {
+                            return;
+                        }
+                    }
+                    window.focus_next(cx);
+                }),
             )
             .on_action(
-                cx.listener(|_, _: &crate::palette::PreviousFocus, window, cx| {
-                    window.focus_prev(cx)
+                cx.listener(|this, _: &crate::palette::PreviousFocus, window, cx| {
+                    if this.viewer.is_none()
+                        && this.composer_visible()
+                        && this.active_composer().read(cx).focus.is_focused(window)
+                        && !this.composer_busy()
+                    {
+                        let current = if this.creating {
+                            this.new_interaction
+                        } else {
+                            let threads = this.source.list_threads();
+                            INTERACTION_MODES[..3]
+                                .iter()
+                                .position(|(mode, _)| {
+                                    *mode == threads[this.selected].interaction_mode
+                                })
+                                .unwrap_or(2)
+                        };
+                        this.set_mode((current + 1) % 3, cx);
+                    } else {
+                        window.focus_prev(cx);
+                    }
                 }),
             )
             .on_action(
@@ -986,7 +1308,9 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::palette::Dismiss, window, cx| {
-                    if this.thread_form.is_some() || this.thread_popup.is_some() {
+                    if this.viewer.is_some() {
+                        this.close_viewer(window, cx);
+                    } else if this.thread_form.is_some() || this.thread_popup.is_some() {
                         this.close_thread_action(window, cx);
                     } else if this.custom_open {
                         this.close_custom(window, cx);
@@ -1000,6 +1324,13 @@ impl Render for Workspace {
                     } else if this.palette_open {
                         this.palette_open = false;
                         window.focus(&this.sidebar_focus, cx);
+                    } else if this.composer_visible()
+                        && this.active_composer().read(cx).slash().is_some()
+                    {
+                        this.active_composer().update(cx, |c, _| {
+                            c.slash_dismissed = true;
+                            c.choices.clear();
+                        });
                     } else if this.creating {
                         this.creating = this.source.order(false).is_empty();
                         window.focus(&this.sidebar_focus, cx);
@@ -1097,6 +1428,9 @@ impl Render for Workspace {
             })
             .when_some(self.thread_form.as_ref(), |s, form| {
                 s.child(crate::thread_actions::form(self, form, window, cx))
+            })
+            .when_some(self.viewer.as_ref(), |s, viewer| {
+                s.child(crate::image_view::render(self, viewer, window, cx))
             })
             .into_any_element()
     }

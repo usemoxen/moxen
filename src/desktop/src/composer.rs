@@ -1,4 +1,8 @@
-use crate::theme::{self, color};
+use crate::{
+    attachments::{Asset, Prompt},
+    composer_menu::{Choice, slash_prefix},
+    theme::{self, color},
+};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -13,6 +17,7 @@ pub struct Submitted(pub String);
 /// The draft, sent to wait for the running turn instead of steering it.
 pub struct Queued(pub String);
 pub struct Changed;
+pub struct Pasted(pub Vec<ClipboardEntry>);
 
 pub struct Composer {
     pub focus: FocusHandle,
@@ -22,6 +27,15 @@ pub struct Composer {
     pub surface: &'static str,
     /// Text size: transcript prose (15) in the composer, 14 in search fields.
     pub size: f32,
+    pub accepts_assets: bool,
+    pub assets: Vec<Asset>,
+    pub loading_assets: usize,
+    pub once: Option<String>,
+    pub revision: u64,
+    pub undo_improvement: Option<String>,
+    pub choices: Vec<Choice>,
+    pub choice: usize,
+    pub slash_dismissed: bool,
     text: String,
     selection: Range<usize>,
     marked: Option<Range<usize>>,
@@ -31,6 +45,7 @@ pub struct Composer {
 impl EventEmitter<Submitted> for Composer {}
 impl EventEmitter<Queued> for Composer {}
 impl EventEmitter<Changed> for Composer {}
+impl EventEmitter<Pasted> for Composer {}
 impl Focusable for Composer {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -45,6 +60,15 @@ impl Composer {
             height: theme::COMPOSER,
             surface: "ground",
             size: theme::BODY,
+            accepts_assets: false,
+            assets: vec![],
+            loading_assets: 0,
+            once: None,
+            revision: 0,
+            undo_improvement: None,
+            choices: vec![],
+            choice: 0,
+            slash_dismissed: false,
             text: String::new(),
             selection: 0..0,
             marked: None,
@@ -58,8 +82,64 @@ impl Composer {
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.selection = text.len()..text.len();
         self.text = text;
+        self.marked = None;
+        self.changed(cx);
+    }
+    pub fn empty(&self) -> bool {
+        self.text.trim().is_empty() && self.assets.is_empty()
+    }
+    pub fn slash(&self) -> Option<(usize, &str)> {
+        if !self.accepts_assets
+            || self.slash_dismissed
+            || self.marked.is_some()
+            || !self.selection.is_empty()
+        {
+            return None;
+        }
+        slash_prefix(&self.text, self.selection.end)
+    }
+    pub fn changed(&mut self, cx: &mut Context<Self>) {
+        self.revision = self.revision.wrapping_add(1);
+        self.undo_improvement = None;
+        self.slash_dismissed = false;
+        self.choice = 0;
+        self.choices.clear();
         cx.emit(Changed);
         cx.notify();
+    }
+    pub fn restore(&mut self, mut prompt: Prompt, cx: &mut Context<Self>) {
+        prompt.assets.append(&mut self.assets);
+        self.assets = prompt.assets;
+        if self.once.is_none() {
+            self.once = prompt.once;
+        }
+        let text = if prompt.text.is_empty() {
+            self.text.clone()
+        } else if self.text.is_empty() {
+            prompt.text
+        } else {
+            format!("{}\n{}", prompt.text, self.text)
+        };
+        self.set_text(text, cx);
+    }
+    pub fn choose(&mut self, index: usize, w: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((start, _)) = self.slash() else {
+            return false;
+        };
+        let Some(choice) = self.choices.get(index) else {
+            return false;
+        };
+        let end = self.selection.end;
+        let mut invocation = choice.invocation.clone();
+        if self.text[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_whitespace())
+        {
+            invocation.push(' ');
+        }
+        self.replace_text_in_range(Some(self.units(start..end)), &invocation, w, cx);
+        true
     }
     pub fn demo_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "Show a safe streaming reply.", window, cx);
@@ -78,20 +158,25 @@ impl Composer {
         self.send(&Send, window, cx);
         assert!(self.text.is_empty());
     }
-    fn send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
-        if self.enabled && self.marked.is_none() && !self.text.trim().is_empty() {
+    fn send(&mut self, _: &Send, w: &mut Window, cx: &mut Context<Self>) {
+        if crate::composer_menu::mode_command(&self.text).is_none()
+            && self.choose(self.choice, w, cx)
+        {
+            return;
+        }
+        if self.enabled && self.loading_assets == 0 && self.marked.is_none() && !self.empty() {
             let text = std::mem::take(&mut self.text);
             self.selection = 0..0;
+            self.changed(cx);
             cx.emit(Submitted(text));
-            cx.notify();
         }
     }
     fn queue_send(&mut self, _: &QueueSend, _: &mut Window, cx: &mut Context<Self>) {
-        if self.enabled && self.marked.is_none() && !self.text.trim().is_empty() {
+        if self.enabled && self.loading_assets == 0 && self.marked.is_none() && !self.empty() {
             let text = std::mem::take(&mut self.text);
             self.selection = 0..0;
+            self.changed(cx);
             cx.emit(Queued(text));
-            cx.notify();
         }
     }
     fn newline(&mut self, _: &Newline, w: &mut Window, cx: &mut Context<Self>) {
@@ -99,6 +184,7 @@ impl Composer {
     }
     fn move_to(&mut self, at: usize, w: &mut Window, cx: &mut Context<Self>) {
         self.selection = at..at;
+        cx.emit(Changed);
         w.notify_text_selection_changed(&self.focus);
         cx.notify();
     }
@@ -127,9 +213,19 @@ impl Composer {
         }
     }
     fn up(&mut self, _: &Up, w: &mut Window, cx: &mut Context<Self>) {
+        if !self.choices.is_empty() {
+            self.choice = self.choice.saturating_sub(1);
+            cx.emit(Changed);
+            return;
+        }
         self.vertical(-1., w, cx);
     }
     fn down(&mut self, _: &Down, w: &mut Window, cx: &mut Context<Self>) {
+        if !self.choices.is_empty() {
+            self.choice = (self.choice + 1).min(self.choices.len() - 1);
+            cx.emit(Changed);
+            return;
+        }
         self.vertical(1., w, cx);
     }
     fn backspace(&mut self, _: &Backspace, w: &mut Window, cx: &mut Context<Self>) {
@@ -150,7 +246,19 @@ impl Composer {
         cx.notify();
     }
     fn paste_action(&mut self, _: &Paste, w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.accepts_assets
+            && item.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)
+                )
+            })
+        {
+            cx.emit(Pasted(item.entries().to_vec()));
+        } else if let Some(text) = item.text() {
             self.replace_text_in_range(None, &text, w, cx);
         }
     }
@@ -232,7 +340,7 @@ impl EntityInputHandler for Composer {
     }
     fn unmark_text(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
-        cx.emit(Changed);
+        self.changed(cx);
         w.notify_text_input_changed(&self.focus);
         cx.notify();
     }
@@ -250,9 +358,8 @@ impl EntityInputHandler for Composer {
         self.text.replace_range(r.clone(), text);
         self.selection = r.start + text.len()..r.start + text.len();
         self.marked = None;
-        cx.emit(Changed);
+        self.changed(cx);
         w.notify_text_input_changed(&self.focus);
-        cx.notify();
     }
     fn replace_and_mark_text_in_range(
         &mut self,

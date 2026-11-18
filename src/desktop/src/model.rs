@@ -1,6 +1,10 @@
 pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
 use crate::work::{Delegated, InspectorData, Read, View};
+use crate::{
+    attachments::{Picture, Prompt, Thumbnail},
+    composer_menu::{Destination, Improvement, Inventory},
+};
 use std::sync::Arc;
 
 pub type ThreadId = usize;
@@ -67,6 +71,7 @@ pub struct Thread {
 pub enum Message {
     User {
         text: String,
+        images: Vec<Thumbnail>,
     },
     Assistant {
         text: String,
@@ -124,6 +129,7 @@ pub struct Queued {
     /// Names it to the source (a turn id).
     pub key: String,
     pub text: String,
+    pub images: Vec<Thumbnail>,
     /// Kept back until released.
     pub held: bool,
     /// When a scheduled send goes out, as the server wrote it.
@@ -154,7 +160,7 @@ pub struct Project {
 #[derive(Clone, Debug)]
 pub struct NewThread {
     pub project: String,
-    pub text: String,
+    pub prompt: Prompt,
     /// `None` leaves it to the server's setting.
     pub runtime_mode: Option<String>,
     pub interaction_mode: String,
@@ -169,7 +175,7 @@ pub struct Problem {
     pub message: String,
     /// A message that did not go out, to put back where it was written:
     /// the thread's draft, or the new-thread draft when there is none.
-    pub unsent: Option<(Option<ThreadId>, String)>,
+    pub unsent: Option<(Option<ThreadId>, Prompt)>,
 }
 
 /// How a pull request is merged.
@@ -272,7 +278,7 @@ pub const RUNTIME_MODES: [(&str, &str); 4] = [
     ("full-access", "Full access"),
 ];
 pub const INTERACTION_MODES: [(&str, &str); 4] = [
-    ("default", "Chat"),
+    ("default", "Build"),
     ("research", "Research"),
     ("orchestrate", "Orchestrate"),
     ("review", "Review"),
@@ -363,7 +369,7 @@ pub trait ThreadSource {
     fn retry(&mut self) {}
     fn queued(&self, id: ThreadId) -> Vec<Queued>;
     /// Takes a waiting message back and returns its text, to edit it.
-    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<String>;
+    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<Prompt>;
     fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit);
     /// Stops the running turn so the waiting message goes next.
     fn send_queued_now(&mut self, id: ThreadId, key: &str) -> Option<Reply>;
@@ -418,7 +424,26 @@ pub trait ThreadSource {
     fn focus(&mut self, _id: ThreadId) {}
     /// Sends `text`; `delivery` says what to do when a turn is running. A
     /// source that simulates its reply returns it.
-    fn send_message(&mut self, id: ThreadId, text: String, delivery: Delivery) -> Option<Reply>;
+    fn send_message(&mut self, id: ThreadId, prompt: Prompt, delivery: Delivery) -> Option<Reply>;
+    fn composer_directory(&self, _: &Destination) -> Option<String> {
+        None
+    }
+    fn read_skills(&mut self, _: &Destination, _: Option<&Selection>) {}
+    fn skills(
+        &self,
+        _: &Destination,
+        _: Option<&Selection>,
+    ) -> Option<Arc<Result<Inventory, String>>> {
+        None
+    }
+    fn read_image(&mut self, _: &Picture) {}
+    fn image(&self, _: &Picture) -> Option<Result<Arc<gpui::Image>, String>> {
+        None
+    }
+    fn improve(&mut self, _: Improvement) {}
+    fn take_improvement(&mut self) -> Option<(Improvement, Option<String>)> {
+        None
+    }
     fn stop(&mut self, id: ThreadId);
     /// Where a new thread can start, newest project first.
     fn projects(&self) -> Vec<Project> {

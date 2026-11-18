@@ -1,13 +1,16 @@
 mod ask;
 mod assets;
+mod attachments;
 #[cfg(feature = "render-harness")]
 mod automation;
 mod catalog;
 mod composer;
+mod composer_menu;
 mod connection;
 mod diff;
 mod git;
 mod git_view;
+mod image_view;
 mod inspector;
 mod live;
 mod mock;

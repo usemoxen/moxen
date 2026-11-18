@@ -1,5 +1,7 @@
 use crate::ui::{self, Control};
 use crate::{
+    attachments::{Asset, Picture, ReplyBlock, reply_blocks},
+    image_view::{self, ImageItem, Source},
     model::{
         INTERACTION_MODES, Message, QueueEdit, Queued, RUNTIME_MODES, Status, Thread, mode_label,
     },
@@ -7,6 +9,7 @@ use crate::{
     workspace::{Dropdown, Workspace},
 };
 use gpui::{prelude::*, *};
+use std::sync::Arc;
 
 /// Space between turns in the transcript (the mockup's column gap).
 const TURN_GAP: f32 = 22.;
@@ -73,7 +76,8 @@ pub fn run_summary(messages: &[Message]) -> String {
 pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let id = w.selected;
     let creating = w.creating;
-    let draft_empty = w.active_composer().read(cx).text().trim().is_empty();
+    let draft = w.active_composer().read(cx);
+    let draft_empty = draft.empty() || draft.loading_assets != 0;
     let thread = w.source.list_threads()[id].clone();
     let running = thread.status == Status::Running && !creating;
     let messages = w.source.messages(id);
@@ -121,23 +125,82 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                             .expanded
                             .get(&(id, index))
                             .map(|at| ui::progress(Some(*at), 150, window));
+                        let mut missing = vec![];
                         let body = match current.clone() {
-                            Message::User { text } => div()
-                                .flex()
-                                .flex_col()
-                                .items_end()
-                                .child(
-                                    div()
-                                        .max_w(relative(0.82))
-                                        .px(px(14.))
-                                        .py(px(10.))
-                                        .rounded(px(14.))
-                                        .bg(color("sunk"))
-                                        .text_size(px(theme::BODY))
-                                        .line_height(px(theme::BODY * 1.55))
-                                        .child(text),
-                                )
-                                .into_any_element(),
+                            Message::User { text, images } => {
+                                let images: Arc<Vec<ImageItem>> =
+                                    Arc::new(images.into_iter().map(ImageItem::from).collect());
+                                missing
+                                    .extend(images.iter().filter_map(|image| image.missing(this)));
+                                let (text, paths) = crate::attachments::file_chips(&text);
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_end()
+                                    .child(
+                                        div()
+                                            .max_w(relative(0.82))
+                                            .px(px(14.))
+                                            .py(px(10.))
+                                            .rounded(px(14.))
+                                            .bg(color("sunk"))
+                                            .text_size(px(theme::BODY))
+                                            .line_height(px(theme::BODY * 1.55))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.))
+                                            .when(!text.is_empty(), |s| s.child(text))
+                                            .when(!paths.is_empty(), |s| {
+                                                s.child(
+                                                    div().flex().flex_wrap().gap(px(6.)).children(
+                                                        paths.into_iter().enumerate().map(
+                                                            |(i, (label, path))| {
+                                                                div()
+                                                                    .id(("sent-path", i))
+                                                                    .max_w(px(230.))
+                                                                    .px(px(8.))
+                                                                    .py(px(3.))
+                                                                    .truncate()
+                                                                    .text_size(px(12.))
+                                                                    .bg(color("ground"))
+                                                                    .text_color(color("ink-2"))
+                                                                    .rounded(px(theme::px_token(
+                                                                        "radius",
+                                                                        "radius-md",
+                                                                    )))
+                                                                    .child(label)
+                                                                    .tooltip(move |_, cx| {
+                                                                        cx.new(|_| {
+                                                                            ui::Tooltip(
+                                                                                path.clone().into(),
+                                                                                None,
+                                                                            )
+                                                                        })
+                                                                        .into()
+                                                                    })
+                                                            },
+                                                        ),
+                                                    ),
+                                                )
+                                            })
+                                            .when(!images.is_empty(), |s| {
+                                                s.child(
+                                                    div().flex().flex_wrap().gap(px(6.)).children(
+                                                        (0..images.len()).map(|at| {
+                                                            image_view::thumbnail(
+                                                                ("sent-image", at),
+                                                                at,
+                                                                images.clone(),
+                                                                this,
+                                                                entity.clone(),
+                                                            )
+                                                        }),
+                                                    ),
+                                                )
+                                            }),
+                                    )
+                                    .into_any_element()
+                            }
                             Message::Assistant { text, at } => div()
                                 .flex()
                                 .flex_col()
@@ -181,17 +244,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             )
                                         }),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(theme::BODY))
-                                        .line_height(px(theme::LINE))
-                                        .when(text.is_empty(), |s| s.text_color(color("ink-2")))
-                                        .child(if text.is_empty() {
-                                            "Thinking…".into()
-                                        } else {
-                                            text
-                                        }),
-                                )
+                                .child(reply_body(&text, id, this, entity.clone(), &mut missing))
                                 .into_any_element(),
                             Message::Plan {
                                 text,
@@ -348,6 +401,17 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                 })
                                 .into_any_element(),
                         };
+                        if !missing.is_empty() {
+                            let weak = entity.downgrade();
+                            cx.defer(move |cx| {
+                                weak.update(cx, |this, _| {
+                                    for picture in &missing {
+                                        this.source.read_image(picture);
+                                    }
+                                })
+                                .ok();
+                            });
+                        }
                         let tool = matches!(current, Message::Tool { .. });
                         div()
                             .w_full()
@@ -399,6 +463,57 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                 }),
         )
         .child(composer(w, &thread, draft_empty, window, cx))
+}
+
+fn reply_body(
+    text: &str,
+    id: usize,
+    w: &Workspace,
+    entity: Entity<Workspace>,
+    missing: &mut Vec<Picture>,
+) -> Div {
+    let blocks = reply_blocks(text);
+    let images: Arc<Vec<ImageItem>> = Arc::new(
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                ReplyBlock::Image { label, path } => Some(ImageItem {
+                    name: if label.is_empty() { *path } else { *label }.to_owned(),
+                    source: Source::Server(Picture::Reply {
+                        thread: id,
+                        path: (*path).to_owned(),
+                    }),
+                }),
+                ReplyBlock::Text(_) => None,
+            })
+            .collect(),
+    );
+    missing.extend(images.iter().filter_map(|image| image.missing(w)));
+    let mut at = 0;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .text_size(px(theme::BODY))
+        .line_height(px(theme::LINE))
+        .when(text.is_empty(), |s| {
+            s.text_color(color("ink-2")).child("Thinking…")
+        })
+        .children(blocks.into_iter().map(|block| match block {
+            ReplyBlock::Text(text) => div().child(text).into_any_element(),
+            ReplyBlock::Image { .. } => {
+                let current = at;
+                at += 1;
+                image_view::thumbnail(
+                    ("reply-image", current),
+                    current,
+                    images.clone(),
+                    w,
+                    entity.clone(),
+                )
+                .into_any_element()
+            }
+        }))
 }
 
 fn composer(
@@ -453,10 +568,15 @@ fn card(
     draft_empty: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) -> Div {
+) -> Stateful<Div> {
     let creating = w.creating;
     let running = thread.status == Status::Running && !creating;
+    let loading = w.active_composer().read(cx).loading_assets != 0;
     div()
+        .id("composer-card")
+        .on_drop(cx.listener(|this, dropped: &ExternalPaths, _, cx| {
+            this.drop_attachments(dropped.paths().to_vec(), cx)
+        }))
         .relative()
         .border(px(theme::px_token("stroke", "stroke-rule")))
         .border_color(color(if running { "live" } else { "edge" }))
@@ -499,24 +619,52 @@ fn card(
                     cx,
                 )),
         )
+        .when_some(w.active_composer().read(cx).once.clone(), |s, once| {
+            s.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(color("ink-2"))
+                    .child(format!(
+                        "{} · next prompt",
+                        mode_label(&INTERACTION_MODES, &once)
+                    ))
+                    .child(
+                        div()
+                            .id("clear-once")
+                            .control("Clear one-off mode")
+                            .p(px(3.))
+                            .child(ui::icon("x", "ink-2"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_composer().update(cx, |c, cx| {
+                                    c.once = None;
+                                    c.changed(cx);
+                                });
+                            })),
+                    ),
+            )
+        })
+        .when(!w.active_composer().read(cx).assets.is_empty(), |s| {
+            s.child(draft_assets(w, cx))
+        })
         .child(w.active_composer().clone())
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .id("attach")
-                        .inert("Attachments are unavailable in this preview")
-                        .ml(px(-6.))
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .child(ui::icon("paperclip", "ink-2")),
-                )
+                .child(attachment_menu(w, cx))
+                .child(improve_control(w, cx))
+                .when(loading, |s| {
+                    s.child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(color("ink-2"))
+                            .child("Attaching…"),
+                    )
+                })
                 .child(div().flex_1())
                 .when(running, |s| {
                     s.child(
@@ -597,12 +745,22 @@ fn card(
                                     )
                                 })
                                 .when(draft_empty, |s| {
-                                    s.cursor(CursorStyle::Arrow).opacity(0.35).tooltip(|_, cx| {
-                                        cx.new(|_| {
-                                            ui::Tooltip("Write a message to send".into(), Some("↵"))
-                                        })
-                                        .into()
-                                    })
+                                    s.cursor(CursorStyle::Arrow).opacity(0.35).tooltip(
+                                        move |_, cx| {
+                                            cx.new(move |_| {
+                                                ui::Tooltip(
+                                                    if loading {
+                                                        "Wait for attachments to load"
+                                                    } else {
+                                                        "Write a message to send"
+                                                    }
+                                                    .into(),
+                                                    Some("↵"),
+                                                )
+                                            })
+                                            .into()
+                                        },
+                                    )
                                 })
                                 .size(px(30.))
                                 .rounded(px(theme::px_token("radius", "radius-md")))
@@ -614,14 +772,314 @@ fn card(
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     window
                                         .focus(&this.active_composer().read(cx).focus.clone(), cx);
+                                    // Clicking Send submits the text as written; Enter selects
+                                    // a highlighted slash suggestion first.
+                                    this.active_composer()
+                                        .update(cx, |c, _| c.slash_dismissed = true);
                                     window.dispatch_action(Box::new(crate::composer::Send), cx);
                                 })),
                         ),
                 ),
         )
+        .when(!w.picker_open && w.dropdown.is_none(), |s| {
+            s.children(slash_menu(w, cx))
+        })
         .when(w.picker_open, |s| {
             s.child(crate::model_picker::render(w, window, cx))
         })
+}
+
+fn attachment_menu(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let open = w.dropdown == Some(Dropdown::Attach);
+    let button = div().id("attach");
+    let button = if open {
+        button.plain_control()
+    } else {
+        button.control("Attach files or images")
+    };
+    div()
+        .relative()
+        .ml(px(-6.))
+        .child(
+            button
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .when(open, |s| s.bg(color("sunk")))
+                .child(ui::icon("paperclip", "ink-2"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.dropdown = (!open).then_some(Dropdown::Attach);
+                    cx.notify();
+                })),
+        )
+        .when(open, |s| {
+            s.child(
+                deferred(
+                    menu_surface("attach-menu")
+                        .absolute()
+                        .bottom(relative(1.))
+                        .mb(px(6.))
+                        .left(px(0.))
+                        .w(px(208.))
+                        .children(
+                            [
+                                (false, "Attach files or images…"),
+                                (true, "Attach folders…"),
+                            ]
+                            .into_iter()
+                            .map(|(folders, label)| {
+                                menu_item(("attach-path", folders as usize), label.into(), false)
+                                    .plain_control()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.dropdown = None;
+                                        this.pick_attachments(folders, cx);
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                )
+                .with_priority(1),
+            )
+        })
+}
+
+fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let composer = w.active_composer().read(cx);
+    let undo = composer.undo_improvement.is_some();
+    let control = div()
+        .id("improve-draft")
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(8.))
+        .rounded(px(theme::px_token("radius", "radius-md")))
+        .text_size(px(12.))
+        .text_color(color("ink-2"))
+        .child(ui::icon("asterisk", "ink-2"))
+        .child(if w.improving {
+            "Improving…"
+        } else if undo {
+            "Undo improvement"
+        } else {
+            "Improve draft"
+        });
+    if w.improving
+        || composer.text().trim().is_empty()
+        || crate::composer_menu::mode_command(composer.text()).is_some()
+    {
+        control.disabled(if w.improving {
+            "Improving your draft"
+        } else {
+            "Write a prompt to improve it"
+        })
+    } else {
+        control
+            .plain_control()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let composer = this.active_composer().clone();
+                window.focus(&composer.read(cx).focus.clone(), cx);
+                if undo {
+                    composer.update(cx, |c, cx| {
+                        if let Some(original) = c.undo_improvement.take() {
+                            c.set_text(original, cx);
+                        }
+                    });
+                } else {
+                    this.improve_draft(cx);
+                }
+            }))
+    }
+}
+
+fn draft_assets(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let composer = w.active_composer().clone();
+    let assets = composer.read(cx).assets.clone();
+    let images: Arc<Vec<ImageItem>> = Arc::new(
+        assets
+            .iter()
+            .filter_map(|asset| match asset {
+                Asset::Image { name, image } => Some(ImageItem {
+                    name: name.clone(),
+                    source: Source::Draft(image.clone()),
+                }),
+                Asset::Path { .. } => None,
+            })
+            .collect(),
+    );
+    let entity = cx.entity();
+    let mut image_index = 0;
+    div()
+        .id("draft-attachments")
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .overflow_x_scroll()
+        .children(assets.into_iter().enumerate().map(|(index, asset)| {
+            let name = asset.name();
+            let composer = composer.clone();
+            let remove = div()
+                .id(("remove-attachment", index))
+                .control(format!("Remove {name}"))
+                .size(px(22.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .bg(color("ground"))
+                .child(ui::icon("x", "ink-2").size(px(12.)))
+                .on_click(move |_, window, cx| {
+                    composer.update(cx, |c, cx| {
+                        if index < c.assets.len() {
+                            c.assets.remove(index);
+                            c.changed(cx);
+                        }
+                        window.focus(&c.focus, cx);
+                    });
+                });
+            match asset {
+                Asset::Path { path, directory } => div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(28.))
+                    .max_w(px(230.))
+                    .pl(px(7.))
+                    .pr(px(3.))
+                    .bg(color("sunk"))
+                    .rounded(px(theme::px_token("radius", "radius-md")))
+                    .child(ui::icon("file", if directory { "ink" } else { "ink-2" }))
+                    .child(
+                        div()
+                            .id(("path-label", index))
+                            .truncate()
+                            .text_size(px(12.))
+                            .child(name)
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| {
+                                    ui::Tooltip(path.to_string_lossy().into_owned().into(), None)
+                                })
+                                .into()
+                            }),
+                    )
+                    .child(remove)
+                    .into_any_element(),
+                Asset::Image { .. } => {
+                    let at = image_index;
+                    image_index += 1;
+                    let chip = image_view::thumbnail(
+                        ("draft-image", index),
+                        at,
+                        images.clone(),
+                        w,
+                        entity.clone(),
+                    );
+                    div()
+                        .relative()
+                        .flex_shrink_0()
+                        .child(chip)
+                        .child(div().absolute().top(px(4.)).right(px(4.)).child(remove))
+                        .into_any_element()
+                }
+            }
+        }))
+}
+
+fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let composer = w.active_composer().read(cx);
+    composer.slash()?;
+    let selected = composer.choice;
+    let count = composer.choices.len();
+    let start = selected.saturating_sub(5);
+    let rows = composer
+        .choices
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(6)
+        .map(|(at, choice)| {
+            div()
+                .id(("slash-choice", at))
+                .plain_control()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .h(px(theme::ROW))
+                .rounded(px(theme::px_token("radius", "radius-md")))
+                .when(at == selected, |s| s.bg(color("sunk")))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(relative(0.55))
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(choice.invocation.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(color("ink-2"))
+                        .child(choice.description.clone()),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.active_composer().update(cx, |c, cx| {
+                        window.focus(&c.focus, cx);
+                        c.choose(at, window, cx);
+                    });
+                }))
+        })
+        .collect::<Vec<_>>();
+    Some(
+        deferred(
+            menu_surface("slash-menu")
+                .absolute()
+                .left(px(0.))
+                .bottom(relative(1.))
+                .mb(px(6.))
+                .w(px(370.))
+                .max_w(relative(1.))
+                .child(
+                    div()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .text_size(px(11.5))
+                        .text_color(color("ink-2"))
+                        .child(if count == 0 {
+                            "No matching commands".to_owned()
+                        } else if count > 6 {
+                            format!(
+                                "Commands and skills · {} of {count} · ↑ ↓ to browse",
+                                selected + 1
+                            )
+                        } else {
+                            "Commands and skills".into()
+                        }),
+                )
+                .children(rows)
+                .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
+                    this.active_composer().update(cx, |c, _| {
+                        let dy = event.delta.pixel_delta(px(theme::ROW)).y;
+                        if c.choices.len() > 6 {
+                            c.choice = c
+                                .choice
+                                .saturating_add_signed(if dy > px(0.) { -1 } else { 1 })
+                                .min(c.choices.len() - 1);
+                        }
+                    });
+                    cx.notify();
+                    cx.stop_propagation();
+                })),
+        )
+        .with_priority(1)
+        .into_any_element(),
+    )
 }
 
 /// How the thread (or the one being drafted) may act on its own.
@@ -836,7 +1294,7 @@ fn menu_chip(
     let table: &[(&str, &str)] = if kind == Dropdown::Access {
         &RUNTIME_MODES
     } else {
-        &INTERACTION_MODES
+        &INTERACTION_MODES[..3]
     };
     let current = if w.creating {
         if kind == Dropdown::Access {
@@ -1234,6 +1692,7 @@ mod tests {
         let messages = vec![
             User {
                 text: String::new(),
+                images: vec![],
             },
             step(),
             step(),

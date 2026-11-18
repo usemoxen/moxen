@@ -19,6 +19,8 @@
 //! rightclick X Y
 //! # a scroll of DX,DY points at X,Y
 //! scroll X Y DX DY
+//! # drop one local fixture path at X,Y without an OS drag
+//! drop-file X Y path with spaces.png
 //! # a keystroke as GPUI writes them: enter, escape, tab, shift-tab, cmd-k
 //! key cmd-k
 //! # types the rest of the line, as written, into the focused input
@@ -47,6 +49,7 @@ pub enum Command {
     Move(f32, f32),
     Click(f32, f32, MouseButton),
     Scroll(f32, f32, f32, f32),
+    DropFile(f32, f32, PathBuf),
     Key(String),
     Type(String),
     Screenshot(PathBuf),
@@ -95,6 +98,22 @@ pub fn parse(script: &str) -> Result<Vec<Command>, String> {
             "scroll" => {
                 let n = numbers(4)?;
                 Command::Scroll(n[0], n[1], n[2], n[3])
+            }
+            "drop-file" => {
+                let mut fields = rest.splitn(3, ' ');
+                let x = fields
+                    .next()
+                    .and_then(|x| x.parse().ok())
+                    .ok_or_else(|| at("expected x"))?;
+                let y = fields
+                    .next()
+                    .and_then(|y| y.parse().ok())
+                    .ok_or_else(|| at("expected y"))?;
+                let path = fields
+                    .next()
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(|| at("expected path"))?;
+                Command::DropFile(x, y, path.into())
             }
             "key" if !rest.trim().is_empty() => Command::Key(rest.trim().to_string()),
             // The text is the rest of the line as written, spaces included.
@@ -214,6 +233,19 @@ async fn execute(
                 }),
             ],
         )?,
+        Command::DropFile(x, y, path) => {
+            let position = at(x, y);
+            let paths = ExternalPaths(std::iter::once(path).collect());
+            dispatch(
+                cx,
+                window,
+                vec![
+                    PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }),
+                    PlatformInput::FileDrop(FileDropEvent::Pending { position }),
+                    PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+                ],
+            )?;
+        }
         Command::Key(keys) => {
             // A leaked string: `Keystroke::parse` wants `'static`, and a script
             // is a handful of lines in a short-lived process.

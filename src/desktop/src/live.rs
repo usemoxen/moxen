@@ -9,7 +9,9 @@
 //! stops listing it, because the window keys per-thread state by it.
 
 use crate::{
+    attachments::{self, Asset, Picture, Prompt},
     catalog::{Catalog, OptionValue, is_effort},
+    composer_menu::{Destination, Improvement, Inventory},
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
         Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
@@ -468,6 +470,12 @@ struct Waiting {
 }
 
 #[derive(Default)]
+struct SkillRead {
+    requested: Option<Instant>,
+    result: Option<Arc<Result<Inventory, String>>>,
+}
+
+#[derive(Default)]
 struct State {
     /// The open connection, while there is one.
     wire: Option<Arc<Wire>>,
@@ -484,6 +492,10 @@ struct State {
     ids: HashMap<String, ThreadId>,
     arranged: Arranged,
     projects: Vec<Project>,
+    project_roots: HashMap<String, String>,
+    skills: HashMap<(String, String), SkillRead>,
+    images: HashMap<Picture, Option<Result<Arc<gpui::Image>, String>>>,
+    improvements: VecDeque<(Improvement, Option<String>)>,
     /// Messages waiting for their turn, by thread, in the order they run.
     queues: HashMap<ThreadId, Vec<Queued>>,
     /// The whole server queue (thread, turn), in its order: moving one place
@@ -521,6 +533,24 @@ struct State {
     reverted: Option<(ThreadId, Option<String>)>,
 }
 impl State {
+    fn composer_directory(&self, target: &Destination) -> Option<&str> {
+        match target {
+            Destination::Thread(id) => self.slots.get(*id)?.cwd.as_deref(),
+            Destination::Project(id) => self.project_roots.get(id).map(String::as_str),
+        }
+    }
+
+    fn skill_key(
+        &self,
+        target: &Destination,
+        selection: Option<&Selection>,
+    ) -> Option<(String, String)> {
+        Some((
+            selection?.instance.clone(),
+            self.composer_directory(target)?.into(),
+        ))
+    }
+
     fn reserve_action(&mut self, id: ThreadId, is_side_question: bool) -> bool {
         if is_side_question && self.asking_side_question {
             self.problems.push_back(Problem {
@@ -545,6 +575,17 @@ impl State {
 
     /// Replaces the listed threads with a shell snapshot's.
     fn apply(&mut self, snapshot: &Value) {
+        self.project_roots = snapshot["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                Some((
+                    text(p, &["id"])?.into(),
+                    text(p, &["workspaceRoot"])?.into(),
+                ))
+            })
+            .collect();
         let projects: HashMap<&str, &str> = snapshot["projects"]
             .as_array()
             .into_iter()
@@ -754,11 +795,14 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
         let listed = entries
             .iter()
             .position(|e| text(e, &["turnId"]) == Some(turn_id));
+        let (body, images) =
+            attachments::user_images(message, text(message, &["text"]).unwrap_or_default());
         waiting.push((
             listed.unwrap_or(usize::MAX),
             Queued {
                 key: turn_id.to_string(),
-                text: text(message, &["text"]).unwrap_or_default().to_string(),
+                text: body,
+                images,
                 held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true),
                 scheduled: text(turn, &["scheduledFor"]).map(str::to_string),
                 earlier: 0,
@@ -1450,19 +1494,32 @@ impl ThreadSource for ServerSource {
         let state = self.shared.state.lock().expect("live state");
         state.queues.get(&id).cloned().unwrap_or_default()
     }
-    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<String> {
-        let text = {
+    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<Prompt> {
+        let queued = {
             let state = self.shared.state.lock().expect("live state");
             state
                 .queues
                 .get(&id)?
                 .iter()
                 .find(|queued| queued.key == key)?
-                .text
                 .clone()
         };
+        let mut assets = vec![];
+        for item in &queued.images {
+            match self.image(&item.source) {
+                Some(Ok(image)) => assets.push(Asset::Image {
+                    name: item.name.clone(),
+                    image,
+                }),
+                _ => return None,
+            }
+        }
         self.edit_queued(id, key, QueueEdit::Remove);
-        Some(text)
+        Some(Prompt {
+            text: queued.text,
+            assets,
+            once: None,
+        })
     }
     fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit) {
         let Some((uuid, steps)) = ({
@@ -1760,15 +1817,18 @@ impl ThreadSource for ServerSource {
             });
         });
     }
-    fn send_message(&mut self, id: ThreadId, text: String, delivery: Delivery) -> Option<Reply> {
+    fn send_message(&mut self, id: ThreadId, prompt: Prompt, delivery: Delivery) -> Option<Reply> {
         let (uuid, busy) = {
             let state = self.shared.state.lock().expect("live state");
             let slot = state.slots.get(id)?;
-            (slot.uuid.clone(), slot.thread.status == Status::Running)
+            (
+                slot.uuid.clone(),
+                matches!(slot.thread.status, Status::Running | Status::Held),
+            )
         };
         let mut command = json!({
             "threadId": uuid,
-            "message": { "text": text },
+            "message": prompt.wire(),
             // A settled thread wakes on the send, as the TUI's does.
             "wakeSettled": true,
         });
@@ -1778,13 +1838,142 @@ impl ThreadSource for ServerSource {
                 Delivery::Queue => "queue",
             }
             .into();
+        } else if let Some(mode) = &prompt.once {
+            command["interactionMode"] = mode.clone().into();
         }
-        background(&self.shared, move |wire| {
+        background_result(&self.shared, move |wire, _| {
+            let wire = wire.map_err(|error| problem(&error, Some((Some(id), prompt.clone()))))?;
             wire.dispatch("thread.turn.start", command)
                 .map(|_| ())
-                .map_err(|error| problem(&error, Some((Some(id), text))))
+                .map_err(|error| problem(&error, Some((Some(id), prompt))))
         });
         None
+    }
+    fn composer_directory(&self, target: &Destination) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .composer_directory(target)
+            .map(str::to_owned)
+    }
+    fn read_skills(&mut self, target: &Destination, selection: Option<&Selection>) {
+        let key = {
+            let mut state = self.shared.state.lock().expect("live state");
+            if state.wire.is_none() {
+                return;
+            }
+            let Some(key) = state.skill_key(target, selection) else {
+                return;
+            };
+            let read = state.skills.entry(key.clone()).or_default();
+            if read
+                .requested
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(15))
+            {
+                return;
+            }
+            read.requested = Some(Instant::now());
+            key
+        };
+        let shared = self.shared.clone();
+        with_wire(&self.shared, move |wire| {
+            let result = wire
+                .query("skills.list", json!({ "instanceId": key.0, "cwd": key.1 }))
+                .map_err(|e| e.message)
+                .and_then(|value| Inventory::decode(&value));
+            shared.update(|state| {
+                let read = state.skills.entry(key).or_default();
+                read.result = Some(Arc::new(result));
+            });
+        });
+    }
+    fn skills(
+        &self,
+        target: &Destination,
+        selection: Option<&Selection>,
+    ) -> Option<Arc<Result<Inventory, String>>> {
+        let state = self.shared.state.lock().expect("live state");
+        state
+            .skills
+            .get(&state.skill_key(target, selection)?)?
+            .result
+            .clone()
+    }
+    fn read_image(&mut self, picture: &Picture) {
+        let request = {
+            let mut state = self.shared.state.lock().expect("live state");
+            if state.wire.is_none() || state.images.contains_key(picture) {
+                return;
+            }
+            let request = match picture {
+                Picture::Stored(id) => ("attachment.read", json!({ "attachmentId": id })),
+                Picture::Reply { thread, path } => {
+                    let Some(slot) = state.slots.get(*thread) else {
+                        return;
+                    };
+                    ("image.read", json!({ "threadId": slot.uuid, "path": path }))
+                }
+            };
+            state.images.insert(picture.clone(), None);
+            request
+        };
+        let picture = picture.clone();
+        let shared = self.shared.clone();
+        with_wire(&self.shared, move |wire| {
+            let result = wire
+                .query(request.0, request.1)
+                .map_err(|e| e.message)
+                .and_then(|value| attachments::decode(&value));
+            shared.update(|state| {
+                state.images.insert(picture, Some(result));
+            });
+        });
+    }
+    fn image(&self, picture: &Picture) -> Option<Result<Arc<gpui::Image>, String>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .images
+            .get(picture)?
+            .clone()
+    }
+    fn improve(&mut self, request: Improvement) {
+        let shared = self.shared.clone();
+        background_result(&self.shared, move |wire, _| {
+            let mut fields = json!({
+                "directory": request.directory, "prompt": request.original, "protectedText": [],
+            });
+            if let Some(selection) = &request.selection {
+                fields["modelSelection"] = selection.to_json();
+            }
+            let result = wire
+                .and_then(|wire| wire.dispatch("prompt.improve", fields))
+                .and_then(|value| {
+                    text(&value, &["text"])
+                        .map(str::to_owned)
+                        .filter(|text| !text.trim().is_empty())
+                        .ok_or_else(|| WireError {
+                            code: "INVALID_REPLY".into(),
+                            message: "The improver returned an empty draft.".into(),
+                        })
+                });
+            shared.update(|state| {
+                state
+                    .improvements
+                    .push_back((request, result.as_ref().ok().cloned()))
+            });
+            result.map(|_| ()).map_err(|e| problem(&e, None))
+        });
+    }
+    fn take_improvement(&mut self) -> Option<(Improvement, Option<String>)> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .improvements
+            .pop_front()
     }
     fn stop(&mut self, id: ThreadId) {
         let Some(uuid) = self.uuid_of(id) else {
@@ -1869,10 +2058,12 @@ impl ThreadSource for ServerSource {
             project_selection(&state, &draft.project)
         });
         let shared = self.shared.clone();
-        background(&self.shared, move |wire| {
-            let unsent = || Some((None, draft.text.clone()));
-            let title: String = draft
-                .text
+        background_result(&self.shared, move |wire, _| {
+            let unsent = || Some((None, draft.prompt.clone()));
+            let wire = wire.map_err(|error| problem(&error, unsent()))?;
+            let message = draft.prompt.wire();
+            let title: String = text(&message, &["text"])
+                .unwrap_or_default()
                 .lines()
                 .next()
                 .unwrap_or_default()
@@ -1896,14 +2087,23 @@ impl ThreadSource for ServerSource {
             let uuid = text(&created, &["threadId"])
                 .unwrap_or_default()
                 .to_string();
-            shared.update(|state| state.opening = Some(uuid.clone()));
-            let mut start = json!({ "threadId": uuid, "message": { "text": draft.text } });
+            let mut start = json!({ "threadId": uuid, "message": message });
+            if let Some(mode) = &draft.prompt.once {
+                start["interactionMode"] = mode.clone().into();
+            }
             if let Some(selection) = selection {
                 start["modelSelection"] = selection;
             }
             wire.dispatch("thread.turn.start", start)
-                .map(|_| ())
-                .map_err(|error| problem(&error, unsent()))
+                .map_err(|error| problem(&error, unsent()))?;
+            shared.update(|state| {
+                if let Some(id) = state.ids.get(&uuid) {
+                    state.opened = Some(*id);
+                } else {
+                    state.opening = Some(uuid);
+                }
+            });
+            Ok(())
         });
     }
     fn add_project(&mut self, path: String) {
@@ -2320,7 +2520,7 @@ fn read_tree(wire: &Wire, uuid: &str, root: Option<String>) -> Result<Patch, Str
 }
 
 /// What a refused or failed command tells the user.
-fn problem(error: &WireError, unsent: Option<(Option<ThreadId>, String)>) -> Problem {
+fn problem(error: &WireError, unsent: Option<(Option<ThreadId>, Prompt)>) -> Problem {
     Problem {
         message: error.message.chars().take(160).collect(),
         unsent,
@@ -2767,6 +2967,14 @@ mod tests {
                                 "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n"
                             ),
                             "query" => match params["type"].as_str() {
+                                Some("skills.list") => {
+                                    seen.lock().unwrap().push(params.clone());
+                                    json!({"trigger": "/", "skills": [{"name": "design-review", "enabled": true, "userInvocable": true}],"commands":[]})
+                                }
+                                Some("attachment.read" | "image.read") => {
+                                    seen.lock().unwrap().push(params.clone());
+                                    json!({"mimeType":"image/png","dataUrl":attachments::SAMPLE})
+                                }
                                 Some("thread.delegation") => {
                                     assert_eq!(
                                         params,
@@ -2896,6 +3104,17 @@ mod tests {
                                     Some("thread.side-question") => {
                                         json!({"text": "Separate answer"})
                                     }
+                                    Some("prompt.improve") => {
+                                        json!({"text": "Clarify the expected result.", "provider": "claude", "model": "opus"})
+                                    }
+                                    Some("thread.turn.start")
+                                        if params["message"]["text"] == "reject draft" =>
+                                    {
+                                        writeln!(writer, "{}", json!({"id": id, "error": {
+                                            "code": "ATTACHMENT_REJECTED", "message": "Attachment rejected by the server."
+                                        }})).unwrap();
+                                        continue;
+                                    }
                                     Some("thread.turn.start" | "thread.turn.interrupt") => {
                                         json!({"accepted": true, "threadId": "new-thread"})
                                     }
@@ -2969,7 +3188,13 @@ mod tests {
                 .all(|m| m["type"] == "queue.edit" && m["action"] == "up" && m["turnId"] == "t2")
         );
         // Taking one back to edit returns its text and cancels that turn.
-        assert_eq!(source.take_queued(0, "t1").as_deref(), Some("first"));
+        assert_eq!(
+            source
+                .take_queued(0, "t1")
+                .map(|prompt| prompt.text)
+                .as_deref(),
+            Some("first")
+        );
         let cancel = sent(6);
         assert_eq!(cancel["type"], "thread.turn.interrupt");
         assert_eq!(cancel["turnId"], "t1");
@@ -2979,7 +3204,7 @@ mod tests {
         // started with its message.
         source.create_thread(NewThread {
             project: "p".into(),
-            text: "build it\nplease".into(),
+            prompt: "build it\nplease".into(),
             runtime_mode: Some("auto".into()),
             interaction_mode: "research".into(),
             model: None,
@@ -3018,7 +3243,7 @@ mod tests {
             .with_option("effort", "max");
         source.create_thread(NewThread {
             project: "p".into(),
-            text: "again".into(),
+            prompt: "again".into(),
             runtime_mode: None,
             interaction_mode: "default".into(),
             model: Some(max.clone()),
@@ -3390,6 +3615,121 @@ mod tests {
             }
             assert_eq!(commands.lock().unwrap().len(), sent_through);
         }
+        let mut expect = |payload: Value| {
+            sent_through += 1;
+            assert_eq!(sent(sent_through), payload);
+        };
+        source.set_modes(0, "full-access", "orchestrate");
+        expect(
+            json!({"type":"thread.interaction-mode.set","threadId":"t1","interactionMode":"orchestrate"}),
+        );
+        let destination = Destination::Project("p".into());
+        let model = Selection::from_json(&json!({"instanceId":"claude","model":"opus"})).unwrap();
+        source.read_skills(&destination, Some(&model));
+        expect(json!({"type":"skills.list", "instanceId":"claude", "cwd":"/fake/project"}));
+        wait_for("the skill inventory", || {
+            source.skills(&destination, Some(&model)).is_some()
+        });
+        assert_eq!(
+            source
+                .skills(&destination, Some(&model))
+                .unwrap()
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .0[0]
+                .invocation,
+            "/design-review"
+        );
+        source.read_skills(&destination, Some(&model));
+
+        let stored = Picture::Stored("img-1".into());
+        source.read_image(&stored);
+        expect(json!({"type":"attachment.read", "attachmentId":"img-1"}));
+        let path = std::path::PathBuf::from("screenshots")
+            .join("result.png")
+            .to_string_lossy()
+            .into_owned();
+        let reply = Picture::Reply {
+            thread: 0,
+            path: path.clone(),
+        };
+        source.read_image(&reply);
+        expect(json!({"type":"image.read", "threadId":"t1", "path":path}));
+        wait_for("both image reads", || {
+            source.image(&stored).is_some() && source.image(&reply).is_some()
+        });
+        let image = source.image(&stored).unwrap().unwrap();
+        assert_eq!(source.image(&reply).unwrap().unwrap(), image);
+
+        let request = Improvement {
+            destination,
+            revision: 7,
+            directory: "/fake/project".into(),
+            selection: Some(model.clone()),
+            original: "fix it".into(),
+        };
+        source.improve(request.clone());
+        expect(
+            json!({"type":"prompt.improve", "directory":"/fake/project", "prompt":"fix it",
+            "modelSelection":{"instanceId":"claude","model":"opus"}, "protectedText":[]}),
+        );
+        let mut improved = None;
+        wait_for("improved draft", || {
+            improved = source.take_improvement();
+            improved.is_some()
+        });
+        assert_eq!(
+            improved,
+            Some((request, Some("Clarify the expected result.".into())))
+        );
+
+        let asset = Asset::Image {
+            name: "shot.png".into(),
+            image,
+        };
+        let upload = json!({"type":"image","name":"shot.png","mimeType":"image/png","sizeBytes":68,"dataUrl":attachments::SAMPLE});
+        let with = |text: &str, once: &str| Prompt {
+            text: text.into(),
+            assets: vec![asset.clone()],
+            once: Some(once.into()),
+        };
+        source.send_message(0, with("inspect", "review"), Delivery::Queue);
+        expect(
+            json!({"type":"thread.turn.start", "threadId":"t1", "message":{"text":"inspect", "attachments":[upload]},
+            "wakeSettled":true,"delivery":"queue"}),
+        );
+        source.shared.update(|state| {
+            state.slots[0].thread.status = Status::Idle;
+        });
+        let rejected = with("reject draft", "review");
+        source.send_message(0, rejected.clone(), Delivery::Steer);
+        expect(
+            json!({"type":"thread.turn.start", "threadId":"t1", "message":{"text":"reject draft", "attachments":[upload]},
+            "wakeSettled":true,"interactionMode":"review"}),
+        );
+        let mut failed = None;
+        wait_for("the rejected message", || {
+            failed = source.take_problem();
+            failed.is_some()
+        });
+        assert_eq!(failed.unwrap().unsent, Some((Some(0), rejected)));
+
+        source.create_thread(NewThread {
+            project: "p".into(),
+            prompt: with("", "orchestrate"),
+            runtime_mode: None,
+            interaction_mode: "default".into(),
+            model: Some(model),
+        });
+        expect(
+            json!({"type":"thread.create","projectId":"p","title":"[Image #1]","interactionMode":"default",
+            "modelSelection":{"instanceId":"claude","model":"opus"}}),
+        );
+        expect(
+            json!({"type":"thread.turn.start","threadId":"new-thread","interactionMode":"orchestrate",
+            "message":{"text":"[Image #1]","attachments":[upload]},"modelSelection":{"instanceId":"claude","model":"opus"}}),
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

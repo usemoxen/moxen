@@ -298,7 +298,7 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
         .messages(id)
         .iter()
         .find_map(|message| match message {
-            Message::User { text } => Some(text.trim().to_string()),
+            Message::User { text, .. } => Some(text.trim().to_string()),
             _ => None,
         });
     let (model, _) = w.model_label(w.source.selection(id).as_ref());
@@ -491,7 +491,7 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
     match read.as_deref() {
         Some(Ok(View::Subagent(Some(rows)))) if !rows.is_empty() => {
             pane = pane.children(rows.iter().map(|row| match &row.message {
-                Message::User { text } => detail_line("Prompt", text.clone()),
+                Message::User { text, .. } => detail_line("Prompt", text.clone()),
                 Message::Assistant { text, .. } => detail_line("Reply", text.clone()),
                 Message::Plan { text, .. } => detail_line("Plan", text.clone()),
                 Message::Tool {

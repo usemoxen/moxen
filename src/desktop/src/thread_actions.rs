@@ -431,7 +431,7 @@ pub fn popup(
     let mut height = px(12.);
     if let Some(index) = popup.message {
         if let Some(message) = w.source.messages(id).get(index)
-            && let Message::User { text } | Message::Assistant { text, .. } = message
+            && let Message::User { text, .. } | Message::Assistant { text, .. } = message
         {
             let copy = text.clone();
             let draft = matches!(message, Message::User { .. }).then(|| copy.clone());

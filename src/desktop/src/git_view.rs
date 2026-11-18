@@ -199,7 +199,7 @@ impl Workspace {
         let base = self.base_of(&git);
         let prompt =
             git::open_request_prompt(kind, draft, branch.as_deref(), base.as_deref(), false);
-        self.source.send_message(id, prompt, Delivery::Queue);
+        self.source.send_message(id, prompt.into(), Delivery::Queue);
         self.git_ui.note = Some(format!(
             "Asked the agent to open a {}{}.",
             if draft { "draft " } else { "" },

@@ -37,8 +37,27 @@ same native subagent rows the TUI derives from the activity history.
   lands at the turn's next step) and Cmd/Ctrl+Enter or Queue queues
   (`delivery: "queue"`), as the TUI's Enter and Tab do. Stop and Escape send
   `thread.turn.interrupt`, only while a turn runs. A command the server refuses
-  shows its message above the composer and puts the unsent text back in the
-  draft.
+  shows its message above the composer and puts the unsent text and
+  attachments back in the draft.
+- The paperclip opens the native file or folder picker. Files and images can
+  also be dropped onto the composer or pasted from the clipboard. Files and
+  folders travel as path references; PNG, JPEG, GIF and WebP images travel
+  inline with the turn. Images are bounded before upload and the server
+  validates the final turn. Click a draft or transcript thumbnail to open
+  the viewer; use Left/Right to step through the message's images, +/− to
+  zoom, drag to pan, and Escape to close it. Sent attachments and local
+  images shown in a reply come from `attachment.read` and `image.read`.
+- Type `/` for the command picker. It reads the selected provider's skills
+  and slash commands for the thread's working directory (`skills.list`).
+  Use Up/Down to browse and Tab or Enter to insert. `$name` is also offered
+  for providers that use dollar-prefixed skills. Shift+Tab while editing an
+  idle draft cycles Build, Research and Orchestrate. Use `/research`,
+  `/orchestrate` or `/review` before a prompt to change only that turn, or
+  submit the command alone to arm it for the next idle send.
+- **Improve draft** sends the draft text and its destination to
+  `prompt.improve`. Attachments stay in the composer. The result only
+  replaces the draft it was requested for, and **Undo improvement** restores
+  the original text.
 - The queue strip lists the thread's waiting messages in the server's order
   (`queuedTurns` joined with `queue.read`, which knows which are held). Each can
   move earlier or later (`queue.edit` `up`/`down`, as many steps as other
@@ -56,7 +75,7 @@ same native subagent rows the TUI derives from the activity history.
   else the one the project's newest thread runs on (the server's default with
   none). The access and mode chips of an open,
   idle thread change it (`thread.runtime-mode.set`, `thread.interaction-mode.set`).
-  Not done: attachments, scheduled sends and queue conditions, starting the
+  Not done: scheduled sends and queue conditions, starting the
   first thread of an account with none, and the run-size question of `/research`.
 - A thread that waits on the person shows a panel in the composer's place, as
   the TUI's answer and permission panels do (`ask.rs`, `pending.rs`). Both are
@@ -217,7 +236,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line;
   Cmd/Ctrl+Enter queues while a turn runs. Send uses the same action. In the mock, Stop (Escape) cancels the simulated
   reply; late words from that reply cannot mutate a later turn.
-- Tab and Shift+Tab move focus between controls; the focused one carries a
+- Tab and Shift+Tab move focus between controls outside the composer shortcuts
+  above; the focused control carries a
   2px `live` ring. Hovered controls show a tooltip with their shortcut as a key
   cap; the toolbar controls (search, Tasks, inspector, stop, send) show the
   same tip while they hold keyboard focus, since GPUI hides hover tooltips in
@@ -226,7 +246,7 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 
 The interaction below describes the mock window (`--mock`).
 
-New-thread creation, attachments, settings, access selection, commit history,
+Settings, commit history,
 real usage, queued-send execution and forge actions are not wired to a
 backend; their controls say so in a tooltip. The initial running fixture stays
 live until Stop is clicked.
@@ -277,6 +297,7 @@ wait 500                  # run frames for 500 ms, so animations advance
 move X Y                  # pointer to a window point (points, origin top-left)
 click X Y                 # also rightclick X Y
 scroll X Y DX DY
+drop-file X Y fixture.png # inject a file drop at a window point
 key cmd-k                 # a keystroke: enter, escape, tab, shift-tab, cmd-k
 type some text            # the rest of the line, as written, into the focused input
 screenshot out/main.png

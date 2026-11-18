@@ -1,4 +1,6 @@
+use crate::attachments::{Asset, Picture, Prompt, Thumbnail};
 use crate::catalog::{Catalog, OptionValue};
+use crate::composer_menu::{Destination, Improvement, Inventory};
 use crate::model::*;
 use crate::work::{
     self, Agent, Background, BackgroundTask, Delegated, Delegation, InspectorData, Read, View,
@@ -15,7 +17,9 @@ pub struct MockSource {
     threads: Vec<Thread>,
     messages: Vec<Vec<Message>>,
     running: Vec<Option<usize>>,
-    queues: Vec<Vec<String>>,
+    queues: Vec<Vec<Prompt>>,
+    images: HashMap<Picture, Arc<gpui::Image>>,
+    improvement: Option<(Improvement, Option<String>)>,
     opened: Option<ThreadId>,
     added: Option<String>,
     catalog: std::sync::Arc<Catalog>,
@@ -200,7 +204,7 @@ impl MockSource {
             )
             .collect();
         let messages = threads.iter().map(|t| vec![
-            Message::User { text: format!("Please investigate: {}. Keep the change focused and verify the result.", t.title) },
+            Message::User { text: format!("Please investigate: {}. Keep the change focused and verify the result.", t.title), images: vec![] },
             Message::Assistant{ text: "I traced the event from the control to its view state. The state updates correctly; I’m checking the layout and keyboard path before changing the presentation.".into(), at: "Thu 09:38".into() },
             tool("read", "src/model_picker.rs", "124 lines · src/model_picker.rs\n\nfn open_picker(&mut self) {\n    self.picker_open = true;\n    self.search.focus();\n}"),
             tool("thought", "Keep focus inside the picker until a selection is made.", "Opening a picker should put focus in search. Escape returns focus to the trigger; choosing a model should preserve the draft and effort. I’ll verify each path independently."),
@@ -218,6 +222,8 @@ impl MockSource {
             messages,
             running: vec![None; count],
             queues: vec![vec![]; count],
+            images: HashMap::new(),
+            improvement: None,
             opened: None,
             added: None,
             catalog: std::sync::Arc::new(
@@ -244,6 +250,46 @@ impl MockSource {
         source.threads[0].started_at = Some(Instant::now());
         source.queues[0].push("Also check Escape returns focus to the model control.".into());
         source.threads[1].depth = 1;
+        // A checkerboard with large cells keeps thumbnail scaling and zoom visible.
+        let specimen = |wide: bool| {
+            let (width, height) = if wide { (480, 300) } else { (320, 440) };
+            let rgba = ::image::RgbImage::from_fn(width, height, |x, y| {
+                ::image::Rgb(match ((x / 40 + y / 40) % 2, wide) {
+                    (0, true) => [61, 141, 154],
+                    (_, true) => [190, 226, 226],
+                    (0, false) => [193, 131, 104],
+                    _ => [247, 211, 157],
+                })
+            });
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            rgba.write_to(&mut bytes, ::image::ImageFormat::Png)
+                .expect("mock image");
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                bytes.into_inner(),
+            ))
+        };
+        let images = vec![
+            Thumbnail {
+                name: "Layout detail.png".into(),
+                source: Picture::Stored("layout-detail".into()),
+            },
+            Thumbnail {
+                name: "Portrait crop.png".into(),
+                source: Picture::Stored("portrait-crop".into()),
+            },
+        ];
+        for (index, image) in images.iter().enumerate() {
+            source
+                .images
+                .insert(image.source.clone(), specimen(index == 0));
+        }
+        if let Message::User {
+            images: attached, ..
+        } = &mut source.messages[2][0]
+        {
+            *attached = images;
+        }
         source.agents = work::agents(&json!({"subagentRows": [
             { "agentId": "explore", "agentType": "Explore", "description": "Trace keyboard focus",
               "running": false, "lastMessage": "The picker restores focus on close." },
@@ -419,7 +465,7 @@ impl ThreadSource for MockSource {
             }
             ThreadAction::Continue { selection } => self.create_thread(NewThread {
                 project: self.threads[id].project.clone(),
-                text: format!("Continue {}", self.threads[id].title),
+                prompt: format!("Continue {}", self.threads[id].title).into(),
                 runtime_mode: Some(self.threads[id].runtime_mode.clone()),
                 interaction_mode: self.threads[id].interaction_mode.clone(),
                 model: selection,
@@ -430,7 +476,7 @@ impl ThreadSource for MockSource {
                 selection,
             } => self.create_thread(NewThread {
                 project: self.threads[id].project.clone(),
-                text: prompt,
+                prompt: prompt.into(),
                 runtime_mode: Some(self.threads[id].runtime_mode.clone()),
                 interaction_mode: self.threads[id].interaction_mode.clone(),
                 model: Some(selection),
@@ -442,9 +488,10 @@ impl ThreadSource for MockSource {
         self.queues[id]
             .iter()
             .enumerate()
-            .map(|(at, text)| Queued {
+            .map(|(at, prompt)| Queued {
                 key: at.to_string(),
-                text: text.clone(),
+                text: prompt.text.clone(),
+                images: vec![],
                 held: false,
                 scheduled: None,
                 earlier: at,
@@ -452,7 +499,7 @@ impl ThreadSource for MockSource {
             })
             .collect()
     }
-    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<String> {
+    fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<Prompt> {
         let at: usize = key.parse().ok()?;
         (at < self.queues[id].len()).then(|| self.queues[id].remove(at))
     }
@@ -484,7 +531,7 @@ impl ThreadSource for MockSource {
     }
     fn create_thread(&mut self, draft: NewThread) {
         let id = self.threads.len();
-        let title: String = draft.text.chars().take(48).collect();
+        let title: String = draft.prompt.text.chars().take(48).collect();
         let selection = draft.model.unwrap_or_else(opus);
         self.threads.push(Thread {
             id,
@@ -499,8 +546,9 @@ impl ThreadSource for MockSource {
             runtime_mode: draft.runtime_mode.unwrap_or_else(|| "full-access".into()),
             interaction_mode: draft.interaction_mode,
         });
+        let message = self.user_message(draft.prompt);
         self.messages.push(vec![
-            Message::User { text: draft.text },
+            message,
             Message::Assistant {
                 text: "Started. This is the mock source, so nothing runs.".into(),
                 at: "Thu 09:38".into(),
@@ -680,18 +728,19 @@ impl ThreadSource for MockSource {
     fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>> {
         std::sync::Arc::new(self.messages[id].clone())
     }
-    fn send_message(&mut self, id: ThreadId, text: String, _: Delivery) -> Option<Reply> {
-        if text.trim().is_empty() {
+    fn send_message(&mut self, id: ThreadId, prompt: Prompt, _: Delivery) -> Option<Reply> {
+        if prompt.text.trim().is_empty() && prompt.assets.is_empty() {
             return None;
         }
         if self.threads[id].status == Status::Running {
-            self.queues[id].push(text);
+            self.queues[id].push(prompt);
             return None;
         }
         self.threads[id].status = Status::Running;
         self.threads[id].started_at = Some(Instant::now());
         self.threads[id].activity = "now".into();
-        self.messages[id].push(Message::User { text });
+        let message = self.user_message(prompt);
+        self.messages[id].push(message);
         let message = self.messages[id].len();
         self.messages[id].push(Message::Assistant {
             text: String::new(),
@@ -699,6 +748,35 @@ impl ThreadSource for MockSource {
         });
         self.running[id] = Some(message);
         Some(Reply { message, words: "The keyboard path is verified. Search receives focus on open, selection preserves the draft, and Escape returns to the trigger. The targeted tests pass; I’m checking the native window next.".split_inclusive(' ').map(str::to_string).collect() })
+    }
+    fn composer_directory(&self, _: &Destination) -> Option<String> {
+        Some("mock-project".into())
+    }
+    fn skills(
+        &self,
+        _: &Destination,
+        _: Option<&Selection>,
+    ) -> Option<Arc<Result<Inventory, String>>> {
+        Some(Arc::new(Inventory::decode(&json!({
+            "trigger": "/", "skills": [
+              {"name":"accessibility", "description":"Check keyboard and screen reader behavior", "enabled":true, "userInvocable":true},
+              {"name":"design-review", "description":"Review layout and interaction against the design system", "enabled":true, "userInvocable":true}
+            ],
+            "commands": [{"name":"compact", "description":"Summarize the current thread"}]
+        }))))
+    }
+    fn image(&self, picture: &Picture) -> Option<Result<Arc<gpui::Image>, String>> {
+        self.images.get(picture).cloned().map(Ok)
+    }
+    fn improve(&mut self, request: Improvement) {
+        let improved = format!(
+            "{}. State the expected behavior and verify the result.",
+            request.original.trim().trim_end_matches('.')
+        );
+        self.improvement = Some((request, Some(improved)));
+    }
+    fn take_improvement(&mut self) -> Option<(Improvement, Option<String>)> {
+        self.improvement.take()
     }
     fn stream_word(&mut self, id: ThreadId, message: usize, word: &str, finished: bool) {
         if self.running[id] != Some(message) {
@@ -717,6 +795,28 @@ impl ThreadSource for MockSource {
         self.running[id] = None;
         self.threads[id].status = Status::Idle;
         self.threads[id].started_at = None;
+    }
+}
+
+impl MockSource {
+    fn user_message(&mut self, prompt: Prompt) -> Message {
+        let text = prompt.wire()["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let images = prompt
+            .assets
+            .into_iter()
+            .filter_map(|asset| {
+                let Asset::Image { name, image } = asset else {
+                    return None;
+                };
+                let source = Picture::Stored(image.id.to_string());
+                self.images.insert(source.clone(), image);
+                Some(Thumbnail { name, source })
+            })
+            .collect();
+        Message::User { text, images }
     }
 }
 
@@ -760,7 +860,13 @@ mod tests {
         assert_eq!(source.queued(0)[0].text, "next");
         source.stream_word(0, reply.message, "reply", true);
         assert_eq!(source.messages(2).len(), other);
-        assert_eq!(source.take_queued(0, "0").as_deref(), Some("next"));
+        assert_eq!(
+            source
+                .take_queued(0, "0")
+                .map(|prompt| prompt.text)
+                .as_deref(),
+            Some("next")
+        );
         assert!(source.take_queued(0, "0").is_none());
     }
 }
