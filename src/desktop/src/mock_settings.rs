@@ -46,7 +46,7 @@ pub fn snapshot_fixture() -> Snapshot {
                 "section": "long-threads", "kind": {"type": "line", "presets": ["40%", "50%", "60%", "70%", "80%", "90%", "8K", "16K", "24K", "32K", "64K", "128K", "256K", "512K", "1M"]}},
              "explicit": false, "effective": {"value": "50%", "label": "50% of the window"}},
             {"descriptor": {"key": "instructions", "label": "Extra instructions",
-                "description": "Appended to every provider session's system prompt.",
+                "description": "Appended to every provider session's system prompt. Each provider's 'Provider instructions' come after these, and a project's moxen.json after that.",
                 "section": "agent", "kind": {"type": "string", "placeholder": "Appended to every session", "multiline": true}},
              "explicit": false},
             {"descriptor": {"key": "branchPruneDays", "label": "Delete finished worktree branches after",
@@ -89,6 +89,14 @@ pub fn snapshot_fixture() -> Snapshot {
                     {"value": "gruvbox", "label": "Gruvbox"},
                     {"value": "tokyo-night", "label": "Tokyo Night"}]}},
              "value": "moxen", "explicit": false},
+            {"descriptor": {"key": "ui.language", "label": "Language", "description": "The language of the interface.",
+                "section": "interface", "kind": {"type": "enum", "choices": [
+                    {"value": "auto", "label": "Auto"}, {"value": "en", "label": "English"},
+                    {"value": "es-ES", "label": "Español (España)"}]}}, "value": "auto", "explicit": false},
+            {"descriptor": {"key": "ui.backdrop", "label": "Backdrop", "description": "The animated field behind the thread list and the new-thread view.",
+                "section": "interface", "kind": {"type": "enum", "choices": [
+                    {"value": "animated", "label": "Animated"}, {"value": "static", "label": "Static"},
+                    {"value": "off", "label": "Off"}]}}, "value": "animated", "explicit": false},
             {"descriptor": {"key": "ui.usageRefreshSeconds", "label": "Usage refresh", "description": "How often plan usage windows are re-read.",
                 "section": "interface",
                 "kind": {"type": "integer", "min": 5, "max": 3600, "unit": "s"}},
@@ -125,7 +133,7 @@ pub fn snapshot_fixture() -> Snapshot {
                      {"path": "apiKey", "value": "keychain:providers.harness.profiles[office].apiKey", "explicit": true},
                      {"path": "apiKeyEnv", "value": "", "explicit": false},
                      {"path": "slots", "value": 4, "explicit": false,
-                      "effective": {"value": 4, "label": "4", "origin": "the Moxen Harness's own Requests at once"}}],
+                      "effective": {"value": 4, "origin": "the Moxen Harness's own Requests at once"}}],
                  "resolved": [
                      {"label": "large", "value": "ready", "origin": "the last probe"},
                      {"label": "small", "value": "not probed", "origin": "no probe yet"}]}]},
@@ -233,6 +241,7 @@ pub fn skill_fixture() -> (Vec<ManagedSkill>, Vec<(String, String, String)>) {
 
 pub fn embeddings_fixture() -> Embeddings {
     Embeddings {
+        phase: "idle".into(),
         state: "ready".into(),
         message: None,
         percent: None,
@@ -258,6 +267,8 @@ pub fn remote_fixture() -> RemoteState {
 
 pub fn updates_fixture() -> UpdateState {
     UpdateState {
+        install_kind: Some("release".into()),
+        release_notes: None,
         providers: vec![crate::settings::ProviderLatest {
             id: "claude".into(),
             latest: Some("2.0.0".into()),

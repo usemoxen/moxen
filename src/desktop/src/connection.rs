@@ -3,6 +3,7 @@
 //! threads yet.
 
 use crate::{
+    language::{desktop, message},
     model::Connection,
     theme::{self, color},
     ui::{self, Control},
@@ -12,16 +13,37 @@ use gpui::{prelude::*, *};
 
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let (title, detail, retry): (&str, String, bool) = match w.source.connection() {
-        Connection::Connecting => ("Connecting to the Moxen server…", String::new(), false),
+        Connection::Connecting => (
+            desktop(
+                "Connecting to the Moxen server…",
+                "Conectando con el servidor de Moxen…",
+            ),
+            String::new(),
+            false,
+        ),
+        Connection::Starting => (
+            desktop(
+                "Starting the Moxen server…",
+                "Iniciando el servidor de Moxen…",
+            ),
+            String::new(),
+            false,
+        ),
         Connection::Failed(why) => (
-            "The Moxen server is not available",
-            format!("{why} Start it with moxen server start, then try again."),
+            desktop(
+                "The Moxen server is not available",
+                "El servidor de Moxen no está disponible",
+            ),
+            why,
             true,
         ),
         Connection::Live => (
-            "No threads yet",
-            "Threads you start from the Moxen CLI or TUI appear here. This window cannot start one yet."
-                .into(),
+            desktop("No threads yet", "Todavía no hay hilos"),
+            desktop(
+                "Start a thread or open Getting started from the command palette.",
+                "Inicia un hilo o abre Primeros pasos desde la paleta de comandos.",
+            )
+            .into(),
             false,
         ),
     };
@@ -37,6 +59,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .gap(px(12.))
+        .when_some(w.source.paired_name(), |s, name| {
+            s.child(div().text_color(color("live")).child(name))
+        })
         .child(
             div()
                 .text_size(px(theme::BODY))
@@ -56,7 +81,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             s.child(
                 div()
                     .id("retry")
-                    .control("Try connecting again")
+                    .control(desktop("Try connecting again", "Volver a conectar"))
                     .h(px(30.))
                     .px(px(14.))
                     .flex()
@@ -66,12 +91,22 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .border_color(color("rule"))
                     .bg(color("raised"))
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Retry")
+                    .child(desktop("Retry", "Reintentar"))
                     .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
             )
         })
+        .when(w.source.restart_required(), |s| {
+            s.child(
+                div()
+                    .text_color(color("held"))
+                    .child(message("update.beforeInstall")),
+            )
+        })
         .when(
-            !retry && w.source.connection() == Connection::Connecting,
+            matches!(
+                w.source.connection(),
+                Connection::Connecting | Connection::Starting
+            ),
             |s| s.child(ui::icon("state-running", "live")),
         )
 }

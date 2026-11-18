@@ -2831,12 +2831,14 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "dirs",
  "gpui",
  "gpui_platform",
  "image",
  "regex",
  "serde_json",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

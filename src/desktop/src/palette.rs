@@ -18,6 +18,7 @@ enum Pick {
     RemoveProject(String),
     StartResearch,
     SingleResearch,
+    Experience(crate::experience::Panel),
 }
 
 enum Row {
@@ -149,6 +150,21 @@ fn actions_and_threads(w: &Workspace, query: &str) -> Vec<Row> {
             Pick::Archived,
         ));
     }
+    use crate::experience::Panel;
+    for panel in [
+        Panel::Guide,
+        Panel::Releases,
+        Panel::Update,
+        Panel::Doctor,
+        Panel::Problems,
+    ] {
+        if panel != Panel::Problems || !w.source.records().is_empty() {
+            rows.push((
+                crate::experience_view::panel_title(panel).into(),
+                Pick::Experience(panel),
+            ));
+        }
+    }
     let threads = w.source.list_threads();
     rows.extend(w.source.order(false).into_iter().map(|id| {
         Row::Pick(
@@ -172,6 +188,7 @@ fn pick(w: &mut Workspace, choice: &Pick, window: &mut Window, cx: &mut Context<
     match choice {
         Pick::Action(item) => w.pick_thread_action(w.selected, *item, window, cx),
         Pick::Archived => w.open_thread_form(Form::Archived, window, cx),
+        Pick::Experience(panel) => w.open_experience(panel, window, cx),
         Pick::Thread(id, _) | Pick::Found(id) => {
             w.palette_open = false;
             w.select(*id, cx);

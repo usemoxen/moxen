@@ -1,5 +1,5 @@
 use crate::{
-    model::{Message, SIDE_QUESTION_PENDING, Status, ThreadAction, ThreadId},
+    model::{Message, Status, ThreadAction, ThreadId, side_question_pending},
     theme::{self, color},
     ui::{self, Control},
     workspace::Workspace,
@@ -31,18 +31,18 @@ pub enum Item {
 impl Item {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Rename => "Rename thread",
+            Self::Rename => crate::language::message("app.rename_thread_979d"),
             Self::Regenerate => "Regenerate thread title",
             Self::Settle => "Settle thread family",
             Self::Unsettle => "Unsettle thread family",
             Self::Snooze => "Snooze thread",
             Self::Unsnooze => "Unsnooze thread",
-            Self::Archive => "Archive thread",
-            Self::Delete => "Delete thread",
+            Self::Archive => crate::language::message("app.archive_thread_1c8a"),
+            Self::Delete => crate::language::message("app.delete_thread_6bd4"),
             Self::Protect => "Protect thread",
             Self::Handover => "Hand off with a prompt",
-            Self::Continue => "Continue in a new thread",
-            Self::ContinueAtReset => "Continue at usage reset",
+            Self::Continue => crate::language::message("continue.title"),
+            Self::ContinueAtReset => crate::language::message("app.continue_at_reset_681f"),
             Self::CancelContinue => "Cancel scheduled continue",
             Self::Delegate => "Delegate a task",
             Self::SideQuestion => "Ask a side question",
@@ -190,9 +190,16 @@ fn normalize_title(text: &str) -> String {
 impl Form {
     fn input(&self) -> Option<&'static str> {
         match self {
-            Self::Item(_, Item::Rename) => Some("Thread title"),
+            Self::Item(_, Item::Rename) => Some(crate::language::message("ui.thread_title_eae0")),
             Self::Item(_, Item::Handover) => Some("What should the next agent know?"),
-            Self::Item(_, Item::Delegate) => Some("What should the agent do?"),
+            // The placeholder slot needs `'static`: the desktop word is
+            // `'static` in both languages, so it is matched out of the Cow.
+            Self::Item(_, Item::Delegate) => {
+                match crate::language::tr("What should the agent do?") {
+                    std::borrow::Cow::Borrowed(word) => Some(word),
+                    std::borrow::Cow::Owned(_) => Some("What should the agent do?"),
+                }
+            }
             Self::Item(_, Item::SideQuestion) => Some("Ask without adding to the conversation"),
             _ => None,
         }
@@ -395,7 +402,7 @@ impl Workspace {
             }
             Item::SideQuestion if !text.is_empty() => {
                 if self.source.side_question_pending() {
-                    self.problem = Some(SIDE_QUESTION_PENDING.into());
+                    self.problem = Some(side_question_pending().into());
                     if let Some(text) = submitted {
                         self.action_input
                             .update(cx, |input, cx| input.set_text(text.to_string(), cx));
@@ -465,7 +472,10 @@ pub fn popup(
                 menu = menu.child(
                     crate::thread_view::menu_row(
                         "revert-message",
-                        "Revert to before this turn…".into(),
+                        format!(
+                            "{}…",
+                            crate::language::message("app.revert_to_before_this_212f")
+                        ),
                         false,
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -533,7 +543,10 @@ pub fn form(
         }
         Form::Revert(_, _, _) => ("Revert conversation", "Remove this turn and all later turns. Choose whether to restore files from the checkpoint too.".into()),
         Form::Archived => ("Archived threads", "Restore a thread to show it in the sidebar again.".into()),
-        Form::Answer(answer) => ("Side question", answer.clone()),
+        Form::Answer(answer) => (
+            crate::language::message("btw.side_question_3945"),
+            answer.clone(),
+        ),
     };
     let mut panel = crate::thread_view::menu_surface("thread-action-form")
         .max_w(px(520.))
@@ -614,7 +627,10 @@ pub fn form(
         Form::Revert(_, _, _) => {
             for (files, label) in [
                 (false, "Revert conversation only"),
-                (true, "Revert conversation and files"),
+                (
+                    true,
+                    crate::language::message("app.revert_conversation_and_files_1442"),
+                ),
             ] {
                 panel = panel.child(
                     crate::thread_view::menu_row(
@@ -637,7 +653,7 @@ pub fn form(
         Form::Item(id, Item::CancelContinue) => {
             let id = *id;
             for (notify_parent, label) in [
-                (true, "Cancel and notify parent"),
+                (true, crate::language::message("autocancel.notify")),
                 (false, "Cancel quietly"),
             ] {
                 panel = panel.child(
@@ -657,22 +673,24 @@ pub fn form(
         }
         Form::Item(id, item) => {
             let label = match item {
-                Item::Rename => "Save title",
-                Item::Delete => "Delete permanently",
-                Item::Settle => "Stop and settle",
-                Item::Continue => "Continue",
-                Item::Handover => "Hand off",
-                Item::Delegate => "Delegate",
-                Item::SideQuestion => "Ask",
-                item => item.label(),
+                Item::Rename => "Save title".to_owned(),
+                Item::Delete => "Delete permanently".to_owned(),
+                Item::Settle => "Stop and settle".to_owned(),
+                Item::Continue => crate::language::message("continue.start").to_owned(),
+                Item::Handover => crate::language::message("action.handOff").to_owned(),
+                Item::Delegate => "Delegate".to_owned(),
+                Item::SideQuestion => crate::language::tr("Ask").into_owned(),
+                item => item.label().to_owned(),
             };
             panel = panel.child(if w.source.action_pending(*id) {
                 div()
                     .id("confirm-thread-action")
                     .disabled("Waiting for the server")
-                    .child("Working…")
+                    .child(crate::language::capitalized(crate::language::message(
+                        "run.state.working",
+                    )))
             } else {
-                crate::thread_view::menu_row("confirm-thread-action", label.into(), false).on_click(
+                crate::thread_view::menu_row("confirm-thread-action", label, false).on_click(
                     cx.listener(|this, _, window, cx| {
                         this.submit_thread_action(Submission::Confirm, window, cx)
                     }),
@@ -710,9 +728,9 @@ pub fn form(
                     .px(px(8.))
                     .text_color(color("ink-2"))
                     .child(if matches!(form, Form::Archived | Form::Answer(_)) {
-                        "Close"
+                        crate::language::tr("Close").into_owned()
                     } else {
-                        "Cancel"
+                        crate::language::message("continue.cancel").to_owned()
                     })
                     .on_click(
                         cx.listener(|this, _, window, cx| this.close_thread_action(window, cx)),

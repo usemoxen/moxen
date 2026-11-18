@@ -124,8 +124,6 @@ pub enum SettingsConfirm {
     UpdateProvider {
         provider: String,
     },
-    ApplyUpdate,
-    RollbackUpdate,
     SetupEmbeddings {
         all: bool,
     },
@@ -240,7 +238,12 @@ impl Workspace {
         self.settings_profile_new = None;
         self.settings_mcp_new = None;
         self.clear_settings_transients();
-        window.focus(&self.sidebar_focus, cx);
+        let focus = if self.experience_ui.panel.is_some() {
+            &self.experience_focus
+        } else {
+            &self.sidebar_focus
+        };
+        window.focus(focus, cx);
         cx.notify();
     }
 
@@ -316,10 +319,21 @@ impl Workspace {
         let mut tabs: Vec<(String, String)> = snapshot
             .sections()
             .into_iter()
-            .map(|section| (section.to_string(), section_label(section).to_string()))
+            .map(|section| {
+                (
+                    section.to_string(),
+                    crate::language::tr(section_label(section)).into_owned(),
+                )
+            })
             .collect();
-        tabs.push(("remote".into(), "Remote access".into()));
-        tabs.push(("updates".into(), "Updates".into()));
+        tabs.push((
+            "remote".into(),
+            crate::language::tr("Remote access").into_owned(),
+        ));
+        tabs.push((
+            "updates".into(),
+            crate::language::tr("Updates").into_owned(),
+        ));
         tabs
     }
 
@@ -613,8 +627,6 @@ impl Workspace {
             }
             SettingsConfirm::RevokeDevice { id } => self.source.revoke_device(&id),
             SettingsConfirm::UpdateProvider { provider } => self.source.update_provider(&provider),
-            SettingsConfirm::ApplyUpdate => self.source.apply_update(),
-            SettingsConfirm::RollbackUpdate => self.source.rollback_update(),
             SettingsConfirm::SetupEmbeddings { all } => self.source.setup_embeddings(all),
             SettingsConfirm::RebuildEmbeddings { all } => self.source.rebuild_embeddings(all),
             SettingsConfirm::UnloadEmbeddings => self.source.unload_embeddings(),
@@ -757,7 +769,7 @@ fn header(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(15.))
-                        .child("Settings"),
+                        .child(crate::language::message("settings.title")),
                 )
                 .when(!path.is_empty(), |s| {
                     s.child(
@@ -934,14 +946,17 @@ fn section_tab(
 }
 
 fn group_heading(group: &str) -> Div {
-    div().pt(px(10.)).pb(px(2.)).child(ui::caps(group))
+    div()
+        .pt(px(10.))
+        .pb(px(2.))
+        .child(ui::caps(&crate::language::tr(group)))
 }
 
 fn loading(text: &str) -> Div {
     div()
         .py(px(12.))
         .text_color(color("ink-2"))
-        .child(text.to_string())
+        .child(crate::language::tr(text).into_owned())
 }
 
 fn error_row(message: &str, w: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -962,7 +977,11 @@ fn error_row(message: &str, w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                 })),
         )
         .when(w.source.settings_saving().is_some(), |s| {
-            s.child(div().text_color(color("ink-2")).child("Saving…"))
+            s.child(
+                div()
+                    .text_color(color("ink-2"))
+                    .child(crate::language::message("guide.saving")),
+            )
         })
 }
 
@@ -978,9 +997,9 @@ fn setting_row(
     let control: AnyElement = match &view.kind {
         SettingKind::Enum(_) | SettingKind::Boolean => {
             let label = if pending {
-                "Saving…".to_string()
+                crate::language::message("guide.saving").to_owned()
             } else {
-                settings::display_value(view)
+                setting_row_value(view)
             };
             div()
                 .id(format!("settings-cycle-{key}"))
@@ -1003,7 +1022,7 @@ fn setting_row(
         | SettingKind::Duration
         | SettingKind::Line
         | SettingKind::Other(_) => {
-            let label = settings::display_value(view);
+            let label = setting_row_value(view);
             div()
                 .id(format!("settings-edit-{key}"))
                 .control(format!("Edit {}", view.label))
@@ -1043,17 +1062,21 @@ fn setting_row(
             .text_color(color("ink-2"))
             .text_size(px(12.5))
             .line_height(px(16.))
-            .child(view.description.clone()),
+            .child(crate::language::tr(&view.description).into_owned()),
     )
 }
 
 fn setting_label(view: &crate::settings::SettingView) -> String {
-    // GPUI draws from the desktop design tokens; only the TUI applies ui.theme.
-    if view.key == "ui.theme" {
-        format!("{} (TUI only)", view.label)
-    } else {
-        view.label.clone()
+    crate::language::tr(&view.label).into_owned()
+}
+
+fn setting_row_value(view: &crate::settings::SettingView) -> String {
+    if let (SettingKind::Enum(choices), SettingValue::Text(value)) = (&view.kind, &view.value)
+        && let Some(choice) = choices.iter().find(|choice| choice.value == *value)
+    {
+        return crate::language::tr(&choice.label).into_owned();
     }
+    settings::display_value(view)
 }
 
 fn sub_line(text: &str) -> Div {
@@ -1081,7 +1104,7 @@ fn list_block(
         let label = if count == 0 {
             format!("Show {noun}s")
         } else {
-            format!("{} — {count}", view.label)
+            format!("{} — {count}", crate::language::tr(&view.label))
         };
         return div()
             .id(format!("settings-entries-{key}"))
@@ -1254,7 +1277,7 @@ fn small_button(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .control(tip)
+        .control(crate::language::tr(tip).into_owned())
         .h(px(28.))
         .px(px(10.))
         .flex()
@@ -1263,7 +1286,12 @@ fn small_button(
         .border_1()
         .border_color(color("rule"))
         .text_color(color("ink-2"))
-        .child(div().flex().items_center().child(label.to_string()))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(crate::language::tr(label).into_owned()),
+        )
         .on_click(on_click)
 }
 
@@ -1299,7 +1327,8 @@ fn entry_detail(
         if schema.group != group {
             group = schema.group.clone();
             if !group.is_empty() {
-                out = out.child(div().pt(px(6.)).child(ui::caps(&group)));
+                let heading = crate::language::tr(&group).into_owned();
+                out = out.child(div().pt(px(6.)).child(ui::caps(&heading)));
             }
         }
         out = out.child(field_row(w, view, schema, field, item, cx));
@@ -1308,8 +1337,13 @@ fn entry_detail(
         }
     }
     if !item.resolved.is_empty() {
-        out = out.child(div().pt(px(6.)).child(ui::caps("In force")));
+        out = out.child(
+            div()
+                .pt(px(6.))
+                .child(ui::caps(crate::language::message("settings.inForce"))),
+        );
         for row in &item.resolved {
+            let (label, value) = resolved_row_text(row);
             out = out.child(
                 div()
                     .flex()
@@ -1320,13 +1354,9 @@ fn entry_detail(
                             .w(px(120.))
                             .flex_shrink_0()
                             .text_color(color("ink-2"))
-                            .child(row.label.clone()),
+                            .child(label),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(format!("{} — {}", row.value, row.origin)),
-                    ),
+                    .child(div().flex_1().child(value)),
             );
         }
     }
@@ -1352,6 +1382,24 @@ fn entry_detail(
     out
 }
 
+fn resolved_row_text(row: &settings::ResolvedRow) -> (String, String) {
+    (
+        crate::language::tr(&row.label).into_owned(),
+        format!("{} — {}", row.value, crate::language::tr(&row.origin)),
+    )
+}
+
+fn field_default_line(effective: &settings::ListEffective) -> String {
+    let default = crate::language::message("settings.default");
+    let origin = crate::language::tr(&effective.origin);
+    if effective.value == SettingValue::Unset {
+        format!("{default}: {origin}")
+    } else {
+        let value = settings::display_scalar(&effective.value);
+        format!("{default}: {value}, {origin}")
+    }
+}
+
 fn field_row(
     _w: &Workspace,
     view: &crate::settings::SettingView,
@@ -1369,7 +1417,7 @@ fn field_row(
             let label = settings::display_field(field, Some(schema));
             div()
                 .id(format!("settings-field-cycle-{key}-{id}-{path}"))
-                .control(format!("Change {}", schema.label))
+                .control(format!("Change {}", crate::language::tr(&schema.label)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -1383,10 +1431,10 @@ fn field_row(
             .child("Below")
             .into_any_element(),
         _ => {
-            let label = settings::display_field(field, Some(schema));
+            let shown = settings::display_field(field, Some(schema));
             div()
                 .id(format!("settings-field-edit-{key}-{id}-{path}"))
-                .control(format!("Edit {}", schema.label))
+                .control(format!("Edit {}", crate::language::tr(&schema.label)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -1395,7 +1443,7 @@ fn field_row(
                         .font_family(theme::MONO)
                         .text_size(px(12.5))
                         .text_color(color("ink-2"))
-                        .child(label),
+                        .child(shown),
                 )
                 .child(ui::icon("pencil", "ink-2"))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1413,7 +1461,11 @@ fn field_row(
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(div().flex_1().child(schema.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(crate::language::tr(&schema.label).into_owned()),
+                )
                 .child(control),
         )
         .child(
@@ -1421,16 +1473,10 @@ fn field_row(
                 .text_color(color("ink-2"))
                 .text_size(px(12.5))
                 .line_height(px(16.))
-                .child(schema.description.clone()),
+                .child(crate::language::tr(&schema.description).into_owned()),
         )
-        .when_some(field.effective.clone(), |s, effective| {
-            s.child(sub_line(&format!(
-                "Default: {}{}",
-                effective.label,
-                effective
-                    .origin
-                    .map_or(String::new(), |origin| format!(", {origin}"))
-            )))
+        .when_some(field.effective.as_ref(), |s, effective| {
+            s.child(sub_line(&field_default_line(effective)))
         })
 }
 
@@ -1912,7 +1958,11 @@ fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> 
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(form.title()));
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(crate::language::tr(&form.title()).into_owned()),
+        );
     if let SettingsForm::Field { previous, .. } = form
         && !previous.is_empty()
     {
@@ -2350,7 +2400,7 @@ fn memory_manager(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             }
             Ok(list) => {
                 if list.memories.is_empty() {
-                    out = out.child(sub_line("No memories yet."));
+                    out = out.child(sub_line(crate::language::message("mem.empty")));
                 }
                 for entry in &list.memories {
                     out = out.child(memory_row(
@@ -2613,7 +2663,12 @@ fn embeddings_row(_w: &Workspace, state: &Embeddings, cx: &mut Context<Workspace
                     }),
                 )),
         )
-        .when(state.busy, |s| s.child(sub_line("Working…")))
+        .when(state.busy, |s| {
+            s.child(sub_line(&format!(
+                "{}…",
+                crate::language::capitalized(crate::language::message("run.state.working"))
+            )))
+        })
 }
 
 /// One entry in the skills list: a skill's row, optionally followed by
@@ -2743,7 +2798,11 @@ fn skill_row(w: &Workspace, skill: &ManagedSkill, cx: &mut Context<Workspace>) -
                             "Switch the skill on"
                         })
                         .text_color(color(if enabled { "live" } else { "ink-2" }))
-                        .child(if enabled { "On" } else { "Off" })
+                        .child(if enabled {
+                            crate::language::message("settings.on")
+                        } else {
+                            crate::language::message("settings.off")
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.source.set_skill_enabled(
                                 this.settings_thread(),
@@ -2810,7 +2869,8 @@ fn skill_detail(
         return out.child(sub_line("Reading…"));
     };
     out = out.child(sub_line(&format!(
-        "Providers: {}",
+        "{}: {}",
+        crate::language::tr("Providers"),
         providers_line(&skill.providers)
     )));
     out = out.child(div().flex().flex_wrap().gap(px(8.)).children(
@@ -2995,23 +3055,23 @@ fn remote_status_row(w: &Workspace, state: &RemoteState, cx: &mut Context<Worksp
                         div()
                             .flex_1()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Remote access"),
+                            .child(crate::language::tr("Remote access").into_owned()),
                     )
                     .child(
                         div()
                             .id("settings-remote-toggle")
                             .control(if enabled {
-                                "Turn remote access off"
+                                crate::language::message("remote.turn_remote_access_off_bbaa")
                             } else {
-                                "Turn remote access on"
+                                crate::language::message("remote.turn_remote_access_on_7134")
                             })
                             .text_color(color(if enabled { "live" } else { "ink-2" }))
                             .child(if saving {
-                                "Saving…"
+                                crate::language::message("guide.saving")
                             } else if enabled {
-                                "On"
+                                crate::language::message("settings.on")
                             } else {
-                                "Off"
+                                crate::language::message("settings.off")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.source.set_setting(
@@ -3145,41 +3205,20 @@ fn updates_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                         }),
                     )),
             );
-            if state.updatable {
-                out = out.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .pt(px(2.))
-                        .child(small_button(
-                            ("settings-update-install", 0),
-                            "Install",
-                            "Download and switch to the newest release",
-                            cx.listener(move |this, _, _, cx| {
-                                this.confirm_settings(
-                                    "Download and switch to the newest release?".into(),
-                                    "Stages stream while it lands; a restart may follow.".into(),
-                                    SettingsConfirm::ApplyUpdate,
-                                    cx,
-                                );
-                            }),
-                        ))
-                        .child(small_button(
-                            ("settings-update-rollback", 0),
-                            "Roll back",
-                            "Go back to the previous version",
-                            cx.listener(move |this, _, _, cx| {
-                                this.confirm_settings(
-                                    "Go back to the previous version?".into(),
-                                    String::new(),
-                                    SettingsConfirm::RollbackUpdate,
-                                    cx,
-                                );
-                            }),
-                        )),
-                );
-            }
-            out = out.child(div().pt(px(10.)).child(ui::caps("Providers")));
+            out = out.child(div().flex().child(small_button(
+                ("settings-update-open", 0),
+                crate::language::message("update.title"),
+                crate::language::message("update.title"),
+                cx.listener(|this, _, window, cx| {
+                    this.close_settings(window, cx);
+                    this.open_experience(crate::experience::Panel::Update, window, cx);
+                }),
+            )));
+            out = out.child(
+                div()
+                    .pt(px(10.))
+                    .child(ui::caps(&crate::language::tr("Providers"))),
+            );
             for provider in &state.providers {
                 out = out.child(provider_row(w, provider, cx));
             }
@@ -3244,11 +3283,64 @@ mod tests {
     };
 
     #[test]
-    fn desktop_labels_the_theme_setting_as_tui_only() {
+    fn the_interface_offers_the_same_theme_as_the_tui() {
         let snapshot = crate::mock_settings::snapshot_fixture();
+        assert_eq!(setting_label(snapshot.find("ui.theme").unwrap()), "Theme");
+    }
+
+    #[test]
+    fn spanish_settings_rows_keep_configured_values_and_translate_typed_states() {
+        use settings::{ListEffective, ResolvedRow, SettingValue};
+
+        crate::language::apply(Some("es-ES"), None);
+        let mut snapshot = crate::mock_settings::snapshot_fixture();
+        crate::mock_settings::apply_set(&mut snapshot, "instructions", "Off");
+        let instructions = snapshot.find("instructions").unwrap();
+        assert_eq!(super::setting_row_value(instructions), "Off");
         assert_eq!(
-            setting_label(snapshot.find("ui.theme").unwrap()),
-            "Theme (TUI only)"
+            super::setting_row_value(snapshot.find("git.autoFetch").unwrap()),
+            "Desactivado"
+        );
+        assert_eq!(
+            super::setting_row_value(snapshot.find("updates.checkLatest").unwrap()),
+            "Activado"
+        );
+        assert_eq!(
+            super::setting_row_value(snapshot.find("model").unwrap()),
+            "Por defecto"
+        );
+        assert_eq!(
+            super::resolved_row_text(&ResolvedRow {
+                label: "images".into(),
+                value: "Off".into(),
+                origin: "your override".into(),
+            }),
+            ("imágenes".into(), "Off — tu ajuste".into())
+        );
+        assert_eq!(
+            super::field_default_line(&ListEffective {
+                value: SettingValue::Text("Off".into()),
+                origin: "your override".into(),
+            }),
+            "Por defecto: Off, tu ajuste"
+        );
+
+        let profiles = snapshot.find("providers.harness.profiles").unwrap();
+        let item = &profiles.items[0];
+        let field = |path| item.fields.iter().find(|field| field.path == path).unwrap();
+        assert_eq!(
+            super::field_default_line(field("slots").effective.as_ref().unwrap()),
+            "Por defecto: 4, las Peticiones simultáneas del propio Moxen Harness"
+        );
+        let mut url = field("baseUrl").clone();
+        url.value = SettingValue::Text("Off".into());
+        assert_eq!(
+            settings::display_field(&url, profiles.field_schema("baseUrl")),
+            "Off"
+        );
+        assert_eq!(
+            settings::display_field(field("apiKey"), profiles.field_schema("apiKey")),
+            "Guardada en el llavero"
         );
     }
 

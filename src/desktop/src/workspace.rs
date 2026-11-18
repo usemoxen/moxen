@@ -61,6 +61,7 @@ pub struct Workspace {
     pub viewer_focus: FocusHandle,
     /// The project a new thread starts in (a project id), until one is picked.
     pub new_project: Option<String>,
+    pub new_scratch: bool,
     /// The access chosen for the new thread; none leaves it to the server.
     pub new_runtime: Option<usize>,
     pub new_interaction: usize,
@@ -178,6 +179,12 @@ pub struct Workspace {
     pub settings_profile_new: Option<crate::settings_view::ProfileWizard>,
     pub settings_mcp_new: Option<crate::settings_view::McpWizard>,
     pub settings_focus: FocusHandle,
+    pub experience_ui: crate::experience::Ui,
+    pub experience_focus: FocusHandle,
+    pub guide_next_focus: FocusHandle,
+    pub guide_folder: Entity<Composer>,
+    pub guide_provider_filter: Entity<Composer>,
+    pub guide_model_filter: Entity<Composer>,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -188,9 +195,11 @@ impl Workspace {
         let mock =
             (demo && stage.as_deref() != Some("live")) || std::env::args().any(|a| a == "--mock");
         let source: Box<dyn ThreadSource> = if mock {
-            Box::new(MockSource::preview())
+            Box::new(MockSource::preview().with_experience(std::env::args().skip(1)))
         } else {
-            Box::new(ServerSource::connect(crate::wire::default_endpoint()))
+            Box::new(ServerSource::desktop(crate::client::server_arg(
+                std::env::args().skip(1),
+            )))
         };
         Self::with_source(source, demo, window, cx)
     }
@@ -202,6 +211,32 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = vec![];
+        let guide_folder = cx.new(|cx| {
+            let mut input = Composer::new(cx);
+            input.placeholder = "Project folder on the server";
+            input
+        });
+        subscriptions.push(
+            cx.subscribe(&guide_folder, |this, _, event: &Submitted, cx| {
+                this.add_guide_folder(&event.0, cx);
+            }),
+        );
+        let mut guide_filter = |placeholder| {
+            let filter = cx.new(|cx| {
+                let mut input = Composer::new(cx);
+                input.placeholder = placeholder;
+                input.height = 36.;
+                input
+            });
+            subscriptions.push(
+                cx.subscribe(&filter, |_, _, _: &crate::composer::Changed, cx| {
+                    cx.notify()
+                }),
+            );
+            filter
+        };
+        let guide_provider_filter = guide_filter("Filter providers");
+        let guide_model_filter = guide_filter("Filter models");
         let new_composer = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.placeholder = "What should the agent do?";
@@ -350,6 +385,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let mut seen = None;
             let mut ticks = 0u32;
+            let mut last_problem_read = Instant::now();
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
@@ -360,6 +396,21 @@ impl Workspace {
                         if ticks == 0 {
                             this.refresh_work();
                             this.refresh_usage();
+                            if this.experience_ui.panel == Some(crate::experience::Panel::Guide)
+                                && this.experience_ui.step == 3
+                            {
+                                this.source.read_embeddings();
+                            }
+                        }
+                        if last_problem_read.elapsed() >= Duration::from_secs(30) {
+                            last_problem_read = Instant::now();
+                            this.source.read_records();
+                        }
+                        if this.experience_ui.panel == Some(crate::experience::Panel::Guide)
+                            && !this.settings_open
+                            && this.guide_motion() == "animated"
+                        {
+                            cx.notify();
                         }
                         let revision = this.source.revision();
                         if seen != Some(revision) {
@@ -449,6 +500,13 @@ impl Workspace {
             creating: false,
             new_composer,
             new_project: None,
+            new_scratch: false,
+            experience_ui: Default::default(),
+            experience_focus: cx.focus_handle(),
+            guide_next_focus: cx.focus_handle(),
+            guide_folder,
+            guide_provider_filter,
+            guide_model_filter,
             new_runtime: None,
             new_interaction: 0,
             new_model: None,
@@ -542,6 +600,25 @@ impl Workspace {
             expanded: HashMap::new(),
             _subscriptions: subscriptions,
         };
+        if mock {
+            use crate::experience::Panel;
+            let case = std::env::args()
+                .skip_while(|arg| arg != "--mock-experience")
+                .nth(1);
+            this.experience_ui.panel = match case.as_deref() {
+                Some("releases") => Some(Panel::Releases),
+                Some("problems") => Some(Panel::Problems),
+                Some("doctor") => {
+                    this.source.read_diagnosis();
+                    Some(Panel::Doctor)
+                }
+                Some("update") => {
+                    this.source.read_updates();
+                    Some(Panel::Update)
+                }
+                _ => None,
+            };
+        }
         this.sync_threads(cx);
         this
     }
@@ -649,6 +726,7 @@ impl Workspace {
         if self.source.take_settled() == Some(self.selected) && !self.creating {
             self.creating = true;
             self.new_project = None;
+            self.new_scratch = false;
             self.new_model = self.source.selection(self.selected);
             let thread = &self.source.list_threads()[self.selected];
             self.new_runtime = RUNTIME_MODES
@@ -691,6 +769,7 @@ impl Workspace {
         }
         if let Some(project) = self.source.take_added() {
             self.new_project = Some(project);
+            self.new_scratch = false;
         }
         while let Some(problem) = self.source.take_problem() {
             self.problem = Some(problem.message);
@@ -888,6 +967,9 @@ impl Workspace {
     /// The project a new thread starts in: the one picked, else the open
     /// thread's, else the newest.
     pub fn new_project_id(&self) -> Option<String> {
+        if self.new_scratch {
+            return None;
+        }
         let projects = self.source.projects();
         self.new_project
             .clone()
@@ -931,7 +1013,7 @@ impl Workspace {
     /// known, a readable form of the slug until then.
     pub fn model_label(&self, selection: Option<&Selection>) -> (String, &'static str) {
         let Some(selection) = selection else {
-            return ("Default model".into(), "ink");
+            return (crate::language::tr("Default model").into_owned(), "ink");
         };
         let catalog = self.catalog();
         let name = catalog
@@ -976,6 +1058,9 @@ impl Workspace {
         if !self.creating {
             return None;
         }
+        if self.new_scratch {
+            return Some(crate::language::message("guide.noProjectChoice").into());
+        }
         let id = self.new_project_id()?;
         self.source
             .projects()
@@ -985,11 +1070,9 @@ impl Workspace {
     }
     /// Starts drafting a thread in the open thread's project.
     pub fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.source.projects().is_empty() {
-            return;
-        }
         self.creating = true;
         self.new_project = None;
+        self.new_scratch = self.source.projects().is_empty();
         self.new_model = None;
         self.dropdown = None;
         self.picker_open = false;
@@ -1000,12 +1083,13 @@ impl Workspace {
         if text.trim().is_empty() && self.new_composer.read(cx).assets.is_empty() {
             return;
         }
-        let Some(project) = self.new_project_id() else {
+        let project = self.new_project_id();
+        if project.is_none() && !self.new_scratch {
             self.problem = Some("There is no project to start a thread in.".into());
             self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
             cx.notify();
             return;
-        };
+        }
         if self.new_sending {
             self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
             return;
@@ -1590,16 +1674,26 @@ fn capture(cx: &mut AsyncWindowContext, name: &str) {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = self.source.settings();
+        let setting = |key| {
+            settings
+                .as_deref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|snapshot| snapshot.find(key))
+                .and_then(|view| match &view.value {
+                    crate::settings::SettingValue::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+        };
+        crate::theme::apply(setting("ui.theme"));
+        crate::language::apply(setting("ui.language"), self.source.client_locale());
         // A snapshot can arrive between two polls; never draw a thread that
         // has no composer or list yet.
         self.sync_threads(cx);
-        if self.source.order(false).is_empty()
-            && self.source.archived().is_empty()
-            && !self.creating
-            && self.thread_form.is_none()
-        {
+        if self.source.connection() != crate::model::Connection::Live {
             return crate::connection::render(self, cx).into_any_element();
         }
+        self.sync_experience(window, cx);
         let has_thread = !self.source.list_threads().is_empty();
         if has_thread {
             self.sync_panel(window, cx);
@@ -1723,6 +1817,8 @@ impl Render for Workspace {
                         this.close_viewer(window, cx);
                     } else if this.settings_open {
                         this.close_settings_over(window, cx);
+                    } else if this.experience_ui.panel.is_some() {
+                        this.close_experience(window, cx);
                     } else if this.thread_form.is_some() || this.thread_popup.is_some() {
                         this.close_thread_action(window, cx);
                     } else if this.project_form.is_some() || this.project_popup.is_some() {
@@ -1813,6 +1909,7 @@ impl Render for Workspace {
             .when(has_thread, |s| {
                 s.child(crate::title_bar::render(self, window, cx))
             })
+            .child(crate::experience_view::notices(self, cx))
             .child(
                 div()
                     .flex_1()
@@ -1820,11 +1917,11 @@ impl Render for Workspace {
                     .flex()
                     .child(crate::sidebar::render(self, window, cx))
                     .when(
-                        has_thread && (self.creating || !self.source.order(false).is_empty()),
+                        self.creating || (has_thread && !self.source.order(false).is_empty()),
                         |s| s.child(crate::thread_view::render(self, window, cx)),
                     )
                     .when(
-                        !has_thread || (!self.creating && self.source.order(false).is_empty()),
+                        !self.creating && (!has_thread || self.source.order(false).is_empty()),
                         |s| s.child(crate::connection::render(self, cx)),
                     )
                     .when(has_thread && shown > 0. && self.source.preview(), |s| {
@@ -1859,6 +1956,9 @@ impl Render for Workspace {
             })
             .when_some(self.project_form.as_ref(), |s, form| {
                 s.child(crate::thread_actions::project_form(self, form, window, cx))
+            })
+            .when_some(self.experience_ui.panel, |s, panel| {
+                s.child(crate::experience_view::render(self, panel, window, cx))
             })
             .when(self.settings_open, |s| {
                 s.child(crate::settings_view::render(self, window, cx))

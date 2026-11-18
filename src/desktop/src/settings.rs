@@ -481,7 +481,7 @@ pub struct ListFieldValue {
     pub path: String,
     pub value: SettingValue,
     pub explicit: bool,
-    pub effective: Option<Effective>,
+    pub effective: Option<ListEffective>,
     pub choices: Vec<Choice>,
     pub items: Vec<ListItem>,
 }
@@ -494,7 +494,15 @@ impl ListFieldValue {
                 .get("value")
                 .map_or(SettingValue::Unset, SettingValue::from_json),
             explicit: boolean(field, "explicit").unwrap_or(false),
-            effective: Effective::from_json(field),
+            effective: field
+                .get("effective")
+                .filter(|effective| !effective.is_null())
+                .map(|effective| ListEffective {
+                    value: effective
+                        .get("value")
+                        .map_or(SettingValue::Unset, SettingValue::from_json),
+                    origin: text(effective, "origin").unwrap_or_default(),
+                }),
             choices: field
                 .get("choices")
                 .and_then(Value::as_array)
@@ -521,6 +529,13 @@ impl ListFieldValue {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// What applies to a list field and where it comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListEffective {
+    pub value: SettingValue,
+    pub origin: String,
 }
 
 /// A read-only row under an entry: what is in force and why.
@@ -592,19 +607,9 @@ impl Snapshot {
 /// the names are the server's, the values never leave it.
 pub fn display_value(view: &SettingView) -> String {
     if view.kind.is_secret() {
-        return if view.value == SettingValue::Unset && !view.explicit {
-            "Not set".into()
-        } else {
-            "Saved in the keychain".into()
-        };
+        return display_secret(&view.value, view.explicit);
     }
-    match &view.value {
-        SettingValue::Unset => "Default".into(),
-        SettingValue::Text(text) => text.clone(),
-        SettingValue::Number(number) => SettingValue::Number(*number).wire(),
-        SettingValue::Flag(true) => "On".into(),
-        SettingValue::Flag(false) => "Off".into(),
-    }
+    display_scalar(&view.value)
 }
 
 /// A list field's value as its row draws it. A scalar secret names storage;
@@ -612,19 +617,16 @@ pub fn display_value(view: &SettingView) -> String {
 /// server's, and anything after the `=` is masked here no matter what the
 /// server sent, so a value can never leak through the display.
 pub fn display_field(field: &ListFieldValue, schema: Option<&ListFieldSchema>) -> String {
+    use crate::language::message;
     if let Some(schema) = schema {
         match &schema.kind {
-            FieldKind::Secret => {
-                return if field.value == SettingValue::Unset && !field.explicit {
-                    "Not set".into()
-                } else {
-                    "Saved in the keychain".into()
-                };
-            }
+            FieldKind::Secret => return display_secret(&field.value, field.explicit),
             FieldKind::Pairs { secret: true } => {
                 return match &field.value {
-                    SettingValue::Unset => "Default".into(),
-                    SettingValue::Text(text) if text.trim().is_empty() => "Default".into(),
+                    SettingValue::Unset => message("settings.default").into(),
+                    SettingValue::Text(text) if text.trim().is_empty() => {
+                        message("settings.default").into()
+                    }
                     SettingValue::Text(text) => mask_pairs(text),
                     _ => "Saved".into(),
                 };
@@ -632,18 +634,31 @@ pub fn display_field(field: &ListFieldValue, schema: Option<&ListFieldSchema>) -
             _ => {}
         }
     }
-    match &field.value {
-        SettingValue::Unset => "Default".into(),
-        SettingValue::Text(text) => {
-            if text.is_empty() {
-                "Default".into()
-            } else {
-                text.clone()
-            }
+    if matches!(&field.value, SettingValue::Text(text) if text.is_empty()) {
+        return message("settings.default").into();
+    }
+    display_scalar(&field.value)
+}
+
+pub fn display_scalar(value: &SettingValue) -> String {
+    use crate::language::message;
+    match value {
+        SettingValue::Unset => message("settings.default").into(),
+        SettingValue::Flag(true) => message("settings.on").into(),
+        SettingValue::Flag(false) => message("settings.off").into(),
+        _ => value.wire(),
+    }
+}
+
+fn display_secret(value: &SettingValue, explicit: bool) -> String {
+    if *value == SettingValue::Unset && !explicit {
+        if crate::language::spanish() {
+            crate::language::message("settings.noKey").into()
+        } else {
+            "Not set".into()
         }
-        SettingValue::Number(number) => SettingValue::Number(*number).wire(),
-        SettingValue::Flag(true) => "On".into(),
-        SettingValue::Flag(false) => "Off".into(),
+    } else {
+        crate::language::message("settings.keySaved").into()
     }
 }
 
@@ -1092,6 +1107,7 @@ impl MemorySearch {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Embeddings {
     pub state: String,
+    pub phase: String,
     pub message: Option<String>,
     pub percent: Option<f64>,
     pub busy: bool,
@@ -1102,6 +1118,7 @@ impl Embeddings {
     pub fn from_json(value: &Value) -> Option<Self> {
         Some(Self {
             state: text(value, "state").unwrap_or_else(|| "stopped".into()),
+            phase: text(value, "phase").unwrap_or_else(|| "idle".into()),
             message: text(value, "message"),
             percent: number(value, "percent"),
             busy: boolean(value, "busy").unwrap_or(false),
@@ -1314,6 +1331,8 @@ pub struct UpdateState {
     pub latest: Option<String>,
     pub reason: Option<String>,
     pub updatable: bool,
+    pub install_kind: Option<String>,
+    pub release_notes: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1351,6 +1370,10 @@ impl UpdateState {
                 .and_then(|latest| text(latest, "version")),
             reason: text(value, "reason"),
             updatable: boolean(value, "updatable").unwrap_or(false),
+            install_kind: text(install, "kind"),
+            release_notes: value
+                .get("latest")
+                .and_then(|release| text(release, "notes")),
         })
     }
 

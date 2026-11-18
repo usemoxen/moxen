@@ -45,7 +45,7 @@ import { remoteServerName, serverMode, type ServerMode } from "./servermode.js";
 export { remoteServerName, serverMode, type ServerMode } from "./servermode.js";
 
 /** A `ClientApi` its owner can release. */
-export type ClientConnection = ClientApi & { close(): Promise<void> };
+export type ClientConnection = ClientApi & { close(): Promise<void>; readonly pairedServer?: PairedServer };
 
 export interface OpenClientOptions {
   /** `direct`: in-process, for the server and tests only. Default: this machine's server. */
@@ -53,6 +53,10 @@ export interface OpenClientOptions {
   /** A paired server by name or address (`--server`); wins over `mode` and `MOXEN_SERVER`. */
   readonly server?: string;
   readonly endpoint?: string;
+  /** A frontend which manages its own connection lifetime can opt out of reconnection here. */
+  readonly reconnect?: boolean;
+  /** Show startup only when there is no local listener. */
+  readonly onStarting?: () => void;
   /**
    * In-process only: a fixed config, for tests. A long-lived caller must
    * pass `configPath` instead — a fixed object is frozen at launch, so
@@ -70,7 +74,7 @@ const AUTOSTART_TIMEOUT_MS = 10_000;
 
 export async function openClient(options: OpenClientOptions = {}): Promise<ClientConnection> {
   const remote = options.server ?? (options.mode === undefined ? remoteServerName() : null);
-  if (remote) return await connectPairedServer(remote);
+  if (remote) return await connectPairedServer(remote, undefined, options.reconnect);
   const mode = options.mode ?? serverMode();
   if (mode === "direct") {
     return new DirectConnection({
@@ -80,12 +84,18 @@ export async function openClient(options: OpenClientOptions = {}): Promise<Clien
     });
   }
   const endpoint = options.endpoint ?? defaultEndpoint();
-  if (!(await probe(endpoint))) await startDaemon(endpoint);
+  if (!(await probe(endpoint))) {
+    options.onStarting?.();
+    await startDaemon(endpoint);
+  }
   // A mismatched server is read, not replaced: starting a new one over it
   // would kill whatever it is running. The hello names both builds, and
   // stopping it (`moxen server stop` works against any build) is the
   // person's call — the next command then starts one from this build.
-  const connection = await RemoteConnection.connect(endpoint, { allowBuildMismatch: true });
+  const connection = await RemoteConnection.connect(endpoint, {
+    allowBuildMismatch: true,
+    ...(options.reconnect === undefined ? {} : { reconnect: options.reconnect }),
+  });
   if (connection.buildMismatch !== null) {
     const mismatch = connection.buildMismatch;
     await connection.close();
@@ -108,11 +118,11 @@ export async function openClient(options: OpenClientOptions = {}): Promise<Clien
 }
 
 /** A connection to a paired server on another machine. Its `pairedServer` says which. */
-export async function connectPairedServer(nameOrAddress: string, servers = new PairedServers()): Promise<RemoteConnection & { readonly pairedServer: PairedServer }> {
+export async function connectPairedServer(nameOrAddress: string, servers = new PairedServers(), reconnect?: boolean): Promise<RemoteConnection & { readonly pairedServer: PairedServer }> {
   const server = await servers.find(nameOrAddress);
   if (!server) throw notPaired(nameOrAddress);
   const { endpoint, ...options } = await servers.connectionOptions(server);
-  const connection = await RemoteConnection.connect(endpoint, options);
+  const connection = await RemoteConnection.connect(endpoint, { ...options, ...(reconnect === undefined ? {} : { reconnect }) });
   return Object.assign(connection, { pairedServer: server });
 }
 

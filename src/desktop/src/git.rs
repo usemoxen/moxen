@@ -132,20 +132,28 @@ pub struct Worktree {
 }
 
 impl Worktree {
-    /// "2 staged · 1 changed", or "clean".
+    /// Whether nothing is uncommitted: the status line then reads the TUI's
+    /// clean word instead of a count.
+    pub fn is_clean(&self) -> bool {
+        self.staged == 0 && self.unstaged == 0 && self.untracked == 0 && self.conflicted == 0
+    }
+
+    /// "2 staged · 1 changed", or the TUI's clean word: each count in the
+    /// TUI's words (`git.staged`, `git.changed`, `git.untracked`,
+    /// `git.conflicted`, `git.clean`).
     pub fn line(&self) -> String {
         let parts: Vec<String> = [
-            (self.staged, "staged"),
-            (self.unstaged, "changed"),
-            (self.untracked, "untracked"),
-            (self.conflicted, "conflicted"),
+            (self.staged, "git.staged"),
+            (self.unstaged, "git.changed"),
+            (self.untracked, "git.untracked"),
+            (self.conflicted, "git.conflicted"),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{n} {what}"))
+        .map(|(n, key)| crate::language::fill(key, &[("{count}", &n.to_string())]))
         .collect();
         if parts.is_empty() {
-            "clean".into()
+            crate::language::message("git.clean").into()
         } else {
             parts.join(" · ")
         }
@@ -362,12 +370,12 @@ pub enum RequestState {
 
 impl RequestState {
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Open => "Open",
-            Self::Draft => "Draft",
-            Self::Merged => "Merged",
-            Self::Closed => "Closed",
-        }
+        crate::language::message(match self {
+            Self::Open => "git.open_c3bf",
+            Self::Draft => "git.draft_f03a",
+            Self::Merged => "git.merged_6391",
+            Self::Closed => "git.closed_03f4",
+        })
     }
     /// A request can still be commented on and merged.
     pub fn active(self) -> bool {
@@ -405,12 +413,19 @@ impl Request {
         })
     }
 
-    /// The review's outcome as the TUI words it.
+    /// The review's outcome in the TUI's words. The inline status line keeps
+    /// the catalog's casing, as the round-3 review/checks words do.
     pub fn review_label(&self) -> Option<(&'static str, Tone)> {
         match self.review.as_deref()? {
-            "APPROVED" => Some(("Approved", Tone::Passed)),
-            "CHANGES_REQUESTED" => Some(("Changes requested", Tone::Failed)),
-            "REVIEW_REQUIRED" => Some(("Review required", Tone::Pending)),
+            "APPROVED" => Some((crate::language::message("git.approved_787d"), Tone::Passed)),
+            "CHANGES_REQUESTED" => Some((
+                crate::language::message("git.changes_requested_51ca"),
+                Tone::Failed,
+            )),
+            "REVIEW_REQUIRED" => Some((
+                crate::language::message("git.review_required_d01e"),
+                Tone::Pending,
+            )),
             _ => None,
         }
     }
@@ -726,36 +741,40 @@ pub enum Patch {
 
 // -- words --------------------------------------------------------------------
 
-/// "3 minutes ago", "yesterday", "2 months ago": how GitHub words an age.
+/// Commit ages use the desktop's English day counts and the TUI's Spanish wording.
 pub fn ago(iso: &str, now_ms: i64) -> String {
+    use crate::language::plural;
     let Some(at) = parse_iso_ms(iso) else {
         return String::new();
     };
     let seconds = ((now_ms - at) / 1000).max(0);
-    let unit = |n: i64, name: &str| format!("{n} {name}{} ago", if n == 1 { "" } else { "s" });
     if seconds < 60 {
-        return "just now".into();
+        return crate::language::message("ago.now").into();
     }
     let minutes = seconds / 60;
     if minutes < 60 {
-        return unit(minutes, "minute");
+        return plural("ago.minute.one", "ago.minute.other", minutes as usize);
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return unit(hours, "hour");
+        return plural("ago.hour.one", "ago.hour.other", hours as usize);
     }
     let days = hours / 24;
-    if days == 1 {
+    let spanish = crate::language::spanish();
+    if !spanish && days == 1 {
         return "yesterday".into();
     }
+    if days < 7 || (!spanish && days < 30) {
+        return plural("ago.day.one", "ago.day.other", days as usize);
+    }
     if days < 30 {
-        return unit(days, "day");
+        return plural("ago.week.one", "ago.week.other", (days / 7) as usize);
     }
     let months = days / 30;
     if months < 12 {
-        return unit(months, "month");
+        return plural("ago.month.one", "ago.month.other", months as usize);
     }
-    unit(days / 365, "year")
+    plural("ago.year.one", "ago.year.other", (days / 365) as usize)
 }
 
 /// The instructions an agent gets to open the request, word for word what the
@@ -941,6 +960,21 @@ mod tests {
     }
 
     #[test]
+    fn the_worktree_line_reads_in_the_tuis_spanish() {
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(
+            overview().status.as_ref().unwrap().line(),
+            "1 preparados · 2 cambiados"
+        );
+        assert_eq!(
+            Worktree::default().line(),
+            "limpio",
+            "nothing uncommitted reads as the TUI's clean"
+        );
+        crate::language::apply(Some("en"), None);
+    }
+
+    #[test]
     fn a_request_status_carries_its_ci_and_mergeability() {
         let status = RequestStatus::from_json(&json!({"request": {
             "number": 7, "title": "Add it", "state": "draft", "url": "https://x/7",
@@ -954,7 +988,7 @@ mod tests {
         assert!(status.conflicting);
         assert_eq!(
             status.request.review_label().unwrap().0,
-            "Changes requested"
+            "changes requested"
         );
         // No rollup: the named runs are counted.
         assert_eq!(status.checks().unwrap().glance().unwrap().1, "1/2");
@@ -1025,7 +1059,8 @@ mod tests {
     }
 
     #[test]
-    fn ages_read_like_github() {
+    fn commit_ages_keep_english_day_counts_and_the_tuis_spanish() {
+        crate::language::apply(Some("en"), None);
         let now = parse_iso_ms("2026-11-17T12:00:00Z").unwrap();
         let at = |iso: &str| ago(iso, now);
         assert_eq!(at("2026-11-17T11:59:30Z"), "just now");
@@ -1035,6 +1070,9 @@ mod tests {
         assert_eq!(at("2026-11-07T12:00:00Z"), "10 days ago");
         assert_eq!(at("2026-08-17T12:00:00Z"), "3 months ago");
         assert_eq!(at("not a date"), "");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(at("2026-11-16T09:00:00Z"), "hace 1 día");
+        assert_eq!(at("2026-11-07T12:00:00Z"), "hace 1 semana");
     }
 
     #[test]

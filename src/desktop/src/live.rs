@@ -12,6 +12,7 @@ use crate::{
     attachments::{self, Asset, Picture, Prompt},
     catalog::{Catalog, OptionValue, is_effort},
     composer_menu::{Destination, Improvement, Inventory},
+    experience::{self, Fix, Memory, Record, Update},
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
         Answer, Ask, CardState, CatalogState, Connection, ContextData, Decision, Delivery,
@@ -495,6 +496,13 @@ struct State {
     wire_epoch: u64,
     transcripts: HashMap<ThreadId, Transcript>,
     connection: Option<Connection>,
+    paired_name: Option<String>,
+    client_locale: Option<String>,
+    restart_required: bool,
+    experience: Option<Arc<Result<Value, String>>>,
+    records: Vec<Record>,
+    diagnosis: Option<Arc<Result<Value, String>>>,
+    app_update: Option<Update>,
     slots: Vec<Slot>,
     ids: HashMap<String, ThreadId>,
     arranged: Arranged,
@@ -661,7 +669,7 @@ impl State {
     fn reserve_action(&mut self, id: ThreadId, is_side_question: bool) -> bool {
         if is_side_question && self.asking_side_question {
             self.problems.push_back(Problem {
-                message: SIDE_QUESTION_PENDING.into(),
+                message: crate::model::side_question_pending().into(),
                 unsent: None,
             });
             return false;
@@ -1001,7 +1009,14 @@ impl Shared {
 
 pub struct ServerSource {
     shared: Arc<Shared>,
-    endpoint: String,
+    target: ClientTarget,
+}
+
+#[derive(Clone)]
+enum ClientTarget {
+    Desktop(Result<Option<String>, WireError>),
+    #[cfg(all(test, unix))]
+    Socket(String),
 }
 impl ServerSource {
     fn dispatch_thread_action(&self, id: ThreadId, action: ThreadAction) {
@@ -1128,19 +1143,18 @@ impl ServerSource {
             }
         };
         let is_side_question = name == "thread.side-question";
-        if !self
-            .shared
-            .update(|state| state.reserve_action(id, is_side_question))
-        {
+        let epoch = self.shared.update(|state| {
+            state
+                .reserve_action(id, is_side_question)
+                .then_some(state.wire_epoch)
+        });
+        let Some(epoch) = epoch else {
             return;
-        }
+        };
         background_result(&self.shared, move |wire, shared| {
             let result = wire.and_then(|wire| wire.dispatch(name, fields));
             shared.update(|state| {
-                state.actions.remove(&id);
-                if is_side_question {
-                    state.asking_side_question = false;
-                }
+                release_action(state, epoch, id, is_side_question);
                 let Ok(result) = &result else {
                     return;
                 };
@@ -1167,13 +1181,22 @@ impl ServerSource {
             result.map(|_| ()).map_err(|error| problem(&error, None))
         });
     }
-    pub fn connect(endpoint: String) -> Self {
+    pub fn desktop(target: Result<Option<String>, WireError>) -> Self {
+        Self::with_target(ClientTarget::Desktop(target))
+    }
+
+    #[cfg(all(test, unix))]
+    fn connect(endpoint: String) -> Self {
+        Self::with_target(ClientTarget::Socket(endpoint))
+    }
+
+    fn with_target(target: ClientTarget) -> Self {
         let source = Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 revision: AtomicU64::new(0),
             }),
-            endpoint,
+            target,
         };
         source.start();
         source
@@ -1185,11 +1208,11 @@ impl ServerSource {
         self.shared
             .update(|state| state.connection = Some(Connection::Connecting));
         let shared = self.shared.clone();
-        let endpoint = self.endpoint.clone();
+        let target = self.target.clone();
         let spawned = std::thread::Builder::new()
             .name("moxen-live".into())
             .spawn(move || {
-                let failed = match session(&endpoint, &shared) {
+                let failed = match session(target, &shared) {
                     Ok(()) => "The connection to the Moxen server closed.".to_string(),
                     Err(error) => error.message,
                 };
@@ -1203,14 +1226,23 @@ impl ServerSource {
     }
 }
 
-fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
-    let (wire, _hello) = Wire::connect(endpoint)?;
+fn session(target: ClientTarget, shared: &Arc<Shared>) -> Result<(), WireError> {
+    let (wire, hello) = match target {
+        ClientTarget::Desktop(server) => Wire::desktop(server?.as_deref(), || {
+            shared.update(|state| state.connection = Some(Connection::Starting));
+        })?,
+        #[cfg(all(test, unix))]
+        ClientTarget::Socket(endpoint) => Wire::connect(&endpoint)?,
+    };
     let wire = Arc::new(wire);
     load_catalog(shared, &wire);
     let subscription = wire.subscribe_shell(&[])?;
     shared.update(|state| {
         state.wire_epoch += 1;
         state.wire = Some(wire.clone());
+        state.paired_name = hello.paired_name;
+        state.client_locale = hello.client_locale;
+        state.restart_required = hello.restart_required;
         state.work.clear();
         state.work_reads.clear();
         state.settings_reads.clear();
@@ -1225,6 +1257,9 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
         state.research_token += 1;
         state.research_watching = None;
     });
+    read_settings_snapshot(shared);
+    read_experience(shared);
+    read_records(shared);
     // A thread opened before the connection existed starts being followed now.
     follow(shared);
     research_follow(shared);
@@ -1238,6 +1273,8 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
                 });
                 follow(shared);
                 research_follow(shared);
+            } else if frame["kind"] == "event" {
+                shared.update(|state| apply_app_event(state, &frame["event"]));
             }
         }
         Ok(())
@@ -1248,6 +1285,7 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
 
 fn end_session(state: &mut State) {
     state.wire = None;
+    state.wire_epoch += 1;
     // Ends the thread, research and role watchers, whose answers belong to this connection.
     state.watch += 1;
     state.research_token += 1;
@@ -1259,10 +1297,50 @@ fn end_session(state: &mut State) {
     state.role_rows.clear();
     state.role_messages.clear();
     state.settings_reads.clear();
+    if matches!(state.app_update, Some(Update::Running { .. })) {
+        state.app_update = Some(Update::Lost);
+    }
     if state.settings_pending.take().is_some() {
         state.settings_write = Some(Err(not_connected().message));
     }
     state.harness_run = None;
+    // In-flight answers, actions and side questions belong to the dropped
+    // connection: the next snapshot decides what is still open, so a request
+    // answered before the drop is answerable again after the reconnect.
+    state.answered.clear();
+    state.actions.clear();
+    state.asking_side_question = false;
+}
+
+/// A failed answer's grace re-check: a request that is still open comes back
+/// so it can be answered again. A disconnect in between already released the
+/// answer (see `end_session`), so a stale refusal touches neither a
+/// post-reconnect answer nor the problems.
+fn reopen_refused(state: &mut State, epoch: u64, id: ThreadId, request: &str) -> bool {
+    if state.wire_epoch != epoch {
+        return false;
+    }
+    let open = state.waiting.get(&id).is_some_and(|waiting| {
+        waiting.permissions.iter().any(|p| p.request == request)
+            || waiting.asks.iter().any(|a| a.request == request)
+    });
+    if open {
+        state.answered.remove(request);
+    }
+    open
+}
+
+/// Releases a thread action's reservation. A disconnect in between already
+/// released it (see `end_session`), so a stale completion must not clear a
+/// post-reconnect reservation.
+fn release_action(state: &mut State, epoch: u64, id: ThreadId, side_question: bool) {
+    if state.wire_epoch != epoch {
+        return;
+    }
+    state.actions.remove(&id);
+    if side_question {
+        state.asking_side_question = false;
+    }
 }
 
 /// Reads the providers, models and efforts (`getConfig`) on its own thread.
@@ -1710,6 +1788,188 @@ impl ThreadSource for ServerSource {
     fn connection(&self) -> Connection {
         let state = self.shared.state.lock().expect("live state");
         state.connection.clone().unwrap_or(Connection::Connecting)
+    }
+    fn paired_name(&self) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .paired_name
+            .clone()
+    }
+    fn restart_required(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .restart_required
+    }
+    fn client_locale(&self) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .client_locale
+            .clone()
+    }
+    fn experience(&self) -> Option<Arc<Result<Value, String>>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .experience
+            .clone()
+    }
+    fn update_experience(&mut self, change: Value) {
+        settings_read(
+            &self.shared,
+            Some(("experience.update", None)),
+            move |wire| {
+                wire.dispatch("experience.update", change)
+                    .map_err(|error| error.message)
+            },
+            |state, result| match result {
+                Ok(snapshot) => state.experience = Some(Arc::new(Ok(snapshot))),
+                Err(message) => state.problems.push_back(Problem {
+                    message,
+                    unsent: None,
+                }),
+            },
+        );
+    }
+    fn experience_saving(&self) -> bool {
+        let state = self.shared.state.lock().expect("live state");
+        state.settings_pending.is_some()
+            || state
+                .settings_reads
+                .contains_key(&("experience.update", None))
+            || state.settings_reads.contains_key(&("guide.memory", None))
+    }
+    fn set_guide_memory(&mut self, choice: Memory) {
+        let settings = choice.writes();
+        settings_read(
+            &self.shared,
+            Some(("guide.memory", None)),
+            move |wire| {
+                let write = |(key, value)| {
+                    wire.dispatch("settings.set", json!({"key":key,"value":value}))
+                        .map_err(|error| error.message)
+                };
+                let first = write(settings[0])?;
+                Ok::<_, String>(match write(settings[1]) {
+                    Ok(second) => (second, None),
+                    Err(error) => (first, Some(error)),
+                })
+            },
+            |state, result| {
+                let error = match result {
+                    Ok((snapshot, error)) => {
+                        if let Some(snapshot) = Snapshot::from_json(&snapshot) {
+                            state.settings = Some(Arc::new(Ok(snapshot)));
+                        }
+                        error
+                    }
+                    Err(error) => Some(error),
+                };
+                if let Some(message) = error {
+                    state.problems.push_back(Problem {
+                        message,
+                        unsent: None,
+                    });
+                }
+            },
+        );
+    }
+    fn add_guide_project(&mut self, path: String) {
+        settings_read(
+            &self.shared,
+            Some(("project.ensure", None)),
+            move |wire| {
+                wire.dispatch(
+                    "project.ensure",
+                    json!({"cwd":path,"projectPolicy":"create"}),
+                )
+                .map_err(|error| error.message)
+            },
+            |state, result| match result {
+                Ok(project) => state.added = project["projectId"].as_str().map(str::to_owned),
+                Err(message) => state.problems.push_back(Problem {
+                    message,
+                    unsent: None,
+                }),
+            },
+        );
+    }
+    fn records(&self) -> Vec<Record> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .records
+            .clone()
+    }
+    fn read_records(&mut self) {
+        read_records(&self.shared);
+    }
+    fn fix_record(&mut self, fix: Fix) {
+        self.shared.update(|state| {
+            state.settings_reads.remove(&("store.problems", None));
+        });
+        settings_read(
+            &self.shared,
+            Some(("record.fix", None)),
+            move |wire| {
+                let (command, fields) = fix.payload();
+                let result = wire
+                    .dispatch(command, fields)
+                    .map_err(|error| error.message)?;
+                let settings = (command == "settings.set")
+                    .then(|| Snapshot::from_json(&result))
+                    .flatten();
+                Ok((settings, read_problem_rows(wire)))
+            },
+            |state, result| match result {
+                Ok((settings, rows)) => {
+                    if let Some(settings) = settings {
+                        state.settings = Some(Arc::new(Ok(settings)));
+                    }
+                    if let Some(rows) = rows {
+                        state.records = rows;
+                    }
+                }
+                Err(message) => state.problems.push_back(Problem {
+                    message,
+                    unsent: None,
+                }),
+            },
+        );
+    }
+    fn diagnosis(&self) -> Option<Arc<Result<Value, String>>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .diagnosis
+            .clone()
+    }
+    fn read_diagnosis(&mut self) {
+        settings_read(
+            &self.shared,
+            Some(("doctor", None)),
+            |wire| {
+                wire.query("doctor", json!({}))
+                    .map_err(|error| error.message)
+            },
+            |state, result| state.diagnosis = Some(Arc::new(result)),
+        );
+    }
+    fn app_update(&self) -> Option<Update> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .app_update
+            .clone()
     }
     fn revision(&self) -> u64 {
         self.shared.revision.load(Ordering::SeqCst)
@@ -2451,7 +2711,10 @@ impl ThreadSource for ServerSource {
         // project's newest thread runs on; with none, the server's default.
         let selection = draft.model.as_ref().map(Selection::to_json).or_else(|| {
             let state = self.shared.state.lock().expect("live state");
-            project_selection(&state, &draft.project)
+            draft
+                .project
+                .as_deref()
+                .and_then(|project| project_selection(&state, project))
         });
         // A research first prompt is answered, not parked: the thread opts in
         // before its first send, as the TUI's new-thread opt-in does.
@@ -2486,12 +2749,16 @@ impl ThreadSource for ServerSource {
                 .take(60)
                 .collect();
             let mut create = json!({
-                "projectId": draft.project,
                 "title": title,
                 "interactionMode": draft.interaction_mode,
             });
             if let Some(uuid) = &created_id {
                 create["threadId"] = uuid.clone().into();
+            }
+            if let Some(project) = draft.project {
+                create["projectId"] = project.into();
+            } else {
+                create["scratch"] = true.into();
             }
             if let Some(selection) = &selection {
                 create["modelSelection"] = selection.clone();
@@ -3098,6 +3365,19 @@ impl ThreadSource for ServerSource {
     fn read_updates(&mut self) {
         read_update_state(&self.shared);
     }
+    fn check_app_update(&mut self) {
+        let allowed = self.shared.update(|state| {
+            if matches!(state.app_update, Some(Update::Running { .. })) {
+                return false;
+            }
+            state.app_update = None;
+            state.updates = None;
+            true
+        });
+        if allowed {
+            read_update_state(&self.shared);
+        }
+    }
     fn updates(&self) -> Option<Arc<Result<UpdateState, String>>> {
         self.shared
             .state
@@ -3161,8 +3441,9 @@ impl ServerSource {
         fill(&mut body);
         let shared = self.shared.clone();
         let request = request.to_string();
-        shared.update(|state| {
+        let epoch = shared.update(|state| {
             state.answered.insert(request.clone());
+            state.wire_epoch
         });
         background(&self.shared, move |wire| {
             let Err(error) = wire.dispatch(command, body) else {
@@ -3170,16 +3451,10 @@ impl ServerSource {
             };
             std::thread::sleep(REFUSAL_GRACE);
             let mut state = shared.state.lock().expect("live state");
-            let open = state.waiting.get(&id).is_some_and(|waiting| {
-                waiting.permissions.iter().any(|p| p.request == request)
-                    || waiting.asks.iter().any(|a| a.request == request)
-            });
-            if open {
-                state.answered.remove(&request);
-                Err(problem(&error, None))
-            } else {
-                Ok(())
+            if !reopen_refused(&mut state, epoch, id, &request) {
+                return Ok(());
             }
+            Err(problem(&error, None))
         });
     }
     fn uuid_of(&self, id: ThreadId) -> Option<String> {
@@ -4139,6 +4414,68 @@ fn read_settings_snapshot(shared: &Arc<Shared>) {
     );
 }
 
+fn read_experience(shared: &Arc<Shared>) {
+    settings_read(
+        shared,
+        Some(("experience.read", None)),
+        |wire| {
+            wire.query("experience.read", json!({}))
+                .map_err(|error| error.message)
+        },
+        |state, result| state.experience = Some(Arc::new(result)),
+    );
+}
+
+fn read_problem_rows(wire: &Wire) -> Option<Vec<Record>> {
+    let store = wire.query("store.problems", json!({})).ok()?;
+    let config = wire.query("config.read", json!({})).unwrap_or(Value::Null);
+    Some(experience::problems(&store, &config))
+}
+
+fn read_records(shared: &Arc<Shared>) {
+    if shared
+        .state
+        .lock()
+        .expect("live state")
+        .settings_reads
+        .contains_key(&("record.fix", None))
+    {
+        return;
+    }
+    settings_read(
+        shared,
+        Some(("store.problems", None)),
+        read_problem_rows,
+        |state, rows| {
+            if let Some(rows) = rows {
+                state.records = rows;
+            }
+        },
+    );
+}
+
+fn apply_app_event(state: &mut State, event: &Value) {
+    let payload = &event["payload"];
+    match event["type"].as_str() {
+        Some("app.server-restart-required") if payload["version"].is_string() => {
+            state.restart_required = true
+        }
+        Some("app.update-progress") => {
+            if let Some(Update::Running {
+                command_id,
+                progress,
+                ..
+            }) = state.app_update.as_mut()
+                && payload["commandId"].as_str() == Some(command_id)
+                && payload["progress"]["stage"].is_string()
+            {
+                *progress = payload["progress"].clone();
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A settings write replaces the snapshot with what the server accepted.
 fn write_settings(shared: &Arc<Shared>, key: &str, command: &'static str, fields: Value) {
     let (epoch, wire) = shared.update(|state| {
@@ -4753,29 +5090,72 @@ fn read_update_state(shared: &Arc<Shared>) {
 
 /// Downloads, tests and switches to a release (or rolls back), then checks again.
 fn send_app_update(shared: &Arc<Shared>, command: &str) {
-    let command = command.to_string();
-    let shared = shared.clone();
-    background(&shared.clone(), move |wire| {
-        let result = wire
-            .dispatch(&command, json!({}))
-            .map_err(|error| problem(&error, None))?;
-        let action = text(&result, &["action"]).unwrap_or_default().to_string();
-        let version = text(&result, &["version"]).unwrap_or_default().to_string();
-        shared.update(|state| {
-            state.settings_notice = Some(SettingsNotice {
-                text: if action == "already-current" {
-                    "Already current.".into()
-                } else if version.is_empty() {
-                    "Updated.".into()
-                } else {
-                    format!("Updated to {version}.")
-                },
-                error: false,
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let rollback = command == "app.update.rollback";
+    let command = command.to_owned();
+    let start = shared.update(|state| {
+        if matches!(state.app_update, Some(Update::Running { .. })) || state.paired_name.is_some() {
+            return None;
+        }
+        let wire = state.wire.clone()?;
+        state.app_update = Some(Update::Running {
+            command_id: command_id.clone(),
+            rollback,
+            progress: json!({"stage":"checking"}),
+        });
+        Some((wire, state.wire_epoch))
+    });
+    let Some((wire, epoch)) = start else { return };
+    let worker = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("moxen-app-update".into())
+        .spawn(move || {
+            let result = wire.dispatch(&command, json!({"commandId":command_id}));
+            worker.update(|state| {
+                if state.wire_epoch != epoch || state.wire.is_none() {
+                    return;
+                }
+                state.app_update = Some(match result {
+                    Ok(result) => {
+                        let action = experience::string(&result, "action");
+                        let version = experience::string(&result, "version");
+                        state.settings_notice = Some(SettingsNotice {
+                            text: if action == "already-current" {
+                                "Already current.".into()
+                            } else {
+                                format!("Updated to {version}.")
+                            },
+                            error: false,
+                        });
+                        Update::Finished { rollback, result }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.code.as_str(),
+                            "CONNECTION_CLOSED" | "SERVER_DISCONNECTED" | "TIMEOUT"
+                        ) =>
+                    {
+                        Update::Lost
+                    }
+                    Err(error) => Update::Failed {
+                        code: error.code,
+                        message: error.message,
+                        rollback,
+                    },
+                });
             });
         });
-        read_update_state(&shared);
-        Ok(())
-    });
+    if let Err(error) = spawned {
+        shared.update(|state| {
+            if state.wire_epoch == epoch {
+                state.app_update = Some(Update::Failed {
+                    code: String::new(),
+                    message: error.to_string(),
+                    rollback,
+                });
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -4923,14 +5303,17 @@ mod tests {
 
     #[test]
     fn a_side_question_in_flight_refuses_another_even_on_a_different_thread() {
-        let mut state = State::default();
-        assert!(state.reserve_action(0, true));
-        assert!(!state.reserve_action(1, true));
-        assert_eq!(
-            state.problems.pop_front().unwrap().message,
-            SIDE_QUESTION_PENDING
-        );
-        assert!(state.reserve_action(1, false));
+        for (locale, refusal) in [
+            ("en", "A side question is still being answered"),
+            ("es-ES", "Todavía se está respondiendo otra pregunta aparte"),
+        ] {
+            crate::language::apply(Some(locale), None);
+            let mut state = State::default();
+            assert!(state.reserve_action(0, true));
+            assert!(!state.reserve_action(1, true));
+            assert_eq!(state.problems.pop_front().unwrap().message, refusal);
+            assert!(state.reserve_action(1, false));
+        }
     }
 
     #[test]
@@ -5190,6 +5573,14 @@ mod tests {
                 let subscriptions = subscriptions.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
+                    let mut shell = None;
+                    let mut completed = false;
+                    let mut seen_release = false;
+                    let mut repaired = HashSet::new();
+                    let fake_experience = |completed, seen_release| {
+                        json!({"version":"0.2.0","onboardingCompleted":completed,
+                        "seenReleases":if seen_release { json!(["0.2.0"]) } else { json!([]) }, "releases":[{"version":"0.2.0","title":{"en":"Changes","es":"Cambios"}}]})
+                    };
                     for line in std::io::BufReader::new(stream).lines() {
                         let Ok(line) = line else { break };
                         let message: Value = serde_json::from_str(&line).expect("json");
@@ -5241,6 +5632,10 @@ mod tests {
                                     }]);
                                 }
                                 let item = if message["method"] == "subscribeShell" {
+                                    if research.is_empty() {
+                                        assert_eq!(params, &json!({}));
+                                        shell = Some(id);
+                                    }
                                     json!({"kind": "snapshot", "snapshot": snapshot})
                                 } else if params["threadId"] == "role-1" {
                                     json!({"kind": "snapshot", "snapshot": {"thread": {
@@ -5290,6 +5685,27 @@ mod tests {
                                 // record, in the order they were sent.
                                 seen_queries.lock().unwrap().push(params.clone());
                                 match params["type"].as_str() {
+                                    Some("experience.read") => {
+                                        assert_eq!(params, &json!({"type":"experience.read"}));
+                                        fake_experience(completed, seen_release)
+                                    }
+                                    Some("store.problems") => {
+                                        assert_eq!(params, &json!({"type":"store.problems"}));
+                                        let rows = [
+                                            json!({"id":"bad","kind":"ledger","file":"store.json","line":7,"message":"Bad record"}),
+                                            json!({"id":"stuck","kind":"turn-ownerless","threadId":"t1","turnId":"stuck-turn","message":"Stuck turn"}),
+                                        ];
+                                        json!({"problems":rows.iter().filter(|row| !repaired.contains(row["id"].as_str().unwrap())).collect::<Vec<_>>()})
+                                    }
+                                    Some("config.read") => {
+                                        assert_eq!(params, &json!({"type":"config.read"}));
+                                        json!({"path":"config.json","problems":if repaired.contains("theme") { json!([]) } else {
+                                            json!([{"path":"ui.theme","message":"Bad theme"}]) }})
+                                    }
+                                    Some("doctor") => {
+                                        assert_eq!(params, &json!({"type":"doctor"}));
+                                        json!({"node":{"ok":true,"version":"1.3.13"},"git":{"ok":true},"providers":{"codex":{"ok":true}}})
+                                    }
                                     Some("skills.list") => {
                                         seen.lock().unwrap().push(params.clone());
                                         json!({"trigger": "/", "skills": [{"name": "design-review", "enabled": true, "userInvocable": true}],"commands":[]})
@@ -5533,11 +5949,13 @@ mod tests {
                                         "pairedAt": "2026-11-16T10:00:00Z", "connections": 1}]})
                                     }
                                     Some("provider.latest") => {
+                                        assert_eq!(params, &json!({"type":"provider.latest"}));
                                         json!({"enabled": true,
-                                        "claude": {"latest": "2.0.0"},
-                                        "opencode": {"latest": null}})
+                                            "claude": {"latest": "2.0.0"},
+                                            "opencode": {"latest": null}})
                                     }
                                     Some("app.update.check") => {
+                                        assert_eq!(params, &json!({"type":"app.update.check"}));
                                         json!({"install": {"version": "0.2.0"}, "status": "available",
                                         "reason": null, "latest": {"version": "0.3.0"},
                                         "updatable": true})
@@ -5548,6 +5966,37 @@ mod tests {
                             "dispatch" => {
                                 seen.lock().unwrap().push(params.clone());
                                 match params["type"].as_str() {
+                                    Some("experience.update") => {
+                                        if params["completeOnboarding"] == true {
+                                            assert_eq!(
+                                                params,
+                                                &json!({"type":"experience.update","completeOnboarding":true})
+                                            );
+                                            completed = true;
+                                        } else {
+                                            assert_eq!(
+                                                params,
+                                                &json!({"type":"experience.update","seenRelease":"0.2.0"})
+                                            );
+                                            seen_release = true;
+                                        }
+                                        fake_experience(completed, seen_release)
+                                    }
+                                    Some("store.quarantine") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type":"store.quarantine","id":"bad"})
+                                        );
+                                        repaired.insert("bad");
+                                        json!({"accepted":true})
+                                    }
+                                    Some("project.ensure") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type":"project.ensure","cwd":"/guide/fixture","projectPolicy":"create"})
+                                        );
+                                        json!({"projectId":"p"})
+                                    }
                                     Some("thread.background.stop") => {
                                         json!({"stopped": true, "taskId": params["taskId"]})
                                     }
@@ -5591,6 +6040,13 @@ mod tests {
                                         json!({"accepted": true, "threadId": "new-thread", "researchSizePending": true})
                                     }
                                     Some("thread.turn.start" | "thread.turn.interrupt") => {
+                                        if params["turnId"] == "stuck-turn" {
+                                            assert_eq!(
+                                                params,
+                                                &json!({"type":"thread.turn.interrupt","threadId":"t1","turnId":"stuck-turn"})
+                                            );
+                                            repaired.insert("stuck");
+                                        }
                                         json!({"accepted": true, "threadId": "new-thread"})
                                     }
                                     Some("settings.set" | "settings.duplicate")
@@ -5635,6 +6091,13 @@ mod tests {
                                         json!({"accepted": true})
                                     }
                                     Some("settings.set" | "settings.duplicate") => {
+                                        if params["key"] == "ui.theme" && params["value"] == "" {
+                                            assert_eq!(
+                                                params,
+                                                &json!({"type":"settings.set","key":"ui.theme","value":""})
+                                            );
+                                            repaired.insert("theme");
+                                        }
                                         if params["key"] == "remote.enabled" {
                                             remote_enabled
                                                 .store(params["value"] == "true", Ordering::SeqCst);
@@ -5706,6 +6169,17 @@ mod tests {
                                             "after": "2.0.0", "updated": true, "output": ""})
                                     }
                                     Some("app.update.apply" | "app.update.rollback") => {
+                                        let command = params["type"].as_str().unwrap();
+                                        let command_id = params["commandId"].as_str().unwrap();
+                                        assert!(uuid::Uuid::parse_str(command_id).is_ok());
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type":command,"commandId":command_id})
+                                        );
+                                        writeln!(writer, "{}", json!({"subscription":shell.unwrap(),"item":{"kind":"event","event":{
+                                            "type":"app.update-progress","payload":{"commandId":command_id,"progress":{"stage":"downloading","bytes":10,"total":100}}}}})).unwrap();
+                                        writeln!(writer, "{}", json!({"subscription":shell.unwrap(),"item":{"kind":"event","event":{
+                                            "type":"app.server-restart-required","payload":{"version":"0.2.0","from":"0.1.0"}}}})).unwrap();
                                         json!({"action": "already-current", "version": "0.2.0"})
                                     }
                                     Some("remote.pairing.cancel" | "remote.device.revoke") => {
@@ -5896,12 +6370,111 @@ mod tests {
     /// A server source with no connection, for the settings actions.
     fn settings_source() -> ServerSource {
         ServerSource {
-            endpoint: String::new(),
+            target: ClientTarget::Desktop(Ok(None)),
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 revision: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_experience_and_diagnostics_use_server_reads_and_exact_repairs() {
+        let dir = std::env::temp_dir().join(format!("mx-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        let commands = fake_server(socket.clone());
+        let mut source = ServerSource::connect(socket.to_string_lossy().into_owned());
+        let snapshot = |source: &ServerSource| {
+            source
+                .experience()
+                .and_then(|answer| answer.as_ref().as_ref().ok().cloned())
+        };
+        wait_for("experience and problem reads", || {
+            snapshot(&source).is_some() && source.records().len() == 3
+        });
+        assert!(!experience::completed(&snapshot(&source).unwrap()));
+        assert!(experience::unread(&snapshot(&source).unwrap()));
+        source.update_experience(json!({"completeOnboarding":true}));
+        wait_for("onboarding acknowledgement", || {
+            snapshot(&source).is_some_and(|current| experience::completed(&current))
+        });
+        source.update_experience(json!({"seenRelease":"0.2.0"}));
+        wait_for("release acknowledgement", || {
+            snapshot(&source).is_some_and(|current| !experience::unread(&current))
+        });
+        source.set_guide_memory(Memory::Embeddings);
+        wait_for("the ordered settings writes", || {
+            !source.experience_saving()
+        });
+        assert!(commands.lock().unwrap().ends_with(&[
+            json!({"type":"settings.set","key":"memory","value":"true"}),
+            json!({"type":"settings.set","key":"memoryEmbeddings","value":"true"})
+        ]));
+        source.add_guide_project("/guide/fixture".into());
+        wait_for("the project result", || {
+            source.take_added().as_deref() == Some("p")
+        });
+        source.create_thread(NewThread {
+            project: None,
+            prompt: "first draft".into(),
+            runtime_mode: None,
+            interaction_mode: "default".into(),
+            model: None,
+        });
+        wait_for("the first thread in a separate workspace", || {
+            commands.lock().unwrap().ends_with(&[
+                json!({"type":"thread.create","scratch":true,"title":"first draft","interactionMode":"default"}),
+                json!({"type":"thread.turn.start","threadId":"new-thread","message":{"text":"first draft"}}),
+            ])
+        });
+        for (index, fix) in [
+            Fix::MoveAside("bad".into()),
+            Fix::Stop("t1".into(), "stuck-turn".into()),
+            Fix::Reset("ui.theme".into()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            source.fix_record(fix);
+            wait_for("the problems to refresh", || {
+                source.records().len() == 2 - index
+            });
+        }
+        source.read_diagnosis();
+        wait_for("the doctor's answer", || {
+            source.diagnosis().as_deref().is_some_and(|answer| {
+                answer
+                    .as_ref()
+                    .is_ok_and(|value| value["node"]["version"] == "1.3.13")
+            })
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_our_update_progress_is_applied_and_a_disconnect_releases_the_action() {
+        let mut state = State {
+            app_update: Some(Update::Running {
+                command_id: "own".into(),
+                rollback: false,
+                progress: json!({"stage":"checking"}),
+            }),
+            ..Default::default()
+        };
+        let frame = |id| json!({"type":"app.update-progress","payload":{"commandId":id,"progress":{"stage":"testing"}}});
+        apply_app_event(&mut state, &frame("another-client"));
+        assert!(
+            matches!(&state.app_update, Some(Update::Running { progress, .. }) if progress["stage"] == "checking")
+        );
+        apply_app_event(&mut state, &frame("own"));
+        assert!(
+            matches!(&state.app_update, Some(Update::Running { progress, .. }) if progress["stage"] == "testing")
+        );
+        end_session(&mut state);
+        assert!(matches!(&state.app_update, Some(Update::Lost)));
+        assert_eq!(state.wire_epoch, 1);
     }
 
     #[test]
@@ -5948,6 +6521,111 @@ mod tests {
             source.take_settings_write(),
             Some(Err(not_connected().message))
         );
+    }
+
+    #[test]
+    fn a_disconnect_releases_in_flight_answers_actions_and_side_questions() {
+        let mut state = State::default();
+        state.answered.insert("ask1".into());
+        state.actions.insert(0);
+        state.asking_side_question = true;
+        end_session(&mut state);
+        assert!(state.answered.is_empty());
+        assert!(state.actions.is_empty());
+        assert!(!state.asking_side_question);
+    }
+
+    #[test]
+    fn a_stale_refusal_or_completion_does_not_touch_a_reconnect() {
+        let mut state = State {
+            waiting: HashMap::from([(
+                0,
+                Waiting {
+                    permissions: vec![Permission {
+                        request: "perm1".into(),
+                        tool: "Bash".into(),
+                        classification: None,
+                        detail: None,
+                        description: None,
+                    }],
+                    asks: vec![],
+                },
+            )]),
+            ..Default::default()
+        };
+        // The answer and the action go out on this connection.
+        let epoch = state.wire_epoch;
+        state.answered.insert("perm1".into());
+        assert!(state.reserve_action(0, true));
+        // The connection drops with the request still open and returns; the
+        // person answers (and re-dispatches) again on the new connection.
+        end_session(&mut state);
+        assert!(state.answered.is_empty());
+        state.wire_epoch += 1;
+        state.answered.insert("perm1".into());
+        assert!(state.reserve_action(0, true));
+        // The dropped connection's late refusal and completion must touch
+        // neither the new answer nor the new reservation.
+        assert!(!reopen_refused(&mut state, epoch, 0, "perm1"));
+        release_action(&mut state, epoch, 0, true);
+        assert!(state.answered.contains("perm1"));
+        assert!(state.actions.contains(&0));
+        assert!(state.asking_side_question);
+        // The new connection's own completion still releases.
+        let epoch = state.wire_epoch;
+        assert!(reopen_refused(&mut state, epoch, 0, "perm1"));
+        release_action(&mut state, epoch, 0, true);
+        assert!(!state.answered.contains("perm1"));
+        assert!(!state.actions.contains(&0));
+        assert!(!state.asking_side_question);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_before_a_disconnect_is_answerable_after_the_reconnect() {
+        let (mut source, dir) = connect_settings_test("reply-reconnect");
+        source.shared.update(|state| {
+            state.apply(&json!({
+                "projects": [{"id": "p", "title": "moxen", "workspaceRoot": "/fake/project"}],
+                "threads": [{"id": "t1", "projectId": "p", "title": "Fix",
+                    "session": {"status": "running"},
+                    "modelSelection": {"instanceId": "claude", "model": "opus"}}],
+            }));
+            state.waiting.insert(
+                0,
+                Waiting {
+                    permissions: vec![Permission {
+                        request: "perm1".into(),
+                        tool: "Bash".into(),
+                        classification: Some("command-execution".into()),
+                        detail: Some("cargo test".into()),
+                        description: None,
+                    }],
+                    asks: vec![],
+                },
+            );
+        });
+        source.decide(0, "perm1", Decision::Allow);
+        assert!(source.permission(0).is_none());
+        // The connection drops with the request still open and returns.
+        source.shared.update(end_session);
+        let (wire, _) =
+            Wire::connect(dir.join("s.sock").to_str().expect("socket path")).expect("reconnect");
+        source.shared.update(|state| {
+            state.wire_epoch += 1;
+            state.wire = Some(Arc::new(wire));
+        });
+        // Still open, and answerable again.
+        assert_eq!(
+            source.permission(0).map(|ask| ask.request),
+            Some("perm1".into())
+        );
+        source.decide(0, "perm1", Decision::Allow);
+        assert!(source.permission(0).is_none());
+        // The re-answer reaches the server and no stale refusal surfaces.
+        std::thread::sleep(REFUSAL_GRACE + Duration::from_millis(200));
+        assert!(source.take_problem().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6135,7 +6813,7 @@ mod tests {
         // A new thread is created in the project on the project's model, then
         // started with its message.
         source.create_thread(NewThread {
-            project: "p".into(),
+            project: Some("p".into()),
             prompt: "build it\nplease".into(),
             runtime_mode: Some("auto".into()),
             interaction_mode: "research".into(),
@@ -6174,7 +6852,7 @@ mod tests {
             .rebase(None, "claude", "opus")
             .with_option("effort", "max");
         source.create_thread(NewThread {
-            project: "p".into(),
+            project: Some("p".into()),
             prompt: "again".into(),
             runtime_mode: None,
             interaction_mode: "default".into(),
@@ -6648,7 +7326,7 @@ mod tests {
         assert_eq!(failed.unwrap().unsent, Some((Some(0), rejected)));
 
         source.create_thread(NewThread {
-            project: "p".into(),
+            project: Some("p".into()),
             prompt: with("", "orchestrate"),
             runtime_mode: None,
             interaction_mode: "default".into(),
@@ -7125,12 +7803,42 @@ mod tests {
         source.update_provider("claude");
         expect(json!({"type":"provider.update","provider":"claude"}));
         source.apply_update();
-        expect(json!({"type":"app.update.apply"}));
+        {
+            wait_for("the update command", || {
+                commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|command| command["type"] == "app.update.apply")
+            });
+            let sent = commands.lock().unwrap();
+            let last = sent
+                .iter()
+                .find(|command| command["type"] == "app.update.apply")
+                .unwrap();
+            assert_eq!(
+                last,
+                &json!({"type":"app.update.apply","commandId":last["commandId"]})
+            );
+        }
         wait_for("the update notice", || {
             source.take_settings_notice().is_some()
         });
+        assert!(matches!(
+            source.app_update(),
+            Some(Update::Finished {
+                rollback: false,
+                ..
+            })
+        ));
+        wait_for("the shell restart notice", || source.restart_required());
         source.rollback_update();
-        expect(json!({"type":"app.update.rollback"}));
+        wait_for("the rollback result", || {
+            matches!(
+                source.app_update(),
+                Some(Update::Finished { rollback: true, .. })
+            )
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 

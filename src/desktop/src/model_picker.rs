@@ -53,7 +53,11 @@ pub fn body(w: &Workspace, mut pane: Stateful<Div>, cx: &mut Context<Workspace>)
     );
     let catalog = match w.source.catalog() {
         CatalogState::Ready(catalog) => catalog,
-        CatalogState::Loading => return pane.child(note("Loading models…")),
+        CatalogState::Loading => {
+            return pane.child(note(&crate::language::capitalized(
+                crate::language::message("picker.loading_3da3").trim_start(),
+            )));
+        }
         CatalogState::Failed(message) => {
             return pane.child(note(&format!("Could not read the models: {message}")));
         }
@@ -135,7 +139,7 @@ fn list(
         out = out.child(note(if query.is_empty() {
             "No provider is turned on. Turn one on in the Moxen settings."
         } else {
-            "No models match"
+            crate::language::message("app.no_matching_models_74d5")
         }));
     }
     out
@@ -198,12 +202,9 @@ fn model_row(
         .when(selected, |s| s.bg(color("sunk")))
         .child(div().flex_1().truncate().child(model.name.clone()))
         .when(model.default, |s| {
-            s.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(color("ink-2"))
-                    .child("default"),
-            )
+            s.child(div().text_size(px(11.5)).text_color(color("ink-2")).child(
+                crate::language::capitalized(crate::language::message("picker.defaultBadge")),
+            ))
         })
         .when_some(model.effort_range(), |s, range| {
             s.child(

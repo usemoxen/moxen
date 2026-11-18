@@ -1231,7 +1231,11 @@ pub fn render(
                         .gap(px(10.))
                         .text_size(px(13.))
                         .child(div().size(px(8.)).rounded(px(2.)).bg(color(token)))
-                        .child(div().flex_1().child(share.name.to_string()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(crate::language::tr(&share.name).into_owned()),
+                        )
                         .child(mono(format!(
                             "{} · {:.1}%",
                             format_count(share.tokens),
@@ -1288,9 +1292,10 @@ fn plan_usage(
     provider_name: Option<&str>,
     now: i64,
 ) -> impl IntoElement {
+    let title = crate::language::message("side.plan_usage_48f7");
     let heading = match provider_name {
-        Some(name) => format!("Plan usage · {name}"),
-        None => "Plan usage".to_string(),
+        Some(name) => format!("{title} · {name}"),
+        None => title.to_string(),
     };
     let section = div()
         .flex()
@@ -1298,12 +1303,9 @@ fn plan_usage(
         .gap(px(10.))
         .child(ui::caps(&heading));
     let Some(limits) = limits else {
-        return section.child(
-            div()
-                .text_size(px(13.))
-                .text_color(color("ink-2"))
-                .child("No subscription usage reported for this provider.".to_string()),
-        );
+        return section.child(div().text_size(px(13.)).text_color(color("ink-2")).child(
+            crate::language::message("side.no_subscription_usage_reported_fa47"),
+        ));
     };
     if limits.windows.is_empty() {
         return section.child(

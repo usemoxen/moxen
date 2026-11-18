@@ -1,16 +1,12 @@
 //! The desktop's client for the Moxen server: the same newline-delimited JSON
-//! protocol the TUI and CLI speak (`src/server/transport/wire.ts`), over the
-//! server's local endpoint. One JSON object per line in both directions.
+//! protocol the TUI and CLI speak (`src/server/transport/wire.ts`). The
+//! launcher bridges it over stdio to a local or paired server.
 //! A request carries a numeric `id` its response echoes; a subscription is named
 //! by the `id` of the request that opened it, and its frames arrive as
 //! `{subscription, item}` until the connection closes.
 //!
-//! The server refuses a client from another build, because the TypeScript
-//! clients share its code. This client is a separate program that speaks the
-//! protocol, so protocol version is its compatibility check: it asks once
-//! with a placeholder build, reads the server's own build from the greeting
-//! (a local socket is greeted even on a mismatch), and presents that build on
-//! a second connection.
+//! The launcher enforces its build and config against the server; the Rust
+//! client uses the bridge's build label and checks the wire protocol version.
 
 use serde_json::{Value, json};
 use std::{
@@ -37,7 +33,7 @@ pub struct WireError {
     pub message: String,
 }
 impl WireError {
-    fn local(code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn local(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -46,7 +42,7 @@ impl WireError {
     pub(crate) fn failed(code: &str, message: impl Into<String>) -> Self {
         Self::local(code, message)
     }
-    fn from_json(value: &Value) -> Self {
+    pub(crate) fn from_json(value: &Value) -> Self {
         let text = |key| value.get(key).and_then(Value::as_str).unwrap_or_default();
         Self::local(text("code"), text("message"))
     }
@@ -60,15 +56,20 @@ impl std::fmt::Display for WireError {
 /// What the server answers a `hello` with (the parts the desktop reads).
 #[derive(Clone, Debug)]
 pub struct Hello {
+    #[cfg(all(test, unix))]
     pub build: String,
+    #[cfg(all(test, unix))]
     pub build_display: String,
+    pub paired_name: Option<String>,
+    pub client_locale: Option<String>,
+    pub restart_required: bool,
 }
 
 type Pending = HashMap<u64, Sender<Result<Value, WireError>>>;
 type Subscriptions = HashMap<u64, Sender<Result<Value, WireError>>>;
 
 struct Shared {
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
     next_id: AtomicU64,
     pending: Mutex<Pending>,
     subscriptions: Mutex<Subscriptions>,
@@ -85,6 +86,7 @@ impl Shared {
         let mut line = message.to_string();
         line.push('\n');
         let mut writer = self.writer.lock().expect("wire writer");
+        let writer = writer.as_mut().ok_or_else(closed)?;
         writer
             .write_all(line.as_bytes())
             .and_then(|_| writer.flush())
@@ -123,54 +125,20 @@ pub struct Wire {
 impl Drop for Wire {
     fn drop(&mut self) {
         self.shared.open.store(false, Ordering::SeqCst);
+        // Close the bridge's stdin even if the launcher is a Windows .cmd
+        // wrapper whose own process can exit before the bridge does.
+        self.shared.writer.lock().expect("wire writer").take();
         (self.shared.close)();
     }
 }
 
-/// One server endpoint: a unix socket path, or on Windows a named pipe.
-/// Mirrors `defaultEndpoint()` in `src/server/transport/endpoint.ts`.
-pub fn default_endpoint() -> String {
-    default_endpoint_from(|name| std::env::var(name).ok(), cfg!(windows))
-}
-
-fn default_endpoint_from(env: impl Fn(&str) -> Option<String>, windows: bool) -> String {
-    if let Some(over) = env("MOXEN_SERVER_ENDPOINT") {
-        let over = over.trim();
-        if !over.is_empty() {
-            return over.to_string();
-        }
-    }
-    if windows {
-        let user = env("USERNAME")
-            .filter(|user| !user.is_empty())
-            .unwrap_or_else(|| "user".into());
-        let user: String = user
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        return format!("{0}{0}.{0}pipe{0}moxen-{user}", '\\');
-    }
-    let home = env("HOME").unwrap_or_default();
-    std::path::Path::new(&home)
-        .join(".moxen")
-        .join("server.sock")
-        .to_string_lossy()
-        .into_owned()
-}
-
-type Halves = (
+pub(crate) type Halves = (
     Box<dyn io::Read + Send>,
     Box<dyn Write + Send>,
     Box<dyn Fn() + Send + Sync>,
 );
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn open_stream(endpoint: &str) -> io::Result<Halves> {
     use std::os::unix::net::UnixStream;
     let stream = UnixStream::connect(endpoint)?;
@@ -185,18 +153,8 @@ fn open_stream(endpoint: &str) -> io::Result<Halves> {
     ))
 }
 
-/// A synchronous handle on a named pipe serialises a blocked read with a
-/// write on the same handle, so the desktop would deadlock on its own
-/// subscription. It needs overlapped I/O, which is not written yet.
-#[cfg(not(unix))]
-fn open_stream(endpoint: &str) -> io::Result<Halves> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("the desktop does not speak to the named pipe {endpoint} yet"),
-    ))
-}
-
 impl Wire {
+    #[cfg(all(test, unix))]
     fn open(endpoint: &str) -> Result<Self, WireError> {
         let (reader, writer, close) = open_stream(endpoint).map_err(|cause| {
             let code = match cause.kind() {
@@ -211,8 +169,12 @@ impl Wire {
             };
             WireError::local(code, message)
         })?;
+        Self::from_stream((reader, writer, close))
+    }
+
+    fn from_stream((reader, writer, close): Halves) -> Result<Self, WireError> {
         let shared = Arc::new(Shared {
-            writer: Mutex::new(writer),
+            writer: Mutex::new(Some(writer)),
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
@@ -220,14 +182,22 @@ impl Wire {
             close,
         });
         let reading = shared.clone();
+        let wire = Self { shared };
         std::thread::Builder::new()
             .name("moxen-wire".into())
             .spawn(move || read_loop(reader, &reading))
             .map_err(|cause| WireError::local("CONNECT_FAILED", cause.to_string()))?;
-        Ok(Self { shared })
+        Ok(wire)
+    }
+
+    pub fn desktop(server: Option<&str>, starting: impl Fn()) -> Result<(Self, Hello), WireError> {
+        let wire = Self::from_stream(crate::client::open(server, starting)?)?;
+        let hello = wire.hello(PROBE_BUILD, DISPLAY)?;
+        Ok((wire, hello))
     }
 
     /// Connects to the server at `endpoint` and completes the build handshake.
+    #[cfg(all(test, unix))]
     pub fn connect(endpoint: &str) -> Result<(Self, Hello), WireError> {
         let probe = Self::open(endpoint)?;
         let greeted = probe.hello(PROBE_BUILD, DISPLAY)?;
@@ -246,8 +216,16 @@ impl Wire {
             Some(json!({ "protocol": PROTOCOL_VERSION, "build": build, "buildDisplay": display })),
         )?;
         Ok(Hello {
-            build: string(&result, "build"),
-            build_display: string(&result, "buildDisplay"),
+            #[cfg(all(test, unix))]
+            build: result["build"].as_str().unwrap_or_default().to_string(),
+            #[cfg(all(test, unix))]
+            build_display: result["buildDisplay"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            paired_name: result["pairedName"].as_str().map(str::to_owned),
+            client_locale: result["clientLocale"].as_str().map(str::to_owned),
+            restart_required: result["restartRequired"].as_bool().unwrap_or(false),
         })
     }
 
@@ -315,7 +293,19 @@ impl Wire {
     /// A command (`type` names it, the rest are its fields).
     #[allow(dead_code)]
     pub fn dispatch(&self, kind: &str, fields: Value) -> Result<Value, WireError> {
-        let timeout = if kind == "prompt.improve" {
+        let installs_memory = kind == "settings.set"
+            && fields["key"] == "memoryEmbeddings"
+            && fields["value"] == "true";
+        let timeout = if installs_memory
+            || matches!(
+                kind,
+                "app.update.apply"
+                    | "app.update.rollback"
+                    | "memory.embeddings.setup"
+                    | "memory.embeddings.rebuild"
+            ) {
+            Duration::from_secs(600)
+        } else if kind == "prompt.improve" {
             // The server gives the provider completion 90 seconds.
             Duration::from_secs(100)
         } else {
@@ -402,14 +392,6 @@ fn closed() -> WireError {
     )
 }
 
-fn string(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Routes every line the server sends until it hangs up, then wakes whoever
 /// is still waiting by dropping their senders.
 fn read_loop(reader: Box<dyn io::Read + Send>, shared: &Shared) {
@@ -456,44 +438,10 @@ fn route(message: &Value, shared: &Shared) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
-        move |name| {
-            pairs
-                .iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_string())
-        }
-    }
-
-    #[test]
-    fn endpoint_follows_the_servers_rules() {
-        // The override wins, trimmed; a blank one is ignored.
-        assert_eq!(
-            default_endpoint_from(env(&[("MOXEN_SERVER_ENDPOINT", " /x/s.sock ")]), false),
-            "/x/s.sock"
-        );
-        let home = default_endpoint_from(
-            env(&[("MOXEN_SERVER_ENDPOINT", " "), ("HOME", "/h")]),
-            false,
-        );
-        assert_eq!(
-            std::path::PathBuf::from(home),
-            std::path::Path::new("/h")
-                .join(".moxen")
-                .join("server.sock")
-        );
-        // The pipe name keeps `[A-Za-z0-9_.-]` and replaces the rest.
-        assert_eq!(
-            default_endpoint_from(env(&[("USERNAME", "A B")]), true),
-            "\\\\.\\pipe\\moxen-A_B"
-        );
-    }
-
-    #[cfg(unix)]
     #[test]
     fn learns_the_server_build_and_streams_shell_frames() {
         use std::io::{BufRead, Write};

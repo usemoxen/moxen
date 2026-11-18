@@ -21,6 +21,7 @@
  */
 import { rm } from "node:fs/promises";
 import net from "node:net";
+import type { Duplex } from "node:stream";
 
 import { buildIdentity, describeBuildMismatch } from "../../core/build.js";
 import { CliError } from "../../core/errors.js";
@@ -111,25 +112,25 @@ export async function serve(options: ServeOptions): Promise<ServerHandle> {
 }
 
 /** How one socket is served: where it came from, and what it may do. */
-export interface SocketContext {
+export interface SocketContext<Socket extends Duplex = net.Socket> {
   /** Accepted by the remote listener (`./remoteaccess.ts`) rather than the local endpoint. */
   readonly remote: boolean;
   /** Stop the server. Never offered to a remote socket. */
-  readonly shutdown: () => void;
+  readonly shutdown?: () => void;
   /**
    * Remote sockets only: vets the `hello` params (a pairing code, or a
    * device's id and token) before the socket is greeted, throwing to
    * refuse. What it returns is added to the hello result. Without it every
    * remote hello is refused.
    */
-  readonly admit?: (params: Record<string, unknown>, socket: net.Socket) => Promise<Partial<HelloResult>> | Partial<HelloResult>;
+  readonly admit?: (params: Record<string, unknown>, socket: Socket) => Promise<Partial<HelloResult>> | Partial<HelloResult>;
   /** How long a client that pings may go unheard before it is dropped (default `CLIENT_SILENCE_MS`). */
   readonly silenceMs?: number;
   /** Added to the hello result; a function is read per hello. */
   readonly greeting?: Partial<HelloResult> | (() => Partial<HelloResult>);
 }
 
-export function handleSocket(socket: net.Socket, api: ClientApi, context: SocketContext): void {
+export function handleSocket<Socket extends Duplex>(socket: Socket, api: ClientApi, context: SocketContext<Socket>): void {
   socket.setEncoding("utf8");
   const reader = new LineReader();
   const subscriptions = new Map<number, () => void>();
@@ -318,7 +319,8 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
         send({ id, result: null });
         break;
       case "shutdown":
-        if (context.remote) {
+        const shutdown = context.shutdown;
+        if (context.remote || !shutdown) {
           send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
           break;
         }
@@ -333,13 +335,13 @@ export function handleSocket(socket: net.Socket, api: ClientApi, context: Socket
           const stop = (): void => {
             if (!stopping) {
               stopping = true;
-              context.shutdown();
+              shutdown();
             }
           };
           socket.write(encode({ id, result: null }), stop);
           socket.once("close", stop);
         } else {
-          context.shutdown();
+          shutdown();
         }
         break;
       default:

@@ -13,6 +13,14 @@ actions!(title_bar, [ToggleInspector, ToggleTasks]);
 const MARK_H: f32 = 16.;
 const MARK_SCALE: f32 = MARK_H / 2.84;
 
+fn settled_badge_label() -> &'static str {
+    if crate::language::spanish() {
+        crate::language::message("status.idle")
+    } else {
+        "Done"
+    }
+}
+
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = &w.source.list_threads()[w.selected];
     let checklist = w.source.inspector(w.selected);
@@ -30,7 +38,12 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .bg(color("ground"))
         .font_family(theme::FONT)
         // Room for the native traffic lights.
-        .child(div().w(px(90.)).flex_shrink_0())
+        .when(cfg!(target_os = "macos"), |s| {
+            s.child(div().w(px(90.)).flex_shrink_0())
+        })
+        .when_some(w.source.paired_name(), |s, name| {
+            s.child(div().text_color(color("live")).child(name))
+        })
         .child(
             div()
                 .flex()
@@ -84,7 +97,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .line_height(px(18.))
                         .font_weight(FontWeight::BOLD)
                         .child(if w.creating {
-                            "New thread".to_string()
+                            crate::language::message("palette.newThread").into()
                         } else {
                             t.title.clone()
                         }),
@@ -105,9 +118,16 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .child(ui::state(t.status))
                 .child(if t.status == Status::Running {
                     let seconds = t.started_at.map_or(0, |start| start.elapsed().as_secs());
-                    format!("Working · {}m {:02}s", seconds / 60, seconds % 60)
+                    format!(
+                        "{} · {}m {:02}s",
+                        crate::language::tr("Working"),
+                        seconds / 60,
+                        seconds % 60
+                    )
+                } else if t.status == Status::Idle {
+                    settled_badge_label().to_owned()
                 } else {
-                    t.status.label().to_string()
+                    crate::language::tr(t.status.label()).into_owned()
                 }),
         )
         .when(!w.creating, |s| {
@@ -122,7 +142,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         div()
                             .id("tasks-toggle")
                             .track_focus(&w.tips.tasks)
-                            .shortcut("Show or hide tasks", "⌃T")
+                            .shortcut("Show or hide tasks", crate::primary_key("⌃T", "Ctrl+T"))
                             .flex_shrink_0()
                             .h(px(28.))
                             .px(px(8.))
@@ -135,12 +155,15 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .text_size(px(12.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(color("ink-2"))
-                            .child("Tasks")
-                            .child(div().text_color(color("ink")).child(format!(
-                                "{}/{}",
-                                crate::work::completed(&checklist.tasks),
-                                checklist.tasks.len()
-                            )))
+                            .child(crate::language::tr("Tasks").into_owned())
+                            .child(
+                                div()
+                                    .text_color(color("ink"))
+                                    .child(crate::language::of_total(
+                                        crate::work::completed(&checklist.tasks),
+                                        checklist.tasks.len(),
+                                    )),
+                            )
                             .on_click(cx.listener(|_, _, window, cx| {
                                 window.dispatch_action(Box::new(ToggleTasks), cx);
                             })),
@@ -149,7 +172,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         &w.tips.tasks,
                         window,
                         "Show or hide tasks",
-                        "⌃T",
+                        crate::primary_key("⌃T", "Ctrl+T"),
                         ui::Tip::BelowRight,
                     )),
             )
@@ -163,7 +186,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         div()
                             .id("inspector-toggle")
                             .track_focus(&w.tips.inspector)
-                            .shortcut("Inspector", "⌘I")
+                            .shortcut("Inspector", crate::primary_key("⌘I", "Ctrl+I"))
                             .flex_shrink_0()
                             .size(px(28.))
                             .flex()
@@ -179,9 +202,20 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         &w.tips.inspector,
                         window,
                         "Inspector",
-                        "⌘I",
+                        crate::primary_key("⌘I", "Ctrl+I"),
                         ui::Tip::BelowRight,
                     )),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settled_badge_keeps_the_english_desktop_label() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::settled_badge_label(), "Done");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::settled_badge_label(), "inactivo");
+    }
 }

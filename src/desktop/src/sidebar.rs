@@ -226,7 +226,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     .when(selected, |s| s.text_color(color("ink")))
                     .child(t.title.clone()),
             )
-            .child(meta(t.activity.clone()))
+            .child(meta(crate::language::age(&t.activity)))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -286,7 +286,10 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             div()
                                 .id("jump-search")
                                 .track_focus(&w.tips.jump)
-                                .shortcut("Jump to thread or action", "⌘K")
+                                .shortcut(
+                                    crate::language::tr("Jump to thread or action").into_owned(),
+                                    crate::primary_key("⌘K", "Ctrl+K"),
+                                )
                                 .on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.open_palette(window, cx)
@@ -307,20 +310,28 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                                 .text_size(px(13.))
                                 .text_color(color("ink-2"))
                                 .child(ui::icon("search", "ink-2"))
-                                .child(div().flex_1().min_w_0().truncate().child("Jump to thread…"))
-                                .child(ui::kbd("⌘K"))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(crate::language::tr("Jump to thread…").into_owned()),
+                                )
+                                .child(ui::kbd(crate::primary_key("⌘K", "Ctrl+K")))
                                 .children(ui::focus_tip(
                                     &w.tips.jump,
                                     window,
                                     "Jump to thread or action",
-                                    "⌘K",
+                                    crate::primary_key("⌘K", "Ctrl+K"),
                                     ui::Tip::BelowLeft,
                                 )),
                         )
                         .child(
                             div()
                                 .id("new-thread")
-                                .control("New thread in this project")
+                                .control(
+                                    crate::language::tr("New thread in this project").into_owned(),
+                                )
                                 .size(px(30.))
                                 .flex()
                                 .items_center()
@@ -352,7 +363,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .text_color(color("ink-2"))
                 .child(
                     row("settled-toggle")
-                        .control("Show settled threads")
+                        .control(crate::language::tr("Show settled threads").into_owned())
                         .child(
                             div()
                                 .size(px(14.))
@@ -368,7 +379,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                                     "ink-2",
                                 )),
                         )
-                        .child(div().flex_1().child("Settled"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(crate::language::tr("Settled").into_owned()),
+                        )
                         .child(meta(
                             listed
                                 .iter()
@@ -387,9 +402,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .when(!w.source.archived().is_empty(), |s| {
                     s.child(
                         row("archived-toggle")
-                            .control("Show archived threads")
+                            .control(crate::language::tr("Show archived threads").into_owned())
                             .child(ui::icon("clock", "ink-2"))
-                            .child(div().flex_1().child("Archived"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(crate::language::tr("Archived").into_owned()),
+                            )
                             .child(meta(w.source.archived().len().to_string()))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_thread_form(
@@ -424,10 +443,17 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 )
                 .child(
                     row("settings")
-                        .shortcut("Settings", "⌘,")
+                        .shortcut(
+                            crate::language::message("settings.title"),
+                            crate::primary_key("⌘,", "Ctrl+,"),
+                        )
                         .child(ui::icon("settings", "ink-2"))
-                        .child(div().flex_1().child("Settings"))
-                        .child(ui::kbd("⌘,"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(crate::language::message("settings.title")),
+                        )
+                        .child(ui::kbd(crate::primary_key("⌘,", "Ctrl+,")))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
                         ),

@@ -75,7 +75,10 @@ pub fn render(id: SharedString, lines: &[DiffLine]) -> impl IntoElement {
                 div()
                     .pl(px(16.))
                     .text_color(color("ink-2"))
-                    .child(format!("… {hidden} more lines")),
+                    .child(crate::language::fill(
+                        "timeline.moreLines",
+                        &[("{count}", &hidden.to_string())],
+                    )),
             )
         })
         .with_animation(

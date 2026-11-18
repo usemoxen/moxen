@@ -164,7 +164,7 @@ fn heading(text: impl Into<SharedString>) -> Div {
         .pt(px(8.))
         .pb(px(3.))
         .font_weight(FontWeight::SEMIBOLD)
-        .child(text.into())
+        .child(crate::language::capitalized(&text.into()))
 }
 
 fn body() -> Div {
@@ -180,9 +180,10 @@ fn body() -> Div {
 }
 
 fn action(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
+    let label = crate::language::capitalized(label);
     div()
         .id(id)
-        .control(label)
+        .control(label.clone())
         .rounded(px(6.))
         .px(px(8.))
         .py(px(5.))
@@ -212,7 +213,8 @@ fn row(id: impl Into<ElementId>, title: String, meta: String, status: Status) ->
         )
 }
 
-fn detail_line(label: &'static str, value: impl Into<SharedString>) -> Div {
+fn detail_line(label: impl Into<SharedString>, value: impl Into<SharedString>) -> Div {
+    let label: SharedString = label.into();
     div()
         .px(px(8.))
         .py(px(4.))
@@ -243,7 +245,9 @@ fn agent_list(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     }
     body()
         .when(!children.is_empty(), |s| {
-            s.child(heading("Delegated threads"))
+            s.child(heading(
+                crate::language::tr("Delegated threads").into_owned(),
+            ))
         })
         .children(children.into_iter().map(|id| {
             let thread = &threads[id];
@@ -251,10 +255,11 @@ fn agent_list(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             let timer = thread.started_at.map_or_else(String::new, |at| {
                 format!(" · {}", duration(at.elapsed().as_millis() as i64))
             });
+            let status = crate::language::tr(thread.status.label()).into_owned();
             row(
                 ("delegated-thread", id),
                 thread.title.clone(),
-                format!("{model} · {}{timer}", thread.status.label()),
+                format!("{model} · {status}{timer}"),
                 thread.status,
             )
             .on_click(cx.listener(move |this, _, window, cx| open_thread(this, id, window, cx)))
@@ -270,6 +275,7 @@ fn agent_list(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 String::new()
             };
+            let status = crate::language::tr(agent.status.label()).into_owned();
             div()
                 .flex()
                 .items_center()
@@ -278,7 +284,7 @@ fn agent_list(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                     row(
                         format!("subagent-{key}"),
                         agent.title.clone(),
-                        format!("{} · {}{timer}", agent.kind, agent.status.label()),
+                        format!("{} · {status}{timer}", agent.kind),
                         agent.status,
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -304,7 +310,7 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
     let (model, _) = w.model_label(w.source.selection(id).as_ref());
     let read = w.source.work(id, &Read::Delegation);
     let mut details = body()
-        .child(heading("Delegated task"))
+        .child(heading(crate::language::tr("Delegated task").into_owned()))
         .children(delegated.parent.map(|id| {
             row(
                 ("parent-thread", id),
@@ -317,27 +323,46 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
         .children(
             prompt
                 .filter(|s| !s.is_empty())
-                .map(|s| detail_line("Task", s)),
+                .map(|s| detail_line(crate::language::message("bgm.task_eaeb"), s)),
         )
-        .child(detail_line("Model", model))
-        .children(delegated.branch.map(|s| detail_line("Branch", s)))
-        .children(delegated.worktree.map(|s| detail_line("Worktree", s)));
+        .child(detail_line(
+            crate::language::message("side.model_a559"),
+            model,
+        ))
+        .children(
+            delegated
+                .branch
+                .map(|s| detail_line(crate::language::message("side.branch_dacd"), s)),
+        )
+        .children(
+            delegated
+                .worktree
+                .map(|s| detail_line(crate::language::message("side.worktree_6691"), s)),
+        );
     match read.as_deref() {
         Some(Ok(View::Delegation(link))) => {
             let timer = thread.started_at.map_or_else(String::new, |at| {
                 format!(" · {}", duration(at.elapsed().as_millis() as i64))
             });
+            let rendered = thread.status.label();
             let status = if thread.status == Status::Running || thread.status == Status::Queued {
-                thread.status.label()
+                crate::language::tr(rendered).into_owned()
             } else {
                 match link.status.as_deref() {
-                    Some("failed") => "Failed",
-                    Some("interrupted") => "Interrupted",
-                    Some("cancelled") => "Cancelled",
-                    _ => thread.status.label(),
+                    Some("failed") => crate::language::message("run.phase.failed").to_string(),
+                    Some("interrupted") => {
+                        crate::language::capitalized(crate::language::message("status.interrupted"))
+                    }
+                    Some("cancelled") => {
+                        crate::language::capitalized(crate::language::message("task.cancelled"))
+                    }
+                    _ => crate::language::tr(rendered).into_owned(),
                 }
             };
-            details = details.child(detail_line("Status", format!("{status}{timer}")));
+            details = details.child(detail_line(
+                crate::language::message("side.status_ec53"),
+                format!("{status}{timer}"),
+            ));
             if let Some(summary) = &link.summary {
                 details = details.child(detail_line("Summary", summary.clone()));
             }
@@ -358,14 +383,15 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
                         };
                         let mut choices = vec![cancel(
                             if link.notify {
-                                "Cancel and notify parent"
+                                crate::language::message("autocancel.notify")
                             } else {
                                 "Confirm cancellation"
                             },
                             link.notify,
                         )];
                         if link.notify {
-                            choices.push(cancel("Cancel without notifying", false));
+                            choices
+                                .push(cancel(crate::language::message("autocancel.silent"), false));
                         }
                         choices.push(action("keep-task", "Keep task").on_click(cx.listener(
                             |this, _, _, cx| {
@@ -392,8 +418,12 @@ fn info(w: &Workspace, delegated: Delegated, cx: &mut Context<Workspace>) -> Div
     }
 }
 
+fn stop_button_label() -> &'static str {
+    crate::language::desktop("Stop", "Parar")
+}
+
 fn stop_button(key: SharedString, cx: &mut Context<Workspace>) -> Stateful<Div> {
-    action(format!("stop-task-{key}"), "Stop")
+    action(format!("stop-task-{key}"), stop_button_label())
         .text_color(color("broken"))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.source.stop_background(this.selected, key.as_ref());
@@ -414,10 +444,10 @@ fn background(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         if group != Some(task.kind) {
             group = Some(task.kind);
             pane = pane.child(heading(match task.kind {
-                "Shell" => "Shells",
-                "Monitor" => "Monitors",
-                "Agent" => "Agents",
-                _ => "Tasks",
+                "Shell" => crate::language::message("bgm.shells_b835").to_owned(),
+                "Monitor" => crate::language::message("bgm.monitors_8c22").to_owned(),
+                "Agent" => crate::language::tr("Agents").into_owned(),
+                _ => crate::language::tr("Tasks").into_owned(),
             }));
         }
         let key = SharedString::from(task.id.clone());
@@ -447,7 +477,9 @@ fn background(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         );
     }
     pane.when(list.tasks.is_empty() && list.live && !list.partial, |s| {
-        s.child(notice("Nothing is running in the background."))
+        s.child(notice(crate::language::message(
+            "bgm.nothing_running_in_the_f068",
+        )))
     })
     .when(!list.live, |s| {
         s.child(notice(
@@ -462,10 +494,12 @@ fn background(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
 }
 
 fn back(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    action("back-to-work-list", "Back").on_click(cx.listener(|this, _, _, cx| {
-        this.work_ui.dismiss();
-        cx.notify();
-    }))
+    action("back-to-work-list", crate::language::message("guide.back")).on_click(cx.listener(
+        |this, _, _, cx| {
+            this.work_ui.dismiss();
+            cx.notify();
+        },
+    ))
 }
 
 fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div {
@@ -484,17 +518,22 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
         .child(back(cx))
         .child(div().flex_1().min_w_0().child(agent.title.clone()))
         .when(agent.stoppable, |s| s.child(stop_button(key, cx)));
+    let agent_status = crate::language::tr(agent.status.label()).into_owned();
     let mut pane = body().child(header).child(detail_line(
-        "Subagent",
-        format!("{} · {}", agent.kind, agent.status.label()),
+        crate::language::capitalized(crate::language::message("subagent.word")),
+        format!("{} · {agent_status}", agent.kind),
     ));
     match read.as_deref() {
         Some(Ok(View::Subagent(Some(rows)))) if !rows.is_empty() => {
             pane = pane.children(rows.iter().map(|row| {
                 match &row.message {
-                    Message::User { text, .. } => detail_line("Prompt", text.clone()),
+                    Message::User { text, .. } => {
+                        detail_line(crate::language::message("bgm.prompt_45d7"), text.clone())
+                    }
                     Message::Assistant { text, .. } => detail_line("Reply", text.clone()),
-                    Message::Plan { text, .. } => detail_line("Plan", text.clone()),
+                    Message::Plan { text, .. } => {
+                        detail_line(crate::language::message("timeline.plan"), text.clone())
+                    }
                     Message::UsageLimit { wrap_up, label, .. } => detail_line(
                         "Usage limit",
                         if *wrap_up {
@@ -583,8 +622,12 @@ fn output(w: &Workspace, task: &BackgroundTask, cx: &mut Context<Workspace>) -> 
         _ => None,
     };
     let status = match available {
-        Some(Some(_)) => format!("Running{}", elapsed(task.started)),
-        Some(None) => "Finished".into(),
+        Some(Some(_)) => format!(
+            "{}{}",
+            crate::language::capitalized(crate::language::message("task.running")),
+            elapsed(task.started)
+        ),
+        Some(None) => crate::language::message("run.phase.finished").to_string(),
         None => "Status unavailable".into(),
     };
     let key = SharedString::from(task.id.clone());
@@ -615,8 +658,9 @@ fn output(w: &Workspace, task: &BackgroundTask, cx: &mut Context<Workspace>) -> 
         }));
     let read = w.source.work(w.selected, &Read::Output(task.id.clone()));
     match read.as_deref() {
-        Some(Ok(View::Output(Some(text)))) if !text.is_empty() => {
-            pane.child(heading("Output")).child(
+        Some(Ok(View::Output(Some(text)))) if !text.is_empty() => pane
+            .child(heading(crate::language::tr("Output").into_owned()))
+            .child(
                 div()
                     .p(px(8.))
                     .bg(color("sunk"))
@@ -624,9 +668,10 @@ fn output(w: &Workspace, task: &BackgroundTask, cx: &mut Context<Workspace>) -> 
                     .font_family(theme::MONO)
                     .text_size(px(12.))
                     .child(text.clone()),
-            )
-        }
-        Some(Ok(View::Output(Some(_)))) => pane.child(notice("No output yet.")),
+            ),
+        Some(Ok(View::Output(Some(_)))) => pane.child(notice(crate::language::capitalized(
+            crate::language::message("bgm.no_output_yet_b7d2"),
+        ))),
         Some(Ok(View::Output(None))) => {
             pane.child(notice("Output is not available for this task."))
         }
@@ -658,6 +703,14 @@ mod tests {
         model::{Status, ThreadSource},
         work::{Read, View},
     };
+
+    #[test]
+    fn background_stop_has_no_terminal_glyph() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::stop_button_label(), "Stop");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::stop_button_label(), "Parar");
+    }
 
     #[test]
     fn escape_closes_details_before_leaving_a_running_approval_alone() {

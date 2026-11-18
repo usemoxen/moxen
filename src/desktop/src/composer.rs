@@ -512,7 +512,7 @@ impl Render for Composer {
                     move |bounds, window, cx| {
                         entity.update(cx, |this, _| {
                             let display = if this.text.is_empty() {
-                                std::borrow::Cow::Borrowed(this.placeholder)
+                                crate::language::tr(this.placeholder)
                             } else {
                                 this.display()
                             };
@@ -598,6 +598,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Send, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-enter", QueueSend, Some("Composer")),
         KeyBinding::new("ctrl-enter", QueueSend, Some("Composer")),
         KeyBinding::new("backspace", Backspace, Some("Composer")),
@@ -606,8 +607,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, Some("Composer")),
         KeyBinding::new("up", Up, Some("Composer")),
         KeyBinding::new("down", Down, Some("Composer")),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-a", SelectAll, Some("Composer")),
         KeyBinding::new("ctrl-a", SelectAll, Some("Composer")),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-v", Paste, Some("Composer")),
         KeyBinding::new("ctrl-v", Paste, Some("Composer")),
     ]);

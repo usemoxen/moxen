@@ -33,38 +33,49 @@ pub fn run_of(messages: &[Message], index: usize) -> (usize, usize) {
     (start, end - start)
 }
 
-/// "Ran 3 commands, read 3 files, edited 1 file": the folded run's summary.
+/// "Ran 3 commands, read 3 files, updated 1 file": the folded run's summary
+/// in the TUI's words (`summary.*`), the first part capitalized as the TUI
+/// does. The desktop's tool buckets map to the TUI's: edits read as updates
+/// (the TUI's own fallback for file changes), code searches as `grep`, and
+/// thoughts fall into the default `step` bucket, as unknown tools do.
 pub fn run_summary(messages: &[Message]) -> String {
+    use crate::language::plural;
     let count = |kind: &str| {
         messages
             .iter()
             .filter(|m| matches!(m, Message::Tool { name, .. } if name == kind))
             .count()
     };
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = vec![];
-    let (ran, read, edited) = (count("command"), count("read"), count("edit"));
-    let (searched, used) = (count("search"), count("tool"));
+    let ran = count("command");
     if ran > 0 {
-        parts.push(format!("ran {}", plural(ran, "command", "commands")));
+        parts.push(plural("summary.command.one", "summary.command.other", ran));
     }
+    let read = count("read");
     if read > 0 {
-        parts.push(format!("read {}", plural(read, "file", "files")));
+        parts.push(plural("summary.read.one", "summary.read.other", read));
     }
+    let searched = count("search");
     if searched > 0 {
-        parts.push(format!("searched {}", plural(searched, "time", "times")));
+        parts.push(plural("summary.grep.one", "summary.grep.other", searched));
     }
+    let edited = count("edit");
     if edited > 0 {
-        parts.push(format!("edited {}", plural(edited, "file", "files")));
+        parts.push(plural(
+            "summary.file_updated.one",
+            "summary.file_updated.other",
+            edited,
+        ));
     }
+    let used = count("tool");
     if used > 0 {
-        parts.push(format!("used {}", plural(used, "tool", "tools")));
+        parts.push(plural("summary.tool.one", "summary.tool.other", used));
     }
     if parts.is_empty() {
-        parts.push(format!(
-            "thought {}",
-            plural(count("thought"), "time", "times")
+        parts.push(plural(
+            "summary.step.one",
+            "summary.step.other",
+            count("thought"),
         ));
     }
     let mut text = parts.join(", ");
@@ -79,16 +90,20 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
     let creating = w.creating;
     let draft = w.active_composer().read(cx);
     let draft_empty = draft.empty() || draft.loading_assets != 0;
-    let thread = w.source.list_threads()[id].clone();
-    let running = thread.status == Status::Running && !creating;
-    let messages = w.source.messages(id);
+    let threads = w.source.list_threads();
+    let thread = threads.get(id);
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
+    let messages = if creating {
+        Arc::default()
+    } else {
+        w.source.messages(id)
+    };
     let last_reply = messages
         .iter()
         .rposition(|m| matches!(m, Message::Assistant { .. }));
     let entity = cx.entity();
-    let state = w.lists[id].clone();
     let (model, model_tone) = w.model_label(w.source.selection(id).as_ref());
-    let started = thread.started_at;
+    let started = thread.and_then(|thread| thread.started_at);
     div()
         .relative()
         .flex_1()
@@ -110,7 +125,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                 {
                     crate::research_view::run_view(w, id, &summary, cx).into_any_element()
                 } else {
-                    list(state, move |index, window, cx| {
+                    list(w.lists[id].clone(), move |index, window, cx| {
                         let this = entity.read(cx);
                         let Some(current) = messages.get(index) else {
                             return div().into_any_element();
@@ -243,7 +258,8 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                                     .text_color(color("live"))
                                                     .child(ui::state(Status::Running))
                                                     .child(format!(
-                                                        "working · {}m {:02}s",
+                                                        "{} · {}m {:02}s",
+                                                        crate::language::tr("working"),
                                                         seconds / 60,
                                                         seconds % 60
                                                     )),
@@ -285,9 +301,13 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             ))
                                             .child(div().font_weight(FontWeight::SEMIBOLD).child(
                                                 if implemented {
-                                                    "Plan implemented"
+                                                    crate::language::message(
+                                                        "timeline.planImplemented",
+                                                    )
                                                 } else {
-                                                    "Plan proposed"
+                                                    crate::language::message(
+                                                        "timeline.planProposed",
+                                                    )
                                                 },
                                             ))
                                             .child(
@@ -815,7 +835,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                     .into_any_element()
                 }),
         )
-        .child(composer(w, &thread, draft_empty, window, cx))
+        .child(composer(w, thread, draft_empty, window, cx))
 }
 
 fn reply_body(
@@ -850,7 +870,8 @@ fn reply_body(
         .text_size(px(theme::BODY))
         .line_height(px(theme::LINE))
         .when(text.is_empty(), |s| {
-            s.text_color(color("ink-2")).child("Thinking…")
+            s.text_color(color("ink-2"))
+                .child(crate::language::tr("Thinking…").into_owned())
         })
         .children(blocks.into_iter().map(|block| match block {
             ReplyBlock::Text(text) => div().child(text).into_any_element(),
@@ -890,14 +911,14 @@ fn back_title_state(w: &Workspace, back: ThreadId) -> (String, String) {
 
 fn composer(
     w: &Workspace,
-    thread: &crate::model::Thread,
+    thread: Option<&Thread>,
     draft_empty: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let id = w.selected;
     let creating = w.creating;
-    let running = thread.status == Status::Running && !creating;
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
     let waiting = if creating {
         vec![]
     } else {
@@ -946,20 +967,20 @@ fn composer(
                         None => card(w, thread, draft_empty, window, cx).into_any_element(),
                     }
                 })
-                .children(status_line(w, cx)),
+                .children(thread.and_then(|_| status_line(w, cx))),
         )
 }
 
 /// The composer: model, access and mode chips, the draft and its buttons.
 fn card(
     w: &Workspace,
-    thread: &crate::model::Thread,
+    thread: Option<&Thread>,
     draft_empty: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
     let creating = w.creating;
-    let running = thread.status == Status::Running && !creating;
+    let running = !creating && thread.is_some_and(|thread| thread.status == Status::Running);
     let loading = w.active_composer().read(cx).loading_assets != 0;
     div()
         .id("composer-card")
@@ -993,7 +1014,7 @@ fn card(
                     "Access",
                     match access_of(w, thread).as_str() {
                         "" => "Default access".to_string(),
-                        mode => mode_label(&RUNTIME_MODES, mode),
+                        mode => crate::language::tr(&mode_label(&RUNTIME_MODES, mode)).into_owned(),
                     },
                     running,
                     cx,
@@ -1003,7 +1024,9 @@ fn card(
                     Dropdown::Mode,
                     "mode",
                     "Mode",
-                    mode_label(&INTERACTION_MODES, &mode_of(w, thread)),
+                    // The TUI's Spanish for the mode (settings "Build").
+                    crate::language::tr(&mode_label(&INTERACTION_MODES, &mode_of(w, thread)))
+                        .into_owned(),
                     running,
                     cx,
                 )),
@@ -1088,7 +1111,10 @@ fn card(
                     s.child(
                         div()
                             .id("queue")
-                            .shortcut("Queue for after this turn", "⌘↵")
+                            .shortcut(
+                                "Queue for after this turn",
+                                crate::primary_key("⌘↵", "Ctrl+Enter"),
+                            )
                             .h(px(30.))
                             .px(px(10.))
                             .border(px(theme::px_token("stroke", "stroke-rule")))
@@ -1098,7 +1124,7 @@ fn card(
                             .items_center()
                             .text_size(px(12.5))
                             .font_weight(FontWeight::MEDIUM)
-                            .child("Queue")
+                            .child(crate::language::tr("Queue").into_owned())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.focus(&this.active_composer().read(cx).focus.clone(), cx);
                                 window.dispatch_action(Box::new(crate::composer::QueueSend), cx);
@@ -1234,6 +1260,14 @@ fn attachment_menu(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         })
 }
 
+fn improve_draft_label() -> String {
+    if crate::language::spanish() {
+        crate::language::capitalized(crate::language::message("composer.improve"))
+    } else {
+        "Improve draft".to_owned()
+    }
+}
+
 fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let composer = w.active_composer().read(cx);
     let undo = composer.undo_improvement.is_some();
@@ -1249,11 +1283,11 @@ fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .text_color(color("ink-2"))
         .child(ui::icon("asterisk", "ink-2"))
         .child(if w.improving {
-            "Improving…"
+            crate::language::capitalized(crate::language::message("composer.improving"))
         } else if undo {
-            "Undo improvement"
+            crate::language::capitalized(crate::language::message("composer.undoImprove"))
         } else {
-            "Improve draft"
+            improve_draft_label()
         });
     if w.improving
         || composer.text().trim().is_empty()
@@ -1311,7 +1345,10 @@ fn draft_assets(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
             let composer = composer.clone();
             let remove = div()
                 .id(("remove-attachment", index))
-                .control(format!("Remove {name}"))
+                .control(format!(
+                    "{} {name}",
+                    crate::language::message("le.chip.remove")
+                ))
                 .size(px(22.))
                 .flex_shrink_0()
                 .flex()
@@ -1441,7 +1478,7 @@ fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
                         .text_size(px(11.5))
                         .text_color(color("ink-2"))
                         .child(if count == 0 {
-                            "No matching commands".to_owned()
+                            crate::language::message("app.no_matching_commands_fad4").into()
                         } else if count > 6 {
                             format!(
                                 "Commands and skills · {} of {count} · ↑ ↓ to browse",
@@ -1472,19 +1509,19 @@ fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
 }
 
 /// How the thread (or the one being drafted) may act on its own.
-fn access_of(w: &Workspace, thread: &Thread) -> String {
+fn access_of(w: &Workspace, thread: Option<&Thread>) -> String {
     if w.creating {
         w.new_runtime
             .map_or_else(String::new, |at| RUNTIME_MODES[at].0.into())
     } else {
-        thread.runtime_mode.clone()
+        thread.map_or_else(String::new, |thread| thread.runtime_mode.clone())
     }
 }
-fn mode_of(w: &Workspace, thread: &Thread) -> String {
+fn mode_of(w: &Workspace, thread: Option<&Thread>) -> String {
     if w.creating {
         INTERACTION_MODES[w.new_interaction].0.into()
     } else {
-        thread.interaction_mode.clone()
+        thread.map_or_else(String::new, |thread| thread.interaction_mode.clone())
     }
 }
 
@@ -1498,7 +1535,7 @@ fn model_pill(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .and_then(|(selection, catalog)| catalog.effort_label(selection));
     div()
         .id("model-pill")
-        .shortcut("Model and effort", "⌘M")
+        .shortcut("Model and effort", crate::primary_key("⌘M", "Ctrl+M"))
         .track_focus(&w.model_focus)
         .h(px(28.))
         .px(px(10.))
@@ -1645,7 +1682,7 @@ pub fn actions_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             kind: Dropdown::Thread,
             id: "thread-actions",
             tooltip: "Thread actions",
-            label: "Actions".into(),
+            label: crate::language::tr("Actions").into_owned(),
             locked: items.is_empty(),
         },
         move |cx| crate::thread_actions::menu_rows("thread-actions", id, &items, cx),
@@ -1737,11 +1774,20 @@ fn menu_chip(
 fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let projects = w.source.projects();
     let current = w.new_project_id();
-    let label = w.new_project_title().unwrap_or_else(|| "Project".into());
+    let label = w
+        .new_project_title()
+        .unwrap_or_else(|| crate::language::tr("Project").into_owned());
     let mut items: Vec<(String, bool)> = projects
         .iter()
         .map(|p| (p.title.clone(), Some(&p.id) == current.as_ref()))
         .collect();
+    items.insert(
+        0,
+        (
+            crate::language::message("guide.noProjectChoice").into(),
+            w.new_scratch,
+        ),
+    );
     items.push(("Add project…".into(), false));
     let menu = Menu {
         kind: Dropdown::Project,
@@ -1760,8 +1806,17 @@ fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 move |this, i, cx| {
                     let projects = this.source.projects();
                     this.dropdown = None;
-                    match projects.get(i) {
-                        Some(project) => this.new_project = Some(project.id.clone()),
+                    if i == 0 {
+                        this.new_project = None;
+                        this.new_scratch = true;
+                        cx.notify();
+                        return;
+                    }
+                    match projects.get(i - 1) {
+                        Some(project) => {
+                            this.new_project = Some(project.id.clone());
+                            this.new_scratch = false;
+                        }
                         None => this.add_project(cx),
                     }
                     cx.notify();
@@ -1785,19 +1840,21 @@ fn new_thread(w: &Workspace) -> impl IntoElement {
             div()
                 .text_size(px(20.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("New thread"),
+                .child(crate::language::tr("New thread").into_owned()),
         )
         .child(
             div()
                 .max_w(px(420.))
                 .text_center()
                 .text_color(color("ink-2"))
-                .child(match w.new_project_title() {
+                .child(if w.new_scratch {
+                    crate::language::message("guide.scratchProject").into()
+                } else { match w.new_project_title() {
                     Some(project) => format!(
                         "It starts in {project}. Choose how it runs below, then write the first message."
                     ),
                     None => "Add a project to start a thread in.".into(),
-                }),
+                }}),
         )
 }
 
@@ -1823,7 +1880,7 @@ fn problem(message: String, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .id("dismiss-problem")
-                .control("Dismiss")
+                .control(crate::language::message("action.dismiss"))
                 .size(px(22.))
                 .flex()
                 .items_center()
@@ -2051,7 +2108,7 @@ fn protection_banner(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyEl
 /// held, moved, taken back to edit, removed, or sent at once.
 fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
     const SHOWN: usize = 3;
-    let chip = |id: &'static str, at: usize, tooltip: &'static str, label: &'static str| {
+    let chip = |id: &'static str, at: usize, tooltip: &'static str, label: &str| {
         div()
             .id((id, at))
             .control(tooltip)
@@ -2064,7 +2121,7 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(color("ink-2"))
-            .child(label)
+            .child(crate::language::capitalized(label))
     };
     div()
         .flex()
@@ -2085,7 +2142,9 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
             } else if item.scheduled.is_some() {
                 "scheduled".to_string()
             } else {
-                "queued".to_string()
+                // The TUI's queued word (`queued.queued_7b2f`), lowercased the
+                // way this strip reads it.
+                crate::language::message("queued.queued_7b2f").to_lowercase()
             };
             div()
                 .flex()
@@ -2134,29 +2193,43 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
                         "queue-hold",
                         at,
                         "Let it run when its turn comes",
-                        "Release",
+                        crate::language::message("queue.action.release"),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit_queued(&hold, QueueEdit::Release, cx)
                     }))
                 } else {
-                    chip("queue-hold", at, "Keep it back until released", "Hold").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.edit_queued(&hold, QueueEdit::Hold, cx)
-                        }),
+                    chip(
+                        "queue-hold",
+                        at,
+                        "Keep it back until released",
+                        crate::language::message("queue.action.hold"),
                     )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_queued(&hold, QueueEdit::Hold, cx)
+                    }))
                 })
                 .child(
-                    chip("queue-edit", at, "Take it back to edit", "Edit").on_click(cx.listener(
-                        move |this, _, window, cx| this.edit_queued_text(&edit, window, cx),
-                    )),
+                    chip(
+                        "queue-edit",
+                        at,
+                        "Take it back to edit",
+                        crate::language::message("skills.edit"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_queued_text(&edit, window, cx)
+                    })),
                 )
                 .child(
-                    chip("queue-remove", at, "Remove without sending", "Remove").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.edit_queued(&remove, QueueEdit::Remove, cx)
-                        }),
-                    ),
+                    chip(
+                        "queue-remove",
+                        at,
+                        "Remove without sending",
+                        crate::language::message("queue.action.remove"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_queued(&remove, QueueEdit::Remove, cx)
+                    })),
                 )
                 .when(running && at == 0 && !item.held, |s| {
                     s.child(
@@ -2216,12 +2289,12 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
     let overview = git.overview.as_ref().filter(|o| o.is_repository);
     let branch = overview
         .and_then(|o| o.checked_out())
-        .unwrap_or("detached")
+        .unwrap_or(crate::language::message("git.detached_1594"))
         .to_string();
     let changed = overview
         .and_then(|o| o.status.as_ref())
-        .map(|s| s.line())
-        .filter(|line| line != "clean");
+        .filter(|s| !s.is_clean())
+        .map(|s| s.line());
     let line = div()
         .mx(px(-6.))
         .flex()
@@ -2256,7 +2329,7 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
         .when(background > 0, |s| {
             s.child(
                 chip("background", "Open background tasks")
-                    .child(format!("{background} background"))
+                    .child(background_chip_label(background))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = 4;
                         this.set_inspector(true);
@@ -2362,15 +2435,33 @@ fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
     Some(usage.into_any_element())
 }
 
+fn background_chip_label(count: usize) -> String {
+    if crate::language::spanish() {
+        crate::language::fill("bg.runningCount", &[("{count}", &count.to_string())])
+    } else {
+        format!("{count} background")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn composer_and_background_chip_keep_desktop_english_and_use_catalog_spanish() {
+        crate::language::apply(Some("en"), None);
+        assert_eq!(super::background_chip_label(2), "2 background");
+        assert_eq!(super::improve_draft_label(), "Improve draft");
+        crate::language::apply(Some("es-ES"), None);
+        assert_eq!(super::background_chip_label(2), "2 en marcha");
+        assert_eq!(super::improve_draft_label(), "Mejorar");
+    }
+
     #[test]
     fn run_summary_counts_each_kind() {
         let source = crate::mock::MockSource::preview();
         use crate::model::ThreadSource;
         assert_eq!(
             super::run_summary(&source.messages(0)),
-            "Ran 3 commands, read 3 files, edited 1 file"
+            "Ran 3 commands, read 3 files, updated 1 file"
         );
     }
     #[test]
