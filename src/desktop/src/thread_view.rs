@@ -819,6 +819,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             failed,
                                             running: step_running,
                                             index,
+                                            verb_width: Some(58.),
                                             shown: if is_first { 1. } else { shown },
                                             open,
                                         },
