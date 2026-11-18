@@ -55,9 +55,10 @@ live until Stop is clicked.
 
 ## Look and motion
 
-Numbers come from the mockup's HTML/CSS (`design-system/mockups/agent-desktop/source/`)
+Numbers come from the mockup's HTML/CSS (`design-system/.private/mockups/agent-desktop/source/`)
 and `tokens.json`. The mockups and `screenshots/` are not in git: run
-`python3 sync-design-system.py` to fetch the mockups, and the capture script
+`python3 sync-design-system.py` to fetch the mockups (into the ignored
+`design-system/.private/`), and the capture script
 to make screenshots. Both paths are ignored in `.gitignore`. Values also come from `tokens.json`; colours, radii, strokes and the float shadow are read from
 the tokens in `theme.rs`.
 
@@ -127,11 +128,18 @@ fixtures. `mock.rs` owns the source; no frontend data access was added.
   the Context tab.
 
 The design-system snapshot is pinned to
-`ff2e9a65a278df4198b573413007132d20858a75`. Refresh with
-`python3 sync-design-system.py` using authenticated `gh`. The script fetches the
+`ff2e9a65a278df4198b573413007132d20858a75` (recorded in `design-system/REVISION`).
+The design system publishes releases (`v*` tags, public files only), and the script
+takes a pinned `RELEASE_TAG` from there, checking the archive's sha256 and manifest, and
+then `REVISION` holds the tag and sha. No release exists yet, so until the first one
+is cut the script uses the commit pin above as a fallback. Refresh with
+`python3 sync-design-system.py` using authenticated `gh`. Only the public files
+(tokens, bundle, logo) land in the tracked `design-system/`; the private docs,
+component READMEs and mockups go to the git-ignored `design-system/.private/`
+and are never committed (MXN-355). The script fetches the
 mockup PNGs through Git's blob API (the contents API cannot return their large
 payloads), together with the HTML/CSS source and its dependencies. Do not edit
-the snapshot by hand. `docs/agent-desktop.md` takes precedence over the images.
+the snapshot by hand. `.private/docs/agent-desktop.md` takes precedence over the images.
 
 Atkinson Hyperlegible Next (upright and italic) and Atkinson Hyperlegible Mono
 are bundled from Google Fonts' `ofl/atkinsonhyperlegiblenext` and
