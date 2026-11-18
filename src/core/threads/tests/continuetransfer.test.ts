@@ -21,7 +21,7 @@ import {
   type OperationContext,
 } from "../operations.js";
 import type { TurnDriver } from "../execute.js";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 
 afterEach(() => {
@@ -780,6 +780,85 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(doc).toContain("Second");
     expect(doc).not.toContain("moved to the new thread's Work queue");
     expect((await w.store.readTurns(continued.threadId)).filter((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))).toEqual([]);
+  });
+
+  it("leaves staged markers alone when the destination read fails, even with a landed entry", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const second = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
+    const destination = await w.make("dest");
+    await sendTurn(w.store, destination.id, { prompt: "Handoff" });
+
+    // The complete state: source marked and taken back, destination entry
+    // whole and live.
+    await stageQueuedMessages(w.ctx, source.id, destination.id);
+    await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    const movedId = `handoff:transfer:${second.turn.id}`;
+    expect((await w.store.readTurns(destination.id)).filter((turn) => turn.queue?.requestId === movedId)).toHaveLength(1);
+
+    // Fault injection: the destination turns read fails once, mid-reconcile.
+    // Absence unproven, the markers must stay staged — unstaging here would
+    // run the message on the source next to the landed copy.
+    const readTurns = w.store.readTurns.bind(w.store);
+    let failed = false;
+    const spy = vi.spyOn(w.store, "readTurns").mockImplementation((threadId: string, options?: { reportTornTail?: boolean }) => {
+      if (threadId === destination.id && !failed) {
+        failed = true;
+        throw new Error("injected EIO");
+      }
+      return readTurns(threadId, options);
+    });
+    try {
+      await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(failed).toBe(true);
+    const staged = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(staged.handoff).toMatchObject({ requestId: `transfer:${second.turn.id}`, destinationThreadId: destination.id });
+    expect(staged.queue?.removed).toBe(true);
+    expect((await w.store.readTurns(destination.id)).filter((turn) => turn.queue?.requestId === movedId)).toHaveLength(1);
+
+    // Reads recovered: the landed entry is visible again, so a further
+    // non-manual continue still keeps the marker — still exactly one entry.
+    await continueOwnThread(w.ctx, { threadId: source.id, summary: "Still half done." });
+    const kept = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(kept.handoff?.requestId).toBe(`transfer:${second.turn.id}`);
+    expect((await w.store.readTurns(destination.id)).filter((turn) => turn.queue?.requestId === movedId)).toHaveLength(1);
+  });
+
+  it("leaves staged markers alone when a destination row is unreadable", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const second = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
+    const destination = await w.make("dest");
+    await sendTurn(w.store, destination.id, { prompt: "Handoff" });
+
+    await stageQueuedMessages(w.ctx, source.id, destination.id);
+    await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    const movedId = `handoff:transfer:${second.turn.id}`;
+    const entry = (await w.store.readTurns(destination.id)).find((turn) => turn.queue?.requestId === movedId)!;
+    expect(entry).toBeDefined();
+
+    // A crash mid-append of the entry's own turn row: the row is still in
+    // the file but unreadable, so the entry only looks absent. Unstaging on
+    // that snapshot would run the message on the source next to the landed
+    // copy once the ledger heals.
+    const file = w.store.turnsFile(destination.id);
+    const lines = (await readFile(file, "utf8")).split("\n");
+    const at = lines.findIndex((line) => line.includes(entry.id));
+    expect(at).toBeGreaterThanOrEqual(0);
+    lines[at] = lines[at]!.slice(0, 30);
+    await writeFile(file, lines.join("\n"), "utf8");
+    await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." });
+
+    const staged = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(staged.handoff).toMatchObject({ requestId: `transfer:${second.turn.id}`, destinationThreadId: destination.id });
+    expect(staged.queue?.removed).toBe(true);
   });
 
   it("clearing the staging claim when editWorkQueue restores a staged entry, so a later migrate leaves it", async () => {
