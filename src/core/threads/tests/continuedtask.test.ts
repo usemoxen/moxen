@@ -759,6 +759,49 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     }
   });
 
+  it("runs a manual continue after an in-flight automatic one on the same destination, starting one turn", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    // Automatic recovery in flight (not awaited) on an idle source: the
+    // manual request waits for it, then rejoins its destination instead of
+    // racing a second handoff beside it.
+    const auto = continueThread(w.ctx, { threadId: source.id, automatic: true });
+    const manual = await continueThread(w.ctx, { threadId: source.id });
+    const landed = await auto;
+    expect(manual.threadId).toBe(landed.threadId);
+    // Exactly one destination, and its first turn started exactly once.
+    expect((await w.store.listThreadIds()).filter((id) => id !== source.id)).toEqual([landed.threadId]);
+    expect(await w.store.readTurns(landed.threadId)).toHaveLength(1);
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    await flushTurnRunners();
+    for (const id of [source.id, landed.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
+  it("gives a later agent request the agent's destination while a manual waits on it", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const agent = continueThread(w.ctx, { threadId: source.id, byAgent: true });
+    const manual = continueThread(w.ctx, { threadId: source.id });
+    // Non-manual requests keep joining the in-flight agent run, even while
+    // a manual waits on it — the agent's destination, not a rejection.
+    const second = await continueThread(w.ctx, { threadId: source.id, byAgent: true });
+    const landed = await agent;
+    expect(second.threadId).toBe(landed.threadId);
+    await expect(manual).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    await interruptTurn(w.store, source.id, running.id);
+    await flushTurnRunners();
+    for (const id of [source.id, landed.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
   it("holds a stored queued handoff behind a live claim instead of preparing beside it", async () => {
     const w = await world();
     const source = await w.make("solo");

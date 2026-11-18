@@ -1280,7 +1280,9 @@ export interface ContinuedThread {
  *
  * A manual continue never joins a non-manual run: the agent's or server's
  * handoff carries its own ordering, while the user's action must refuse a
- * running source at once instead of inheriting the agent's destination.
+ * running source at once instead of inheriting the agent's destination. The
+ * manual request waits for the in-flight run to settle and then retries
+ * through the normal path, without disturbing the map entry it waited on.
  */
 const continuationRuns = new Map<string, { manual: boolean; run: Promise<ContinuedThread> }>();
 
@@ -1304,17 +1306,26 @@ const continuationRuns = new Map<string, { manual: boolean; run: Promise<Continu
  * Concurrent calls on one source share a single destination (see
  * `continuationRuns`), and a retry after a crash rejoins the reserved
  * destination instead of creating another (`reserveContinuation`) — except a
- * manual request never joins an agent's or the server's in-flight run, so it
- * always passes its own busy check and writes its own claim.
+ * manual request never joins an agent's or the server's in-flight run. It
+ * waits for that run to settle and then retries through the normal path, so
+ * it always passes its own busy check and writes its own claim.
  */
 export function continueThread(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const manual = isManualContinue(request);
   const ongoing = continuationRuns.get(request.threadId);
   // A manual request joins only an in-flight manual run. Joining an agent's
   // or the server's run would hand its destination back with no busy check
-  // and no claim, so the manual request runs on its own and refuses a
-  // running source in reserveContinuation.
+  // and no claim — and replacing the entry would divert later non-manual
+  // requests into the manual run, or run two handoffs at once on one
+  // destination. Instead the manual request leaves the entry alone, waits
+  // for it to settle, and retries through the normal path: it joins a manual
+  // run if one now exists, else starts fresh and refuses a running source in
+  // reserveContinuation.
   if (ongoing && (!manual || ongoing.manual)) return ongoing.run;
+  if (ongoing) {
+    const retry = (): Promise<ContinuedThread> => continueThread(ctx, request);
+    return ongoing.run.then(retry, retry);
+  }
   const entry: { manual: boolean; run: Promise<ContinuedThread> } = { manual, run: null! };
   entry.run = continueThreadInner(ctx, request).finally(() => {
     if (continuationRuns.get(request.threadId) === entry) continuationRuns.delete(request.threadId);
