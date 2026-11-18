@@ -1192,9 +1192,10 @@ The source thread keeps its rows as history, but nothing moved can run there:
 each moved turn is taken back as removed, and the handoff names the move
 (one message, or several, arriving as follow-up turns) without assigning
 their texts as this turn's work. A message queued after the move starts
-stays on the source and never enters the handoff. Continuing while a turn
-is running stages nothing: the queued messages stay and run there, and the
-handoff keeps its old shape. Usage, protection and summary traffic, and
+stays on the source and never enters the handoff. A manual continue needs an
+idle source: while one of its turns is running, it is refused with
+`THREAD_BUSY` before anything is written — no destination, note, staged
+transfer or queue edit — so the queued messages stay and run there. Usage, protection and summary traffic, and
 queue-selected model/stored handoffs, keep their own semantics and never
 move this way; removed entries stay removed. The agent's `thread_continue`
 above is unchanged: queued work left on the old thread stays there and runs
