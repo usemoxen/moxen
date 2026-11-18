@@ -85,6 +85,98 @@ pub fn run_summary(messages: &[Message]) -> String {
     text
 }
 
+/// One user prompt as the transcript draws it: a right-aligned sunk bubble.
+/// The thread view adds the message's file chips and image thumbnails to the
+/// bubble; a research role column draws the bare bubble.
+pub fn prompt_bubble(text: String) -> Div {
+    div()
+        .max_w(relative(0.82))
+        .px(px(14.))
+        .py(px(10.))
+        .rounded(px(14.))
+        .bg(color("sunk"))
+        .text_size(px(theme::BODY))
+        .line_height(px(theme::BODY * 1.55))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .when(!text.is_empty(), |s| s.child(text))
+}
+
+/// The running turn's clock under an assistant reply's header.
+pub fn live_clock(seconds: u64) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .font_family(theme::MONO)
+        .text_size(px(12.))
+        .text_color(color("live"))
+        .child(ui::state(Status::Running))
+        .child(format!(
+            "{} · {}m {:02}s",
+            crate::language::tr("working"),
+            seconds / 60,
+            seconds % 60
+        ))
+        .into_any_element()
+}
+
+/// What an assistant reply carries above its prose: who wrote it, when, and
+/// the running turn's clock when it is still being written.
+pub struct AssistantHead<'a> {
+    pub model: &'a str,
+    pub tone: &'static str,
+    pub at: &'a str,
+    pub live: Option<AnyElement>,
+}
+
+/// One assistant reply as the transcript draws it: the model that wrote it
+/// and when, over its prose. `live` is the running turn's clock, shown only
+/// under the reply still being written.
+pub fn assistant_message(
+    head: AssistantHead<'_>,
+    text: &str,
+    id: ThreadId,
+    w: &Workspace,
+    entity: Entity<Workspace>,
+    missing: &mut Vec<Picture>,
+) -> AnyElement {
+    let AssistantHead {
+        model,
+        tone,
+        at,
+        live,
+    } = head;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color(tone))
+                        .child(model.to_string()),
+                )
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(12.))
+                        .text_color(color("ink-2"))
+                        .child(at.to_string()),
+                )
+                .when_some(live, |s, live| s.child(div().flex_1()).child(live)),
+        )
+        .child(reply_body(text, id, w, entity, missing))
+        .into_any_element()
+}
+
 pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let id = w.selected;
     let creating = w.creating;
@@ -123,7 +215,8 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                     crate::research_view::role_full(w, lead, role, agent, cx).into_any_element()
                 } else if let Some(summary) = w.source.run_summary(id).filter(|_| w.show_run_view())
                 {
-                    crate::research_view::run_view(w, id, &summary, cx).into_any_element()
+                    crate::research_view::run_view(w, id, &summary, w.turn_width(window), cx)
+                        .into_any_element()
                 } else {
                     list(w.lists[id].clone(), move |index, window, cx| {
                         let this = entity.read(cx);
@@ -159,18 +252,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     .flex_col()
                                     .items_end()
                                     .child(
-                                        div()
-                                            .max_w(relative(0.82))
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .rounded(px(14.))
-                                            .bg(color("sunk"))
-                                            .text_size(px(theme::BODY))
-                                            .line_height(px(theme::BODY * 1.55))
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.))
-                                            .when(!text.is_empty(), |s| s.child(text))
+                                        prompt_bubble(text)
                                             .when(!paths.is_empty(), |s| {
                                                 s.child(
                                                     div().flex().flex_wrap().gap(px(6.)).children(
@@ -222,52 +304,23 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     )
                                     .into_any_element()
                             }
-                            Message::Assistant { text, at } => div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_baseline()
-                                        .gap(px(8.))
-                                        .child(
-                                            div()
-                                                .text_size(px(13.5))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(color(model_tone))
-                                                .child(model.clone()),
+                            Message::Assistant { text, at } => assistant_message(
+                                AssistantHead {
+                                    model: &model,
+                                    tone: model_tone,
+                                    at: &at,
+                                    live: (running && Some(index) == last_reply).then(|| {
+                                        live_clock(
+                                            started.map_or(0, |start| start.elapsed().as_secs()),
                                         )
-                                        .child(
-                                            div()
-                                                .font_family(theme::MONO)
-                                                .text_size(px(12.))
-                                                .text_color(color("ink-2"))
-                                                .child(at),
-                                        )
-                                        .when(running && Some(index) == last_reply, |s| {
-                                            let seconds = started
-                                                .map_or(0, |start| start.elapsed().as_secs());
-                                            s.child(div().flex_1()).child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(6.))
-                                                    .font_family(theme::MONO)
-                                                    .text_size(px(12.))
-                                                    .text_color(color("live"))
-                                                    .child(ui::state(Status::Running))
-                                                    .child(format!(
-                                                        "{} · {}m {:02}s",
-                                                        crate::language::tr("working"),
-                                                        seconds / 60,
-                                                        seconds % 60
-                                                    )),
-                                            )
-                                        }),
-                                )
-                                .child(reply_body(&text, id, this, entity.clone(), &mut missing))
-                                .into_any_element(),
+                                    }),
+                                },
+                                &text,
+                                id,
+                                this,
+                                entity.clone(),
+                                &mut missing,
+                            ),
                             Message::Plan {
                                 text,
                                 implemented,
@@ -756,6 +809,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                         .when(!folded, |s| s.child(div().h(px(6.))))
                                 })
                                 .when(!folded, |s| {
+                                    let toggle = entity.clone();
                                     s.child(crate::steps::render(
                                         crate::steps::Step {
                                             name,
@@ -764,12 +818,23 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             meta,
                                             failed,
                                             running: step_running,
-                                            id,
                                             index,
                                             shown: if is_first { 1. } else { shown },
                                             open,
                                         },
-                                        entity.clone(),
+                                        move |cx: &mut App| {
+                                            toggle.update(cx, |this, cx| {
+                                                if this.expanded.remove(&(id, index)).is_none()
+                                                {
+                                                    this.expanded.insert(
+                                                        (id, index),
+                                                        std::time::Instant::now(),
+                                                    );
+                                                }
+                                                this.lists[id].splice(index..index + 1, 1);
+                                                cx.notify();
+                                            });
+                                        },
                                     ))
                                 })
                                 .into_any_element(),
