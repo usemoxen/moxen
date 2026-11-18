@@ -640,6 +640,7 @@ pub fn role_full(
         .id("role-full-scroll")
         .flex_1()
         .min_h_0()
+        .h_full()
         .overflow_y_scroll()
         .px(px(28.))
         .py(px(12.))
@@ -804,6 +805,7 @@ fn role_rows(
                             failed,
                             running,
                             index: at,
+                            verb_width: None,
                             shown: 1.,
                             open,
                         },
@@ -842,8 +844,9 @@ fn column_title(summary: &RunSummary, agent: &RunAgent) -> String {
 /// The research run in place of the lead's chat: a header, a roster with one
 /// glyph per agent, and the researcher, critic and finalizer columns. The
 /// columns share the reading column's width equally, divided by rules, and
-/// fill its height; the key hints live in the columns' tooltips. Narrow panes
-/// draw the focused column under a switcher.
+/// fill its height; the key hints live in the column headers' tooltips. At
+/// narrow widths the stage strip is the column switcher and only the focused
+/// column draws.
 pub fn run_view(
     w: &Workspace,
     lead: ThreadId,
@@ -870,6 +873,22 @@ pub fn run_view(
                 .flex()
                 .items_center()
                 .gap(px(4.))
+                // At narrow widths the stage strip is the column switcher:
+                // the focused group is highlighted and every group focuses
+                // its column, so no second chip row is needed.
+                .when(narrow, |s| {
+                    s.px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .when(focus == role, |s| s.bg(color("sunk")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.run_role.insert(lead, focus_role);
+                                cx.notify();
+                            }),
+                        )
+                })
                 .child(
                     div()
                         .id(("run-role", role as usize))
@@ -925,6 +944,7 @@ pub fn run_view(
         )
         .flex_1()
         .min_h_0()
+        .h_full()
         .flex()
         .flex_col()
         .items_center()
@@ -970,30 +990,6 @@ pub fn run_view(
                         ),
                 )
                 .child(roster)
-                .when(narrow, |s| {
-                    s.child(
-                        div()
-                            .flex()
-                            .gap(px(6.))
-                            .children(ROLES.into_iter().map(|role| {
-                                let active = role == focus;
-                                div()
-                                    .id(("run-chip", role as usize))
-                                    .control(format!("Show the {} column", role.label()))
-                                    .px(px(8.))
-                                    .py(px(2.))
-                                    .rounded(px(6.))
-                                    .text_size(px(13.))
-                                    .text_color(if active { color("ink") } else { color("ink-2") })
-                                    .when(active, |s| s.bg(color("sunk")))
-                                    .child(role.label())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.run_role.insert(lead, role);
-                                        cx.notify();
-                                    }))
-                            })),
-                    )
-                })
                 .child(
                     div()
                         .flex_1()
@@ -1007,7 +1003,14 @@ pub fn run_view(
                             let agent = summary.agents[role as usize][shown].clone();
                             let focused = role == focus;
                             let (model, _) = w.column_model(&summary, lead, role);
-                            let footer = format!("{} · {model}", agent.state.label());
+                            // Settled columns read as the TUI's footer does
+                            // (`done · <model>`); a working column carries the
+                            // run's elapsed time with it (`working… <time>`).
+                            let footer = if agent.state == AgentState::Working {
+                                format!("{}… {} · {model}", agent.state.label(), elapsed(&summary))
+                            } else {
+                                format!("{} · {model}", agent.state.label())
+                            };
                             let body: AnyElement = match &agent.thread_id {
                                 None => div()
                                     .text_size(px(13.))
@@ -1053,12 +1056,9 @@ pub fn run_view(
                                 .min_w_0()
                                 .min_h_0()
                                 .when(at > 0, |s| s.border_l_1().border_color(color("rule")))
-                                .tooltip(|_, cx| {
-                                    cx.new(|_| ui::Tooltip(message("run.keys").into(), None))
-                                        .into()
-                                })
                                 .child(
                                     div()
+                                        .id(("run-column-head", role as usize))
                                         .flex()
                                         .items_baseline()
                                         .justify_between()
@@ -1066,6 +1066,18 @@ pub fn run_view(
                                         .pl(px(12.))
                                         .pr(px(12.))
                                         .pt(px(2.))
+                                        // The run's key hints live in the column
+                                        // headers' tooltips, clear of the text.
+                                        .tooltip(|_, cx| {
+                                            cx.new(|_| {
+                                                ui::Tooltip(message("run.keys").into(), None)
+                                            })
+                                            .into()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.run_role.insert(lead, role);
+                                            cx.notify();
+                                        }))
                                         .child(
                                             div()
                                                 .flex_1()
