@@ -1638,18 +1638,31 @@ impl ThreadSource for ServerSource {
         read_records(&self.shared);
     }
     fn fix_record(&mut self, fix: Fix) {
+        self.shared.update(|state| {
+            state.settings_reads.remove(&("store.problems", None));
+        });
         settings_read(
             &self.shared,
             Some(("record.fix", None)),
             move |wire| {
                 let (command, fields) = fix.payload();
-                wire.dispatch(command, fields)
-                    .map(|_| read_problem_rows(wire))
-                    .map_err(|error| error.message)
+                let result = wire
+                    .dispatch(command, fields)
+                    .map_err(|error| error.message)?;
+                let settings = (command == "settings.set")
+                    .then(|| Snapshot::from_json(&result))
+                    .flatten();
+                Ok((settings, read_problem_rows(wire)))
             },
             |state, result| match result {
-                Ok(Some(rows)) => state.records = rows,
-                Ok(None) => {}
+                Ok((settings, rows)) => {
+                    if let Some(settings) = settings {
+                        state.settings = Some(Arc::new(Ok(settings)));
+                    }
+                    if let Some(rows) = rows {
+                        state.records = rows;
+                    }
+                }
                 Err(message) => state.problems.push_back(Problem {
                     message,
                     unsent: None,
@@ -3305,6 +3318,15 @@ fn read_problem_rows(wire: &Wire) -> Option<Vec<Record>> {
 }
 
 fn read_records(shared: &Arc<Shared>) {
+    if shared
+        .state
+        .lock()
+        .expect("live state")
+        .settings_reads
+        .contains_key(&("record.fix", None))
+    {
+        return;
+    }
     settings_read(
         shared,
         Some(("store.problems", None)),

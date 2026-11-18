@@ -9,6 +9,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 const STEPS: [(&str, &str); 6] = [
     ("guide.welcome", "guide.welcomeBody"),
@@ -398,6 +399,8 @@ pub fn render(w: &Workspace, panel: Panel, window: &Window, cx: &mut Context<Wor
                         (Panel::Guide, "]") if w.experience_ui.step + 1 < STEPS.len() => {
                             w.guide_next()
                         }
+                        (Panel::Guide, "down") => window.focus_next(cx),
+                        (Panel::Guide, "up") => window.focus_prev(cx),
                         (Panel::Releases, "left") if !w.experience_ui.history => {
                             w.browse_release(-1)
                         }
@@ -407,11 +410,14 @@ pub fn render(w: &Workspace, panel: Panel, window: &Window, cx: &mut Context<Wor
                         (Panel::Releases, "h") => {
                             w.experience_ui.history = !w.experience_ui.history
                         }
-                        (Panel::Releases, "enter")
-                            if w.experience_focus.is_focused(window)
-                                && !w.experience_ui.history =>
-                        {
-                            w.mark_release()
+                        (Panel::Releases, "up") if w.experience_ui.history => w.browse_release(-1),
+                        (Panel::Releases, "down") if w.experience_ui.history => w.browse_release(1),
+                        (Panel::Releases, "enter") if w.experience_focus.is_focused(window) => {
+                            if w.experience_ui.history {
+                                w.experience_ui.history = false;
+                            } else {
+                                w.mark_release();
+                            }
                         }
                         (Panel::Guide, "enter") if w.experience_focus.is_focused(window) => {
                             w.guide_next()
@@ -549,6 +555,12 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                         continue;
                     };
                     let chosen = setting.value.wire();
+                    let values = Arc::new(
+                        choices
+                            .iter()
+                            .map(|choice| choice.value.clone())
+                            .collect::<Vec<_>>(),
+                    );
                     body = body.child(
                         column()
                             .child(
@@ -558,6 +570,7 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                             )
                             .child(row().flex_wrap().children(choices.iter().map(|choice| {
                                 let value = choice.value.clone();
+                                let values = values.clone();
                                 button(
                                     format!("guide-{key}-{value}"),
                                     tr(&choice.label).into_owned(),
@@ -569,6 +582,34 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
                                         }
                                     }),
                                 )
+                                .on_key_down(cx.listener(
+                                    move |w, event: &KeyDownEvent, _, cx| {
+                                        let delta = match event.keystroke.key.as_str() {
+                                            "left" => -1,
+                                            "right" => 1,
+                                            _ => return,
+                                        };
+                                        if w.source.experience_saving() {
+                                            return;
+                                        }
+                                        let setting = w.source.settings();
+                                        let current = setting
+                                            .as_deref()
+                                            .and_then(|snapshot| snapshot.as_ref().ok())
+                                            .and_then(|snapshot| snapshot.find(key))
+                                            .map(|view| view.value.wire());
+                                        let index = values
+                                            .iter()
+                                            .position(|value| Some(value) == current.as_ref())
+                                            .unwrap_or(0);
+                                        let next = (index as isize + delta)
+                                            .rem_euclid(values.len() as isize)
+                                            as usize;
+                                        w.source.set_setting(key, &values[next]);
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                    },
+                                ))
                             }))),
                     );
                 }
@@ -1020,7 +1061,7 @@ fn releases(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
             button(
                 ("release-choice", index),
                 format!("{version} · {} · {status}", words(&release["title"])),
-                false,
+                w.experience_ui.release == index,
                 cx.listener(move |w, _, _, cx| {
                     w.experience_ui.release = index;
                     w.experience_ui.history = false;
