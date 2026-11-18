@@ -3,7 +3,8 @@ use crate::{
     attachments::{Asset, Picture, ReplyBlock, reply_blocks},
     image_view::{self, ImageItem, Source},
     model::{
-        INTERACTION_MODES, Message, QueueEdit, Queued, RUNTIME_MODES, Status, Thread, mode_label,
+        INTERACTION_MODES, Message, QueueEdit, Queued, RUNTIME_MODES, Status, Thread, ThreadId,
+        mode_label,
     },
     theme::{self, color},
     workspace::{Dropdown, Workspace},
@@ -103,6 +104,11 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                 .overflow_hidden()
                 .child(if creating {
                     new_thread(w).into_any_element()
+                } else if let Some((lead, role, agent)) = w.role_full {
+                    crate::research_view::role_full(w, lead, role, agent, cx).into_any_element()
+                } else if let Some(summary) = w.source.run_summary(id).filter(|_| w.show_run_view())
+                {
+                    crate::research_view::run_view(w, id, &summary, cx).into_any_element()
                 } else {
                     list(state, move |index, window, cx| {
                         let this = entity.read(cx);
@@ -516,6 +522,25 @@ fn reply_body(
         }))
 }
 
+fn back_title_state(w: &Workspace, back: ThreadId) -> (String, String) {
+    if let Some((_, role, agent)) = w.role_full
+        && let Some(summary) = w.source.run_summary(back)
+        && let Some(row) = summary.agents[role as usize].get(agent)
+    {
+        return (
+            crate::research_view::agent_title(&summary, row),
+            format!("part of the research run · {}", row.state.label()),
+        );
+    }
+    let state = w
+        .source
+        .list_threads()
+        .get(back)
+        .map(|thread| thread.status.label())
+        .unwrap_or("Done");
+    ("Lead thread".into(), state.into())
+}
+
 fn composer(
     w: &Workspace,
     thread: &crate::model::Thread,
@@ -551,9 +576,21 @@ fn composer(
                 .when(!waiting.is_empty(), |s| {
                     s.child(queue_strip(&waiting, running, cx))
                 })
-                .child(match crate::ask::panel(w, id, creating, cx) {
-                    Some(panel) => panel,
-                    None => card(w, thread, draft_empty, window, cx).into_any_element(),
+                .when_some(w.notice.clone(), |s, text| {
+                    s.child(crate::research_view::notice(&text, cx))
+                })
+                .when_some(
+                    crate::research_view::proposal_panel(w, id, cx),
+                    |s, panel| s.child(panel),
+                )
+                .child(if let Some(back) = w.run_back_to() {
+                    let (title, state) = back_title_state(w, back);
+                    crate::research_view::back_bar(w, &title, &state, cx).into_any_element()
+                } else {
+                    match crate::ask::panel(w, id, creating, cx) {
+                        Some(panel) => panel,
+                        None => card(w, thread, draft_empty, window, cx).into_any_element(),
+                    }
                 })
                 .when(w.source.preview() || has_branch(w), |s| {
                     s.child(status_line(w, cx))

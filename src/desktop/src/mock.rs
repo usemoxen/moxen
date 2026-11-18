@@ -38,6 +38,20 @@ pub struct MockSource {
     settled: Option<ThreadId>,
     side_answers: HashMap<ThreadId, SideAnswer>,
     reverted: Option<(ThreadId, Option<String>)>,
+    /// Project ids without their title override (rename keeps the id).
+    renamed_projects: HashMap<String, String>,
+    /// Project ids the person removed: listed nowhere, their threads stay.
+    removed_projects: HashSet<String>,
+    /// What the last thread search answered, while the palette shows it.
+    search: SearchState,
+    /// The run-size questions waiting, by thread.
+    proposals: HashMap<ThreadId, ResearchProposal>,
+    /// Research runs started here, by lead thread.
+    runs: HashMap<ThreadId, RunSummary>,
+    /// Role threads' transcripts, by role thread name.
+    role_rows: HashMap<String, Vec<Message>>,
+    /// A send parked the run-size question (`researchSizePending`).
+    research_pending: bool,
     settings: Option<Snapshot>,
     settings_notice: Option<SettingsNotice>,
     harness_run: Option<HarnessRun>,
@@ -256,6 +270,13 @@ impl MockSource {
             settled: None,
             side_answers: HashMap::new(),
             reverted: None,
+            renamed_projects: HashMap::new(),
+            removed_projects: HashSet::new(),
+            search: SearchState::Idle,
+            proposals: HashMap::new(),
+            runs: HashMap::new(),
+            role_rows: HashMap::new(),
+            research_pending: false,
             settings: None,
             settings_notice: None,
             harness_run: None,
@@ -277,6 +298,16 @@ impl MockSource {
         source.threads[0].started_at = Some(Instant::now());
         source.queues[0].push("Also check Escape returns focus to the model control.".into());
         source.threads[1].depth = 1;
+        // A research run in progress, so the run view and its role
+        // transcripts can be checked without answering first.
+        source.answer_proposal(
+            4,
+            "proposal-4",
+            Some(ResearchSize {
+                researchers: 2,
+                critics: 1,
+            }),
+        );
         // A checkerboard with large cells keeps thumbnail scaling and zoom visible.
         let specimen = |wide: bool| {
             let (width, height) = if wide { (480, 300) } else { (320, 440) };
@@ -550,9 +581,14 @@ impl ThreadSource for MockSource {
     fn projects(&self) -> Vec<Project> {
         ["moxen-agent", "moxen-chat"]
             .into_iter()
-            .map(|title| Project {
-                id: title.into(),
-                title: title.into(),
+            .filter(|id| !self.removed_projects.contains(*id))
+            .map(|id| Project {
+                id: id.into(),
+                title: self
+                    .renamed_projects
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| id.into()),
             })
             .collect()
     }
@@ -587,6 +623,15 @@ impl ThreadSource for MockSource {
         self.asks.push(None);
         self.selections.push(selection);
         self.opened = Some(id);
+        if self.threads[id].interaction_mode == "research"
+            || self.threads[id].interaction_mode == "orchestrate"
+        {
+            // The new thread is asked for its run size once it opens.
+            let fixture = self.proposal_fixture(id);
+            if let Some(proposal) = fixture {
+                self.proposals.insert(id, proposal);
+            }
+        }
     }
     fn order(&self, _: bool) -> Vec<ThreadId> {
         // Threads started here come first, newest first.
@@ -601,6 +646,31 @@ impl ThreadSource for MockSource {
     }
     fn add_project(&mut self, path: String) {
         self.added = Some(path);
+    }
+    fn rename_project(&mut self, id: &str, title: String) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        let old = self
+            .projects()
+            .into_iter()
+            .find(|project| project.id == id)
+            .map(|project| project.title);
+        let Some(old) = old else {
+            return;
+        };
+        self.renamed_projects.insert(id.into(), title.clone());
+        for thread in &mut self.threads {
+            if thread.project == old {
+                thread.project = title.clone();
+            }
+        }
+    }
+    fn remove_project(&mut self, id: &str) {
+        if ["moxen-agent", "moxen-chat"].contains(&id) {
+            self.removed_projects.insert(id.into());
+        }
     }
     fn take_added(&mut self) -> Option<String> {
         self.added.take()
@@ -758,6 +828,20 @@ impl ThreadSource for MockSource {
     fn send_message(&mut self, id: ThreadId, prompt: Prompt, _: Delivery) -> Option<Reply> {
         if prompt.text.trim().is_empty() && prompt.assets.is_empty() {
             return None;
+        }
+        let research_once =
+            matches!(&prompt.once, Some(mode) if mode == "research" || mode == "orchestrate");
+        if (self.threads[id].interaction_mode == "research"
+            || self.threads[id].interaction_mode == "orchestrate"
+            || research_once)
+            && !self.runs.contains_key(&id)
+        {
+            // The server parked the run-size question: the next send asks for
+            // it, and the question shows until it is answered.
+            self.research_pending = true;
+            self.proposals
+                .entry(id)
+                .or_insert_with(|| Self::proposal_for(id, self.threads[id].title.clone()));
         }
         if self.threads[id].status == Status::Running {
             self.queues[id].push(prompt);
@@ -1222,9 +1306,225 @@ impl ThreadSource for MockSource {
             error: false,
         });
     }
+    fn search_threads(&mut self, query: &str) {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            self.search = SearchState::Idle;
+            return;
+        }
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let holds = |text: &str| {
+            let lower = text.to_lowercase();
+            terms.iter().all(|term| lower.contains(term))
+        };
+        let mut threads = vec![];
+        for (id, thread) in self.threads.iter().enumerate() {
+            if self.deleted.contains(&id) {
+                continue;
+            }
+            let user_text = self.messages[id].iter().find_map(|message| match message {
+                Message::User { text, .. } => Some(text.clone()),
+                _ => None,
+            });
+            let mut hits = vec![];
+            if holds(&thread.title) {
+                hits.push(SearchHit {
+                    kind: "title".into(),
+                    snippet: thread.title.clone(),
+                    source: String::new(),
+                });
+            }
+            if let Some(text) = user_text
+                && holds(&text)
+            {
+                let snippet: String = text.chars().take(140).collect();
+                hits.push(SearchHit {
+                    kind: "message".into(),
+                    snippet,
+                    source: "user".into(),
+                });
+            }
+            if hits.is_empty() {
+                continue;
+            }
+            threads.push(SearchResult {
+                uuid: format!("mock-{id}"),
+                project_id: thread.project.clone(),
+                title: thread.title.clone(),
+                settled: thread.settled,
+                hit_count: hits.len(),
+                hits,
+            });
+        }
+        // Active threads first, then settled ones, like the server.
+        threads.sort_by_key(|row| row.settled);
+        self.search = SearchState::Done(SearchResults {
+            query,
+            total: threads.len(),
+            threads,
+        });
+    }
+    fn search_state(&self) -> SearchState {
+        self.search.clone()
+    }
+    fn thread_at_uuid(&self, uuid: &str) -> Option<ThreadId> {
+        uuid.strip_prefix("mock-")?
+            .parse::<ThreadId>()
+            .ok()
+            .filter(|id| self.threads.get(*id).is_some())
+    }
+    fn watch_research(&mut self, _thread: Option<ThreadId>) {}
+    fn proposal(&self, id: ThreadId) -> Option<ResearchProposal> {
+        if let Some(proposal) = self.proposals.get(&id) {
+            return Some(proposal.clone());
+        }
+        self.proposal_fixture(id)
+    }
+    fn answer_proposal(&mut self, id: ThreadId, _proposal: &str, size: Option<ResearchSize>) {
+        self.proposals.remove(&id);
+        let Some(size) = size else {
+            return;
+        };
+        let lead = format!("mock-{id}");
+        // Started roles only: the researchers reported and the critic is
+        // reviewing; the finalizer has no thread yet.
+        let roles: Vec<serde_json::Value> = (0..size.researchers)
+            .map(|at| {
+                serde_json::json!({"threadId": format!("{lead}-researcher-{at}"),
+                    "role": "researcher", "question": "Survey the area"})
+            })
+            .chain((0..size.critics).map(|at| {
+                serde_json::json!({"threadId": format!("{lead}-critic-{at}"),
+                    "role": "critic", "question": "Review the reports"})
+            }))
+            .collect();
+        let run = serde_json::json!({
+            "leadThreadId": lead, "state": "running",
+            "size": {"researchers": size.researchers, "critics": size.critics},
+            "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:01:00Z",
+            "roles": roles,
+        });
+        let titles = |uuid: &str| {
+            uuid.strip_prefix(&format!("{lead}-"))
+                .map(|role| format!("{} report", role.replace('-', " ")))
+        };
+        let rows: Vec<crate::research::RoleRow> = roles
+            .iter()
+            .map(|role| crate::research::RoleRow {
+                thread_id: role["threadId"].as_str().unwrap_or_default().to_string(),
+                role: match role["role"].as_str().unwrap_or_default() {
+                    "critic" => "critic",
+                    "finalizer" => "finalizer",
+                    _ => "researcher",
+                },
+                question: role["question"].as_str().unwrap_or_default().to_string(),
+                // The first researcher already reported; the critic is
+                // reviewing it.
+                session: if role["role"] == "researcher"
+                    && role["threadId"] == format!("{lead}-researcher-0")
+                {
+                    "idle"
+                } else {
+                    "running"
+                }
+                .to_string(),
+                turn: if role["role"] == "researcher" {
+                    "completed"
+                } else {
+                    "running"
+                }
+                .to_string(),
+            })
+            .collect();
+        if let Some(summary) =
+            crate::research::summarize_run(&run, &self.threads[id].title, rows, &titles)
+        {
+            self.runs.insert(id, summary);
+        }
+        self.role_rows.insert(
+            format!("{lead}-researcher-0"),
+            vec![
+                Message::User {
+                    text: "Survey how the picker keeps focus while it lists.".into(),
+                    images: vec![],
+                },
+                Message::Assistant {
+                    text: "Traced the event from the control to its view state. Drafts survive switching threads; checking the keyboard path next.".into(),
+                    at: "Thu 09:41".into(),
+                },
+            ],
+        );
+        self.role_rows.insert(
+            format!("{lead}-critic-0"),
+            vec![
+                Message::User {
+                    text: "Review the survey for gaps.".into(),
+                    images: vec![],
+                },
+                Message::Assistant {
+                    text:
+                        "The evidence holds for the common path; the empty list still needs a look."
+                            .into(),
+                    at: "Thu 09:42".into(),
+                },
+            ],
+        );
+    }
+    fn read_run(&mut self, _id: ThreadId) {}
+    fn leads_run(&self, id: ThreadId) -> bool {
+        self.runs.contains_key(&id)
+    }
+    fn run_summary(&self, id: ThreadId) -> Option<RunSummary> {
+        self.runs.get(&id).cloned()
+    }
+    fn role_messages(&self, thread: &str) -> Option<Arc<Vec<Message>>> {
+        self.role_rows.get(thread).cloned().map(Arc::new)
+    }
+    fn take_research_pending(&mut self) -> bool {
+        std::mem::take(&mut self.research_pending)
+    }
 }
 
 impl MockSource {
+    /// The run-size question a research-mode thread is asked, until it
+    /// answers or starts its run.
+    fn proposal_fixture(&self, id: ThreadId) -> Option<ResearchProposal> {
+        let thread = self.threads.get(id)?;
+        if self.runs.contains_key(&id)
+            || (thread.interaction_mode != "research" && thread.interaction_mode != "orchestrate")
+        {
+            return None;
+        }
+        Some(Self::proposal_for(id, thread.title.clone()))
+    }
+
+    fn proposal_for(id: ThreadId, task: String) -> ResearchProposal {
+        ResearchProposal {
+            id: format!("proposal-{id}"),
+            thread_id: format!("mock-{id}"),
+            task,
+            size: ResearchSize {
+                researchers: 2,
+                critics: 1,
+            },
+            models: [
+                Some(crate::research::RoleModel {
+                    provider: "claudeAgent".into(),
+                    model: "opus-5-5".into(),
+                    effort: Some("medium".into()),
+                }),
+                None,
+                None,
+            ],
+            models_raw: None,
+            lead_provider: "claudeAgent".into(),
+            lead_model: "opus-5-5".into(),
+        }
+    }
     fn user_message(&mut self, prompt: Prompt) -> Message {
         let text = prompt.wire()["text"]
             .as_str()
@@ -1249,6 +1549,20 @@ impl MockSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_preview_shows_a_research_run_with_role_transcripts() {
+        use crate::model::ThreadSource;
+        let source = MockSource::preview();
+        let summary = source.run_summary(4).expect("run");
+        assert_eq!(summary.phase(), crate::model::RunPhase::Reviewing);
+        assert_eq!(summary.agents[0].len(), 2);
+        let rows = source
+            .role_messages("mock-4-researcher-0")
+            .expect("role transcript");
+        assert!(
+            matches!(&rows[1], Message::Assistant { text, .. } if text.contains("Traced the event"))
+        );
+    }
     #[test]
     fn stopped_reply_cannot_mutate_a_new_turn() {
         let mut source = MockSource::new();

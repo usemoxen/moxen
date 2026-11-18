@@ -1,5 +1,14 @@
 pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
+pub use crate::research::{
+    AgentRef, AgentState, PickerRow, PickerState, ResearchProposal, ResearchRole, ResearchSize,
+    RunAgent, RunPhase, RunSummary,
+};
+pub use crate::research::{
+    ROLES, column_widths, default_agent_index, focus_role_of, initial_picker, move_row,
+    run_elapsed_ms, set_critics, set_researchers, step_agent, step_picker, step_role, thread_count,
+};
+pub use crate::search::{SearchHit, SearchResult, SearchResults, SearchState};
 pub use crate::settings::{
     Discovery, Embeddings, HarnessRun, ManagedSkill, MemoryDraft, MemoryEntry, MemoryList,
     MemorySearch, RemoteState, SettingsNotice, Snapshot, UpdateState,
@@ -374,6 +383,10 @@ pub trait ThreadSource {
     fn queued(&self, id: ThreadId) -> Vec<Queued>;
     /// Takes a waiting message back and returns its text, to edit it.
     fn take_queued(&mut self, id: ThreadId, key: &str) -> Option<Prompt>;
+    /// The thread the wire id names, for opening a search result.
+    fn thread_at_uuid(&self, _uuid: &str) -> Option<ThreadId> {
+        None
+    }
     fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit);
     /// Stops the running turn so the waiting message goes next.
     fn send_queued_now(&mut self, id: ThreadId, key: &str) -> Option<Reply>;
@@ -452,6 +465,48 @@ pub trait ThreadSource {
     /// Where a new thread can start, newest project first.
     fn projects(&self) -> Vec<Project> {
         vec![]
+    }
+    /// Asks the server for threads holding `query` and reports the answer
+    /// through `search_state` (`threads.search`, the TUI picker's semantics).
+    fn search_threads(&mut self, _query: &str) {}
+    /// What the last search answered, while the palette shows it.
+    fn search_state(&self) -> SearchState {
+        SearchState::Idle
+    }
+    /// Renames a project through the server (`project.rename`).
+    fn rename_project(&mut self, _id: &str, _title: String) {}
+    /// Removes a project through the server (`project.remove`).
+    fn remove_project(&mut self, _id: &str) {}
+    /// Which thread the server may ask this window for a run size
+    /// (`subscribeShell`'s `researchProposals`): the focused thread while it
+    /// can start one, none otherwise. Replaces the previous opt-in.
+    fn watch_research(&mut self, _thread: Option<ThreadId>) {}
+    /// The run-size question waiting for this thread, if the server asked.
+    fn proposal(&self, _id: ThreadId) -> Option<ResearchProposal> {
+        None
+    }
+    /// Answers the run-size question: `size` starts the run, `None` runs one
+    /// researcher instead (`research.proposal.answer`).
+    fn answer_proposal(&mut self, _id: ThreadId, _proposal: &str, _size: Option<ResearchSize>) {}
+    /// Whether the thread leads a research run the shell lists.
+    fn leads_run(&self, _id: ThreadId) -> bool {
+        false
+    }
+    /// Reads the thread's research run and its role transcripts again.
+    fn read_run(&mut self, _id: ThreadId) {}
+    /// The thread's research run, once read (`research.run` projected like
+    /// the TUI's run view).
+    fn run_summary(&self, _id: ThreadId) -> Option<RunSummary> {
+        None
+    }
+    /// One role thread's transcript, while its run view shows it.
+    fn role_messages(&self, _thread: &str) -> Option<Arc<Vec<Message>>> {
+        None
+    }
+    /// Whether a send parked the run-size question (`researchSizePending`):
+    /// the next send asks for it, as the TUI's toast says.
+    fn take_research_pending(&mut self) -> bool {
+        false
     }
     /// Starts a thread with its first message; once it is listed,
     /// `take_opened` names it.

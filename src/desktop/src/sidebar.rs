@@ -98,6 +98,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         {
             rows = rows.child(group);
         }
+        let title = t.project.clone();
         if w.group != 0 && !projects.contains(&t.project.as_str()) {
             let first = projects.is_empty();
             let label = ["label-2", "label-6", "label-4", "label-3"][projects.len() % 4];
@@ -139,7 +140,20 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .font_weight(FontWeight::BOLD)
                             .child(t.project.clone()),
                     )
-                    .child(meta(count.to_string())),
+                    .child(meta(count.to_string()))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            let project = this
+                                .source
+                                .projects()
+                                .into_iter()
+                                .find(|project| project.title == title);
+                            if let Some(project) = project {
+                                this.open_project_menu(&project.id, event.position, window, cx);
+                            }
+                        }),
+                    ),
             );
         }
         let selected = w.selected == i;

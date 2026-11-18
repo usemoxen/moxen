@@ -704,3 +704,265 @@ pub fn form(
             ),
         )
 }
+
+/// A project the sidebar's group header opened a menu for.
+pub struct ProjectPopup {
+    pub id: String,
+    pub at: Point<Pixels>,
+}
+
+/// A project rename, or a removal waiting for confirmation.
+pub enum ProjectForm {
+    Rename(String),
+    Remove(String),
+}
+
+fn project_title(w: &Workspace, id: &str) -> String {
+    w.source
+        .projects()
+        .into_iter()
+        .find(|project| project.id == id)
+        .map(|project| project.title)
+        .unwrap_or_else(|| id.to_string())
+}
+
+impl Workspace {
+    pub fn open_project_menu(
+        &mut self,
+        id: &str,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette_open = false;
+        self.picker_open = false;
+        self.dropdown = None;
+        self.thread_popup = None;
+        self.thread_form = None;
+        self.project_popup = Some(ProjectPopup {
+            id: id.to_string(),
+            at,
+        });
+        window.focus(&self.thread_action_focus, cx);
+        cx.notify();
+    }
+
+    pub fn pick_project_action(
+        &mut self,
+        id: &str,
+        rename: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_popup = None;
+        self.palette_open = false;
+        self.dropdown = None;
+        self.picker_open = false;
+        self.problem = None;
+        let form = if rename {
+            ProjectForm::Rename(id.to_string())
+        } else {
+            ProjectForm::Remove(id.to_string())
+        };
+        if rename {
+            let title = project_title(self, id);
+            self.action_input.update(cx, |input, cx| {
+                input.placeholder = "Project name";
+                input.set_text(title, cx);
+            });
+            window.focus(&self.action_input.read(cx).focus.clone(), cx);
+        } else {
+            window.focus(&self.thread_action_focus, cx);
+        }
+        self.project_form = Some(form);
+        cx.notify();
+    }
+
+    pub fn close_project_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_popup = None;
+        self.project_form = None;
+        window.focus(&self.sidebar_focus, cx);
+        cx.notify();
+    }
+
+    pub fn submit_project_action(
+        &mut self,
+        submitted: Submission<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = match submitted {
+            Submission::Text(text) => text.to_string(),
+            Submission::Confirm => self.action_input.read(cx).text().to_string(),
+            Submission::Revert { .. } => return,
+        };
+        let Some(form) = &self.project_form else {
+            return;
+        };
+        match form {
+            ProjectForm::Rename(id) => {
+                let id = id.clone();
+                let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if title.is_empty() || title == project_title(self, &id) {
+                    self.close_project_action(window, cx);
+                    return;
+                }
+                self.source.rename_project(&id, title);
+                self.close_project_action(window, cx);
+            }
+            ProjectForm::Remove(id) => {
+                if !matches!(submitted, Submission::Confirm) {
+                    return;
+                }
+                let id = id.clone();
+                self.source.remove_project(&id);
+                self.close_project_action(window, cx);
+            }
+        }
+    }
+}
+
+pub fn project_popup(
+    w: &Workspace,
+    popup: &ProjectPopup,
+    window: &Window,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let id = popup.id.clone();
+    let menu = crate::thread_view::menu_surface("project-context").children([
+        crate::thread_view::menu_row(("project-action", 0usize), "Rename project…".into(), false)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pick_project_action(&id, true, window, cx)
+            }))
+            .into_any_element(),
+        crate::thread_view::menu_row(("project-action", 1usize), "Remove project…".into(), false)
+            .text_color(color("broken"))
+            .on_click(cx.listener({
+                let id = popup.id.clone();
+                move |this, _, window, cx| this.pick_project_action(&id, false, window, cx)
+            }))
+            .into_any_element(),
+    ]);
+    div()
+        .absolute()
+        .inset_0()
+        .track_focus(&w.thread_action_focus)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .id("project-menu-backdrop")
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_project_action(window, cx)),
+                ),
+        )
+        .child(
+            menu.absolute()
+                .left(
+                    popup
+                        .at
+                        .x
+                        .min((window.viewport_size().width - px(246.)).max(px(0.))),
+                )
+                .top(
+                    popup
+                        .at
+                        .y
+                        .min((window.viewport_size().height - px(120.)).max(px(0.))),
+                )
+                .w(px(240.)),
+        )
+}
+
+pub fn project_form(
+    w: &Workspace,
+    form: &ProjectForm,
+    window: &Window,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let (title, detail) = match form {
+        ProjectForm::Rename(id) => ("Rename project", project_title(w, id)),
+        ProjectForm::Remove(id) => (
+            "Remove project",
+            format!(
+                "Remove “{}” from the sidebar? Its threads stay, grouped under “Unknown project”.",
+                project_title(w, id)
+            ),
+        ),
+    };
+    let mut panel = crate::thread_view::menu_surface("project-action-form")
+        .max_w(px(520.))
+        .w_full()
+        .p(px(16.))
+        .gap(px(10.))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(15.))
+                .child(title),
+        )
+        .child(
+            div()
+                .id("project-form-detail")
+                .max_h(px(260.))
+                .overflow_y_scroll()
+                .text_color(color("ink-2"))
+                .child(detail),
+        );
+    if let ProjectForm::Rename(_) = form {
+        panel = panel.child(w.action_input.clone()).child(
+            crate::thread_view::menu_row("confirm-project-action", "Save name".into(), false)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let text = this.action_input.read(cx).text().to_string();
+                    this.submit_project_action(Submission::Text(&text), window, cx)
+                })),
+        );
+    }
+    if let ProjectForm::Remove(_) = form {
+        panel = panel.child(
+            crate::thread_view::menu_row("confirm-project-action", "Remove project".into(), false)
+                .text_color(color("broken"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.submit_project_action(Submission::Confirm, window, cx)
+                })),
+        );
+    }
+    let _ = window;
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .track_focus(&w.thread_action_focus)
+        .key_context("ThreadActionConfirm")
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .id("project-form-backdrop")
+                .occlude()
+                .bg(black().opacity(0.22))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_project_action(window, cx)),
+                ),
+        )
+        .child(
+            panel.child(
+                div()
+                    .id("cancel-project-action")
+                    .control("Close")
+                    .px(px(8.))
+                    .text_color(color("ink-2"))
+                    .child("Cancel")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.close_project_action(window, cx)),
+                    ),
+            ),
+        )
+}

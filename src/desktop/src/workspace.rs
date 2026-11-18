@@ -6,8 +6,8 @@ use crate::{
     live::ServerSource,
     mock::MockSource,
     model::{
-        CatalogState, Delivery, Discovery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES,
-        Reply, Selection, Status, ThreadId, ThreadSource,
+        CatalogState, Delivery, Discovery, INTERACTION_MODES, NewThread, PickerState, QueueEdit,
+        RUNTIME_MODES, Reply, ResearchRole, Selection, Status, ThreadId, ThreadSource,
     },
     theme::{self, color},
     thread_actions,
@@ -87,10 +87,34 @@ pub struct Workspace {
     pub search: Entity<Composer>,
     pub thread_popup: Option<thread_actions::Popup>,
     pub thread_form: Option<thread_actions::Form>,
+    pub project_popup: Option<thread_actions::ProjectPopup>,
+    pub project_form: Option<thread_actions::ProjectForm>,
     pub action_model: Option<Selection>,
     pub action_input: Entity<Composer>,
     pub thread_action_focus: FocusHandle,
     focus_new_draft: bool,
+    /// A notice above the composer, until it is dismissed. The parked
+    /// run-size question clears itself, like the TUI's toast.
+    pub notice: Option<String>,
+    pub notice_at: Option<Instant>,
+    /// The thread searched for, and when the palette's text last changed: the
+    /// search goes out once the query holds still.
+    searched: String,
+    search_at: Option<(Instant, String)>,
+    /// The threads the server may ask this window for a run size, last sent.
+    research_watching: Option<ThreadId>,
+    /// The lead thread opened in full: its transcript shows, not its run.
+    pub lead_full: Option<ThreadId>,
+    /// A role agent opened in full: its lead and its roster reference.
+    pub role_full: Option<(ThreadId, ResearchRole, usize)>,
+    /// The run view's columns: the role keys act on and the agent each role
+    /// shows, by lead thread.
+    pub run_role: HashMap<ThreadId, ResearchRole>,
+    pub run_picks: HashMap<(ThreadId, ResearchRole), usize>,
+    /// Role transcript tool rows opened in the run view, by lead, role and agent.
+    pub run_expanded: HashSet<(ThreadId, ResearchRole, usize)>,
+    /// The size picker's state, by thread: the proposal it answers and its state.
+    pub picker: HashMap<ThreadId, (String, PickerState)>,
     /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
     pub fold_toggled: HashSet<(ThreadId, usize)>,
     pub unfolded_at: HashMap<(ThreadId, usize), Instant>,
@@ -237,7 +261,11 @@ impl Workspace {
             &action_input,
             window,
             |this, _, e: &Submitted, window, cx| {
-                this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
+                if this.project_form.is_some() {
+                    this.submit_project_action(thread_actions::Submission::Text(&e.0), window, cx);
+                } else {
+                    this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
+                }
             },
         ));
         let settings_input = cx.new(|cx| {
@@ -306,6 +334,10 @@ impl Workspace {
                         {
                             cx.notify();
                         }
+                        // A search goes out once the palette's query holds
+                        // still, like the TUI's picker waits for a pause.
+                        this.sync_search(cx);
+                        this.sync_research(cx);
                     })
                     .is_err()
                 {
@@ -409,6 +441,19 @@ impl Workspace {
             search,
             thread_popup: None,
             thread_form: None,
+            project_popup: None,
+            project_form: None,
+            notice: None,
+            notice_at: None,
+            searched: String::new(),
+            search_at: None,
+            research_watching: None,
+            lead_full: None,
+            role_full: None,
+            run_role: HashMap::new(),
+            run_picks: HashMap::new(),
+            run_expanded: HashSet::new(),
+            picker: HashMap::new(),
             action_model: None,
             action_input,
             thread_action_focus: cx.focus_handle(),
@@ -622,6 +667,119 @@ impl Workspace {
                 }
             }
         }
+        // The server parked the run-size question: the next send asks for it.
+        // The notice clears itself, as the TUI's toast does after 2.5s.
+        if self.source.take_research_pending() {
+            self.notice = Some("Run size still to choose — the next send asks for it.".into());
+            self.notice_at = Some(Instant::now());
+        }
+        if self
+            .notice_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_millis(2500))
+        {
+            self.notice = None;
+            self.notice_at = None;
+        }
+    }
+    /// How long the palette's query holds still before the store is searched.
+    const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
+    /// Sends the palette's query once it holds still, like the TUI's picker
+    /// waits for a pause in typing.
+    fn sync_search(&mut self, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            self.searched = String::new();
+            self.search_at = None;
+            return;
+        }
+        let query = self.search.read(cx).text().to_string();
+        if query.trim().is_empty() {
+            self.searched = String::new();
+            self.search_at = None;
+            self.source.search_threads("");
+            return;
+        }
+        if query == self.searched {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .search_at
+            .as_ref()
+            .is_none_or(|(_, pending)| pending != &query)
+        {
+            self.search_at = Some((now, query));
+            return;
+        }
+        if self
+            .search_at
+            .as_ref()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= Self::SEARCH_DEBOUNCE)
+        {
+            self.searched = query.clone();
+            self.search_at = None;
+            self.source.search_threads(&query);
+            cx.notify();
+        }
+    }
+    /// The thread the server may ask this window for a run size: the focused
+    /// thread while it can start one (Research mode is on, `/research` is
+    /// typed, or the thread orchestrates), none otherwise.
+    fn research_target(&self, cx: &mut Context<Self>) -> Option<ThreadId> {
+        if self.creating || self.composers.len() <= self.selected {
+            return None;
+        }
+        let thread = self.source.list_threads().get(self.selected)?.clone();
+        let composer = self.composers[self.selected].read(cx);
+        let drafted = composer_menu::mode_command(composer.text())
+            .is_some_and(|(mode, _)| mode == "research");
+        let research = thread.interaction_mode == "research"
+            || thread.interaction_mode == "orchestrate"
+            || composer.once.as_deref() == Some("research")
+            || drafted;
+        research.then_some(self.selected)
+    }
+    /// Keeps the run-size opt-in on the focused thread and the run view's
+    /// reads going while it shows.
+    fn sync_research(&mut self, cx: &mut Context<Self>) {
+        let target = self.research_target(cx);
+        if target != self.research_watching {
+            self.research_watching = target;
+            self.source.watch_research(target);
+        }
+        if !self.creating && self.source.leads_run(self.selected) {
+            self.source.read_run(self.selected);
+        }
+    }
+    /// The lead's run view replaces its transcript: the shell lists it
+    /// leading a run and the run is read, and it is not opened in full.
+    pub fn show_run_view(&self) -> bool {
+        !self.creating
+            && self.role_full.is_none()
+            && self.lead_full != Some(self.selected)
+            && self.source.leads_run(self.selected)
+            && self.source.run_summary(self.selected).is_some()
+    }
+    /// The lead a role thread (or a lead opened in full) goes back to.
+    pub fn run_back_to(&self) -> Option<ThreadId> {
+        if self.show_run_view() {
+            return None;
+        }
+        if let Some((lead, _, _)) = self.role_full {
+            return Some(lead);
+        }
+        if self.lead_full == Some(self.selected) {
+            return Some(self.selected);
+        }
+        None
+    }
+    /// Leaves the full transcript for the run view.
+    pub fn back_to_run(&mut self, cx: &mut Context<Self>) {
+        if self.run_back_to().is_none() {
+            return;
+        }
+        self.lead_full = None;
+        self.role_full = None;
+        cx.notify();
     }
     /// The project a new thread starts in: the one picked, else the open
     /// thread's, else the newest.
@@ -1088,10 +1246,12 @@ impl Workspace {
         self.selected = id;
         self.creating = false;
         self.dropdown = None;
+        self.lead_full = None;
+        self.role_full = None;
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread_form.is_some() {
+        if self.thread_form.is_some() || self.project_form.is_some() {
             return;
         }
         self.thread_popup = None;
@@ -1151,6 +1311,12 @@ impl Workspace {
         cx.notify();
     }
     fn send(&mut self, id: ThreadId, text: String, delivery: Delivery, cx: &mut Context<Self>) {
+        // The run-size question waits: Enter starts the run with the picked
+        // size, as the TUI's modal does.
+        if !self.creating && self.source.proposal(id).is_some() {
+            self.answer_size(id, cx);
+            return;
+        }
         let busy = self
             .source
             .list_threads()
@@ -1396,6 +1562,14 @@ impl Render for Workspace {
                         this.close_settings_over(window, cx);
                     } else if this.thread_form.is_some() || this.thread_popup.is_some() {
                         this.close_thread_action(window, cx);
+                    } else if this.project_form.is_some() || this.project_popup.is_some() {
+                        this.close_project_action(window, cx);
+                    } else if this.role_full.is_some() || this.lead_full.is_some() {
+                        this.back_to_run(cx);
+                    } else if !this.creating && this.source.proposal(this.selected).is_some() {
+                        // The run-size question waits: Esc runs one researcher
+                        // instead, as the TUI's modal does.
+                        this.answer_single(this.selected, cx);
                     } else if this.custom_open {
                         this.close_custom(window, cx);
                     } else if this.git_ui.form.is_some() {
@@ -1512,6 +1686,14 @@ impl Render for Workspace {
             })
             .when_some(self.thread_form.as_ref(), |s, form| {
                 s.child(crate::thread_actions::form(self, form, window, cx))
+            })
+            .when_some(self.project_popup.as_ref(), |s, popup| {
+                s.child(crate::thread_actions::project_popup(
+                    self, popup, window, cx,
+                ))
+            })
+            .when_some(self.project_form.as_ref(), |s, form| {
+                s.child(crate::thread_actions::project_form(self, form, window, cx))
             })
             .when(self.settings_open, |s| {
                 s.child(crate::settings_view::render(self, window, cx))
