@@ -65,6 +65,10 @@ pub enum SettingsForm {
 }
 
 impl SettingsForm {
+    fn inline(&self) -> bool {
+        matches!(self, Self::Scalar { .. } | Self::Field { .. })
+    }
+
     fn title(&self) -> String {
         match self {
             Self::Scalar { title, .. } => title.clone(),
@@ -218,6 +222,7 @@ impl Workspace {
         self.settings_open = true;
         self.settings_error = None;
         self.source.read_settings();
+        self.source.refresh_catalog();
         self.source.read_remote();
         self.source.read_updates();
         self.source.read_memories(self.settings_thread());
@@ -230,6 +235,7 @@ impl Workspace {
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
         self.settings_rail_tip = None;
+        self.settings_editor = None;
         self.settings_form = None;
         self.settings_form_saving = false;
         self.settings_confirm = None;
@@ -249,13 +255,15 @@ impl Workspace {
 
     /// Escape with the window open: the form or wizard first, then the window.
     pub fn close_settings_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_form.is_some()
+        if self.settings_editor.is_some()
+            || self.settings_form.is_some()
             || self.settings_confirm.is_some()
             || self.settings_memory_new.is_some()
             || self.settings_profile_new.is_some()
             || self.settings_mcp_new.is_some()
             || self.settings_export.is_some()
         {
+            self.settings_editor = None;
             self.settings_form = None;
             self.settings_form_saving = false;
             self.settings_confirm = None;
@@ -315,31 +323,14 @@ impl Workspace {
         }
     }
 
-    fn tabs(&self, snapshot: &Snapshot) -> Vec<(String, String)> {
-        let mut tabs: Vec<(String, String)> = snapshot
-            .sections()
-            .into_iter()
-            .map(|section| {
-                (
-                    section.to_string(),
-                    crate::language::tr(section_label(section)).into_owned(),
-                )
-            })
-            .collect();
-        tabs.push((
-            "remote".into(),
-            crate::language::tr("Remote access").into_owned(),
-        ));
-        tabs.push((
-            "updates".into(),
-            crate::language::tr("Updates").into_owned(),
-        ));
-        tabs
+    pub fn select_settings_section(&mut self, section: &str, group: Option<&str>) {
+        self.settings_tab = (section.to_owned(), group.map(str::to_owned));
     }
 
     fn open_settings_form(&mut self, form: SettingsForm, initial: &str, cx: &mut Context<Self>) {
         let secret = form.secret();
         let multiline = form.multiline();
+        self.settings_editor = None;
         self.settings_confirm = None;
         self.settings_error = None;
         self.settings_memory_new = None;
@@ -364,94 +355,24 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Cycles an enum through its choices, or a boolean through Default/On/Off.
-    pub fn cycle_setting(&mut self, key: &str, cx: &mut Context<Self>) {
-        let next = self
-            .source
-            .settings()
-            .as_ref()
-            .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
-            .and_then(|snapshot| snapshot.find(key))
-            .and_then(|view| match &view.kind {
-                SettingKind::Enum(choices) => {
-                    let current = match &view.value {
-                        SettingValue::Text(text) => {
-                            choices.iter().position(|choice| &choice.value == text)
-                        }
-                        _ => None,
-                    };
-                    choices
-                        .get(current.map_or(0, |at| (at + 1) % choices.len().max(1)))
-                        .map(|choice| choice.value.clone())
-                }
-                SettingKind::Boolean => Some(match &view.value {
-                    SettingValue::Unset => "true".into(),
-                    SettingValue::Flag(true) => "false".into(),
-                    SettingValue::Flag(false) => String::new(),
-                    SettingValue::Text(_) | SettingValue::Number(_) => "true".into(),
-                }),
-                _ => None,
-            });
-        if let Some(next) = next {
-            self.settings_error = None;
-            self.source.set_setting(key, &next);
-            cx.notify();
+    fn write_setting(&mut self, key: &str, value: &str, cx: &mut Context<Self>) {
+        if self.source.settings_saving().is_some() {
+            return;
         }
+        self.settings_editor = None;
+        self.settings_error = None;
+        self.source.set_setting(key, value);
+        cx.notify();
     }
 
-    /// Cycles a list field: enums and efforts through their choices, booleans
-    /// through Default/On/Off.
-    pub fn cycle_field(&mut self, key: &str, id: &str, path: &str, cx: &mut Context<Self>) {
-        let next = self
-            .source
-            .settings()
-            .as_ref()
-            .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
-            .and_then(|snapshot| snapshot.find(key))
-            .and_then(|view| {
-                let schema = view.field_schema(path)?;
-                let item = view.items.iter().find(|item| item.id == id)?;
-                let field = item.fields.iter().find(|field| field.path == path)?;
-                match &schema.kind {
-                    crate::settings::FieldKind::Enum(choices) => {
-                        let current = match &field.value {
-                            SettingValue::Text(text) => {
-                                choices.iter().position(|choice| &choice.value == text)
-                            }
-                            _ => None,
-                        };
-                        choices
-                            .get(current.map_or(0, |at| (at + 1) % choices.len().max(1)))
-                            .map(|choice| choice.value.clone())
-                    }
-                    crate::settings::FieldKind::Effort => {
-                        let current = match &field.value {
-                            SettingValue::Text(text) => field
-                                .choices
-                                .iter()
-                                .position(|choice| &choice.value == text),
-                            _ => None,
-                        };
-                        field
-                            .choices
-                            .get(current.map_or(0, |at| (at + 1) % field.choices.len().max(1)))
-                            .map(|choice| choice.value.clone())
-                    }
-                    crate::settings::FieldKind::Boolean => Some(match &field.value {
-                        SettingValue::Unset => "true".into(),
-                        SettingValue::Flag(true) => "false".into(),
-                        SettingValue::Flag(false) => String::new(),
-                        SettingValue::Text(_) | SettingValue::Number(_) => "true".into(),
-                    }),
-                    _ => None,
-                }
-            });
-        if let Some(next) = next {
-            self.settings_error = None;
-            self.source
-                .set_setting(&format!("{key}[{id}].{path}"), &next);
-            cx.notify();
-        }
+    fn toggle_settings_editor(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.settings_editor.as_deref() == Some(key);
+        self.settings_editor = (!open).then(|| key.to_owned());
+        self.settings_form = None;
+        self.settings_form_saving = false;
+        self.settings_error = None;
+        window.focus(&self.settings_focus, cx);
+        cx.notify();
     }
 
     /// Submits the form bar's text: validated like the server will, then sent.
@@ -662,15 +583,14 @@ pub fn render(
     let tabs = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
-        .map(|snapshot| w.tabs(snapshot))
+        .map(tabs)
         .unwrap_or_default();
-    if w.settings_tab >= tabs.len() {
-        w.settings_tab = 0;
-    }
-    let tab = tabs
-        .get(w.settings_tab)
-        .map(|(id, _)| id.clone())
-        .unwrap_or_default();
+    let selected = tabs
+        .iter()
+        .position(|tab| tab.section == w.settings_tab.0 && tab.group == w.settings_tab.1.as_deref())
+        .or_else(|| tabs.iter().position(|tab| tab.section == w.settings_tab.0))
+        .unwrap_or(0);
+    let tab = tabs.get(selected);
     let mut panel = div()
         .id("settings-panel")
         .track_focus(&w.settings_focus)
@@ -678,7 +598,8 @@ pub fn render(
         // here, because GPUI delivers a press to every element under it.
         .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_settings(window, cx)))
         .w(px(960.))
-        .h(px(620.))
+        .h(px(660.))
+        .max_h(relative(0.95))
         .flex()
         .flex_col()
         .rounded(px(12.))
@@ -693,23 +614,24 @@ pub fn render(
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(rail(w, &tabs, window, cx))
+                .child(rail(w, &tabs, selected, window, cx))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(body(w, &tab, window, cx)),
+                        .child(body(w, tab, cx)),
                 ),
         );
     panel = panel
         .when_some(w.settings_notice.clone(), |s, (text, error)| {
             s.child(panel_notice(text, error))
         })
-        .when_some(w.settings_form.clone(), |s, form| {
-            s.child(form_bar(w, &form, cx))
-        })
+        .when_some(
+            w.settings_form.as_ref().filter(|form| !form.inline()),
+            |s, form| s.child(form_bar(w, form, None, cx)),
+        )
         .when_some(w.settings_confirm.clone(), |s, (title, detail, _)| {
             s.child(confirm_bar(w, &title, &detail, cx))
         })
@@ -799,6 +721,75 @@ const RAIL_WIDTH: f32 = 190.;
 const RAIL_GUTTER: f32 = 8.;
 const RAIL_ITEM_PADDING: f32 = 10.;
 
+struct SettingsTab<'a> {
+    section: &'a str,
+    group: Option<&'a str>,
+    category: &'static str,
+    label: &'a str,
+}
+
+fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
+    let mut tabs = Vec::new();
+    for section in snapshot.sections() {
+        let category = match section {
+            "provider:harness" => "Moxen Harness",
+            "provider:claude" | "provider:codex" | "provider:opencode" => "Providers",
+            "mcp" | "skills" => "Integrations",
+            _ => "Moxen",
+        };
+        if section == "provider:harness" {
+            let bare = snapshot
+                .settings
+                .iter()
+                .find(|view| view.section == section && matches!(view.kind, SettingKind::List(_)))
+                .filter(|view| view.items.is_empty())
+                .and_then(|view| view.group.as_deref());
+            let groups = snapshot
+                .settings
+                .iter()
+                .filter(|view| view.section == section && !view.hidden)
+                .filter_map(|view| view.group.as_deref())
+                .filter(|group| bare.is_none_or(|bare| *group == bare));
+            for group in groups {
+                if !tabs
+                    .iter()
+                    .any(|tab: &SettingsTab| tab.section == section && tab.group == Some(group))
+                {
+                    tabs.push(SettingsTab {
+                        section,
+                        group: Some(group),
+                        category,
+                        label: group,
+                    });
+                }
+            }
+        } else {
+            tabs.push(SettingsTab {
+                section,
+                group: None,
+                category,
+                label: section_label(section),
+            });
+        }
+    }
+    for (section, label) in [("remote", "Remote access"), ("updates", "Updates")] {
+        let index = tabs
+            .iter()
+            .position(|tab| tab.category != "Moxen")
+            .unwrap_or(tabs.len());
+        tabs.insert(
+            index,
+            SettingsTab {
+                section,
+                group: None,
+                category: "Moxen",
+                label,
+            },
+        );
+    }
+    tabs
+}
+
 fn rail_tip_left(text_width: f32) -> Option<f32> {
     let item_width = RAIL_WIDTH - 2. * RAIL_GUTTER;
     (text_width > item_width - 2. * RAIL_ITEM_PADDING).then_some(item_width + RAIL_GUTTER)
@@ -806,19 +797,32 @@ fn rail_tip_left(text_width: f32) -> Option<f32> {
 
 fn rail(
     w: &Workspace,
-    tabs: &[(String, String)],
+    tabs: &[SettingsTab<'_>],
+    selected_index: usize,
     window: &Window,
     cx: &mut Context<Workspace>,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id("settings-rail")
+        .overflow_y_scroll()
         .w(px(RAIL_WIDTH))
         .flex_shrink_0()
         .py(px(4.))
         .px(px(RAIL_GUTTER))
         .flex()
         .flex_col()
-        .children(tabs.iter().enumerate().map(|(at, (_, label))| {
-            let selected = w.settings_tab == at;
+        .children(tabs.iter().enumerate().flat_map(|(at, tab)| {
+            let heading = (at == 0 || tabs[at - 1].category != tab.category).then(|| {
+                ui::caps(&crate::language::tr(tab.category))
+                    .pt(px(if at == 0 { 6. } else { 12. }))
+                    .pb(px(3.))
+                    .px(px(RAIL_ITEM_PADDING))
+                    .into_any_element()
+            });
+            let label = crate::language::tr(tab.label).into_owned();
+            let selected = selected_index == at;
+            let section = tab.section.to_owned();
+            let group = tab.group.map(str::to_owned);
             let mut run = window.text_style().to_run(label.len());
             run.font.family = theme::FONT.into();
             let width = window
@@ -826,11 +830,12 @@ fn rail(
                 .shape_line(label.clone().into(), px(theme::UI), &[run], None)
                 .width();
             let tip_left = rail_tip_left(f32::from(width));
-            div()
+            let row = div()
                 .id(("settings-tab", at))
                 .plain_control()
                 .relative()
-                .h(px(theme::ROW))
+                .h(px(22.))
+                .flex_shrink_0()
                 .px(px(RAIL_ITEM_PADDING))
                 .flex()
                 .items_center()
@@ -861,26 +866,40 @@ fn rail(
                     })
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings_tab = at;
+                    this.select_settings_section(&section, group.as_deref());
                     this.settings_entry = None;
                     this.settings_item = None;
                     this.settings_skill = None;
                     this.settings_memory = None;
+                    this.settings_editor = None;
+                    this.settings_form = None;
+                    this.settings_form_saving = false;
                     this.settings_error = None;
                     this.settings_notice = None;
                     cx.notify();
                 }))
+                .into_any_element();
+            heading.into_iter().chain(std::iter::once(row))
         }))
 }
 
-fn body(w: &Workspace, tab: &str, window: &Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn body(w: &Workspace, tab: Option<&SettingsTab<'_>>, cx: &mut Context<Workspace>) -> AnyElement {
     let content: AnyElement = match tab {
-        "remote" => remote_tab(w, cx),
-        "updates" => updates_tab(w, cx),
-        _ => section_tab(w, tab, window, cx),
+        Some(tab) if tab.section == "remote" => remote_tab(w, cx),
+        Some(tab) if tab.section == "updates" => updates_tab(w, cx),
+        _ => section_tab(w, tab, cx),
     };
     div()
-        .id("settings-content")
+        .id(tab.map_or_else(
+            || "settings-content".to_owned(),
+            |tab| {
+                format!(
+                    "settings-content-{}-{}",
+                    tab.section,
+                    tab.group.unwrap_or_default()
+                )
+            },
+        ))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
@@ -896,8 +915,7 @@ fn body(w: &Workspace, tab: &str, window: &Window, cx: &mut Context<Workspace>) 
 
 fn section_tab(
     w: &Workspace,
-    tab: &str,
-    _window: &Window,
+    tab: Option<&SettingsTab<'_>>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let snapshot = w.source.settings();
@@ -908,12 +926,19 @@ fn section_tab(
         Ok(snapshot) => snapshot,
         Err(message) => return error_row(message, w, cx).into_any_element(),
     };
+    let Some(tab) = tab else {
+        return loading("Nothing here.").into_any_element();
+    };
     let views: Vec<&crate::settings::SettingView> = snapshot
         .settings
         .iter()
-        .filter(|view| view.section == tab)
+        .filter(|view| {
+            view.section == tab.section
+                && view.visible(snapshot)
+                && (tab.group.is_none() || view.group.as_deref() == tab.group)
+        })
         .collect();
-    if views.is_empty() && tab != "skills" {
+    if views.is_empty() && tab.section != "skills" {
         return loading("Nothing here.").into_any_element();
     }
     let mut out = div().flex().flex_col().gap(px(4.));
@@ -932,14 +957,14 @@ fn section_tab(
         } else {
             out = out.child(setting_row(w, view, cx));
         }
-        if view.key == "providers.harness.profiles" || view.key == "mcp.servers" {
+        if matches!(view.kind, SettingKind::List(_)) {
             out = out.child(list_block(w, view, cx));
         }
     }
-    if tab == "memory" {
+    if tab.section == "memory" {
         out = out.child(memory_manager(w, cx));
     }
-    if tab == "skills" {
+    if tab.section == "skills" {
         out = out.child(skills_manager(w, cx));
     }
     out.into_any_element()
@@ -992,78 +1017,618 @@ fn setting_row(
     cx: &mut Context<Workspace>,
 ) -> Div {
     let key = view.key.clone();
-    let pending = w.source.settings_saving().as_deref() == Some(key.as_str());
-    let mut row = div().flex().flex_col().py(px(6.));
-    let control: AnyElement = match &view.kind {
-        SettingKind::Enum(_) | SettingKind::Boolean => {
-            let label = if pending {
-                crate::language::message("guide.saving").to_owned()
-            } else {
-                setting_row_value(view)
-            };
-            div()
-                .id(format!("settings-cycle-{key}"))
-                .control(format!("Change {}", view.label))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .text_color(color(if pending { "ink-2" } else { "live" }))
-                        .child(label),
-                )
-                .child(ui::icon("chevron-right", "ink-2"))
-                .on_click(cx.listener(move |this, _, _, cx| this.cycle_setting(&key, cx)))
-                .into_any_element()
-        }
-        SettingKind::Secret
-        | SettingKind::Text { .. }
-        | SettingKind::Integer { .. }
-        | SettingKind::Duration
-        | SettingKind::Line
-        | SettingKind::Other(_) => {
-            let label = setting_row_value(view);
-            div()
-                .id(format!("settings-edit-{key}"))
-                .control(format!("Edit {}", view.label))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.5))
-                        .text_color(color("ink-2"))
-                        .child(label),
-                )
-                .child(ui::icon("pencil", "ink-2"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_scalar_form(&key, cx);
-                }))
-                .into_any_element()
-        }
-        SettingKind::List(_) => div().into_any_element(),
+    let picking = w.settings_editor.as_deref() == Some(key.as_str());
+    let choices = match &view.kind {
+        SettingKind::Enum(_) | SettingKind::Catalog { .. } => true,
+        SettingKind::Duration(presets) | SettingKind::Line(presets) => !presets.is_empty(),
+        _ => false,
     };
-    row = row.child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .flex_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(setting_label(view)),
+    let label = setting_row_value(view);
+    let unavailable = view.unavailable.as_deref();
+    let control = match &view.kind {
+        SettingKind::Boolean => switch_control(
+            w,
+            &key,
+            label,
+            view.value == SettingValue::Flag(true)
+                || (view.value == SettingValue::Unset
+                    && view
+                        .effective
+                        .as_ref()
+                        .is_some_and(|effective| effective.value == SettingValue::Flag(true))),
+            view.default == SettingValue::Unset && view.explicit,
+            unavailable,
+            cx,
+        )
+        .into_any_element(),
+        SettingKind::List(_) => div().into_any_element(),
+        _ => {
+            let click_key = key.clone();
+            row_control(
+                w,
+                &key,
+                label,
+                choices,
+                picking,
+                unavailable,
+                cx.listener(move |this, _, window, cx| {
+                    if choices {
+                        this.toggle_settings_editor(&click_key, window, cx);
+                    } else {
+                        this.open_scalar_form(&click_key, window, cx);
+                    }
+                }),
             )
-            .child(control),
-    );
-    row.child(
-        div()
-            .text_color(color("ink-2"))
-            .text_size(px(12.5))
-            .line_height(px(16.))
-            .child(crate::language::tr(&view.description).into_owned()),
+            .into_any_element()
+        }
+    };
+    let mut row = div()
+        .flex()
+        .flex_col()
+        .py(px(6.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(setting_label(view)),
+                )
+                .when_some(view.applies_at, |row, tag| {
+                    row.child(setting_badge(crate::language::tr(tag).as_ref()))
+                })
+                .child(control),
+        )
+        .child(
+            div()
+                .text_color(color("ink-2"))
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .child(crate::language::tr(&view.description).into_owned()),
+        );
+    if let Some(reason) = unavailable {
+        row = row.child(sub_line(&crate::language::tr(reason)));
+    }
+    if picking {
+        row = row.child(scalar_picker(w, view, cx));
+    }
+    if let Some(form @ SettingsForm::Scalar { key: form_key, .. }) = &w.settings_form
+        && form_key == &key
+    {
+        let stepper = match &view.kind {
+            SettingKind::Integer { min, max, .. } => Some(Stepper {
+                min: Some(*min),
+                max: Some(*max),
+                step: 1.,
+                fallback: numeric_value(view.effective.as_ref().map(|effective| &effective.value)),
+            }),
+            _ => None,
+        };
+        row = row.child(form_bar(w, form, stepper, cx));
+    }
+    row
+}
+
+fn setting_badge(label: &str) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(6.))
+        .rounded(px(theme::px_token("radius", "radius-xs")))
+        .bg(color("sunk"))
+        .text_color(color("ink-2"))
+        .text_size(px(11.))
+        .child(label.to_owned())
+}
+
+fn row_control(
+    w: &Workspace,
+    key: &str,
+    label: String,
+    picker: bool,
+    open: bool,
+    unavailable: Option<&str>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let pending = w.source.settings_saving().as_deref() == Some(key);
+    let control = div()
+        .id(format!("settings-edit-{key}"))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_color(color(if picker && !pending { "live" } else { "ink-2" }))
+                .when(!picker, |label| {
+                    label.font_family(theme::MONO).text_size(px(12.5))
+                })
+                .child(if pending {
+                    crate::language::message("guide.saving").into()
+                } else {
+                    label
+                }),
+        )
+        .child(ui::icon(
+            if open {
+                "chevron-down"
+            } else if picker {
+                "chevron-right"
+            } else {
+                "pencil"
+            },
+            "ink-2",
+        ));
+    if let Some(reason) = unavailable {
+        control.disabled(crate::language::tr(reason).into_owned())
+    } else {
+        control.plain_control().on_click(on_click)
+    }
+}
+
+fn switch_control(
+    w: &Workspace,
+    key: &str,
+    label: String,
+    on: bool,
+    can_reset: bool,
+    unavailable: Option<&str>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let reset_key = key.to_owned();
+    let write_key = reset_key.clone();
+    let pending = w.source.settings_saving().as_deref() == Some(key);
+    let switch = div()
+        .id(format!("settings-switch-{key}"))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(div().text_color(color("ink-2")).child(if pending {
+            crate::language::message("guide.saving").into()
+        } else {
+            label
+        }))
+        .child(ui::switch_track(on));
+    let switch = if let Some(reason) = unavailable {
+        switch.disabled(crate::language::tr(reason).into_owned())
+    } else {
+        switch
+            .plain_control()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.write_setting(&write_key, if on { "false" } else { "true" }, cx);
+            }))
+    };
+    div().flex().items_center().gap(px(6.)).child(switch).when(
+        can_reset && unavailable.is_none(),
+        |row| {
+            row.child(
+                div()
+                    .id(format!("settings-reset-{key}"))
+                    .quiet()
+                    .text_color(color("ink-2"))
+                    .text_size(px(12.))
+                    .child(crate::language::message("settings.default"))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.write_setting(&reset_key, "", cx)),
+                    ),
+            )
+        },
     )
+}
+
+struct PickerOption {
+    value: String,
+    label: String,
+    description: Option<String>,
+    group: Option<String>,
+    default: bool,
+}
+
+impl PickerOption {
+    fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+            description: None,
+            group: None,
+            default: false,
+        }
+    }
+
+    fn reset(label: &str, description: Option<String>) -> Self {
+        Self {
+            description,
+            default: true,
+            ..Self::new("", label)
+        }
+    }
+}
+
+fn choice_option(choice: &settings::Choice, default: &str) -> PickerOption {
+    PickerOption {
+        description: choice
+            .description
+            .as_deref()
+            .map(|description| crate::language::tr(description).into_owned()),
+        default: choice.value == default,
+        ..PickerOption::new(
+            &choice.value,
+            crate::language::tr(&choice.label).into_owned(),
+        )
+    }
+}
+
+fn editor_panel() -> Div {
+    div()
+        .mt(px(6.))
+        .rounded(px(theme::px_token("radius", "radius-md")))
+        .border_1()
+        .border_color(color("rule"))
+        .bg(color("sunk"))
+        .p(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+}
+
+fn option_list(
+    key: &str,
+    current: &str,
+    options: Vec<PickerOption>,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    let mut group = None;
+    let mut list = div()
+        .id(format!("settings-options-{key}"))
+        .max_h(px(220.))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col();
+    for (index, option) in options.into_iter().enumerate() {
+        if option.group != group {
+            group = option.group.clone();
+            if let Some(name) = &group {
+                list = list.child(ui::caps(name).px(px(8.)).pt(px(6.)));
+            }
+        }
+        let selected = option.value == current;
+        let key = key.to_owned();
+        list = list.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    format!("settings-option-{key}").into(),
+                    index as u64,
+                ))
+                .plain_control()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(theme::px_token("radius", "radius-xs")))
+                .when(selected, |row| row.bg(color("raised")))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_shrink_0()
+                        .when(selected, |slot| slot.child(ui::icon("check", "live"))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(option.label)
+                        .when_some(option.description, |row, description| {
+                            row.child(sub_line(&description))
+                        }),
+                )
+                .when(option.default, |row| {
+                    row.child(setting_badge(crate::language::message(
+                        "settings.theDefault",
+                    )))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if selected {
+                        this.settings_editor = None;
+                        cx.notify();
+                    } else {
+                        this.write_setting(&key, &option.value, cx);
+                    }
+                })),
+        );
+    }
+    list
+}
+
+fn scalar_picker(w: &Workspace, view: &settings::SettingView, cx: &mut Context<Workspace>) -> Div {
+    use crate::language::{message, tr};
+    let default = view.default.wire();
+    let effective = view.effective.as_ref();
+    let inherited_label = effective.map(|effective| tr(&effective.label).into_owned());
+    let mut current = view.value.wire();
+    let key = &view.key;
+    let mut panel = editor_panel();
+    match &view.kind {
+        SettingKind::Duration(presets) | SettingKind::Line(presets) => {
+            let fallback = effective.map_or(default, |effective| effective.value.wire());
+            if current.is_empty() {
+                current.clone_from(&fallback);
+            }
+            let mut buttons = div().flex().flex_wrap().gap(px(4.));
+            for (index, preset) in presets.iter().enumerate() {
+                let key = key.clone();
+                let value = preset.clone();
+                let default = preset == &fallback;
+                let selected = preset == &current;
+                buttons = buttons.child(
+                    div()
+                        .id(("settings-preset", index))
+                        .plain_control()
+                        .rounded(px(theme::px_token("radius", "radius-xs")))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(6.))
+                        .py(px(4.))
+                        .when(selected, |button| {
+                            button
+                                .bg(color("raised"))
+                                .text_color(color("live"))
+                                .child(ui::icon("check", "live"))
+                        })
+                        .child(preset.clone())
+                        .when(default, |button| {
+                            button.child(setting_badge(message("settings.theDefault")))
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.write_setting(&key, &value, cx)),
+                        ),
+                );
+            }
+            let custom = key.clone();
+            let reset = key.clone();
+            panel = panel.child(buttons).child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(small_button(
+                        ("settings-custom", 0),
+                        "Edit",
+                        "Edit",
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_scalar_form(&custom, window, cx)
+                        }),
+                    ))
+                    .when(
+                        view.explicit && view.default == SettingValue::Unset,
+                        |row| {
+                            row.child(small_button(
+                                ("settings-preset-reset", 0),
+                                "Default",
+                                "Default",
+                                cx.listener(move |this, _, _, cx| {
+                                    this.write_setting(&reset, "", cx)
+                                }),
+                            ))
+                        },
+                    ),
+            );
+        }
+        SettingKind::Enum(choices) => {
+            let mut options = Vec::new();
+            if default.is_empty() {
+                options.push(PickerOption::reset(
+                    message("settings.default"),
+                    inherited_label,
+                ));
+                if !view.explicit {
+                    current.clear();
+                }
+            } else if current.is_empty() {
+                current.clone_from(&default);
+            }
+            options.extend(choices.iter().map(|choice| choice_option(choice, &default)));
+            panel = panel
+                .max_w(px(540.))
+                .child(option_list(key, &current, options, cx));
+        }
+        SettingKind::Catalog { .. } => {
+            let snapshot = w.source.settings();
+            let catalog = w.catalog();
+            let options = catalog_picker_options(
+                view,
+                snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.as_ref().ok()),
+                catalog.as_deref(),
+            );
+            if !view.explicit {
+                current.clear();
+            }
+            panel = panel
+                .max_w(px(540.))
+                .child(option_list(key, &current, options, cx));
+        }
+        _ => {}
+    }
+    panel
+}
+
+fn catalog_picker_options(
+    view: &settings::SettingView,
+    snapshot: Option<&Snapshot>,
+    catalog: Option<&crate::catalog::Catalog>,
+) -> Vec<PickerOption> {
+    use crate::language::{message, tr};
+    use settings::CatalogSource;
+    let SettingKind::Catalog {
+        source,
+        provider_kind,
+        provider_key,
+        provider_kinds,
+    } = &view.kind
+    else {
+        return Vec::new();
+    };
+    let row = |key: &str| snapshot.and_then(|snapshot| snapshot.find(key));
+    let value = |key: &str| {
+        row(key)
+            .map(|setting| setting.value.wire())
+            .filter(|value| !value.is_empty())
+    };
+    let default_provider = value("provider");
+    let target = provider_key.as_ref().map_or_else(
+        || default_provider.clone(),
+        |key| {
+            value(key).or_else(|| {
+                row(key)?
+                    .effective
+                    .as_ref()
+                    .map(|effective| effective.value.wire())
+                    .filter(|value| !value.is_empty())
+            })
+        },
+    );
+    let providers: Vec<_> = catalog
+        .into_iter()
+        .flat_map(|catalog| catalog.offerable())
+        .filter(|provider| {
+            provider_kinds.is_empty()
+                || provider_kinds
+                    .iter()
+                    .any(|kind| kind == provider.settings_kind())
+        })
+        .filter(|provider| match source {
+            CatalogSource::Provider => true,
+            _ => provider_kind.as_ref().map_or_else(
+                || {
+                    target
+                        .as_ref()
+                        .is_none_or(|target| *target == provider.instance)
+                },
+                |kind| kind == provider.settings_kind(),
+            ),
+        })
+        .collect();
+    let reset_label = match source {
+        CatalogSource::Provider if provider_kinds.is_empty() => message("settings.firstAvailable"),
+        _ if view.effective.is_some() => message("settings.default"),
+        _ => message("settings.providerDefault"),
+    };
+    let mut options = vec![PickerOption::reset(
+        reset_label,
+        view.effective
+            .as_ref()
+            .map(|effective| tr(&effective.label).into_owned()),
+    )];
+    match source {
+        CatalogSource::Provider => options.extend(
+            providers
+                .iter()
+                .map(|provider| PickerOption::new(&provider.instance, &provider.name)),
+        ),
+        CatalogSource::Model => {
+            let mut seen = std::collections::HashSet::new();
+            for provider in &providers {
+                let mut models: Vec<_> = provider.offerable_models(None).collect();
+                models.sort_by_key(|model| !model.default);
+                for model in models {
+                    if seen.insert(&model.slug) {
+                        options.push(PickerOption {
+                            description: model.effort_range(),
+                            group: (providers.len() > 1).then(|| provider.name.clone()),
+                            default: model.default,
+                            ..PickerOption::new(&model.slug, &model.name)
+                        });
+                    }
+                }
+            }
+        }
+        CatalogSource::Effort => {
+            let per_provider: Vec<Vec<_>> = providers
+                .iter()
+                .filter_map(|provider| {
+                    let configured =
+                        value(&format!("providers.{}.model", provider.settings_kind())).or_else(
+                            || {
+                                let aimed = default_provider.as_deref()?;
+                                let same_driver = catalog
+                                    .and_then(|catalog| catalog.provider(aimed))
+                                    .is_some_and(|aimed| aimed.driver == provider.driver);
+                                (aimed == provider.instance || same_driver)
+                                    .then(|| value("model"))
+                                    .flatten()
+                            },
+                        );
+                    let model = if let Some(configured) = configured {
+                        provider
+                            .models
+                            .iter()
+                            .find(|model| model.slug == configured)
+                    } else {
+                        provider
+                            .models
+                            .iter()
+                            .find(|model| model.default)
+                            .or_else(|| provider.models.first())
+                    }?;
+                    let choices: Vec<_> = model
+                        .knobs
+                        .iter()
+                        .filter(|knob| crate::catalog::is_effort(&knob.id))
+                        .flat_map(|knob| &knob.choices)
+                        .collect();
+                    (!choices.is_empty()).then_some(choices)
+                })
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let choices: Vec<_> = per_provider
+                .first()
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|choice| {
+                    seen.insert(&choice.id)
+                        && per_provider
+                            .iter()
+                            .all(|choices| choices.iter().any(|other| other.id == choice.id))
+                })
+                .collect();
+            let default = choices
+                .iter()
+                .find(|choice| choice.default)
+                .or_else(|| choices.iter().find(|choice| choice.id == "medium"))
+                .or_else(|| choices.iter().find(|choice| choice.id == "high"))
+                .or_else(|| choices.first())
+                .map(|choice| choice.id.as_str());
+            for choice in choices {
+                let description = match choice.id.as_str() {
+                    "minimal" => Some(message("effort.minimal")),
+                    "low" => Some(message("effort.low")),
+                    "medium" => Some(message("effort.medium")),
+                    "high" => Some(message("effort.high")),
+                    "xhigh" => Some(message("effort.xhigh")),
+                    "max" => Some(message("effort.max")),
+                    _ => None,
+                };
+                options.push(PickerOption {
+                    description: description.map(str::to_owned),
+                    default: default == Some(choice.id.as_str()),
+                    ..PickerOption::new(&choice.id, tr(&choice.label).into_owned())
+                });
+            }
+            if options.len() == 1 {
+                options[0].description = Some(message("settings.noEffortSetting").into());
+            }
+        }
+    }
+    let current = view.value.wire();
+    if view.explicit && !options.iter().any(|option| option.value == current) {
+        options.insert(0, PickerOption::new(&current, &current));
+    }
+    options
 }
 
 fn setting_label(view: &crate::settings::SettingView) -> String {
@@ -1246,7 +1811,7 @@ fn add_buttons(
             .into_any_element(),
         );
     }
-    if key == "mcp.servers" {
+    if key == "mcpServers" {
         let add = key.clone();
         buttons.push(
             small_button(
@@ -1370,7 +1935,7 @@ fn entry_detail(
     );
     // The last test or probe of this entry, while it runs and after.
     if let Some(run) = w.source.harness_run() {
-        let scope = if view.key == "mcp.servers" {
+        let scope = if view.key == "mcpServers" {
             "mcp"
         } else {
             "harness"
@@ -1401,7 +1966,7 @@ fn field_default_line(effective: &settings::ListEffective) -> String {
 }
 
 fn field_row(
-    _w: &Workspace,
+    w: &Workspace,
     view: &crate::settings::SettingView,
     schema: &ListFieldSchema,
     field: &ListFieldValue,
@@ -1412,47 +1977,57 @@ fn field_row(
     let id = item.id.clone();
     let path = schema.path.clone();
     let title = schema.label.clone();
+    let address = format!("{key}[{id}].{path}");
+    let picking = w.settings_editor.as_deref() == Some(address.as_str());
+    let choices = match &schema.kind {
+        FieldKind::Enum(choices) => Some(choices.as_slice()),
+        FieldKind::Effort => Some(field.choices.as_slice()),
+        _ => None,
+    };
+    let shown = settings::display_field(field, Some(schema));
     let control: AnyElement = match &schema.kind {
-        FieldKind::Enum(_) | FieldKind::Boolean | FieldKind::Effort => {
-            let label = settings::display_field(field, Some(schema));
-            div()
-                .id(format!("settings-field-cycle-{key}-{id}-{path}"))
-                .control(format!("Change {}", crate::language::tr(&schema.label)))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(div().text_color(color("live")).child(label))
-                .child(ui::icon("chevron-right", "ink-2"))
-                .on_click(cx.listener(move |this, _, _, cx| this.cycle_field(&key, &id, &path, cx)))
-                .into_any_element()
-        }
+        FieldKind::Boolean => switch_control(
+            w,
+            &address,
+            shown,
+            field.value == SettingValue::Flag(true)
+                || (!field.explicit
+                    && field
+                        .effective
+                        .as_ref()
+                        .is_some_and(|effective| effective.value == SettingValue::Flag(true))),
+            field.explicit,
+            None,
+            cx,
+        )
+        .into_any_element(),
         FieldKind::NestedList { .. } => div()
             .text_color(color("ink-2"))
             .child("Below")
             .into_any_element(),
         _ => {
-            let shown = settings::display_field(field, Some(schema));
-            div()
-                .id(format!("settings-field-edit-{key}-{id}-{path}"))
-                .control(format!("Edit {}", crate::language::tr(&schema.label)))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.5))
-                        .text_color(color("ink-2"))
-                        .child(shown),
-                )
-                .child(ui::icon("pencil", "ink-2"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_field_form(&key, &id, &path, &title, cx);
-                }))
-                .into_any_element()
+            let (key, id, path, click_address) =
+                (key.clone(), id.clone(), path.clone(), address.clone());
+            let is_picker = choices.is_some();
+            row_control(
+                w,
+                &address,
+                shown,
+                is_picker,
+                picking,
+                None,
+                cx.listener(move |this, _, window, cx| {
+                    if is_picker {
+                        this.toggle_settings_editor(&click_address, window, cx);
+                    } else {
+                        this.open_field_form(&key, &id, &path, &title, window, cx);
+                    }
+                }),
+            )
+            .into_any_element()
         }
     };
-    div()
+    let mut row = div()
         .flex()
         .flex_col()
         .py(px(4.))
@@ -1477,7 +2052,51 @@ fn field_row(
         )
         .when_some(field.effective.as_ref(), |s, effective| {
             s.child(sub_line(&field_default_line(effective)))
-        })
+        });
+    if picking && let Some(choices) = choices {
+        let mut options = vec![PickerOption::reset(
+            crate::language::message("settings.default"),
+            field.effective.as_ref().map(field_default_line),
+        )];
+        options.extend(choices.iter().map(|choice| choice_option(choice, "")));
+        let current = if field.explicit {
+            field.value.wire()
+        } else {
+            String::new()
+        };
+        row = row.child(editor_panel().child(option_list(&address, &current, options, cx)));
+    }
+    if let Some(
+        form @ SettingsForm::Field {
+            key: form_key,
+            id: form_id,
+            path: form_path,
+            ..
+        },
+    ) = &w.settings_form
+        && form_key == &key
+        && form_id == &id
+        && form_path == &path
+    {
+        let fallback = numeric_value(field.effective.as_ref().map(|effective| &effective.value));
+        let stepper = match schema.kind {
+            FieldKind::Integer { min, max } => Some(Stepper {
+                min,
+                max,
+                step: 1.,
+                fallback,
+            }),
+            FieldKind::Number { min, max } => Some(Stepper {
+                min,
+                max,
+                step: 0.1,
+                fallback,
+            }),
+            _ => None,
+        };
+        row = row.child(form_bar(w, form, stepper, cx));
+    }
+    row
 }
 
 fn nested_block(
@@ -1570,7 +2189,7 @@ fn run_buttons(
 ) -> Vec<AnyElement> {
     let key = view.key.clone();
     let id = id.to_string();
-    let is_mcp = key == "mcp.servers";
+    let is_mcp = key == "mcpServers";
     let mut buttons: Vec<AnyElement> = vec![];
     if !is_mcp {
         let run_id = id.clone();
@@ -1703,7 +2322,7 @@ fn capitalize(text: &str) -> String {
 }
 
 impl Workspace {
-    fn open_scalar_form(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn open_scalar_form(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let view = self
             .source
             .settings()
@@ -1730,6 +2349,12 @@ impl Workspace {
             &initial,
             cx,
         );
+        if matches!(view.kind, SettingKind::Integer { .. }) {
+            self.settings_input
+                .update(cx, |input, _| input.height = 24.);
+        }
+        let focus = self.settings_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
     }
 
     fn open_field_form(
@@ -1738,6 +2363,7 @@ impl Workspace {
         id: &str,
         path: &str,
         title: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let field = self
@@ -1779,6 +2405,15 @@ impl Workspace {
             &initial,
             cx,
         );
+        if matches!(
+            schema.kind,
+            FieldKind::Integer { .. } | FieldKind::Number { .. }
+        ) {
+            self.settings_input
+                .update(cx, |input, _| input.height = 24.);
+        }
+        let focus = self.settings_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
     }
 
     fn submit_wizard_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1947,22 +2582,64 @@ fn panel_notice(text: String, error: bool) -> Div {
         .child(text)
 }
 
-/// The form bar pinned under the panel: title, input, error and actions.
-fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> Div {
-    let mut bar = div()
-        .border_t_1()
-        .border_color(color("rule"))
-        .px(px(16.))
-        .pt(px(10.))
-        .pb(px(12.))
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(crate::language::tr(&form.title()).into_owned()),
-        );
+#[derive(Clone, Copy)]
+struct Stepper {
+    min: Option<f64>,
+    max: Option<f64>,
+    step: f64,
+    fallback: Option<f64>,
+}
+
+impl Stepper {
+    fn next(self, text: &str, direction: f64) -> Option<String> {
+        let value = text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .or(self.fallback);
+        let base = value.unwrap_or(0.);
+        let mut next = base + self.step * direction;
+        if self.step < 1. {
+            next = (next / self.step).round() / self.step.recip();
+        }
+        let next = next.clamp(self.min.unwrap_or(f64::MIN), self.max.unwrap_or(f64::MAX));
+        (value != Some(next)).then(|| SettingValue::Number(next).wire())
+    }
+}
+
+fn numeric_value(value: Option<&SettingValue>) -> Option<f64> {
+    match value {
+        Some(SettingValue::Number(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Typed settings edit in place; multi-step operations keep the footer.
+fn form_bar(
+    w: &Workspace,
+    form: &SettingsForm,
+    stepper: Option<Stepper>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let mut bar = if form.inline() {
+        editor_panel()
+    } else {
+        div()
+            .border_t_1()
+            .border_color(color("rule"))
+            .px(px(16.))
+            .pt(px(10.))
+            .pb(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+    }
+    .child(
+        div()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(crate::language::tr(&form.title()).into_owned()),
+    );
     if let SettingsForm::Field { previous, .. } = form
         && !previous.is_empty()
     {
@@ -1971,7 +2648,57 @@ fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> 
     if form.secret() {
         bar = bar.child(sub_line("Characters are hidden while typing."));
     }
-    bar = bar.child(w.settings_input.clone());
+    bar = if let Some(stepper) = stepper {
+        let text = w.settings_input.read(cx).text().to_owned();
+        let step = |index, label, direction, cx: &mut Context<Workspace>| {
+            let next = stepper.next(&text, direction);
+            div()
+                .id(("settings-step", index))
+                .w(px(32.))
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(color("rule"))
+                .rounded(px(theme::px_token("radius", "radius-sm")))
+                .child(label)
+                .map(|button| match next {
+                    Some(next) => {
+                        button
+                            .plain_control()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.settings_input
+                                    .update(cx, |input, cx| input.set_text(next.clone(), cx));
+                                this.settings_error = None;
+                                cx.notify();
+                            }))
+                    }
+                    None => button.text_color(color("ink-3")),
+                })
+        };
+        bar.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(step(0_usize, "−", -1., cx))
+                .child(
+                    div()
+                        .w(px(112.))
+                        .px(px(5.))
+                        .py(px(3.))
+                        .rounded(px(theme::px_token("radius", "radius-sm")))
+                        .border_1()
+                        .border_color(color("rule"))
+                        .bg(color("ground"))
+                        .child(w.settings_input.clone()),
+                )
+                .child(step(1_usize, "+", 1., cx)),
+        )
+    } else {
+        bar.child(w.settings_input.clone())
+    };
     if let Some(error) = &w.settings_error {
         bar = bar.child(div().text_color(color("broken")).child(error.clone()));
     }
@@ -3286,6 +4013,71 @@ mod tests {
     fn the_interface_offers_the_same_theme_as_the_tui() {
         let snapshot = crate::mock_settings::snapshot_fixture();
         assert_eq!(setting_label(snapshot.find("ui.theme").unwrap()), "Theme");
+    }
+
+    #[test]
+    fn harness_pages_follow_the_table_order_and_leave_the_profile_editor_reachable() {
+        let mut snapshot = crate::mock_settings::snapshot_fixture();
+        let harness_pages = |snapshot: &settings::Snapshot| {
+            super::tabs(snapshot)
+                .into_iter()
+                .filter(|tab| tab.category == "Moxen Harness")
+                .map(|tab| tab.label.to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            harness_pages(&snapshot),
+            [
+                "Defaults",
+                "Tools",
+                "Long threads",
+                "Sessions",
+                "Model prices",
+                "Model servers"
+            ]
+        );
+        crate::mock_settings::apply_set(&mut snapshot, "providers.harness.profiles[office]", "");
+        assert_eq!(harness_pages(&snapshot), ["Model servers"]);
+    }
+
+    #[test]
+    fn catalog_picker_scopes_models_to_the_provider_page_and_hides_opt_outs() {
+        use crate::{catalog::CatalogState, mock::MockSource, model::ThreadSource};
+        let CatalogState::Ready(catalog) = MockSource::new().catalog() else {
+            panic!("expected mock catalog");
+        };
+        let snapshot = settings::Snapshot::from_json(&serde_json::json!({
+            "path": "config.json",
+            "settings": [{
+                "descriptor": {"key": "providers.claude.model", "kind": {
+                    "type": "string", "source": "model", "providerKind": "claude"
+                }}
+            }]
+        }))
+        .unwrap();
+        let options =
+            super::catalog_picker_options(&snapshot.settings[0], Some(&snapshot), Some(&catalog));
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["", "opus-5-5", "fable-5-1", "sonnet-5-5", "haiku-4-5"]
+        );
+        assert!(options[1].default);
+    }
+
+    #[test]
+    fn a_numeric_step_uses_the_inherited_value_without_crossing_the_bounds() {
+        let stepper = super::Stepper {
+            min: Some(1.),
+            max: Some(5.),
+            step: 1.,
+            fallback: Some(4.),
+        };
+        assert_eq!(stepper.next("", 1.).as_deref(), Some("5"));
+        assert_eq!(stepper.next("5", 1.), None);
+        assert_eq!(stepper.next("1", -1.), None);
     }
 
     #[test]

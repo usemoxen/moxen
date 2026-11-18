@@ -160,7 +160,8 @@ pub struct Workspace {
     /// The settings window: open, on a tab, with a list entry, skill or
     /// memory open inside it, and a form, confirmation or add-flow below.
     pub settings_open: bool,
-    pub settings_tab: usize,
+    pub settings_tab: (String, Option<String>),
+    pub settings_editor: Option<String>,
     pub settings_rail_tip: Option<usize>,
     pub settings_entry: Option<String>,
     pub settings_item: Option<String>,
@@ -564,7 +565,8 @@ impl Workspace {
             action_input,
             thread_action_focus: cx.focus_handle(),
             settings_open: false,
-            settings_tab: 0,
+            settings_tab: ("general".into(), None),
+            settings_editor: None,
             settings_rail_tip: None,
             settings_entry: None,
             settings_item: None,

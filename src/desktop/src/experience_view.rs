@@ -149,15 +149,12 @@ impl Workspace {
         self.open_settings(window, cx);
         self.settings_entry = match section {
             "provider:harness" => Some("providers.harness.profiles".into()),
-            "mcp" => Some("mcp.servers".into()),
+            "mcp" => Some("mcpServers".into()),
             _ => None,
         };
         self.settings_item = None;
-        if let Some(Ok(snapshot)) = self.source.settings().as_deref()
-            && let Some(index) = snapshot.sections().iter().position(|&id| id == section)
-        {
-            self.settings_tab = index;
-        }
+        let group = (section == "provider:harness").then_some("Model servers");
+        self.select_settings_section(section, group);
     }
 
     pub fn add_guide_folder(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -750,7 +747,7 @@ fn guide(w: &Workspace, cx: &mut Context<Workspace>) -> (Div, Div) {
         4 => {
             body = body.child(detail(t("guide.mcpExamples")));
             if let Some(Ok(settings)) = w.source.settings().as_deref()
-                && let Some(view) = settings.find("mcp.servers")
+                && let Some(view) = settings.find("mcpServers")
             {
                 for item in &view.items {
                     let id = item.id.clone();

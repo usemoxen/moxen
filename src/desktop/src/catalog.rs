@@ -288,6 +288,14 @@ impl Catalog {
 }
 
 impl Provider {
+    /// The provider name used by the settings table, not the wire driver id.
+    pub fn settings_kind(&self) -> &str {
+        match self.driver.as_str() {
+            "claudeAgent" => "claude",
+            driver => driver,
+        }
+    }
+
     /// The models the picker lists: all but the user's hidden ones, except the
     /// current one, which stays so a since-hidden choice still shows.
     pub fn offerable_models<'a>(
