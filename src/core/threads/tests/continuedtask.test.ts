@@ -465,6 +465,50 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     await interruptTurn(w.store, source.id, running.id);
   });
 
+  it("a reservation failure after the claim still releases the source at once", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done for now." });
+    const before = await w.store.listThreadIds();
+
+    // Fail the continuation note: after the claim record is written, before
+    // the reservation returns. The cleanup owns the whole reservation, so
+    // the registered token and the record are both released.
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let failOnce = true;
+    w.store.appendLedger = ((...args: Parameters<typeof w.store.appendLedger>) => {
+      if (failOnce && args[1] === "activity") {
+        failOnce = false;
+        return Promise.reject(new Error("injected ledger failure"));
+      }
+      return realAppend(...args);
+    }) as typeof w.store.appendLedger;
+    try {
+      await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow("injected ledger failure");
+    } finally {
+      delete (w.store as unknown as Record<string, unknown>).appendLedger;
+    }
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+
+    // Admission works immediately — no registered token blocks it — and a
+    // retry of the same continue lands.
+    const sent = await sendTurn(w.store, source.id, { prompt: "Work after failure" });
+    expect(sent.turn.status).toBe("running");
+    await interruptTurn(w.store, source.id, sent.turn.id);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    await flushTurnRunners();
+    for (const threadId of [source.id, continued.threadId]) {
+      for (const turn of await w.store.readTurns(threadId)) {
+        if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
+      }
+    }
+  });
+
   it("refuses admission while the handoff is in flight, then lets the old thread work again", async () => {
     const w = await world();
     const source = await w.make("solo");

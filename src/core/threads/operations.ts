@@ -1324,18 +1324,20 @@ function isManualContinue(request: ContinueThreadRequest): boolean {
  * A manual continue also claims the source for the handoff: admission starts
  * no turn here until the handoff lands and clears the claim (see
  * `continueThreadInner`), so the destination never runs beside a turn the
- * race admitted. Returns the destination with the claim token that clears it.
+ * race admitted. The caller preallocates the claim token and owns cleanup
+ * for the whole reservation — including a ledger failure after the claim is
+ * written — so a failed reserve never leaves a registered token or a
+ * blocking record behind. Returns the destination.
  */
-async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string): Promise<{ destinationId: string; claimToken: string | null }> {
-  const manual = isManualContinue(request);
+async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string, claimToken: string | null): Promise<string> {
+  const manual = claimToken !== null;
   if (!manual) {
-    if (request.destinationThreadId) return { destinationId: request.destinationThreadId, claimToken: null };
-    if (source.usagePause?.continuedThreadId) return { destinationId: source.usagePause.continuedThreadId, claimToken: null };
+    if (request.destinationThreadId) return request.destinationThreadId;
+    if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
   }
   return await store.withThreadLock(source.id, async () => {
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
-    let claimToken: string | null = null;
     if (manual) {
       const running = openTurn(await store.readTurns(live.id));
       if (running) {
@@ -1346,22 +1348,20 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
       }
       // Claim the source before any note or destination exists: from here
       // until the handoff lands, admission starts no turn here (see
-      // `continuationInFlight`). Registered against this process, so the
-      // claim stays effective however long the handoff takes; the handoff
-      // clears it when it lands, and admission heals it if this handoff
-      // dies with it.
-      claimToken = store.newId();
+      // `continuationInFlight`). Registered against this process by the
+      // caller, so the claim stays effective however long the handoff takes;
+      // the handoff clears it when it lands, and admission heals it if this
+      // handoff dies with it.
       await store.writeThreadRecord({
         ...live,
-        continueClaim: { token: claimToken, pid: process.pid, host: os.hostname(), at: store.nowIso() },
+        continueClaim: { token: claimToken!, pid: process.pid, host: os.hostname(), at: store.nowIso() },
         updatedAt: store.nowIso(),
       });
-      trackContinuation(claimToken);
-      if (live.usagePause?.continuedThreadId) return { destinationId: live.usagePause.continuedThreadId, claimToken };
-    } else if (current?.usagePause?.continuedThreadId) return { destinationId: current.usagePause.continuedThreadId, claimToken: null };
+      if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
+    } else if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
     const notes = await store.readActivities(source.id);
     const prior = notes.find((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string");
-    if (prior) return { destinationId: prior.payload!.threadId as string, claimToken };
+    if (prior) return prior.payload!.threadId as string;
     const id = store.newId();
     await store.appendLedger(source.id, "activity", {
       id: store.newId(),
@@ -1380,7 +1380,7 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
       createdAt: store.nowIso(),
     });
     store.emit(source.id, "thread-continued");
-    return { destinationId: id, claimToken };
+    return id;
   });
 }
 
@@ -1499,8 +1499,15 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const carriedMode = request.interactionMode ?? source.interactionMode;
   const interactionMode = carriedMode === "review" ? "default" : carriedMode;
   const noteSummary = carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`;
-  const { destinationId, claimToken } = await reserveContinuation(store, source, request, title, noteSummary);
+  // The claim token is owned by the cleanup below, which spans the whole
+  // reservation: a failure after the claim is written — a ledger throw
+  // between the record write and the note — still untracks and clears.
+  // Tracking before the lock is safe: admission only consults the registry
+  // alongside a claim record, which does not exist yet.
+  const claimToken = isManualContinue(request) ? store.newId() : null;
+  if (claimToken !== null) trackContinuation(claimToken);
   try {
+    const destinationId = await reserveContinuation(store, source, request, title, noteSummary, claimToken);
     return await continueThreadReserved(ctx, request, source, title, interactionMode, noteSummary, destinationId);
   } finally {
     // The handoff landed (or failed): the source takes work again. A later
