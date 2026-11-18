@@ -42,7 +42,13 @@ fn launcher(
         return configured.into();
     }
     let binary = if cfg!(windows) { "moxen.exe" } else { "moxen" };
-    let installed = if cfg!(windows) { "moxen.cmd" } else { "moxen" };
+    // An npm install leaves a `moxen.cmd` shim beside (or instead of) the
+    // executable: prefer the executable, which runs directly.
+    let installed = if cfg!(windows) {
+        vec!["moxen.exe", "moxen.cmd"]
+    } else {
+        vec!["moxen"]
+    };
     let app = store
         .filter(|root| !root.is_empty())
         .map(|root| Path::new(root).join("app"))
@@ -52,10 +58,46 @@ fn launcher(
         .map(|folder| folder.join(binary))
         .filter(|path| exists(path))
         .or_else(|| {
-            app.map(|app| app.join("bin").join(installed))
-                .filter(|path| exists(path))
+            app.map(|app| app.join("bin"))
+                .and_then(|bin| first_present(&bin, &installed, &exists))
         })
         .unwrap_or_else(|| PathBuf::from(binary))
+}
+
+/// The first of `names` present in `dir`: the installed launcher prefers the
+/// executable over the npm shim, on any platform.
+fn first_present(dir: &Path, names: &[&str], exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| exists(path))
+}
+
+/// How to start the launcher: a batch shim (`.cmd`/`.bat`, e.g. an npm
+/// install of Moxen on Windows) only runs under `cmd.exe`, with the shim and
+/// its arguments as separate arguments — never joined into one command
+/// string. Mirrors how `server/client.ts` starts its own shim.
+fn launch_command(launcher: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let shim = launcher
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    if shim {
+        (
+            PathBuf::from("cmd.exe"),
+            vec![
+                "/d".into(),
+                "/s".into(),
+                "/c".into(),
+                launcher.into(),
+                BRIDGE.into(),
+            ],
+        )
+    } else {
+        (launcher.into(), vec![BRIDGE.into()])
+    }
 }
 
 pub fn open(server: Option<&str>, starting: impl Fn()) -> Result<Halves, WireError> {
@@ -66,9 +108,10 @@ pub fn open(server: Option<&str>, starting: impl Fn()) -> Result<Halves, WireErr
         std::env::var_os("MOXEN_STORE_ROOT").as_deref(),
         Path::is_file,
     );
-    let mut command = Command::new(&binary);
+    let (program, args) = launch_command(&binary);
+    let mut command = Command::new(&program);
     command
-        .arg(BRIDGE)
+        .args(&args)
         .env_remove("MOXEN_DESKTOP_SERVER")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -181,6 +224,66 @@ mod tests {
         assert_eq!(
             choose(None, false),
             PathBuf::from(if cfg!(windows) { "moxen.exe" } else { "moxen" })
+        );
+    }
+
+    #[test]
+    fn the_installed_launcher_prefers_the_executable_over_the_shim() {
+        let bin = Path::new("bin");
+        let present = |names: &[&str], have: &[&str]| {
+            first_present(bin, names, |path| {
+                have.iter().any(|name| path == bin.join(name))
+            })
+        };
+        // The Windows lookup, on any platform: `moxen.exe` wins when both
+        // sit beside each other, else the `moxen.cmd` shim remains.
+        assert_eq!(
+            present(&["moxen.exe", "moxen.cmd"], &["moxen.exe", "moxen.cmd"]),
+            Some(bin.join("moxen.exe"))
+        );
+        assert_eq!(
+            present(&["moxen.exe", "moxen.cmd"], &["moxen.cmd"]),
+            Some(bin.join("moxen.cmd"))
+        );
+        assert_eq!(present(&["moxen.exe", "moxen.cmd"], &[]), None);
+    }
+
+    #[test]
+    fn a_batch_shim_runs_under_cmd_with_separate_arguments() {
+        let shimmed = |launcher: &str| {
+            let (program, args) = launch_command(Path::new(launcher));
+            let args = args
+                .iter()
+                .map(|arg| arg.to_str().expect("text argument").to_string())
+                .collect::<Vec<_>>();
+            (program, args)
+        };
+        // The bridge flag travels as its own argument: the command is never
+        // joined into one string.
+        assert_eq!(
+            shimmed("C:\\npm\\moxen.cmd"),
+            (
+                PathBuf::from("cmd.exe"),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "C:\\npm\\moxen.cmd".to_string(),
+                    BRIDGE.to_string(),
+                ]
+            )
+        );
+        assert_eq!(shimmed("C:\\npm\\MOXEN.BAT").0, PathBuf::from("cmd.exe"));
+        assert_eq!(
+            shimmed("/usr/local/bin/moxen"),
+            (
+                PathBuf::from("/usr/local/bin/moxen"),
+                vec![BRIDGE.to_string()]
+            )
+        );
+        assert_eq!(
+            shimmed("moxen.exe"),
+            (PathBuf::from("moxen.exe"), vec![BRIDGE.to_string()])
         );
     }
 
