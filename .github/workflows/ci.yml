@@ -66,8 +66,10 @@ jobs:
         shell: bash
         working-directory: src/desktop
     steps:
-      # Windows would otherwise check files out with CRLF endings.
+      # Windows would otherwise check files out with CRLF endings. Runs
+      # before checkout, when src/desktop doesn't exist yet.
       - name: Keep line endings as committed
+        working-directory: .
         run: git config --global core.autocrlf false
 
       - uses: actions/checkout@v4
