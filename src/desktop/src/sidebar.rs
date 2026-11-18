@@ -388,10 +388,20 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         )
 }
 
-/// The activity stamp's width in a thread row: Mono 11.5, whose advance is
-/// six tenths of an em.
-fn activity_width(activity: &str) -> f32 {
-    activity.chars().count() as f32 * 11.5 * 0.6
+/// The activity stamp's width in a thread row, shaped in Mono 11.5 the same
+/// way the title is shaped. A `chars().count()` estimate lands a couple of
+/// pixels off either way, which tips rows that fit and misses rows that
+/// are cut off.
+fn activity_width(window: &Window, activity: &str) -> f32 {
+    let mut style = window.text_style();
+    style.font_family = theme::MONO.into();
+    let run = style.to_run(activity.len());
+    f32::from(
+        window
+            .text_system()
+            .shape_line(activity.into(), px(11.5), &[run], None)
+            .width(),
+    )
 }
 
 /// Whether the row's title overflows the truncated label it is drawn in, so
@@ -401,15 +411,21 @@ fn activity_width(activity: &str) -> f32 {
 /// system at the row's size.
 fn title_truncated(window: &Window, title: &str, activity: &str, depth: usize) -> bool {
     let size = if depth > 0 { 12.5 } else { 13.5 };
-    let run = window.text_style().to_run(title.len());
+    // The row draws the title in the interface font and the stamp in Mono:
+    // shape both in those families, or the comparison drifts ~10px from
+    // what `.truncate()` lays out. `window.text_style()` is the window
+    // default, not the row's style, so set the families explicitly.
+    let mut title_style = window.text_style();
+    title_style.font_family = theme::FONT.into();
+    let title_run = title_style.to_run(title.len());
     let width = f32::from(
         window
             .text_system()
-            .shape_line(title.into(), px(size), &[run], None)
+            .shape_line(title.into(), px(size), &[title_run], None)
             .width(),
     );
     let indent = if depth > 0 { 24. } else { 0. };
-    width > theme::SIDEBAR - 16. - 20. - 14. - 16. - indent - activity_width(activity) - 1.
+    width > theme::SIDEBAR - 16. - 20. - 14. - 16. - indent - activity_width(window, activity) - 1.
 }
 
 /// Whether the sidebar row shows its full title beside it: never for the
