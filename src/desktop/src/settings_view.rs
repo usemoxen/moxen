@@ -231,6 +231,7 @@ impl Workspace {
 
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
+        self.settings_rail_tip = None;
         self.settings_form = None;
         self.settings_form_saving = false;
         self.settings_confirm = None;
@@ -275,9 +276,14 @@ impl Workspace {
 
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(result) = self.source.take_settings_write() {
-            if self.settings_form_saving && self.settings_form.is_some() {
+            if self.settings_form_saving {
                 match result {
-                    Ok(()) => self.settings_form = None,
+                    Ok(()) => {
+                        self.settings_form = None;
+                        if let Some(wizard) = self.settings_profile_new.take() {
+                            self.settings_item = Some(wizard.id);
+                        }
+                    }
                     Err(message) => self.settings_error = Some(message),
                 }
             } else if let Err(message) = result {
@@ -675,7 +681,7 @@ pub fn render(
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(rail(w, &tabs, cx))
+                .child(rail(w, &tabs, window, cx))
                 .child(
                     div()
                         .flex_1()
@@ -686,8 +692,8 @@ pub fn render(
                 ),
         );
     panel = panel
-        .when_some(w.settings_notice.clone(), |s, (text, _)| {
-            s.child(panel_notice(text))
+        .when_some(w.settings_notice.clone(), |s, (text, error)| {
+            s.child(panel_notice(text, error))
         })
         .when_some(w.settings_form.clone(), |s, form| {
             s.child(form_bar(w, &form, cx))
@@ -777,27 +783,71 @@ fn header(
         )
 }
 
-fn rail(w: &Workspace, tabs: &[(String, String)], cx: &mut Context<Workspace>) -> Div {
+const RAIL_WIDTH: f32 = 190.;
+const RAIL_GUTTER: f32 = 8.;
+const RAIL_ITEM_PADDING: f32 = 10.;
+
+fn rail_tip_left(text_width: f32) -> Option<f32> {
+    let item_width = RAIL_WIDTH - 2. * RAIL_GUTTER;
+    (text_width > item_width - 2. * RAIL_ITEM_PADDING).then_some(item_width + RAIL_GUTTER)
+}
+
+fn rail(
+    w: &Workspace,
+    tabs: &[(String, String)],
+    window: &Window,
+    cx: &mut Context<Workspace>,
+) -> Div {
     div()
-        .w(px(190.))
+        .w(px(RAIL_WIDTH))
         .flex_shrink_0()
         .py(px(4.))
-        .px(px(8.))
+        .px(px(RAIL_GUTTER))
         .flex()
         .flex_col()
         .children(tabs.iter().enumerate().map(|(at, (_, label))| {
             let selected = w.settings_tab == at;
+            let mut run = window.text_style().to_run(label.len());
+            run.font.family = theme::FONT.into();
+            let width = window
+                .text_system()
+                .shape_line(label.clone().into(), px(theme::UI), &[run], None)
+                .width();
+            let tip_left = rail_tip_left(f32::from(width));
             div()
                 .id(("settings-tab", at))
-                .control(label.clone())
+                .plain_control()
+                .relative()
                 .h(px(theme::ROW))
-                .px(px(10.))
+                .px(px(RAIL_ITEM_PADDING))
                 .flex()
                 .items_center()
                 .rounded(px(6.))
                 .when(selected, |s| s.bg(color("sunk")).text_color(color("ink")))
                 .when(!selected, |s| s.text_color(color("ink-2")))
-                .child(div().flex_1().truncate().child(label.clone()))
+                .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                .when_some(tip_left, |row, left| {
+                    row.on_hover(cx.listener(move |this, hovering, _, cx| {
+                        if *hovering {
+                            this.settings_rail_tip = Some(at);
+                        } else if this.settings_rail_tip == Some(at) {
+                            this.settings_rail_tip = None;
+                        }
+                        cx.notify();
+                    }))
+                    .when(w.settings_rail_tip == Some(at), |row| {
+                        row.child(
+                            deferred(
+                                div()
+                                    .absolute()
+                                    .left(px(left))
+                                    .top_0()
+                                    .child(ui::Tooltip(label.clone().into(), None).body()),
+                            )
+                            .with_priority(1),
+                        )
+                    })
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings_tab = at;
                     this.settings_entry = None;
@@ -984,7 +1034,7 @@ fn setting_row(
                 div()
                     .flex_1()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(view.label.clone()),
+                    .child(setting_label(view)),
             )
             .child(control),
     );
@@ -995,6 +1045,15 @@ fn setting_row(
             .line_height(px(16.))
             .child(view.description.clone()),
     )
+}
+
+fn setting_label(view: &crate::settings::SettingView) -> String {
+    // GPUI draws from the desktop design tokens; only the TUI applies ui.theme.
+    if view.key == "ui.theme" {
+        format!("{} (TUI only)", view.label)
+    } else {
+        view.label.clone()
+    }
 }
 
 fn sub_line(text: &str) -> Div {
@@ -1131,13 +1190,22 @@ fn add_buttons(
                 ("settings-add-profile", 0),
                 "Add profile…",
                 "Add a Harness profile",
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     this.settings_profile_new = Some(ProfileWizard {
                         list_key: add.clone(),
                         ..Default::default()
                     });
                     this.settings_form = None;
+                    this.settings_form_saving = false;
                     this.settings_error = None;
+                    this.clear_settings_transients();
+                    this.settings_input.update(cx, |input, cx| {
+                        input.masked = false;
+                        input.height = 44.;
+                        input.placeholder = "";
+                        input.set_text(String::new(), cx);
+                        window.focus(&input.focus, cx);
+                    });
                     cx.notify();
                 }),
             )
@@ -1766,9 +1834,8 @@ impl Workspace {
                         let key = wizard.list_key.clone();
                         let id = wizard.id.clone();
                         self.source.set_setting(&format!("{key}[{id}]"), &document);
-                        self.settings_profile_new = None;
                         self.settings_error = None;
-                        self.settings_item = Some(id);
+                        self.settings_form_saving = true;
                         cx.notify();
                         return;
                     }
@@ -1821,7 +1888,7 @@ impl Workspace {
     }
 }
 
-fn panel_notice(text: String) -> Div {
+fn panel_notice(text: String, error: bool) -> Div {
     div()
         .mx(px(16.))
         .mb(px(8.))
@@ -1830,7 +1897,7 @@ fn panel_notice(text: String) -> Div {
         .rounded(px(6.))
         .bg(color("sunk"))
         .text_size(px(12.5))
-        .text_color(color("ink-2"))
+        .text_color(color(if error { "broken" } else { "ink-2" }))
         .child(text)
 }
 
@@ -1939,7 +2006,7 @@ fn memory_wizard_bar(w: &Workspace, wizard: &MemoryWizard, cx: &mut Context<Work
         1 => format!("Describe “{}”", wizard.name),
         _ => format!("Write “{}”", wizard.name),
     };
-    let mut bar = wizard_shell(w, &step);
+    let mut bar = wizard_shell(w, &step, true);
     if wizard.step == 2 {
         let type_idx = wizard.type_idx;
         bar = bar.child(div().flex().flex_wrap().gap(px(8.)).children(
@@ -2022,7 +2089,7 @@ fn profile_wizard_bar(w: &Workspace, wizard: &ProfileWizard, cx: &mut Context<Wo
         3 => "The NAME of an environment variable holding the key (empty for none)".into(),
         _ => "Which models does it serve? (comma-separated)".into(),
     };
-    let mut bar = wizard_shell(w, &step);
+    let mut bar = wizard_shell(w, &step, wizard.step != 2);
     if wizard.step == 2 {
         let format_idx = wizard.format_idx;
         bar = bar.child(
@@ -2060,7 +2127,19 @@ fn profile_wizard_bar(w: &Workspace, wizard: &ProfileWizard, cx: &mut Context<Wo
             bar = bar.child(sub_line("Discovering the server's models…"));
         }
     }
-    bar.child(wizard_input_row("Next", "Go to the next step", cx))
+    if wizard.step == 4 {
+        bar.child(wizard_input_row(
+            if w.settings_form_saving {
+                "Saving…"
+            } else {
+                "Create"
+            },
+            "Save the profile",
+            cx,
+        ))
+    } else {
+        bar.child(wizard_input_row("Next", "Go to the next step", cx))
+    }
 }
 
 fn mcp_wizard_bar(w: &Workspace, wizard: &McpWizard, cx: &mut Context<Workspace>) -> Div {
@@ -2072,10 +2151,10 @@ fn mcp_wizard_bar(w: &Workspace, wizard: &McpWizard, cx: &mut Context<Workspace>
             wizard.name
         )
     };
-    wizard_shell(w, &step).child(wizard_input_row("Next", "Go to the next step", cx))
+    wizard_shell(w, &step, true).child(wizard_input_row("Next", "Go to the next step", cx))
 }
 
-fn wizard_shell(w: &Workspace, step: &str) -> Div {
+fn wizard_shell(w: &Workspace, step: &str, with_input: bool) -> Div {
     div()
         .border_t_1()
         .border_color(color("rule"))
@@ -2090,7 +2169,7 @@ fn wizard_shell(w: &Workspace, step: &str) -> Div {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(step.to_string()),
         )
-        .child(w.settings_input.clone())
+        .when(with_input, |bar| bar.child(w.settings_input.clone()))
         .when_some(w.settings_error.clone(), |s, error| {
             s.child(div().text_color(color("broken")).child(error))
         })
@@ -2706,25 +2785,30 @@ fn skill_detail(
     )));
     out = out.child(div().flex().flex_wrap().gap(px(8.)).children(
         crate::settings::SKILL_PROVIDERS.iter().map(|(id, label)| {
-            let on = skill.providers.iter().any(|provider| provider == id);
+            let on = skill.provider_on(id);
             let (toggle_source, toggle_folder) = (skill.source.clone(), skill.folder.clone());
-            let mut providers: Vec<String> = skill.providers.clone();
-            if on {
-                providers.retain(|provider| provider != id);
-            } else {
-                providers.push(id.to_string());
-            }
+            let providers = skill.toggle_provider(id);
+            let editable = skill.editable;
             option_chip(
                 format!("settings-skill-provider-{source}-{folder}-{id}"),
                 label.to_string(),
                 on,
                 cx.listener(move |this, _, _, cx| {
-                    this.source.set_skill_providers(
-                        this.settings_thread(),
-                        &toggle_source,
-                        &toggle_folder,
-                        providers.clone(),
-                    );
+                    if !editable {
+                        return;
+                    }
+                    if let Some(providers) = &providers {
+                        this.source.set_skill_providers(
+                            this.settings_thread(),
+                            &toggle_source,
+                            &toggle_folder,
+                            providers.clone(),
+                        );
+                        this.settings_notice = None;
+                    } else {
+                        this.settings_notice =
+                            Some(("Keep at least one provider on.".into(), true));
+                    }
                     cx.notify();
                 }),
             )
@@ -3124,7 +3208,25 @@ fn provider_index(id: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProfileWizard, settings, wizard_models};
+    use super::{
+        ProfileWizard, RAIL_GUTTER, RAIL_WIDTH, rail_tip_left, setting_label, settings,
+        wizard_models,
+    };
+
+    #[test]
+    fn desktop_labels_the_theme_setting_as_tui_only() {
+        let snapshot = crate::mock_settings::snapshot_fixture();
+        assert_eq!(
+            setting_label(snapshot.find("ui.theme").unwrap()),
+            "Theme (TUI only)"
+        );
+    }
+
+    #[test]
+    fn rail_tip_appears_only_for_clipped_text_and_starts_beyond_the_rail() {
+        assert_eq!(rail_tip_left(154.), None);
+        assert!(rail_tip_left(154.1).unwrap() + RAIL_GUTTER >= RAIL_WIDTH);
+    }
 
     #[test]
     fn profile_wizard_reaches_key_before_discovering_models() {

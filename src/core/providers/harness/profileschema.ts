@@ -5,6 +5,7 @@
  * `profiles.ts`, and `normalizeConfig` runs every edit through it.
  */
 import type { ListField, SettingChoice, SettingDescriptor } from "../../configschema.js";
+import { POSITIVE_PROFILE_INT_MIN, PROFILE_NUMBER_BOUNDS } from "./profiles.js";
 import { QUIRK_FAMILIES } from "./quirks.js";
 
 const choice = (value: string, label: string, description?: string): SettingChoice =>
@@ -21,7 +22,7 @@ const MODEL_FIELDS: readonly ListField[] = [
     description: "Tokens the model can hold. Automatic compaction and the context meter need it.",
     unset: { text: "the server's, from a probe" },
     group: "Model",
-    kind: { type: "integer", presets: [8_192, 16_384, 32_768, 65_536, 98_304, 131_072, 196_608, 262_144, 524_288, 1_048_576] },
+    kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [8_192, 16_384, 32_768, 65_536, 98_304, 131_072, 196_608, 262_144, 524_288, 1_048_576] },
   },
   {
     path: "maxOutput",
@@ -29,7 +30,7 @@ const MODEL_FIELDS: readonly ListField[] = [
     description: "Most tokens one reply may run to.",
     unset: { text: "the server's" },
     group: "Model",
-    kind: { type: "integer", presets: [2_048, 4_096, 8_192, 12_288, 16_384, 24_576, 32_768, 65_536] },
+    kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [2_048, 4_096, 8_192, 12_288, 16_384, 24_576, 32_768, 65_536] },
   },
   {
     path: "vision",
@@ -222,7 +223,7 @@ export const HARNESS_PROFILE_FIELDS: readonly ListField[] = [
     description: "Requests this server runs at the same time (llama.cpp `-np`). With 1, Moxen's own subagents wait their turn instead of starving you.",
     unset: { text: "the Moxen Harness's own Requests at once" },
     group: "Endpoint",
-    kind: { type: "integer", presets: [1, 2, 3, 4, 6, 8, 12, 16], ends: { low: "Fewer", high: "More" } },
+    kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [1, 2, 3, 4, 6, 8, 12, 16], ends: { low: "Fewer", high: "More" } },
   },
   {
     path: "models",
@@ -231,10 +232,10 @@ export const HARNESS_PROFILE_FIELDS: readonly ListField[] = [
     group: "Models",
     kind: { type: "list", noun: "model", fields: MODEL_FIELDS },
   },
-  { path: "sampling.temperature", label: "Temperature", description: "Sampling temperature, 0 to 5.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", presets: [0, 0.1, 0.2, 0.4, 0.6, 0.7, 0.8, 1, 1.2], ends: { low: "Focused", high: "Creative" } } },
-  { path: "sampling.topP", label: "Top P", description: "Nucleus sampling, 0 to 1.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", presets: [0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 1], ends: { low: "Narrower", high: "Wider" } } },
-  { path: "sampling.topK", label: "Top K", description: "Sampling pool size.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "integer", presets: [10, 20, 30, 40, 50, 64, 100], ends: { low: "Narrower", high: "Wider" } } },
-  { path: "sampling.minP", label: "Min P", description: "Smallest probability a token may have, 0 to 1.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", presets: [0, 0.01, 0.02, 0.05, 0.08, 0.1, 0.2], ends: { low: "Looser", high: "Stricter" } } },
+  { path: "sampling.temperature", label: "Temperature", description: "Sampling temperature, 0 to 5.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", ...PROFILE_NUMBER_BOUNDS.temperature, presets: [0, 0.1, 0.2, 0.4, 0.6, 0.7, 0.8, 1, 1.2], ends: { low: "Focused", high: "Creative" } } },
+  { path: "sampling.topP", label: "Top P", description: "Nucleus sampling, 0 to 1.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", ...PROFILE_NUMBER_BOUNDS.topP, presets: [0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 1], ends: { low: "Narrower", high: "Wider" } } },
+  { path: "sampling.topK", label: "Top K", description: "Sampling pool size.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "integer", ...PROFILE_NUMBER_BOUNDS.topK, presets: [10, 20, 30, 40, 50, 64, 100], ends: { low: "Narrower", high: "Wider" } } },
+  { path: "sampling.minP", label: "Min P", description: "Smallest probability a token may have, 0 to 1.", unset: { text: "the server's" }, group: "Sampling", kind: { type: "number", ...PROFILE_NUMBER_BOUNDS.minP, presets: [0, 0.01, 0.02, 0.05, 0.08, 0.1, 0.2], ends: { low: "Looser", high: "Stricter" } } },
   {
     path: "preserveThinking",
     label: "Keep reasoning in history",
@@ -256,21 +257,21 @@ export const HARNESS_PROFILE_FIELDS: readonly ListField[] = [
     description: "Kept so older profiles still load: 0.3 to 0.95 of the window. 'Compact at' in tokens wins when it is set.",
     group: "Compaction",
     hidden: true,
-    kind: { type: "number", presets: [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9] },
+    kind: { type: "number", ...PROFILE_NUMBER_BOUNDS.fraction, presets: [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9] },
   },
   {
     path: "compaction.tokens",
     label: "Compact at",
     description: "Tokens of context at which this profile compacts. Overrides the Moxen Harness's and the global 'Compact at', whatever their unit. Needs a context window on the model.",
     group: "Compaction",
-    kind: { type: "integer", presets: [8_192, 16_384, 24_576, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576], ends: { low: "Earlier", high: "Later" } },
+    kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [8_192, 16_384, 24_576, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576], ends: { low: "Earlier", high: "Later" } },
   },
   {
     path: "compaction.keepRecentTokens",
     label: "Kept word for word",
     description: "How much of the newest conversation stays unsummarised. Overrides the Moxen Harness setting.",
     group: "Compaction",
-    kind: { type: "integer", presets: [4_096, 8_192, 12_288, 16_384, 24_576, 32_768, 49_152, 65_536], ends: { low: "Less", high: "More" } },
+    kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [4_096, 8_192, 12_288, 16_384, 24_576, 32_768, 49_152, 65_536], ends: { low: "Less", high: "More" } },
   },
   {
     path: "compaction.effort",
@@ -289,10 +290,10 @@ export const HARNESS_PROFILE_FIELDS: readonly ListField[] = [
     kind: { type: "boolean" },
   },
   { path: "loopGuard.calls", label: "Catch repeated tool calls", description: "Warn, then end the turn, when the model makes the same tool call (or the same few calls in turn) again and again.", unset: { value: true }, group: "Behaviour", kind: { type: "boolean" } },
-  { path: "loopGuard.repeatWarn", label: "Warn after identical calls", description: "The same tool call, getting the same answer, this many times in one turn gets a warning. A call that answers differently each time (a test run, a re-read after an edit) is progress and is not counted.", unset: { value: 4 }, group: "Behaviour", visibleWhen: { path: "loopGuard.calls", in: ["", "true"] }, kind: { type: "integer", presets: [2, 3, 4, 5, 6, 8, 10], ends: { low: "Sooner", high: "Later" } } },
-  { path: "loopGuard.repeatStop", label: "Stop after identical calls", description: "…and this many ends the turn. It is never earlier than the warning.", unset: { value: 6 }, group: "Behaviour", visibleWhen: { path: "loopGuard.calls", in: ["", "true"] }, kind: { type: "integer", presets: [4, 5, 6, 8, 10, 12, 16], ends: { low: "Sooner", high: "Later" } } },
+  { path: "loopGuard.repeatWarn", label: "Warn after identical calls", description: "The same tool call, getting the same answer, this many times in one turn gets a warning. A call that answers differently each time (a test run, a re-read after an edit) is progress and is not counted.", unset: { value: 4 }, group: "Behaviour", visibleWhen: { path: "loopGuard.calls", in: ["", "true"] }, kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [2, 3, 4, 5, 6, 8, 10], ends: { low: "Sooner", high: "Later" } } },
+  { path: "loopGuard.repeatStop", label: "Stop after identical calls", description: "…and this many ends the turn. It is never earlier than the warning.", unset: { value: 6 }, group: "Behaviour", visibleWhen: { path: "loopGuard.calls", in: ["", "true"] }, kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [4, 5, 6, 8, 10, 12, 16], ends: { low: "Sooner", high: "Later" } } },
   { path: "loopGuard.text", label: "Catch repeated text", description: "Cut a reply off when it, or its reasoning, repeats one stretch of text over and over. Turn it off if it ends replies that were fine.", unset: { value: true }, group: "Behaviour", kind: { type: "boolean" } },
-  { path: "loopGuard.textRepeats", label: "Stop repeated text after", description: "A reply repeating one stretch of text this many times is cut off.", unset: { value: 10 }, group: "Behaviour", visibleWhen: { path: "loopGuard.text", in: ["", "true"] }, kind: { type: "integer", presets: [4, 6, 8, 10, 15, 20, 30], ends: { low: "Sooner", high: "Later" } } },
+  { path: "loopGuard.textRepeats", label: "Stop repeated text after", description: "A reply repeating one stretch of text this many times is cut off.", unset: { value: 10 }, group: "Behaviour", visibleWhen: { path: "loopGuard.text", in: ["", "true"] }, kind: { type: "integer", min: POSITIVE_PROFILE_INT_MIN, presets: [4, 6, 8, 10, 15, 20, 30], ends: { low: "Sooner", high: "Later" } } },
   {
     path: "systemPromptAppend",
     label: "Profile instructions",

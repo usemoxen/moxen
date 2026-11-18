@@ -257,12 +257,18 @@ impl ListFieldSchema {
     }
 }
 
-/// A list field's editor kind (the plain kinds; ranges live in the server).
+/// A list field's editor kind, including any bounds the server describes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldKind {
     Text,
-    Integer,
-    Number,
+    Integer {
+        min: Option<f64>,
+        max: Option<f64>,
+    },
+    Number {
+        min: Option<f64>,
+        max: Option<f64>,
+    },
     Boolean,
     Secret,
     Enum(Vec<Choice>),
@@ -282,8 +288,14 @@ impl FieldKind {
     fn from_json(kind: &Value) -> Self {
         match kind.get("type").and_then(Value::as_str).unwrap_or_default() {
             "string" => Self::Text,
-            "integer" => Self::Integer,
-            "number" => Self::Number,
+            "integer" => Self::Integer {
+                min: number(kind, "min"),
+                max: number(kind, "max"),
+            },
+            "number" => Self::Number {
+                min: number(kind, "min"),
+                max: number(kind, "max"),
+            },
             "boolean" => Self::Boolean,
             "secret" => Self::Secret,
             "enum" => Self::Enum(
@@ -665,15 +677,7 @@ pub fn normalize_setting_value(kind: &SettingKind, text: &str) -> Result<String,
             _ => Err("Use true or false.".into()),
         },
         SettingKind::Integer { min, max, .. } => {
-            let number: f64 = trimmed.parse().map_err(|_| "Type a number.".to_string())?;
-            if number < *min || number > *max {
-                return Err(format!(
-                    "Type a number from {} to {}.",
-                    bound(*min),
-                    bound(*max)
-                ));
-            }
-            Ok(trimmed.into())
+            normalize_number(trimmed, false, Some(*min), Some(*max))
         }
         SettingKind::Secret
         | SettingKind::Text { .. }
@@ -686,6 +690,32 @@ pub fn normalize_setting_value(kind: &SettingKind, text: &str) -> Result<String,
 
 fn bound(number: f64) -> String {
     SettingValue::Number(number).wire()
+}
+
+fn normalize_number(
+    text: &str,
+    integer: bool,
+    min: Option<f64>,
+    max: Option<f64>,
+) -> Result<String, String> {
+    let value: f64 = text.parse().map_err(|_| "Type a number.".to_string())?;
+    if !value.is_finite() {
+        return Err("Type a number.".into());
+    }
+    if integer && value.fract() != 0. {
+        return Err("Type a whole number.".into());
+    }
+    if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
+        return Err(match (min, max) {
+            (Some(min), Some(max)) => {
+                format!("Type a number from {} to {}.", bound(min), bound(max))
+            }
+            (Some(min), None) => format!("Type a number of at least {}.", bound(min)),
+            (None, Some(max)) => format!("Type a number no greater than {}.", bound(max)),
+            (None, None) => unreachable!("checked a bound"),
+        });
+    }
+    Ok(text.into())
 }
 
 /// Checks a list field's typed text. Nested lists are edited entry by entry,
@@ -705,10 +735,8 @@ pub fn normalize_field_value(kind: &FieldKind, text: &str) -> Result<String, Str
             "true" | "false" => Ok(trimmed.into()),
             _ => Err("Use true or false.".into()),
         },
-        FieldKind::Integer | FieldKind::Number => trimmed
-            .parse::<f64>()
-            .map(|_| trimmed.to_string())
-            .map_err(|_| "Type a number.".to_string()),
+        FieldKind::Integer { min, max } => normalize_number(trimmed, true, *min, *max),
+        FieldKind::Number { min, max } => normalize_number(trimmed, false, *min, *max),
         FieldKind::NestedList { .. } | FieldKind::Effort => {
             Err("Change this where its entries are listed.".into())
         }
@@ -1133,6 +1161,27 @@ impl ManagedSkill {
                 .unwrap_or_default(),
         })
     }
+
+    pub fn provider_on(&self, id: &str) -> bool {
+        self.providers.is_empty() || self.providers.iter().any(|provider| provider == id)
+    }
+
+    /// Empty is the wire representation of all providers, never of none.
+    pub fn toggle_provider(&self, id: &str) -> Option<Vec<String>> {
+        let on: Vec<String> = SKILL_PROVIDERS
+            .iter()
+            .map(|(provider, _)| *provider)
+            .filter(|provider| self.provider_on(provider) != (*provider == id))
+            .map(str::to_string)
+            .collect();
+        if on.is_empty() {
+            None
+        } else if on.len() == SKILL_PROVIDERS.len() {
+            Some(vec![])
+        } else {
+            Some(on)
+        }
+    }
 }
 
 /// A provider a skill can be limited to, in the manager's own words.
@@ -1484,6 +1533,39 @@ mod tests {
             .is_err()
         );
         assert!(normalize_field_value(&FieldKind::Text, " anything ").is_ok());
+    }
+
+    #[test]
+    fn numeric_list_fields_reject_out_of_range_nonfinite_and_fractional_integers() {
+        let slots = FieldKind::from_json(&json!({"type":"integer", "min":1}));
+        assert_eq!(normalize_field_value(&slots, " 4 ").unwrap(), "4");
+        for invalid in ["0", "-1", "1.25", "NaN", "inf"] {
+            assert!(normalize_field_value(&slots, invalid).is_err(), "{invalid}");
+        }
+        let top_p = FieldKind::from_json(&json!({"type":"number", "min":0, "max":1}));
+        assert_eq!(normalize_field_value(&top_p, "0.25").unwrap(), "0.25");
+        assert_eq!(normalize_field_value(&top_p, " ").unwrap(), "");
+        assert!(normalize_field_value(&top_p, "-0.25").is_err());
+        assert!(normalize_field_value(&top_p, "1.25").is_err());
+    }
+
+    #[test]
+    fn skill_provider_toggle_treats_empty_as_all_and_never_sends_none() {
+        let mut skill = super::ManagedSkill::from_json(
+            &json!({"source":"agents","folder":"review","providers":[]}),
+        )
+        .unwrap();
+        assert!(
+            super::SKILL_PROVIDERS
+                .iter()
+                .all(|(provider, _)| skill.provider_on(provider))
+        );
+        skill.providers = skill.toggle_provider("codex").unwrap();
+        assert_eq!(skill.providers, ["claude", "opencode", "harness"]);
+        assert!(!skill.provider_on("codex"));
+        assert_eq!(skill.toggle_provider("codex"), Some(vec![]));
+        skill.providers = vec!["codex".into()];
+        assert!(skill.toggle_provider("codex").is_none());
     }
 
     #[test]

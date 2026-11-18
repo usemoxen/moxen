@@ -112,6 +112,7 @@ pub struct Workspace {
     /// memory open inside it, and a form, confirmation or add-flow below.
     pub settings_open: bool,
     pub settings_tab: usize,
+    pub settings_rail_tip: Option<usize>,
     pub settings_entry: Option<String>,
     pub settings_item: Option<String>,
     pub settings_skill: Option<(String, String)>,
@@ -415,6 +416,7 @@ impl Workspace {
             thread_action_focus: cx.focus_handle(),
             settings_open: false,
             settings_tab: 0,
+            settings_rail_tip: None,
             settings_entry: None,
             settings_item: None,
             settings_skill: None,
