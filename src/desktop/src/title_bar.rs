@@ -22,7 +22,11 @@ fn settled_badge_label() -> &'static str {
 }
 
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let t = &w.source.list_threads()[w.selected];
+    // A new-thread draft carries no state of its own: while it is active the
+    // title bar names only the project and the draft, never the open thread
+    // behind it.
+    let threads = w.source.list_threads();
+    let thread = Workspace::shown_thread(w.creating, w.selected).and_then(|id| threads.get(id));
     let checklist = w.source.inspector(w.selected);
     let head = |at: f32| (at + 0.42) * MARK_SCALE;
     div()
@@ -62,7 +66,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                                 .size_full()
                                 .text_color(color("ink")),
                         )
-                        .when(t.status == Status::Running && !w.creating, |s| {
+                        .when(thread.is_some_and(|t| t.status == Status::Running), |s| {
                             s.child(
                                 div()
                                     .absolute()
@@ -80,13 +84,18 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .text_color(color("ink-2"))
-                        .child(w.new_project_title().unwrap_or_else(|| {
-                            let project = w.source.project_id(t.id);
-                            w.thread_project_title(
-                                project.as_deref().unwrap_or(&t.project),
-                                &t.project,
-                            )
-                        })),
+                        .child(match thread {
+                            None => w
+                                .new_project_title()
+                                .unwrap_or_else(|| crate::language::tr("Project").into_owned()),
+                            Some(t) => w.new_project_title().unwrap_or_else(|| {
+                                let project = w.source.project_id(t.id);
+                                w.thread_project_title(
+                                    project.as_deref().unwrap_or(&t.project),
+                                    &t.project,
+                                )
+                            }),
+                        }),
                 )
                 .child(
                     div()
@@ -105,37 +114,39 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .child(if w.creating {
                             crate::language::message("palette.newThread").into()
                         } else {
-                            t.title.clone()
+                            thread.map(|t| t.title.clone()).unwrap_or_default()
                         }),
                 ),
         )
         .child(div().flex_1())
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .font_family(theme::MONO)
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(color(t.status.token()))
-                .child(ui::state(t.status))
-                .child(if t.status == Status::Running {
-                    let seconds = t.started_at.map_or(0, |start| start.elapsed().as_secs());
-                    format!(
-                        "{} · {}m {:02}s",
-                        crate::language::tr("Working"),
-                        seconds / 60,
-                        seconds % 60
-                    )
-                } else if t.status == Status::Idle {
-                    settled_badge_label().to_owned()
-                } else {
-                    crate::language::tr(t.status.label()).into_owned()
-                }),
-        )
+        .when_some(thread, |s, t| {
+            s.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .font_family(theme::MONO)
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color(t.status.token()))
+                    .child(ui::state(t.status))
+                    .child(if t.status == Status::Running {
+                        let seconds = t.started_at.map_or(0, |start| start.elapsed().as_secs());
+                        format!(
+                            "{} · {}m {:02}s",
+                            crate::language::tr("Working"),
+                            seconds / 60,
+                            seconds % 60
+                        )
+                    } else if t.status == Status::Idle {
+                        settled_badge_label().to_owned()
+                    } else {
+                        crate::language::tr(t.status.label()).into_owned()
+                    }),
+            )
+        })
         .when(!w.creating, |s| {
             s.child(crate::thread_view::actions_chip(w, cx))
         })
@@ -217,6 +228,15 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_draft_presents_no_thread() {
+        // The sidebar, title bar and status line read the draft through
+        // `shown_thread`: while the draft is active nothing is selected, so
+        // no state chip or usage pill draws for the thread behind it.
+        assert_eq!(crate::workspace::Workspace::shown_thread(true, 2), None);
+        assert_eq!(crate::workspace::Workspace::shown_thread(false, 2), Some(2));
+    }
+
     #[test]
     fn settled_badge_keeps_the_english_desktop_label() {
         crate::language::apply(Some("en"), None);

@@ -90,7 +90,7 @@ impl Workspace {
     /// asks for the patch the Diff tab is about to draw.
     pub fn sync_inspector(&mut self) {
         let id = self.selected;
-        let visible = self.inspector_open && self.tab <= 1;
+        let visible = !self.creating && self.inspector_open && self.tab <= 1;
         if !visible {
             self.git_ui.seen = None;
             return;

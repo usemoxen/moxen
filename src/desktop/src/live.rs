@@ -7842,6 +7842,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The connected window draws the inspector the mock-only gate used to
+    /// hide: the live source answers every tab's reads through the server.
+    /// Runs against the fake protocol server, never a real one.
+    #[cfg(all(unix, feature = "render-harness"))]
+    #[gpui::test]
+    fn the_connected_inspector_renders_and_reads_context(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::Workspace;
+        use gpui::VisualTestContext;
+        let dir = std::env::temp_dir().join(format!("moxen-live-inspector-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let server = fake_server(path.clone());
+        let source = ServerSource::connect(path.to_string_lossy().into_owned());
+        wait_for("a live connection", || {
+            source.connection() == crate::model::Connection::Live
+        });
+        wait_for("the thread list", || !source.list_threads().is_empty());
+        assert!(!source.preview());
+        cx.update(crate::composer::bind_keys);
+        let (workspace, cx): (_, &mut VisualTestContext) = cx.add_window_view(|window, cx| {
+            Workspace::with_source(Box::new(source), false, window, cx)
+        });
+        cx.run_until_parked();
+        // The pane draws for a connected session, with its tabs.
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("inspector").is_some());
+        // The Context tab reads through the server for the open thread.
+        cx.update(|_, cx| {
+            workspace.update(cx, |w, cx| {
+                w.select(0, cx);
+                w.refresh_usage();
+            });
+        });
+        assert_eq!(
+            queried(&server.queries, "thread.context"),
+            json!({"type": "thread.context", "threadId": "t1"})
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn inspector_reads_work_from_the_server_and_retains_released_background_output() {
