@@ -760,7 +760,8 @@ impl ThreadSource for MockSource {
         Some(Arc::new(Inventory::decode(&json!({
             "trigger": "/", "skills": [
               {"name":"accessibility", "description":"Check keyboard and screen reader behavior", "enabled":true, "userInvocable":true},
-              {"name":"design-review", "description":"Review layout and interaction against the design system", "enabled":true, "userInvocable":true}
+              {"name":"design-review", "description":"Review layout and interaction against the design system", "enabled":true, "userInvocable":true},
+              {"name":"xlsx", "displayName":"Spreadsheets", "description":"Read and write spreadsheet files", "enabled":true, "userInvocable":true}
             ],
             "commands": [{"name":"compact", "description":"Summarize the current thread"}]
         }))))

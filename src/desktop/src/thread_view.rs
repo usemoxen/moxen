@@ -1018,7 +1018,7 @@ fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
                         .max_w(relative(0.55))
                         .truncate()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(choice.invocation.clone()),
+                        .child(choice.label()),
                 )
                 .child(
                     div()

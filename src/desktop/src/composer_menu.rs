@@ -41,6 +41,23 @@ pub struct Choice {
     pub description: String,
 }
 
+impl Choice {
+    /// What the picker row shows: the provider's display name with the
+    /// trigger (`/Spreadsheets`), like the TUI's skill picker — choosing
+    /// the row still inserts `invocation` (`/xlsx`).
+    pub fn label(&self) -> String {
+        if self.display_name.is_empty() {
+            self.invocation.clone()
+        } else {
+            format!(
+                "{}{}",
+                self.invocation.chars().next().unwrap_or('/'),
+                self.display_name
+            )
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct Inventory(pub Vec<Choice>);
 
@@ -295,6 +312,27 @@ mod tests {
         assert_eq!(names("/spread"), ["/xlsx"]);
         assert_eq!(names("/SPREAD"), ["/xlsx"]);
         assert_eq!(names("/pdf"), ["/pdf"]);
+    }
+
+    #[test]
+    fn the_picker_labels_a_skill_with_its_display_name_but_inserts_its_name() {
+        let inventory = Inventory::decode(&json!({
+            "trigger":"/",
+            "skills":[
+              {"name":"xlsx","enabled":true,"userInvocable":true,"displayName":"Spreadsheets"},
+              {"name":"pdf","enabled":true,"userInvocable":true}
+            ],
+            "commands":[]
+        }))
+        .unwrap();
+        let found = choices("/spread", Some(&inventory), true);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label(), "/Spreadsheets");
+        // Choosing the row inserts the trigger and the name, not the label.
+        assert_eq!(found[0].invocation, "/xlsx");
+        let plain = choices("/pdf", Some(&inventory), true);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].label(), "/pdf");
     }
 
     #[test]
