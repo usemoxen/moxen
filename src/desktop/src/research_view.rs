@@ -7,6 +7,7 @@
 //! (`src/tui/i18n/en.ts`).
 
 use crate::{
+    language::{capitalized, fill, message},
     model::{
         AgentRef, AgentState, Message, PickerRow, PickerState, ROLES, ResearchProposal,
         ResearchRole, RunAgent, RunPhase, RunSummary, Selection, ThreadId, column_widths,
@@ -45,14 +46,6 @@ fn elapsed(summary: &RunSummary) -> String {
         .map(|time| time.as_millis() as i64)
         .unwrap_or(0);
     format_elapsed(run_elapsed_ms(summary, now))
-}
-
-fn capitalized(word: &str) -> String {
-    let mut chars = word.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 impl Workspace {
@@ -207,30 +200,30 @@ pub fn proposal_panel(
     let rows = [
         (
             PickerRow::Researchers,
-            "Researchers",
+            message("run.role.researchers"),
             (0..MAX_RESEARCHERS).map(dot).collect::<Vec<_>>(),
             size.researchers.to_string(),
             w.proposal_model(&proposal, ResearchRole::Researcher),
-            Some(format!(
-                "{count} in total for the run, not at once.",
-                count = size.researchers
+            Some(fill(
+                "research.picker.researchersNote.other",
+                &[("{count}", &size.researchers.to_string())],
             )),
         ),
         (
             PickerRow::Critics,
-            "Critics",
+            message("run.role.critics"),
             critics.into_iter().collect::<Vec<_>>(),
             size.critics.to_string(),
             w.proposal_model(&proposal, ResearchRole::Critic),
             Some(if size.critics == 1 {
-                "One critic does Evidence, Risks and Alternatives.".into()
+                message("research.picker.criticsOne").into()
             } else {
-                "One each: Evidence, Risks and Alternatives.".into()
+                message("research.picker.criticsThree").into()
             }),
         ),
         (
             PickerRow::Researchers,
-            "Finalizer",
+            message("run.role.finalizer"),
             vec![step_dot(true, false, "●".into())],
             "1".into(),
             w.proposal_model(&proposal, ResearchRole::Finalizer),
@@ -263,7 +256,7 @@ pub fn proposal_panel(
                     div()
                         .text_size(px(15.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Full research run"),
+                        .child(message("research.picker.title")),
                 )
                 .child(
                     div()
@@ -377,10 +370,12 @@ pub fn proposal_panel(
             div()
                 .text_size(px(13.))
                 .text_color(color("ink"))
-                .child(format!(
-                    "{} threads, the lead included · {}",
-                    thread_count(size),
-                    w.proposal_providers(&proposal)
+                .child(fill(
+                    "research.picker.threads.other",
+                    &[
+                        ("{count}", &thread_count(size).to_string()),
+                        ("{providers}", &w.proposal_providers(&proposal)),
+                    ],
                 )),
         )
         .child(
@@ -397,7 +392,7 @@ pub fn proposal_panel(
                         .bg(color("live"))
                         .text_color(color("on-live"))
                         .text_size(px(13.))
-                        .child("Start")
+                        .child(message("research.picker.start"))
                         .on_click(cx.listener(move |this, _, _, cx| this.answer_size(id, cx))),
                 )
                 .child(
@@ -408,7 +403,7 @@ pub fn proposal_panel(
                         .py(px(6.))
                         .text_size(px(13.))
                         .text_color(color("ink-2"))
-                        .child("One researcher instead")
+                        .child(message("research.picker.single"))
                         .on_click(cx.listener(move |this, _, _, cx| this.answer_single(id, cx))),
                 ),
         )
@@ -416,7 +411,7 @@ pub fn proposal_panel(
             div()
                 .text_size(px(12.))
                 .text_color(color("ink-2"))
-                .child("←→ change · ↑↓ row · enter start · esc one researcher"),
+                .child(message("research.picker.keys")),
         )
         .on_click(cx.listener(|_, _, _, cx| cx.notify()))
         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
@@ -469,7 +464,7 @@ pub fn notice(text: &str, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .id("dismiss-notice")
-                .control("Dismiss")
+                .control(message("action.dismiss"))
                 .p(px(3.))
                 .child(ui::icon("x", "ink-2"))
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -480,18 +475,22 @@ pub fn notice(text: &str, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
-/// "Researcher 1", "Critic 2 · Risks", "Finalizer": what a column and the
+/// "Researcher 1", "Critic 2 · Risks", message("run.role.finalizer"): what a column and the
 /// roster call an agent.
 pub(crate) fn agent_title(summary: &RunSummary, agent: &RunAgent) -> String {
     match agent.role {
-        ResearchRole::Finalizer => "Finalizer".into(),
-        ResearchRole::Researcher => format!("Researcher {}", agent.index),
+        ResearchRole::Finalizer => message("run.agent.finalizer").into(),
+        ResearchRole::Researcher => {
+            fill("run.agent.researcher", &[("{n}", &agent.index.to_string())])
+        }
         ResearchRole::Critic => {
             let lens = agent.lens.as_deref().unwrap_or("");
-            let lens = if lens == "all three reviews" {
-                "all three reviews".to_string()
-            } else {
-                lens.to_string()
+            let lens = match lens {
+                "all three reviews" => message("run.lens.all"),
+                "Evidence" => message("run.lens.evidence"),
+                "Risks" => message("run.lens.risks"),
+                "Alternatives" => message("run.lens.alternatives"),
+                _ => lens,
             };
             let lens = if lens.is_empty() {
                 String::new()
@@ -499,9 +498,12 @@ pub(crate) fn agent_title(summary: &RunSummary, agent: &RunAgent) -> String {
                 format!(" · {lens}")
             };
             if summary.agents[ResearchRole::Critic as usize].len() == 1 {
-                format!("Critic{lens}")
+                format!("{}{lens}", message("run.agent.critic"))
             } else {
-                format!("Critic {}{lens}", agent.index)
+                format!(
+                    "{}{lens}",
+                    fill("run.agent.criticN", &[("{n}", &agent.index.to_string())])
+                )
             }
         }
     }
@@ -564,7 +566,7 @@ pub fn back_bar(
                 .control("Back to the research run")
                 .text_size(px(13.))
                 .text_color(color("live"))
-                .child("← back to the run")
+                .child(message("run.back"))
                 .on_click(cx.listener(|this, _, _, cx| this.back_to_run(cx))),
         )
 }
@@ -591,14 +593,14 @@ pub fn role_full(
             .p(px(10.))
             .text_size(px(13.))
             .text_color(color("ink-2"))
-            .child("Not started yet.")
+            .child(message("run.waiting.researcher"))
             .into_any_element(),
         Some(thread) => match w.source.role_messages(thread) {
             None => div()
                 .p(px(10.))
                 .text_size(px(13.))
                 .text_color(color("ink-2"))
-                .child("Reading…")
+                .child(message("git.reading_f65c").trim_start())
                 .into_any_element(),
             Some(messages) => role_rows(w, lead, role, agent, &messages, cx),
         },
@@ -673,7 +675,7 @@ fn role_rows(
                     .text_size(px(theme::BODY))
                     .line_height(px(theme::LINE))
                     .child(if text.is_empty() {
-                        "Thinking…".into()
+                        message("timeline.thinking").into()
                     } else {
                         text
                     })
@@ -690,9 +692,9 @@ fn role_rows(
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color(if implemented { "ink-2" } else { "ink" }))
                             .child(if implemented {
-                                "Plan implemented"
+                                message("timeline.planImplemented")
                             } else {
-                                "Plan proposed"
+                                message("timeline.planProposed")
                             }),
                     )
                     .child(
@@ -867,9 +869,9 @@ pub fn run_view(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(15.))
                         .child(if summary.title.is_empty() {
-                            "Research run".into()
+                            message("run.title").into()
                         } else {
-                            format!("Research run · {}", summary.title)
+                            format!("{} · {}", message("run.title"), summary.title)
                         }),
                 )
                 .child(
@@ -935,15 +937,15 @@ pub fn run_view(
                             .text_color(color("ink-2"))
                             .child(if summary.ended {
                                 match role {
-                                    ResearchRole::Researcher => "No researcher was started.",
-                                    ResearchRole::Critic => "No critic was started.",
-                                    ResearchRole::Finalizer => "No final report was written.",
+                                    ResearchRole::Researcher => message("run.never.researcher"),
+                                    ResearchRole::Critic => message("run.never.critic"),
+                                    ResearchRole::Finalizer => message("run.never.finalizer"),
                                 }
                             } else {
                                 match role {
-                                    ResearchRole::Researcher => "Not started yet.",
-                                    ResearchRole::Critic => "Waiting for the reports.",
-                                    ResearchRole::Finalizer => "Waiting for a critic verdict.",
+                                    ResearchRole::Researcher => message("run.waiting.researcher"),
+                                    ResearchRole::Critic => message("run.waiting.critic"),
+                                    ResearchRole::Finalizer => message("run.waiting.finalizer"),
                                 }
                             })
                             .into_any_element(),
@@ -952,7 +954,7 @@ pub fn run_view(
                                 .p(px(10.))
                                 .text_size(px(13.))
                                 .text_color(color("ink-2"))
-                                .child("Reading…")
+                                .child(message("git.reading_f65c").trim_start())
                                 .into_any_element(),
                             Some(messages) => role_rows(w, lead, role, shown, &messages, cx),
                         },
@@ -1014,7 +1016,7 @@ pub fn run_view(
                     div()
                         .text_size(px(12.))
                         .text_color(color("ink-2"))
-                        .child("←→ agent · tab column · ↑↓ scroll · enter opens it"),
+                        .child(message("run.keys")),
                 )
                 .child(
                     div()
@@ -1022,7 +1024,7 @@ pub fn run_view(
                         .control("Open the lead thread")
                         .text_size(px(13.))
                         .text_color(color("live"))
-                        .child("lead thread →")
+                        .child(message("run.lead"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.lead_full = Some(lead);
                             cx.notify();

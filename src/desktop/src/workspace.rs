@@ -809,7 +809,7 @@ impl Workspace {
         // The server parked the run-size question: the next send asks for it.
         // The notice clears itself, as the TUI's toast does after 2.5s.
         if self.source.take_research_pending() {
-            self.notice = Some("Run size still to choose — the next send asks for it.".into());
+            self.notice = Some(crate::language::message("send.researchSizePending").into());
             self.notice_at = Some(Instant::now());
         }
         if self

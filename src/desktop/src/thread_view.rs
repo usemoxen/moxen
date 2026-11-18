@@ -897,7 +897,11 @@ fn back_title_state(w: &Workspace, back: ThreadId) -> (String, String) {
     {
         return (
             crate::research_view::agent_title(&summary, row),
-            format!("part of the research run · {}", row.state.label()),
+            format!(
+                "{} · {}",
+                crate::language::message("run.backPart"),
+                row.state.label()
+            ),
         );
     }
     let state = w
@@ -906,7 +910,10 @@ fn back_title_state(w: &Workspace, back: ThreadId) -> (String, String) {
         .get(back)
         .map(|thread| thread.status.label())
         .unwrap_or("Done");
-    ("Lead thread".into(), state.into())
+    (
+        crate::language::message("run.leadTitle").into(),
+        crate::language::tr(state).into_owned(),
+    )
 }
 
 fn composer(

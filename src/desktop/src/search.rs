@@ -23,17 +23,17 @@ fn text(value: &Value) -> &str {
 /// otherwise, as the TUI's search picker says it.
 pub fn hit_where(hit: &SearchHit) -> String {
     match hit.kind.as_str() {
-        "title" => "title".to_string(),
+        "title" => crate::language::message("search.where.title").to_string(),
         "tool" => {
             if hit.source.is_empty() {
-                "tool".to_string()
+                crate::language::message("search.where.tool").to_string()
             } else {
                 hit.source.clone()
             }
         }
         "message" => {
             if hit.source.is_empty() {
-                "message".to_string()
+                crate::language::message("search.where.message").to_string()
             } else {
                 hit.source.clone()
             }
@@ -69,7 +69,7 @@ pub struct SearchResult {
 /// matched than the row lists.
 pub fn hit_meta(hit: &SearchHit, hit_count: usize) -> String {
     let more = if hit_count > 1 {
-        format!(" (+{})", hit_count - 1)
+        crate::language::fill("search.more", &[("{count}", &(hit_count - 1).to_string())])
     } else {
         String::new()
     };

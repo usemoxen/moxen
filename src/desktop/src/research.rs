@@ -209,9 +209,9 @@ pub const ROLES: [ResearchRole; 3] = [
 impl ResearchRole {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Researcher => "Researchers",
-            Self::Critic => "Critics",
-            Self::Finalizer => "Finalizer",
+            Self::Researcher => crate::language::message("run.role.researchers"),
+            Self::Critic => crate::language::message("run.role.critics"),
+            Self::Finalizer => crate::language::message("run.role.finalizer"),
         }
     }
 }
@@ -230,11 +230,11 @@ pub enum AgentState {
 impl AgentState {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Waiting => "waiting",
-            Self::Working => "working",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Stopped => "stopped",
+            Self::Waiting => crate::language::message("run.state.waiting"),
+            Self::Working => crate::language::message("run.state.working"),
+            Self::Done => crate::language::message("run.state.done"),
+            Self::Failed => crate::language::message("run.state.failed"),
+            Self::Stopped => crate::language::message("run.state.stopped"),
         }
     }
 
@@ -282,13 +282,13 @@ pub enum RunPhase {
 impl RunPhase {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Planning => "Planning",
-            Self::Researching => "Researching",
-            Self::Reviewing => "Reviewing",
-            Self::Finalizing => "Finalizing",
-            Self::Finished => "Finished",
-            Self::Failed => "Failed",
-            Self::Stopped => "Stopped",
+            Self::Planning => crate::language::message("run.phase.planning"),
+            Self::Researching => crate::language::message("run.phase.researching"),
+            Self::Reviewing => crate::language::message("run.phase.reviewing"),
+            Self::Finalizing => crate::language::message("run.phase.finalizing"),
+            Self::Finished => crate::language::message("run.phase.finished"),
+            Self::Failed => crate::language::message("run.phase.failed"),
+            Self::Stopped => crate::language::message("run.phase.stopped"),
         }
     }
 }

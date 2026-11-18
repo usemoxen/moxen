@@ -46,7 +46,7 @@ fn matches(w: &Workspace, query: &str) -> Vec<Row> {
             Pick::StartResearch,
         ));
         answers.push(Row::Pick(
-            "Run one researcher instead".into(),
+            crate::language::message("research.picker.single").into(),
             None,
             Pick::SingleResearch,
         ));
@@ -82,7 +82,9 @@ fn matches(w: &Workspace, query: &str) -> Vec<Row> {
                 })
                 .collect();
             if !active.is_empty() {
-                rows.push(Row::Header("Active".into()));
+                rows.push(Row::Header(
+                    crate::language::message("search.active").into(),
+                ));
                 rows.extend(
                     active
                         .into_iter()
@@ -90,7 +92,9 @@ fn matches(w: &Workspace, query: &str) -> Vec<Row> {
                 );
             }
             if !settled.is_empty() {
-                rows.push(Row::Header("Settled".into()));
+                rows.push(Row::Header(
+                    crate::language::message("search.settled").into(),
+                ));
                 rows.extend(
                     settled
                         .into_iter()

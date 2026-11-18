@@ -724,7 +724,7 @@ pub fn form(
             panel.child(
                 div()
                     .id("cancel-thread-action")
-                    .control("Close")
+                    .control(crate::language::tr("Close").into_owned())
                     .px(px(8.))
                     .text_color(color("ink-2"))
                     .child(if matches!(form, Form::Archived | Form::Answer(_)) {
@@ -1024,10 +1024,10 @@ pub fn project_form(
             panel.child(
                 div()
                     .id("cancel-project-action")
-                    .control("Close")
+                    .control(crate::language::tr("Close").into_owned())
                     .px(px(8.))
                     .text_color(color("ink-2"))
-                    .child("Cancel")
+                    .child(crate::language::message("continue.cancel"))
                     .on_click(
                         cx.listener(|this, _, window, cx| this.close_project_action(window, cx)),
                     ),
