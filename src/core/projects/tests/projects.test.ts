@@ -117,4 +117,33 @@ describe("projects registry", () => {
       code: "PROJECT_ALREADY_EXISTS",
     });
   });
+
+  it("revives a removed project with a supplied title and keeps its id", async () => {
+    const root = await tmpRoot();
+    const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo" });
+    await removeStoredProject(root, project.id);
+    const revived = await ensureStoredProject(root, {
+      workspaceRoot: "/repo",
+      title: "  New   Name  ",
+      id: "some-other-id",
+    });
+    expect(revived.created).toBe(false);
+    expect(revived.project.id).toBe(project.id);
+    expect(revived.project.title).toBe("New Name");
+    expect(revived.project.deletedAt).toBeNull();
+    expect(revived.command).toBeNull();
+  });
+
+  it("collapses inner whitespace in project titles", async () => {
+    const root = await tmpRoot();
+    const created = await ensureStoredProject(root, { workspaceRoot: "/zero", title: "zero   hero" });
+    expect(created.project.title).toBe("zero hero");
+    const first = await ensureStoredProject(root, { workspaceRoot: "/one" });
+    const renamed = await renameStoredProject(root, first.project.id, "a  b");
+    expect(renamed.title).toBe("a b");
+    const second = await ensureStoredProject(root, { workspaceRoot: "/two" });
+    await expect(renameStoredProject(root, second.project.id, "a   b")).rejects.toMatchObject({
+      code: "PROJECT_ALREADY_EXISTS",
+    });
+  });
 });

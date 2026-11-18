@@ -152,6 +152,15 @@ export function projectTitle(workspaceRoot: string): string {
   return path.basename(workspaceRoot) || "project";
 }
 
+/**
+ * Project-title equality: trim and collapse inner whitespace runs, like the
+ * thread seed and provider titles (`threads.ts`) and the desktop's rename
+ * field. Comparisons stay case-sensitive.
+ */
+export function normalizeProjectTitle(title: string): string {
+  return title.replace(/\s+/gu, " ").trim();
+}
+
 /** Non-deleted projects. Pure; kept for envelope assembly over ProjectEnvelope rows. */
 export function activeProjects<P extends ProjectEnvelope>(projects: readonly P[]): P[] {
   return projects.filter((project) => project.deletedAt == null);
@@ -174,13 +183,16 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
   }
   const all = await loadAll(root);
   // A removed project is a soft delete: reopening its folder revives it with
-  // its id, so its threads and per-project settings come back.
+  // its id, so its threads and per-project settings come back. A supplied
+  // title renames the revived row; a supplied id that differs from the
+  // revived row's id is ignored — the revived row keeps its id.
   const deleted = all.find(
     (entry) => entry.deletedAt != null && workspaceRootsEqual(entry.workspaceRoot, normalized),
   );
   if (deleted) {
     const now = input.now ?? (() => new Date().toISOString());
-    const revived: StoredProject = { ...deleted, workspaceRoot: normalized, deletedAt: null, updatedAt: now() };
+    const title = normalizeProjectTitle(input.title ?? "") || deleted.title;
+    const revived: StoredProject = { ...deleted, title, workspaceRoot: normalized, deletedAt: null, updatedAt: now() };
     await saveAll(
       root,
       all.map((entry) => (entry.id === deleted.id ? revived : entry)),
@@ -189,7 +201,7 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
   }
   const now = input.now ?? (() => new Date().toISOString());
   const createdAt = now();
-  const title = input.title?.trim() || projectTitle(normalized);
+  const title = normalizeProjectTitle(input.title ?? "") || projectTitle(normalized);
   const id = input.id?.trim() || randomUUID();
   if (input.id?.trim() && all.some((entry) => entry.id === id)) {
     throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with id ${id}.`, {
@@ -219,8 +231,8 @@ export async function renameStoredProject(
   title: string,
   now: () => string = () => new Date().toISOString(),
 ): Promise<StoredProject> {
-  const trimmed = title.trim();
-  if (!trimmed) {
+  const normalized = normalizeProjectTitle(title);
+  if (!normalized) {
     throw new CliError("INVALID_PROJECT", "A project title cannot be empty.", { exitCode: 2 });
   }
   const all = await loadAll(root);
@@ -231,15 +243,15 @@ export async function renameStoredProject(
     });
   }
   const conflict = all.find(
-    (entry) => entry.id !== projectId && entry.deletedAt == null && entry.title === trimmed,
+    (entry) => entry.id !== projectId && entry.deletedAt == null && entry.title === normalized,
   );
   if (conflict) {
-    throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with title "${trimmed}".`, {
+    throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with title "${normalized}".`, {
       exitCode: 4,
-      details: { projectId, title: trimmed, conflictingProjectId: conflict.id },
+      details: { projectId, title: normalized, conflictingProjectId: conflict.id },
     });
   }
-  const renamed: StoredProject = { ...all[at]!, title: trimmed, updatedAt: now() };
+  const renamed: StoredProject = { ...all[at]!, title: normalized, updatedAt: now() };
   await saveAll(root, all.map((entry, index) => (index === at ? renamed : entry)));
   return renamed;
 }
