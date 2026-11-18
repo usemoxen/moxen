@@ -47,6 +47,11 @@ and a lock from a crashed server is taken over once its process is gone,
 not left behind. It also carries a format version (`store.json`, like the
 config file's): a build refuses data newer than it knows.
 
+On Unix, the server and local clients reject socket paths longer than
+103 UTF-8 bytes on macOS and BSD, or 107 on Linux. If the path is too long,
+set `MOXEN_SERVER_ENDPOINT` to a shorter socket path for both the server
+and its clients. Windows named pipes do not have this byte limit.
+
 Clients never change anything themselves. The TUI and every CLI command
 connect to this machine's server, starting it in the background when none
 is running (`moxen server start` runs it in the foreground instead), or
