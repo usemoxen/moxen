@@ -1233,11 +1233,11 @@ fn doctor(w: &Workspace) -> Div {
     };
     let mut out = column()
         .child(line(
-            "Runtime",
+            &tr("Runtime"),
             &diagnosis["node"],
             string(&diagnosis["node"], "version"),
         ))
-        .child(line("Git", &diagnosis["git"], ""));
+        .child(line(&tr("Git"), &diagnosis["git"], ""));
     for (id, label) in [
         ("claude", "Claude Code"),
         ("opencode", "OpenCode"),

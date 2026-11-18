@@ -85,44 +85,60 @@ pub fn message(key: &'static str) -> &'static str {
 }
 
 pub fn tr(text: &str) -> Cow<'_, str> {
-    if spanish()
-        && let Some(translated) = SETTINGS
-            .get(text)
-            .map(String::as_str)
-            .or_else(|| BY_ENGLISH.get(text).copied())
-    {
-        return Cow::Borrowed(translated);
-    }
     if spanish() {
-        return Cow::Borrowed(match text {
-            "All" => "Todos",
-            "Projects" => "Proyectos",
-            "This project" => "Este proyecto",
-            "Archived" => "Archivados",
-            "Jump to thread…" => "Ir a un hilo…",
-            "Jump to thread or action" => "Ir a un hilo o acción",
-            "New thread in this project" => "Nuevo hilo en este proyecto",
-            "Show settled threads" => "Mostrar hilos cerrados",
-            "Search threads and actions" => "Buscar hilos y acciones",
-            "What should the agent do?" => "¿Qué debe hacer el agente?",
-            "Steer the agent…" => "Orienta al agente…",
-            "No threads yet" => "Todavía no hay hilos",
-            "Working" => "En curso",
-            "Done" => "Terminado",
-            "Stuck" => "Bloqueado",
-            "Your turn" => "Tu turno",
-            "Up next" => "En cola",
-            "Snoozed" => "Aplazado",
-            "Actions" => "Acciones",
-            "Background" => "Segundo plano",
-            "Inspector" => "Inspector",
-            "Queue" => "Poner en cola",
-            "Attach" => "Adjuntar",
-            "Default model" => "Modelo predeterminado",
-            _ => text,
-        });
+        // The settings catalog names exact settings strings, so it stays
+        // first. The desktop's own words name its own concepts (the thread
+        // group "All" is the TUI sidebar's "todos", not the stats range
+        // "Todo"), so they win over the reverse-catalog guess, which only
+        // covers dynamic strings the desktop did not write itself.
+        if let Some(word) = SETTINGS.get(text).map(String::as_str) {
+            return Cow::Borrowed(word);
+        }
+        if let Some(word) = desktop_word(text) {
+            return Cow::Borrowed(word);
+        }
+        if let Some(translated) = BY_ENGLISH.get(text).copied() {
+            return Cow::Borrowed(translated);
+        }
     }
     Cow::Borrowed(text)
+}
+
+/// The desktop's own words: what its fixed labels say in Spanish. Every one
+/// is pinned by `doctor_labels_have_spanish_strings` and
+/// `desktop_words_win_over_the_reverse_catalog` below.
+fn desktop_word(text: &str) -> Option<&'static str> {
+    Some(match text {
+        "All" => "Todos",
+        "Projects" => "Proyectos",
+        "This project" => "Este proyecto",
+        "Archived" => "Archivados",
+        "Jump to thread…" => "Ir a un hilo…",
+        "Jump to thread or action" => "Ir a un hilo o acción",
+        "New thread in this project" => "Nuevo hilo en este proyecto",
+        "Show settled threads" => "Mostrar hilos cerrados",
+        "Search threads and actions" => "Buscar hilos y acciones",
+        "What should the agent do?" => "¿Qué debe hacer el agente?",
+        "Steer the agent…" => "Orienta al agente…",
+        "No threads yet" => "Todavía no hay hilos",
+        "Working" => "En curso",
+        "Done" => "Terminado",
+        "Stuck" => "Bloqueado",
+        "Your turn" => "Tu turno",
+        "Up next" => "En cola",
+        "Snoozed" => "Aplazado",
+        "Actions" => "Acciones",
+        "Background" => "Segundo plano",
+        "Inspector" => "Inspector",
+        "Queue" => "Poner en cola",
+        "Attach" => "Adjuntar",
+        "Default model" => "Modelo predeterminado",
+        // The Doctor panel rows have no TUI wording (the TUI has no doctor),
+        // so these are the desktop's own words.
+        "Store" => "Almacén",
+        "Authentication" => "Autenticación",
+        _ => return None,
+    })
 }
 
 pub fn desktop(english: &'static str, spanish_text: &'static str) -> &'static str {
@@ -132,6 +148,55 @@ pub fn desktop(english: &'static str, spanish_text: &'static str) -> &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_words_win_over_the_reverse_catalog() {
+        apply(Some("es-ES"), None);
+        // The thread group is the TUI sidebar mode's "todos", not the stats
+        // range's "Todo"; the thread status is the desktop's own wording,
+        // not the update stage's "Hecho".
+        assert_eq!(tr("All"), "Todos");
+        assert_eq!(tr("Done"), "Terminado");
+        // Agreements with the TUI catalogs keep working through every layer.
+        assert_eq!(tr("This project"), "Este proyecto");
+        assert_eq!(tr("Background"), "Segundo plano");
+        apply(Some("en"), None);
+        assert_eq!(tr("All"), "All");
+        assert_eq!(tr("Done"), "Done");
+    }
+
+    #[test]
+    fn doctor_labels_have_spanish_strings() {
+        // Every row of the Doctor panel, in panel order; proper names stay
+        // as they are, everything else has a Spanish string.
+        let labels = [
+            "Runtime",
+            "Git",
+            "Claude Code",
+            "OpenCode",
+            "Codex",
+            "Store",
+            "Authentication",
+        ];
+        apply(Some("es-ES"), None);
+        assert_eq!(
+            labels.map(|label| tr(label).into_owned()),
+            [
+                "Motor",
+                "Git",
+                "Claude Code",
+                "OpenCode",
+                "Codex",
+                "Almacén",
+                "Autenticación",
+            ]
+        );
+        apply(Some("en"), None);
+        assert_eq!(
+            labels.map(|label| tr(label).into_owned()),
+            labels.map(str::to_string)
+        );
+    }
 
     #[test]
     fn language_precedence_and_the_shared_spanish_copy() {
