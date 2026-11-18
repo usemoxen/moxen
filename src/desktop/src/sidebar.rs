@@ -165,7 +165,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     ),
             );
         }
-        let selected = w.selected == i;
+        let selected = Workspace::shown_thread(w.creating, w.selected) == Some(i);
         let menu_open =
             w.thread_popup.is_some() || w.dropdown == Some(crate::workspace::Dropdown::Thread);
         // A click selects the row, which drops its tip; only a truncated
@@ -357,7 +357,14 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .text_color(color("ink-2"))
                 .child(
                     row("settled-toggle")
-                        .control(crate::language::tr("Show settled threads").into_owned())
+                        .control(
+                            crate::language::tr(if w.settled_open {
+                                "Hide settled threads"
+                            } else {
+                                "Show settled threads"
+                            })
+                            .into_owned(),
+                        )
                         .child(
                             div()
                                 .size(px(14.))

@@ -974,7 +974,14 @@ fn composer(
                         None => card(w, thread, draft_empty, window, cx).into_any_element(),
                     }
                 })
-                .children(thread.and_then(|_| status_line(w, cx))),
+                // A new-thread draft has no status of its own: the open thread's
+                // branch, usage and background chips stay hidden until the
+                // thread is listed.
+                .children(
+                    thread
+                        .filter(|_| Workspace::shown_thread(w.creating, w.selected).is_some())
+                        .and_then(|_| status_line(w, cx)),
+                ),
         )
 }
 
@@ -2396,6 +2403,9 @@ fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
         }
     });
     let usage = chip("usage", "Context and plan usage")
+        // The render-harness test for the new-thread draft finds the chip by
+        // this name, like `composer-problem` below.
+        .debug_selector(|| "status-usage".into())
         .flex_shrink_0()
         .children((!shares.is_empty()).then(|| crate::usage::meter(&shares, 24., 5.)))
         .children(label.map(|label| {

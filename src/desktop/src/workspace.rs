@@ -1490,6 +1490,13 @@ impl Workspace {
         self.clear_thread_tip();
         cx.notify();
     }
+    /// The thread the window chrome may present: none while the new-thread
+    /// draft is active, so the sidebar, title bar and status line never show
+    /// the open thread's state behind the draft.
+    pub fn shown_thread(creating: bool, selected: ThreadId) -> Option<ThreadId> {
+        (!creating).then_some(selected)
+    }
+
     /// Drops the sidebar row tip and the listed rows it was taken against.
     pub fn clear_thread_tip(&mut self) {
         self.thread_tip = None;
@@ -2060,6 +2067,31 @@ mod tests {
         cx.update(crate::composer::bind_keys);
         let source = MockSource::new().with_project_title("moxen-chat", "a  b");
         cx.add_window_view(|window, cx| Workspace::with_source(Box::new(source), false, window, cx))
+    }
+
+    #[gpui::test]
+    fn the_new_thread_draft_hides_the_open_thread(cx: &mut TestAppContext) {
+        let (workspace, cx) = mock_workspace(cx);
+        cx.update(|_, cx| {
+            workspace.update(cx, |w, cx| w.select(0, cx));
+        });
+        cx.run_until_parked();
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("status-usage").is_some());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.new_thread(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.creating);
+            // The sidebar, title bar and status line read the draft through
+            // `shown_thread`: an active draft presents no thread, so the old
+            // row, its state chip and its usage pill all clear.
+            assert_eq!(Workspace::shown_thread(w.creating, w.selected), None);
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("status-usage").is_none());
     }
 
     #[gpui::test]

@@ -122,6 +122,11 @@ fn tasks(
         )
 }
 
+/// A tab badge's count, hidden at zero: only live information earns the slot.
+fn nonzero(count: usize) -> Option<String> {
+    (count > 0).then(|| count.to_string())
+}
+
 fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let info = w.source.delegated(w.selected).is_some();
     div()
@@ -137,12 +142,19 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .border_b_1()
                 .border_color(color("rule"))
                 .children(TABS.into_iter().enumerate().map(|(i, label)| {
-                    let count = match i {
-                        0 => w.source.turn_diffs(w.selected).len(),
-                        1 => w.source.git(w.selected).requests.len(),
-                        3 if !info => crate::work_view::agent_count(w),
-                        4 => crate::work_view::background_count(w),
-                        _ => 0,
+                    let count: Option<String> = match i {
+                        0 => nonzero(w.source.turn_diffs(w.selected).len()),
+                        1 => nonzero(w.source.git(w.selected).requests.len()),
+                        // The mockup names the share on the tab: "Context 66%".
+                        2 => {
+                            let data = w.source.context(w.selected);
+                            let snapshot = w.source.snapshot_usage(w.selected);
+                            crate::usage::context_percent(data.as_deref(), snapshot.as_ref())
+                                .map(|percent| format!("{percent}%"))
+                        }
+                        3 if !info => nonzero(crate::work_view::agent_count(w)),
+                        4 => nonzero(crate::work_view::background_count(w)),
+                        _ => None,
                     };
                     let label = if i == 3 && info { "Info" } else { label };
                     let on = w.tab == i;
@@ -165,14 +177,14 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_color(color(if on { "ink" } else { "ink-2" }))
                         .when(on, |s| s.font_weight(FontWeight::SEMIBOLD))
                         .child(crate::language::tr(label).into_owned())
-                        .when(count > 0, |s| {
+                        .when_some(count, |s, count| {
                             s.child(
                                 div()
                                     .font_family(theme::MONO)
                                     .font_weight(FontWeight::NORMAL)
                                     .text_size(px(11.5))
                                     .text_color(color("ink-2"))
-                                    .child(count.to_string()),
+                                    .child(count),
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {

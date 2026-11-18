@@ -756,6 +756,29 @@ pub fn context_shares(categories: &[Category], max: Option<i64>, used: i64) -> V
     shares
 }
 
+/// The Context tab badge's number: the window's share as a percent, like the
+/// mockup's "Context 66%". The live breakdown first, then the last recorded
+/// reading, then the snapshot's recorded totals.
+pub fn context_percent(
+    data: Option<&ContextData>,
+    snapshot: Option<&SnapshotUsage>,
+) -> Option<i64> {
+    let (used, max) = data
+        .and_then(|data| data.totals())
+        .map(|(used, max)| (Some(used), max))
+        .unwrap_or((None, None));
+    let (used, max): (Option<i64>, Option<i64>) = match (used, max) {
+        (Some(used), max) => (Some(used), max),
+        (None, _) => snapshot
+            .map(|usage| (Some(usage.used), usage.max))
+            .unwrap_or((None, None)),
+    };
+    match (used, max) {
+        (Some(used), Some(max)) if max > 0 => Some(window_percent(used, max)),
+        _ => None,
+    }
+}
+
 /// A forecast that the account's allowance runs out mid-work: the provider,
 /// the window, and whether the thread should wrap up now.
 #[derive(Clone, Debug, PartialEq)]
@@ -1039,27 +1062,36 @@ fn mono(text: String) -> Div {
         .child(text)
 }
 
+/// The token a used category draws in, by name: the providers name the same
+/// families differently ("System prompt & tools", "Reasoning", "Messages"),
+/// but each family keeps its colour wherever it is drawn, so the Context tab
+/// and the status-line meter agree. Unknown names read as tools, the first
+/// category the fixtures name.
+pub fn category_token(name: &str) -> &'static str {
+    let name = name.to_lowercase();
+    if name.contains("system") {
+        "context-system"
+    } else if name.contains("tool") {
+        "context-tools"
+    } else if name.contains("reason") {
+        "context-reasoning"
+    } else if name.contains("message") {
+        "context-messages"
+    } else {
+        "context-tools"
+    }
+}
+
 /// The status line's usage meter: each used category its own colour, in
 /// stacked order. Missing shares leave it out rather than show an empty bar.
 pub fn meter(shares: &[Share], width: f32, height: f32) -> impl IntoElement {
-    let mut used = 0;
     let colors: Vec<(&str, f32)> = shares
         .iter()
         .map(|share| {
             let token = match share.kind {
                 CategoryKind::Free => "rule",
                 CategoryKind::Buffer => "ink-2",
-                CategoryKind::Used => {
-                    let tokens = [
-                        "context-tools",
-                        "context-system",
-                        "context-reasoning",
-                        "context-messages",
-                    ];
-                    let token = tokens[used % tokens.len()];
-                    used += 1;
-                    token
-                }
+                CategoryKind::Used => category_token(share.name),
             };
             (token, share.percent as f32)
         })
@@ -1160,16 +1192,35 @@ pub fn render(
                 let token = match share.kind {
                     CategoryKind::Free => "rule",
                     CategoryKind::Buffer => "ink-2",
-                    CategoryKind::Used => "context-tools",
+                    CategoryKind::Used => category_token(share.name),
                 };
                 (token, share.percent as f32)
             })
             .collect::<Vec<_>>();
+        // The auto-compact mark sits on the bar the way the mockup draws it:
+        // an ink tick at the threshold's share of the window, over the track
+        // (`overflow: visible`, unlike the status-line meter).
+        let mark = match (threshold, max) {
+            (Some(threshold), Some(max)) if max > 0 => {
+                let at = (threshold as f32 / max as f32).clamp(0., 1.);
+                Some(
+                    div()
+                        .absolute()
+                        .left(relative(at))
+                        .top(px(-4.))
+                        .bottom(px(-4.))
+                        .w(px(2.))
+                        .rounded(px(1.))
+                        .bg(color("ink")),
+                )
+            }
+            _ => None,
+        };
         body = body.child(
             div()
+                .relative()
                 .h(px(10.))
                 .rounded(px(5.))
-                .overflow_hidden()
                 .bg(color("sunk"))
                 .flex()
                 .children(bar.into_iter().map(|(token, part)| {
@@ -1179,7 +1230,8 @@ pub fn render(
                         .border_r_2()
                         .border_color(color("ground"))
                         .bg(color(token))
-                })),
+                }))
+                .children(mark),
         );
     }
     if let (Some(threshold), Some(_), Some(used)) = (threshold, max, used) {
@@ -1223,7 +1275,7 @@ pub fn render(
                     let token = match share.kind {
                         CategoryKind::Free => "rule",
                         CategoryKind::Buffer => "ink-2",
-                        CategoryKind::Used => "context-tools",
+                        CategoryKind::Used => category_token(share.name),
                     };
                     div()
                         .flex()
@@ -1348,13 +1400,10 @@ fn plan_usage(
             .gap(px(6.))
             .children(rows.into_iter().map(move |(label, percent, reset)| {
                 let fraction = (percent / 100.).clamp(0., 1.) as f32;
-                let token = if fraction >= 0.9 {
-                    "broken"
-                } else if fraction >= 0.7 {
-                    "held"
-                } else {
-                    "context-tools"
-                };
+                // The mockup paints every plan window the same blue: urgency
+                // belongs to the gauges and the protection banner, and only
+                // the `vu` meter uses `held` and `broken`.
+                let token = "label-2";
                 div()
                     .flex()
                     .items_center()
@@ -1388,10 +1437,95 @@ fn plan_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        Category, CategoryKind, Hold, LimitsData, QueueEntry, format_count, format_share, headroom,
-        plan_gauges, reset_label, until_label,
+        Breakdown, Category, CategoryKind, ContextData, Hold, LimitsData, QueueEntry,
+        SnapshotUsage, format_count, format_share, headroom, plan_gauges, reset_label, until_label,
     };
     use serde_json::json;
+
+    #[test]
+    fn context_categories_keep_their_family_colours() {
+        // Every name the providers report maps to its family's token, so the
+        // Context tab and the status-line meter agree whatever the order.
+        assert_eq!(super::category_token("Tool calls"), "context-tools");
+        assert_eq!(super::category_token("Tool definitions"), "context-tools");
+        assert_eq!(
+            super::category_token("Tool calls and results"),
+            "context-tools"
+        );
+        assert_eq!(
+            super::category_token("System prompt & tools"),
+            "context-system"
+        );
+        assert_eq!(super::category_token("System and tools"), "context-system");
+        assert_eq!(super::category_token("System prompt"), "context-system");
+        assert_eq!(super::category_token("Reasoning"), "context-reasoning");
+        assert_eq!(super::category_token("Messages"), "context-messages");
+        assert_eq!(super::category_token("User messages"), "context-messages");
+        assert_eq!(
+            super::category_token("Assistant messages"),
+            "context-messages"
+        );
+        // A name no family claims reads as tools, the first category the
+        // fixtures name.
+        assert_eq!(super::category_token("Something new"), "context-tools");
+        // Shares sort largest-first: the token still follows the name, not
+        // the position, so a reordered breakdown draws the same colours.
+        let categories = vec![
+            Category {
+                name: "Messages".to_string(),
+                tokens: 83_000,
+                kind: CategoryKind::Used,
+            },
+            Category {
+                name: "Tool calls".to_string(),
+                tokens: 280_000,
+                kind: CategoryKind::Used,
+            },
+        ];
+        let shares = super::context_shares(&categories, Some(1_000_000), 663_000);
+        assert_eq!(
+            shares
+                .iter()
+                .map(|share| (share.name, super::category_token(share.name)))
+                .collect::<Vec<_>>(),
+            [
+                ("Tool calls", "context-tools"),
+                ("Messages", "context-messages")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_context_badge_names_the_window_share() {
+        // 663k of 1m reads 66%, like the TUI's composer footer, and the
+        // mockup's "Context 66%".
+        let breakdown = Breakdown::from_json(&json!({
+            "usedTokens": 663_000, "maxTokens": 1_000_000,
+            "autoCompactThreshold": 800_000, "compactsAutomatically": true,
+            "categories": [
+                {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
+            ],
+        }));
+        let data = ContextData {
+            live: true,
+            breakdown,
+            reading: None,
+            error: None,
+        };
+        assert_eq!(super::context_percent(Some(&data), None), Some(66));
+        // No breakdown and no snapshot: no badge, never 0%.
+        assert_eq!(super::context_percent(None, None), None);
+        let snapshot = SnapshotUsage {
+            used: 663_000,
+            max: Some(1_000_000),
+            ..SnapshotUsage::default()
+        };
+        assert_eq!(super::context_percent(None, Some(&snapshot)), Some(66));
+        assert_eq!(
+            super::context_percent(None, Some(&SnapshotUsage::default())),
+            None
+        );
+    }
 
     #[test]
     fn counts_read_like_the_tui() {

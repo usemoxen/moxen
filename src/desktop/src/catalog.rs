@@ -214,6 +214,17 @@ impl Catalog {
             .map_or_else(|| prettify(&selection.model), |m| m.name.clone())
     }
 
+    /// The display name of a bare model slug, for readings that carry no
+    /// instance (the stats screen's favorite model): the catalog's name
+    /// where known, a readable form of the slug until then.
+    pub fn display_name(&self, slug: &str) -> String {
+        self.providers
+            .iter()
+            .flat_map(|provider| provider.models.iter())
+            .find(|model| model.slug == slug)
+            .map_or_else(|| prettify(slug), |model| model.name.clone())
+    }
+
     /// The reasoning level beside the name: the chosen one, else the model's
     /// default, so the knob never reads blank.
     pub fn effort_label(&self, selection: &Selection) -> Option<String> {
@@ -543,6 +554,17 @@ mod tests {
         };
         assert_eq!(names(None), ["opus", "haiku"]);
         assert_eq!(names(Some("old")), ["opus", "haiku", "old"]);
+    }
+
+    #[test]
+    fn bare_slugs_resolve_to_display_names() {
+        // The stats screen's favorite model carries no instance: the name
+        // comes from wherever the catalog knows the slug.
+        let catalog = Catalog::from_config(&config()).unwrap();
+        assert_eq!(catalog.display_name("opus"), "Opus 5.5");
+        assert_eq!(catalog.display_name("space-bunny-free"), "Space Bunny Free");
+        // A slug the catalog does not know reads like the picker does.
+        assert_eq!(catalog.display_name("mystery-model"), "Mystery Model");
     }
 
     #[test]

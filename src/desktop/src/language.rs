@@ -209,6 +209,7 @@ fn desktop_word(text: &str) -> Option<&'static str> {
         "Jump to thread or action" => "Ir a un hilo o acción",
         "New thread in this project" => "Nuevo hilo en este proyecto",
         "Show settled threads" => "Mostrar hilos cerrados",
+        "Hide settled threads" => "Ocultar hilos cerrados",
         "Show archived threads" => "Mostrar hilos archivados",
         "Search threads and actions" => "Buscar hilos y acciones",
         "What should the agent do?" => "¿Qué debe hacer el agente?",
@@ -255,9 +256,14 @@ mod tests {
         // Agreements with the TUI catalogs keep working through every layer.
         assert_eq!(tr("This project"), "Este proyecto");
         assert_eq!(tr("Background"), "Segundo plano");
+        // The settled toggle names its action: showing the section offers to
+        // hide it, and hiding it offers to show it.
+        assert_eq!(tr("Show settled threads"), "Mostrar hilos cerrados");
+        assert_eq!(tr("Hide settled threads"), "Ocultar hilos cerrados");
         apply(Some("en"), None);
         assert_eq!(tr("All"), "All");
         assert_eq!(tr("Done"), "Done");
+        assert_eq!(tr("Hide settled threads"), "Hide settled threads");
     }
 
     #[test]

@@ -749,7 +749,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .child("No usage yet.".to_string())
                         .into_any_element()
                 } else if tab == StatsTab::Overview {
-                    overview(&data).into_any_element()
+                    overview(w, &data).into_any_element()
                 } else {
                     models(&data).into_any_element()
                 }
@@ -758,7 +758,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(card_row(w, cx))
 }
 
-fn overview(data: &StatsData) -> impl IntoElement {
+fn overview(w: &Workspace, data: &StatsData) -> impl IntoElement {
     let today = today_key(crate::live::now_ms());
     let cost = match data.cost_usd {
         None => "unpriced".to_string(),
@@ -795,9 +795,15 @@ fn overview(data: &StatsData) -> impl IntoElement {
                 ),
                 (
                     "Favorite model".to_string(),
-                    data.favorite_model
-                        .clone()
-                        .unwrap_or_else(|| "—".to_string()),
+                    data.favorite_model.as_deref().map_or_else(
+                        || "—".to_string(),
+                        |slug| {
+                            w.catalog().map_or_else(
+                                || crate::catalog::prettify(slug),
+                                |catalog| catalog.display_name(slug),
+                            )
+                        },
+                    ),
                 ),
             ],
             528.,
