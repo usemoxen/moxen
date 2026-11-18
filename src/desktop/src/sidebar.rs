@@ -378,6 +378,28 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     )
                 })
                 .child(
+                    div()
+                        .id("stats")
+                        .quiet()
+                        .h(px(theme::ROW))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .rounded(px(6.))
+                        .text_size(px(13.5))
+                        .line_height(px(17.5))
+                        .child(ui::icon("circle-gauge", "ink-2"))
+                        .child(div().flex_1().child("Stats"))
+                        .on_hover(cx.listener(|this, hovering, _, cx| {
+                            this.stats_tip = *hovering;
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_stats(cx);
+                        })),
+                )
+                .child(
                     row("settings")
                         .control("Settings are unavailable in this preview")
                         .cursor(CursorStyle::Arrow)

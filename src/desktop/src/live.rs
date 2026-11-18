@@ -14,13 +14,16 @@ use crate::{
     composer_menu::{Destination, Improvement, Inventory},
     git::{self, CommitDetail, Forge, Git, OpenCommit, Overview, Patch, RequestStatus, TurnDiff},
     model::{
-        Answer, Ask, CatalogState, Connection, Decision, Delivery, MergeStrategy, Message,
-        NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, Reply,
-        SIDE_QUESTION_PENDING, Selection, SideAnswer, Status, Thread, ThreadAction, ThreadId,
+        Answer, Ask, CardState, CatalogState, Connection, ContextData, Decision, Delivery, Hold,
+        LimitsData, MergeStrategy, Message, NewRequest, NewThread, Permission, Problem, Project,
+        ProtectionData, QueueEdit, QueueMove, Queued, Reply, SIDE_QUESTION_PENDING, Selection,
+        SideAnswer, SnapshotUsage, StatsRange, StatsState, Status, Thread, ThreadAction, ThreadId,
         ThreadSource,
     },
     pending,
+    stats::StatsData,
     transcript::{self, Row},
+    usage::{Breakdown, Reading, estimate_breakdown},
     wire::{Wire, WireError},
     work::{self, Background, Delegated, Delegation, InspectorData, Read, View},
 };
@@ -531,6 +534,37 @@ struct State {
     side_answers: HashMap<ThreadId, SideAnswer>,
     asking_side_question: bool,
     reverted: Option<(ThreadId, Option<String>)>,
+    /// What the Context tab shows, by thread: the live breakdown and the last
+    /// recorded reading, once read.
+    contexts: HashMap<ThreadId, Arc<ContextData>>,
+    /// Threads with a context read on the wire.
+    context_reads: HashSet<ThreadId>,
+    /// When each thread's context was last read: reads ride a slow timer, as
+    /// the TUI's Context tab does, so the status line stays fresh without
+    /// polling the provider every tick.
+    context_at: HashMap<ThreadId, Instant>,
+    /// The account's plan usage, and when it was read.
+    limits: Option<Arc<LimitsData>>,
+    limits_at: Option<Instant>,
+    limits_reading: bool,
+    /// Usage protection: the forecasts and the recovery queue, once read.
+    protection: Option<Arc<ProtectionData>>,
+    protection_reading: bool,
+    /// Each followed thread's own protection hold, off its snapshot.
+    holds: HashMap<ThreadId, Hold>,
+    /// Each followed thread's recorded context totals, off its snapshot: what
+    /// the status line reads without another query, and what the transcript
+    /// estimate scales against.
+    snapshot_usage: HashMap<ThreadId, SnapshotUsage>,
+    /// Each followed thread's transcript estimate, for providers that only
+    /// report a total: what fills the window, from its own messages and
+    /// tool calls.
+    estimated: HashMap<ThreadId, Breakdown>,
+    /// Usage stats and saved cards, by range, once read.
+    stats: HashMap<StatsRange, Arc<StatsState>>,
+    stats_reads: HashSet<StatsRange>,
+    cards: HashMap<StatsRange, Arc<CardState>>,
+    card_reads: HashSet<StatsRange>,
 }
 impl State {
     fn composer_directory(&self, target: &Destination) -> Option<&str> {
@@ -1215,6 +1249,26 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
                         background_count: work::background_count(thread),
                     }),
                 );
+                match Hold::from_json(thread) {
+                    Some(hold) => {
+                        state.holds.insert(id, hold);
+                    }
+                    None => {
+                        state.holds.remove(&id);
+                    }
+                }
+                match SnapshotUsage::from_json(thread) {
+                    Some(usage) => {
+                        state.snapshot_usage.insert(id, usage.clone());
+                        state
+                            .estimated
+                            .insert(id, estimate_breakdown(&usage, thread));
+                    }
+                    None => {
+                        state.snapshot_usage.remove(&id);
+                        state.estimated.remove(&id);
+                    }
+                }
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
                 state.turns.insert(id, git::turn_diffs_of(thread));
                 state.waiting.insert(
@@ -1697,8 +1751,9 @@ impl ThreadSource for ServerSource {
         });
         let (detail, runs) = (self.shared.clone(), self.shared.clone());
         let (detail_sha, runs_sha) = (sha.clone(), sha);
+        let drop_sha = detail_sha.clone();
         let (detail_uuid, runs_uuid) = (uuid.clone(), uuid);
-        with_wire(&self.shared, move |wire| {
+        if !with_wire(&self.shared, move |wire| {
             let fields = json!({ "threadId": detail_uuid, "sha": detail_sha });
             let result = wire.query("git.commit.detail", fields);
             detail.update(|state| {
@@ -1712,7 +1767,18 @@ impl ThreadSource for ServerSource {
                     Err(error) => git.error = Some(error.message),
                 }
             });
-        });
+        }) {
+            self.shared.update(|state| {
+                let git = state.git_of(id);
+                let Some(open) = git.commit.as_mut().filter(|open| open.sha == drop_sha) else {
+                    return;
+                };
+                open.loading = false;
+                git.error = Some(dropped());
+            });
+        }
+        // CI is optional: without it the commit stands without runs, as with a
+        // slow forge, so a dropped read needs no cleanup.
         with_wire(&self.shared, move |wire| {
             let fields = json!({ "threadId": runs_uuid, "sha": runs_sha });
             // CI is the forge's and may be slow or absent: the commit stands without it.
@@ -1734,6 +1800,72 @@ impl ThreadSource for ServerSource {
     }
     fn close_commit(&mut self, id: ThreadId) {
         self.shared.update(|state| state.git_of(id).commit = None);
+    }
+    fn context(&self, id: ThreadId) -> Option<Arc<ContextData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.contexts.get(&id).cloned()
+    }
+    fn read_context(&mut self, id: ThreadId) {
+        read_context(&self.shared, id);
+    }
+    fn snapshot_usage(&self, id: ThreadId) -> Option<SnapshotUsage> {
+        let state = self.shared.state.lock().expect("live state");
+        state.snapshot_usage.get(&id).cloned()
+    }
+    fn limits(&self) -> Option<Arc<LimitsData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.limits.clone()
+    }
+    fn read_limits(&mut self) {
+        read_limits(&self.shared);
+    }
+    fn protection(&self) -> Option<Arc<ProtectionData>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.protection.clone()
+    }
+    fn read_protection(&mut self) {
+        read_protection(&self.shared);
+    }
+    fn hold(&self, id: ThreadId) -> Option<Hold> {
+        let state = self.shared.state.lock().expect("live state");
+        state.holds.get(&id).cloned()
+    }
+    fn wrap_provider(&mut self, provider: String) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch("usage.wrap", json!({ "provider": provider }))
+                .map(|_| ())
+                .map_err(|error| problem(&error, None))?;
+            read_protection(&shared);
+            Ok(())
+        });
+    }
+    fn queue_protection(&mut self, thread_id: String, direction: QueueMove) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "usage.queue",
+                json!({ "threadId": thread_id, "direction": direction.wire() }),
+            )
+            .map(|_| ())
+            .map_err(|error| problem(&error, None))?;
+            read_protection(&shared);
+            Ok(())
+        });
+    }
+    fn stats(&self, range: StatsRange) -> Option<Arc<StatsState>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.stats.get(&range).cloned()
+    }
+    fn read_stats(&mut self, range: StatsRange) {
+        read_stats(&self.shared, range);
+    }
+    fn card(&self, range: StatsRange) -> Option<Arc<CardState>> {
+        let state = self.shared.state.lock().expect("live state");
+        state.cards.get(&range).cloned()
+    }
+    fn read_card(&mut self, range: StatsRange) {
+        read_card(&self.shared, range);
     }
     fn create_request(&mut self, id: ThreadId, request: NewRequest) {
         let mut fields = json!({ "title": request.title, "draft": request.draft });
@@ -1779,7 +1911,8 @@ impl ThreadSource for ServerSource {
             state.patches.insert((id, turn), Patch::Loading);
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        let dropped = self.shared.clone();
+        if !with_wire(&shared.clone(), move |wire| {
             let result = wire.request(
                 "turnDiff",
                 Some(json!({ "threadId": uuid, "toTurnCount": turn })),
@@ -1792,7 +1925,12 @@ impl ThreadSource for ServerSource {
             shared.update(|state| {
                 state.patches.insert((id, turn), patch);
             });
-        });
+        }) {
+            // Back to unasked: the Diff tab asks again while it shows the turn.
+            dropped.update(|state| {
+                state.patches.remove(&(id, turn));
+            });
+        }
     }
     fn tree_patch(&self, id: ThreadId) -> Option<Patch> {
         let state = self.shared.state.lock().expect("live state");
@@ -1810,12 +1948,18 @@ impl ThreadSource for ServerSource {
                 .and_then(|g| g.overview.as_ref()?.root.clone())
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        let dropped = self.shared.clone();
+        if !with_wire(&shared.clone(), move |wire| {
             let patch = read_tree(&wire, &uuid, root).unwrap_or_else(Patch::Failed);
             shared.update(|state| {
                 state.trees.insert(id, patch);
             });
-        });
+        }) {
+            // Back to unasked: the Diff tab asks again while it shows the tree.
+            dropped.update(|state| {
+                state.trees.remove(&id);
+            });
+        }
     }
     fn send_message(&mut self, id: ThreadId, prompt: Prompt, delivery: Delivery) -> Option<Reply> {
         let (uuid, busy) = {
@@ -2280,7 +2424,7 @@ impl ServerSource {
             git.notice = None;
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        if !with_wire(&shared.clone(), move |wire| {
             let result = wire.dispatch(command, fields);
             let branch = shared.update(|state| {
                 let git = state.git_of(id);
@@ -2295,7 +2439,13 @@ impl ServerSource {
             if result.is_ok() && command != "forge.request.comment" {
                 begin_read(&shared, id, &uuid, branch);
             }
-        });
+        }) {
+            self.shared.update(|state| {
+                let git = state.git_of(id);
+                git.busy = None;
+                git.error = Some(dropped());
+            });
+        }
     }
 }
 
@@ -2315,12 +2465,23 @@ fn begin_read(shared: &Arc<Shared>, id: ThreadId, uuid: &str, branch: Option<Str
     });
     let (history, forge) = (shared.clone(), shared.clone());
     let (history_uuid, forge_uuid) = (uuid.to_string(), uuid.to_string());
-    with_wire(shared, move |wire| {
+    let (history_drop, forge_drop) = (shared.clone(), shared.clone());
+    if !with_wire(shared, move |wire| {
         read_history(&history, &wire, id, read, &history_uuid, branch.as_deref())
-    });
-    with_wire(shared, move |wire| {
+    }) {
+        history_drop.update_git(id, read, |git| {
+            git.loading_git = false;
+            git.error = Some(dropped());
+        });
+    }
+    if !with_wire(shared, move |wire| {
         read_forge(&forge, &wire, id, read, &forge_uuid)
-    });
+    }) {
+        forge_drop.update_git(id, read, |git| {
+            git.loading_forge = false;
+            git.error = Some(dropped());
+        });
+    }
 }
 
 /// Polls each visible view without overlapping reads of it. Thread and work
@@ -2339,7 +2500,9 @@ fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
         names
     };
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    let drop_key = key.clone();
+    if !with_wire(shared, move |wire| {
         let answer = match &key.1 {
             Read::Delegation => (|| {
                 let link = wire.query("thread.delegation", json!({ "threadId": uuid }))?;
@@ -2389,18 +2552,31 @@ fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
                 }
             }
         });
-    });
+    }) {
+        // Back to unasked: the inspector asks again while the view shows.
+        dropped.update(|state| {
+            state.work_reads.remove(&drop_key);
+        });
+    }
 }
 
-/// Runs a read on its own thread with the open connection; nothing if there is none.
-fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) {
+/// Runs a read on its own thread with the open connection. Reports whether
+/// the job was started: a dropped job (no connection, so nothing runs) leaves
+/// its caller to release whatever guard it set, so a later read still runs.
+fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) -> bool {
     let wire = shared.state.lock().expect("live state").wire.clone();
     let Some(wire) = wire else {
-        return;
+        return false;
     };
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("moxen-read".into())
-        .spawn(move || job(wire));
+        .spawn(move || job(wire))
+        .is_ok()
+}
+
+/// What a read that never reached the server says.
+fn dropped() -> String {
+    "Not connected to the Moxen server.".to_string()
 }
 
 /// The checkout's history: status, branches and commits, then each commit's CI.
@@ -2517,6 +2693,315 @@ fn read_tree(wire: &Wire, uuid: &str, root: Option<String>) -> Result<Patch, Str
         return Ok(Patch::Missing);
     }
     Ok(Patch::Ready(git::parse_patch(&ask(&root, "diff", &paths)?)))
+}
+
+/// Reads the thread's live context breakdown and its last recorded reading.
+/// Re-reads at most every few seconds, as the TUI's Context tab does. A failed
+/// pair keeps the last answer and names the failure, so the Context tab
+/// reads "no data" rather than 0%.
+fn read_context(shared: &Arc<Shared>, id: ThreadId) {
+    let uuid = {
+        let mut state = shared.state.lock().expect("live state");
+        let fresh = state
+            .context_at
+            .get(&id)
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(5));
+        if state.wire.is_none() || !fresh || !state.context_reads.insert(id) {
+            None
+        } else {
+            match state.slots.get(id).map(|slot| slot.uuid.clone()) {
+                Some(uuid) => Some(uuid),
+                // This call took the guard but has no thread to read:
+                // release it, so the next read still runs. A call that
+                // never took it (no wire, stale, or another read in
+                // flight) leaves the owner's guard alone.
+                None => {
+                    state.context_reads.remove(&id);
+                    None
+                }
+            }
+        }
+    };
+    let Some(uuid) = uuid else {
+        return;
+    };
+    let target = shared.clone();
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let breakdown = wire.query("thread.context", json!({ "threadId": uuid }));
+        let reading = wire.query("thread.context-reading", json!({ "threadId": uuid }));
+        target.update(|state| {
+            state.context_reads.remove(&id);
+            state.context_at.insert(id, Instant::now());
+            let previous = state.contexts.get(&id).cloned();
+            let error = match (&breakdown, &reading) {
+                (Err(error), _) | (_, Err(error)) => Some(error.message.clone()),
+                _ => None,
+            };
+            let live = breakdown
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("live"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let failed = breakdown.is_err() && reading.is_err();
+            let next = if failed {
+                // A failed pair keeps the last answer, as the banner does.
+                previous
+                    .as_ref()
+                    .and_then(|previous| previous.breakdown.clone())
+            } else {
+                breakdown
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| Breakdown::from_json(&value["breakdown"]))
+                    .filter(|breakdown| !breakdown.categories.is_empty())
+                    // A total-only reading still shows what fills the
+                    // window: the transcript estimate, like the TUI's.
+                    .or_else(|| state.estimated.get(&id).cloned())
+            };
+            let last = if failed {
+                previous
+                    .as_ref()
+                    .and_then(|previous| previous.reading.clone())
+            } else {
+                reading
+                    .as_ref()
+                    .ok()
+                    .and_then(Reading::from_json)
+                    .or_else(|| {
+                        previous
+                            .as_ref()
+                            .and_then(|previous| previous.reading.clone())
+                    })
+            };
+            state.contexts.insert(
+                id,
+                Arc::new(ContextData {
+                    live,
+                    breakdown: next,
+                    reading: last,
+                    error,
+                }),
+            );
+        });
+    }) {
+        dropped.update(|state| {
+            state.context_reads.remove(&id);
+        });
+    }
+}
+
+/// The account's plan windows, re-read on the TUI's slow timer: live events
+/// refresh the server's copy, this just picks it up.
+fn read_limits(shared: &Arc<Shared>) {
+    let fresh = shared.update(|state| {
+        let due = state
+            .limits_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(20));
+        if due && !state.limits_reading {
+            state.limits_reading = true;
+            true
+        } else {
+            false
+        }
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let answer = wire.query("usage.limits", json!({}));
+        target.update(|state| {
+            state.limits_reading = false;
+            state.limits_at = Some(Instant::now());
+            match answer {
+                Ok(value) => {
+                    state.limits = Some(Arc::new(LimitsData::from_json(&value)));
+                }
+                Err(error) if state.limits.is_none() => {
+                    state.limits = Some(Arc::new(LimitsData {
+                        error: Some(error.message),
+                        ..LimitsData::default()
+                    }));
+                }
+                Err(_) => {}
+            }
+        });
+    }) {
+        dropped.update(|state| {
+            state.limits_reading = false;
+        });
+    }
+}
+
+/// Usage protection on the TUI's fast timer: a reconnect keeps the last
+/// durable queue visible, and a failed read keeps it too.
+fn read_protection(shared: &Arc<Shared>) {
+    let fresh = shared.update(|state| {
+        if state.protection_reading {
+            false
+        } else {
+            state.protection_reading = true;
+            state.wire.is_some()
+        }
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let answer = wire.query("usage.protection", json!({}));
+        target.update(|state| {
+            state.protection_reading = false;
+            match answer {
+                // A malformed answer is not protection state: the last
+                // answer stands, so a hiccup never clears the queue.
+                Ok(value) => match ProtectionData::from_json(&value) {
+                    Some(protection) => {
+                        state.protection = Some(Arc::new(protection));
+                    }
+                    None if state.protection.is_none() => {
+                        state.protection = Some(Arc::new(ProtectionData::default()));
+                    }
+                    None => {}
+                },
+                Err(error) if state.protection.is_none() => {
+                    state.protection = Some(Arc::new(ProtectionData {
+                        error: Some(error.message),
+                        ..ProtectionData::default()
+                    }));
+                }
+                Err(_) => {}
+            }
+        });
+    }) {
+        dropped.update(|state| {
+            state.protection_reading = false;
+        });
+    }
+}
+
+/// Usage stats for a range, read when the stats screen opens it.
+fn read_stats(shared: &Arc<Shared>, range: StatsRange) {
+    let fresh = shared.update(|state| {
+        if state.wire.is_none() || !state.stats_reads.insert(range) {
+            return false;
+        }
+        true
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let answer = wire.query("usage.stats", json!({ "range": range.wire() }));
+        target.update(|state| {
+            state.stats_reads.remove(&range);
+            let previous = state.stats.get(&range);
+            match answer {
+                Ok(value) => {
+                    state.stats.insert(
+                        range,
+                        Arc::new(StatsState {
+                            data: StatsData::from_json(range, &value),
+                            error: None,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    state.stats.insert(
+                        range,
+                        Arc::new(StatsState {
+                            data: previous.and_then(|previous| previous.data.clone()),
+                            error: Some(error.message),
+                        }),
+                    );
+                }
+            }
+        });
+    }) {
+        dropped.update(|state| {
+            state.stats_reads.remove(&range);
+        });
+    }
+}
+
+/// The shareable PNG card for a range: the server draws it, the client saves
+/// it where it runs, and the modal names the path.
+fn read_card(shared: &Arc<Shared>, range: StatsRange) {
+    let fresh = shared.update(|state| {
+        if state.wire.is_none() || !state.card_reads.insert(range) {
+            return false;
+        }
+        state.cards.insert(
+            range,
+            Arc::new(CardState {
+                busy: true,
+                ..CardState::default()
+            }),
+        );
+        true
+    });
+    if !fresh {
+        return;
+    }
+    let target = shared.clone();
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let saved: Result<String, WireError> = (|| {
+            let card = wire.query("usage.card", json!({ "range": range.wire() }))?;
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                text(&card, &["png"]).unwrap_or_default(),
+            )
+            .map_err(|_| WireError::failed("BAD_CARD", "The server's stats card was not a PNG."))?;
+            let path =
+                std::env::temp_dir().join(text(&card, &["filename"]).unwrap_or_default().replace(
+                    |char: char| {
+                        !char.is_ascii_alphanumeric() && char != '.' && char != '_' && char != '-'
+                    },
+                    "_",
+                ));
+            std::fs::write(&path, bytes)
+                .map_err(|cause| WireError::failed("CARD_WRITE_FAILED", cause.to_string()))?;
+            Ok(path.to_string_lossy().into_owned())
+        })();
+        target.update(|state| {
+            state.card_reads.remove(&range);
+            match saved {
+                Ok(path) => {
+                    state.cards.insert(
+                        range,
+                        Arc::new(CardState {
+                            path: Some(path),
+                            error: None,
+                            busy: false,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    state.cards.insert(
+                        range,
+                        Arc::new(CardState {
+                            path: None,
+                            error: Some(error.message),
+                            busy: false,
+                        }),
+                    );
+                }
+            }
+        });
+    }) {
+        // A job that never ran leaves no busy card behind.
+        dropped.update(|state| {
+            state.card_reads.remove(&range);
+            state.cards.remove(&range);
+        });
+    }
 }
 
 /// What a refused or failed command tells the user.
@@ -2826,6 +3311,8 @@ mod tests {
                 {"kind": "background.tasks", "payload": {"tasks": [{"taskId": "shell-1"}]}},
             ],
             "subagentRows": [{"agentId": "agent-1", "agentType": "Explore", "running": true, "stoppable": true}],
+            "contextUsage": {"usedTokens": 663_000, "maxTokens": 1_000_000},
+            "protection": {"protected": true, "forced": false, "waitingWakeUps": 1},
             "checkpoints": [
                 {"turnId": "t1", "status": "available", "checkpointTurnCount": 1, "files": []},
                 {"turnId": "t2", "status": "available", "checkpointTurnCount": 2,
@@ -2903,18 +3390,25 @@ mod tests {
     }
 
     /// A server that serves one running thread with a message waiting in its
-    /// queue, and records every command it is sent.
+    /// queue, and records every command it is sent and every query it is
+    /// asked. Query payloads are recorded for the test thread to assert, so
+    /// a mismatch fails with the diff rather than a timeout on a panicking
+    /// server thread.
+    type Recorded = Arc<Mutex<Vec<Value>>>;
     #[cfg(unix)]
-    fn fake_server(path: std::path::PathBuf) -> Arc<Mutex<Vec<Value>>> {
+    fn fake_server(path: std::path::PathBuf) -> (Recorded, Recorded) {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
         let listener = UnixListener::bind(&path).expect("bind");
         let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
         let seen = commands.clone();
+        let queries = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_queries = queries.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = stream.expect("accept");
                 let seen = seen.clone();
+                let seen_queries = seen_queries.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -2966,115 +3460,162 @@ mod tests {
                             "turnDiff" => json!(
                                 "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n"
                             ),
-                            "query" => match params["type"].as_str() {
-                                Some("skills.list") => {
-                                    seen.lock().unwrap().push(params.clone());
-                                    json!({"trigger": "/", "skills": [{"name": "design-review", "enabled": true, "userInvocable": true}],"commands":[]})
-                                }
-                                Some("attachment.read" | "image.read") => {
-                                    seen.lock().unwrap().push(params.clone());
-                                    json!({"mimeType":"image/png","dataUrl":attachments::SAMPLE})
-                                }
-                                Some("thread.delegation") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.delegation", "threadId": "child"})
-                                    );
-                                    json!({"parentThreadId": "t1", "notify": true})
-                                }
-                                Some("thread.task.status") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.task.status", "parentThreadId": "t1", "taskId": "child"})
-                                    );
-                                    json!({"task": {"status": "running", "summary": "Checking focus"}})
-                                }
-                                Some("thread.subagent") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.subagent", "threadId": "t1", "agentId": "agent-1"})
-                                    );
-                                    json!({"available": true, "messages": [
-                                        {"id": "m1", "role": "user", "text": "Trace the key path"},
-                                        {"id": "m2", "role": "assistant", "text": "Found the listener"},
-                                    ]})
-                                }
-                                Some("thread.background.list") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.background.list", "threadId": "t1"})
-                                    );
-                                    let stopped = seen.lock().unwrap().iter().any(|m| {
-                                        m["type"] == "thread.background.stop"
-                                            && m["taskId"] == "shell-1"
-                                    });
-                                    if stopped {
-                                        json!({"live": true, "partial": true, "tasks": []})
-                                    } else {
-                                        json!({"live": true, "partial": true, "tasks": [{
-                                            "taskId": "shell-1", "toolName": "Bash", "description": "Checks", "command": "cargo test"
-                                        }, {
-                                            "taskId": "watch", "toolName": "Monitor", "description": "Logs", "stoppable": false
-                                        }]})
+                            "query" => {
+                                // Recorded for the test thread: a payload mismatch
+                                // fails there with the diff, not here with a
+                                // timeout on a panicking server thread. The
+                                // composer's reads also stay in the command
+                                // record, in the order they were sent.
+                                seen_queries.lock().unwrap().push(params.clone());
+                                match params["type"].as_str() {
+                                    Some("skills.list") => {
+                                        seen.lock().unwrap().push(params.clone());
+                                        json!({"trigger": "/", "skills": [{"name": "design-review", "enabled": true, "userInvocable": true}],"commands":[]})
                                     }
-                                }
-                                Some("thread.background.output") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.background.output", "threadId": "t1", "taskId": "shell-1"})
-                                    );
-                                    if seen.lock().unwrap().iter().any(|m| {
-                                        m["type"] == "thread.background.stop"
-                                            && m["taskId"] == "shell-1"
-                                    }) {
-                                        json!({"available": false, "lines": []})
-                                    } else {
-                                        json!({"available": true, "lines": ["running", "done"]})
+                                    Some("attachment.read" | "image.read") => {
+                                        seen.lock().unwrap().push(params.clone());
+                                        json!({"mimeType":"image/png","dataUrl":attachments::SAMPLE})
                                     }
-                                }
-                                Some("git.overview") => {
-                                    json!({"isRepository": true, "root": "/work",
+                                    Some("thread.delegation") => {
+                                        json!({"parentThreadId": "t1", "notify": true})
+                                    }
+                                    Some("thread.task.status") => {
+                                        json!({"task": {"status": "running", "summary": "Checking focus"}})
+                                    }
+                                    Some("thread.subagent") => {
+                                        json!({"available": true, "messages": [
+                                            {"id": "m1", "role": "user", "text": "Trace the key path"},
+                                            {"id": "m2", "role": "assistant", "text": "Found the listener"},
+                                        ]})
+                                    }
+                                    Some("thread.background.list") => {
+                                        let stopped = seen.lock().unwrap().iter().any(|m| {
+                                            m["type"] == "thread.background.stop"
+                                                && m["taskId"] == "shell-1"
+                                        });
+                                        if stopped {
+                                            json!({"live": true, "partial": true, "tasks": []})
+                                        } else {
+                                            json!({"live": true, "partial": true, "tasks": [{
+                                                "taskId": "shell-1", "toolName": "Bash", "description": "Checks", "command": "cargo test"
+                                            }, {
+                                                "taskId": "watch", "toolName": "Monitor", "description": "Logs", "stoppable": false
+                                            }]})
+                                        }
+                                    }
+                                    Some("thread.background.output") => {
+                                        if seen.lock().unwrap().iter().any(|m| {
+                                            m["type"] == "thread.background.stop"
+                                                && m["taskId"] == "shell-1"
+                                        }) {
+                                            json!({"available": false, "lines": []})
+                                        } else {
+                                            json!({"available": true, "lines": ["running", "done"]})
+                                        }
+                                    }
+                                    Some("git.overview") => {
+                                        json!({"isRepository": true, "root": "/work",
                                     "status": {"branch": "feature", "staged": 0, "unstaged": 2, "untracked": 0, "conflicted": 0},
                                     "branches": [{"name": "feature", "current": true, "remote": false, "ahead": 1, "behind": 0},
                                                  {"name": "main", "current": false, "remote": false, "ahead": null, "behind": null}],
                                     "commits": [{"sha": "abc1234567", "shortSha": "abc1234", "author": "A",
                                                  "date": "2026-11-16T10:00:00Z", "subject": "Fix", "refs": []}],
                                     "branch": "feature", "defaultBranch": "main"})
-                                }
-                                Some("forge.commits.checks") => {
-                                    json!({"checks": {"abc1234567": {"passed": 3, "failed": 1, "pending": 0}}})
-                                }
-                                Some("forge.detect") => {
-                                    json!({"kind": "github", "slug": "o/r", "installed": true, "authenticated": true})
-                                }
-                                Some("forge.requests.list") => json!({"requests": [
+                                    }
+                                    Some("forge.commits.checks") => {
+                                        json!({"checks": {"abc1234567": {"passed": 3, "failed": 1, "pending": 0}}})
+                                    }
+                                    Some("forge.detect") => {
+                                        json!({"kind": "github", "slug": "o/r", "installed": true, "authenticated": true})
+                                    }
+                                    Some("forge.requests.list") => json!({"requests": [
                                     {"number": 5, "title": "Other", "state": "open"},
                                     {"number": 7, "title": "Mine", "state": "open"}]}),
-                                Some("forge.request.status") => {
-                                    json!({"request": {"number": 7, "title": "Mine", "state": "open",
+                                    Some("forge.request.status") => {
+                                        json!({"request": {"number": 7, "title": "Mine", "state": "open",
                                     "url": "https://x/7", "targetBranch": "main", "runs": [], "mergeable": "mergeable"}})
-                                }
-                                Some("git.commit.detail") => {
-                                    json!({"commit": {"sha": "abc1234567", "subject": "Fix", "body": "",
+                                    }
+                                    Some("git.commit.detail") => {
+                                        json!({"commit": {"sha": "abc1234567", "subject": "Fix", "body": "",
                                     "author": "A", "date": "2026-11-16T10:00:00Z", "committer": "A", "committerDate": "2026-11-16T10:00:00Z",
                                     "parents": [], "refs": [], "files": [], "diff": null}})
+                                    }
+                                    Some("forge.commit.runs") => {
+                                        json!({"runs": [{"name": "ci", "state": "failed", "url": "https://x/run"}]})
+                                    }
+                                    Some("workspace.git") if params["call"] == "changed" => {
+                                        json!({"stdout": "src/a.rs\0"})
+                                    }
+                                    Some("workspace.git") => {
+                                        json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
+                                    }
+                                    Some("queue.read") => json!({"entries": [
+                                        {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
+                                        {"threadId": "other", "turnId": "x", "policy": {"held": false}},
+                                        {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
+                                    ]}),
+                                    Some("thread.context") => {
+                                        json!({"live": true, "breakdown": {
+                                            "usedTokens": 663_000, "maxTokens": 1_000_000,
+                                            "cachedInputTokens": 1000, "autoCompactThreshold": 800_000,
+                                            "compactsAutomatically": true, "costUsd": 1.25,
+                                            "categories": [
+                                                {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
+                                                {"name": "System and tools", "tokens": 180_000, "kind": "used"},
+                                                {"name": "Reasoning", "tokens": 120_000, "kind": "used"},
+                                                {"name": "Messages", "tokens": 83_000, "kind": "used"},
+                                                {"name": "Free space", "tokens": 337_000, "kind": "free"},
+                                            ],
+                                            "tools": [{"name": "Bash", "tokens": 40_000}],
+                                            "estimated": false,
+                                        }})
+                                    }
+                                    Some("thread.context-reading") => {
+                                        json!({"reading": {"usedTokens": 600_000, "maxTokens": 1_000_000,
+                                        "takenAt": "2026-11-16T10:00:00.000Z", "compactedSince": false}})
+                                    }
+                                    Some("usage.limits") => {
+                                        json!({"providers": {"claude": {
+                                        "checkedAt": "2026-11-16T10:00:00.000Z", "windows": [
+                                            {"id": "session", "kind": "session", "label": "Session",
+                                             "usedPercent": 36.0, "resetsAt": "2026-11-16T12:00:00.000Z"},
+                                            {"id": "weekly", "kind": "weekly", "label": "Weekly",
+                                             "usedPercent": 43.0, "resetsAt": null},
+                                        ], "unavailable": null}}})
+                                    }
+                                    Some("usage.protection") => {
+                                        json!({"forecasts": [{
+                                            "provider": "claude", "windowId": "session", "label": "Session",
+                                            "usedPercent": 97.0, "resetsAt": "2026-11-16T12:00:00.000Z",
+                                            "remainingWorkMs": 1_800_000, "reservePercent": 3.0,
+                                            "shouldWrap": true, "running": 1,
+                                        }], "queue": [{
+                                            "threadId": "t1", "title": "Fix", "provider": "claude",
+                                            "phase": "waiting", "resetsAt": "2026-11-16T12:00:00.000Z",
+                                            "order": 1, "handoff": false,
+                                        }]})
+                                    }
+                                    Some("usage.stats") => {
+                                        json!({
+                                            "range": "all", "sessions": 3, "messages": 340, "turns": 48,
+                                            "totalTokens": 663_000, "costUsd": 1.5, "unpricedTurns": 1,
+                                            "activeDays": 5, "bestStreak": 3, "peakHour": 9, "favoriteModel": "opus-5-5",
+                                            "byProvider": [{"key": "claude",
+                                                "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                                "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                            "byModel": [{"key": "opus-5-5",
+                                                "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                                "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                            "daily": [{"day": "2026-11-16", "tokens": 6,
+                                                "byModel": {"opus-5-5": 6}, "byProvider": {}}],
+                                        })
+                                    }
+                                    Some("usage.card") => {
+                                        json!({"png": "aGk=", "filename": "moxen-stats-test.png"})
+                                    }
+                                    other => panic!("unexpected fake-server query: {other:?}"),
                                 }
-                                Some("forge.commit.runs") => {
-                                    json!({"runs": [{"name": "ci", "state": "failed", "url": "https://x/run"}]})
-                                }
-                                Some("workspace.git") if params["call"] == "changed" => {
-                                    json!({"stdout": "src/a.rs\0"})
-                                }
-                                Some("workspace.git") => {
-                                    json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
-                                }
-                                Some("queue.read") => json!({"entries": [
-                                    {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
-                                    {"threadId": "other", "turnId": "x", "policy": {"held": false}},
-                                    {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
-                                ]}),
-                                other => panic!("unexpected fake-server query: {other:?}"),
-                            },
+                            }
                             "dispatch" => {
                                 seen.lock().unwrap().push(params.clone());
                                 match params["type"].as_str() {
@@ -3128,7 +3669,7 @@ mod tests {
                 });
             }
         });
-        commands
+        (commands, queries)
     }
 
     #[cfg(unix)]
@@ -3140,6 +3681,156 @@ mod tests {
         }
     }
 
+    /// The fake server's record of a read, asserted on the test thread: a
+    /// payload mismatch fails here with the diff, not after a 10 s timeout.
+    #[cfg(unix)]
+    fn queried(queries: &Arc<Mutex<Vec<Value>>>, kind: &str) -> Value {
+        wait_for(&format!("the {kind} query"), || {
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|query| query["type"] == kind)
+        });
+        queries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|query| query["type"] == kind)
+            .cloned()
+            .expect("query")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_read_releases_its_guard_for_the_next_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // No connection: with_wire reports the drop and the job never runs.
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            revision: AtomicU64::new(0),
+        });
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_job = ran.clone();
+        assert!(!with_wire(&shared, move |_| {
+            ran_job.store(true, Ordering::SeqCst);
+        }));
+        assert!(!ran.load(Ordering::SeqCst));
+        // A limits read with no wire leaves the flag clear and reads nothing.
+        read_limits(&shared);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.limits_reading);
+            assert!(state.limits.is_none());
+        }
+        // A later read, once the wire is there, succeeds through the same guard.
+        let dir = std::env::temp_dir().join(format!("moxen-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let (_commands, _queries) = fake_server(path.clone());
+        let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
+        shared.state.lock().expect("live state").wire = Some(Arc::new(wire));
+        let ran_read = Arc::new(AtomicBool::new(false));
+        let ran_read_job = ran_read.clone();
+        assert!(with_wire(&shared, move |_| {
+            ran_read_job.store(true, Ordering::SeqCst);
+        }));
+        read_limits(&shared);
+        wait_for("plan usage", || {
+            shared.state.lock().expect("live state").limits.is_some()
+        });
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.limits_reading);
+            assert!(
+                state
+                    .limits
+                    .as_deref()
+                    .is_some_and(|limits| limits.for_instance("claude").is_some())
+            );
+        }
+        wait_for("the dropped job's stand-in", || {
+            ran_read.load(Ordering::SeqCst)
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_context_read_waits_for_the_first() {
+        // One listed thread, so id 0 has a slot and a uuid to read.
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            revision: AtomicU64::new(0),
+        });
+        let dir = std::env::temp_dir().join(format!("moxen-context-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let (_commands, queries) = fake_server(path.clone());
+        let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
+        shared.update(|state| {
+            state.wire = Some(Arc::new(wire));
+            state.apply(&json!({
+                "projects": [{"id": "p", "title": "moxen"}],
+                "threads": [
+                    {"id": "t1", "projectId": "p", "title": "Fix it", "archivedAt": null},
+                ],
+            }));
+        });
+        // A read is already on the wire: a second call starts nothing and
+        // leaves the first read's guard alone, so the next tick does not
+        // duplicate the pair while it is still running.
+        shared.update(|state| {
+            state.context_reads.insert(0);
+        });
+        read_context(&shared, 0);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(state.context_reads.contains(&0));
+        }
+        assert!(
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|query| query["type"] != "thread.context")
+        );
+        // The first read's completion releases the guard; the next call then
+        // reads the pair and clears it again.
+        shared.update(|state| {
+            state.context_reads.remove(&0);
+        });
+        read_context(&shared, 0);
+        wait_for("the context pair", || {
+            shared
+                .state
+                .lock()
+                .expect("live state")
+                .contexts
+                .contains_key(&0)
+        });
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.context_reads.contains(&0));
+            assert!(
+                state.contexts[&0]
+                    .breakdown
+                    .as_ref()
+                    .is_some_and(|breakdown| !breakdown.categories.is_empty())
+            );
+        }
+        // An id this call took the guard for but with no slot to read
+        // releases it instead of leaking it: the guard is clear afterwards.
+        read_context(&shared, 7);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.context_reads.contains(&7));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn sends_steers_queues_and_edits_through_the_servers_commands() {
@@ -3147,7 +3838,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let commands = fake_server(path.clone());
+        let (commands, queries) = fake_server(path.clone());
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the thread list", || !source.list_threads().is_empty());
         source.focus(0);
@@ -3156,6 +3847,10 @@ mod tests {
         let queue = source.queued(0);
         assert_eq!(queue[0].key, "t1");
         assert!(queue[1].held);
+        assert_eq!(
+            queried(&queries, "queue.read"),
+            json!({"type": "queue.read"})
+        );
         let sent = |expected: usize| {
             wait_for("the command", || commands.lock().unwrap().len() >= expected);
             commands.lock().unwrap()[expected - 1].clone()
@@ -3730,6 +4425,182 @@ mod tests {
             json!({"type":"thread.turn.start","threadId":"new-thread","interactionMode":"orchestrate",
             "message":{"text":"[Image #1]","attachments":[upload]},"modelSelection":{"instanceId":"claude","model":"opus"}}),
         );
+
+        // The thread-action commands above end at sent(52): the usage phase
+        // below sends only queries until its own wrap and queue commands.
+        // The Context tab: the live breakdown, the last recorded reading, and
+        // the thread's own hold and recorded totals off its snapshot.
+        source.read_context(0);
+        wait_for("the context breakdown", || {
+            source
+                .context(0)
+                .as_deref()
+                .and_then(|context| context.breakdown.as_ref())
+                .is_some()
+        });
+        assert_eq!(
+            queried(&queries, "thread.context"),
+            json!({"type": "thread.context", "threadId": "t1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.context-reading"),
+            json!({"type": "thread.context-reading", "threadId": "t1"})
+        );
+        let context = source.context(0).expect("context");
+        assert!(context.live && context.error.is_none());
+        let breakdown = context.breakdown.as_ref().expect("breakdown");
+        assert_eq!((breakdown.used, breakdown.max), (663_000, Some(1_000_000)));
+        assert_eq!(breakdown.categories.len(), 5);
+        assert_eq!(breakdown.tools.len(), 1);
+        assert!(!breakdown.estimated);
+        let reading = context.reading.as_ref().expect("reading");
+        assert_eq!((reading.used, reading.max), (600_000, Some(1_000_000)));
+        assert!(!reading.compacted_since);
+        // The live breakdown wins over the snapshot's recorded totals.
+        assert_eq!(context.totals(), Some((663_000, Some(1_000_000))));
+        assert_eq!(
+            source
+                .snapshot_usage(0)
+                .map(|usage| (usage.used, usage.max)),
+            Some((663_000, Some(1_000_000)))
+        );
+        let hold = source.hold(0).expect("hold");
+        assert!(!hold.forced);
+        assert_eq!(hold.waiting, 1);
+        // A re-read inside the throttle window sends nothing new.
+        source.read_context(0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|query| query["type"] == "thread.context")
+                .count(),
+            1
+        );
+
+        // The account's plan usage, with its reset times; the instance reads
+        // its own account, then its driver's.
+        source.read_limits();
+        wait_for("plan usage", || source.limits().is_some());
+        assert_eq!(
+            queried(&queries, "usage.limits"),
+            json!({"type": "usage.limits"})
+        );
+        let limits = source.limits().expect("limits");
+        assert!(limits.error.is_none());
+        let claude = limits.for_instance("claude").expect("claude limits");
+        assert_eq!(
+            claude
+                .windows
+                .iter()
+                .map(|window| window.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Session", "Weekly"]
+        );
+        assert_eq!(
+            claude.windows[0].resets_at.as_deref(),
+            Some("2026-11-16T12:00:00.000Z")
+        );
+        assert_eq!(claude.windows[1].resets_at, None);
+        let gauges = crate::usage::plan_gauges(Some(claude));
+        assert_eq!(
+            gauges
+                .iter()
+                .map(|gauge| (gauge.short.as_str(), gauge.percent as i64))
+                .collect::<Vec<_>>(),
+            [("5h", 36), ("wk", 43)]
+        );
+        assert!(limits.for_instance("claudeAgent").is_some());
+        assert!(limits.for_instance("unknown").is_none());
+
+        // Usage protection: the forecast that says to wrap up, and the
+        // thread waiting on its allowance, with the wrap and queue commands.
+        source.read_protection();
+        wait_for("usage protection", || {
+            source
+                .protection()
+                .as_deref()
+                .is_some_and(|protection| !protection.queue.is_empty())
+        });
+        assert_eq!(
+            queried(&queries, "usage.protection"),
+            json!({"type": "usage.protection"})
+        );
+        let protection = source.protection().expect("protection");
+        assert!(protection.error.is_none());
+        let forecast = protection
+            .forecasts
+            .iter()
+            .find(|forecast| forecast.should_wrap);
+        assert_eq!(
+            forecast.map(|forecast| (forecast.provider.as_str(), forecast.label.as_str())),
+            Some(("claude", "Session"))
+        );
+        let entry = protection.queue.first().expect("queued thread");
+        assert_eq!(entry.phase.label(), "waiting for usage");
+        assert!(!entry.actions().is_empty());
+        source.wrap_provider("claude".into());
+        assert_eq!(
+            sent(53),
+            json!({"type": "usage.wrap", "provider": "claude"})
+        );
+        source.queue_protection("t1".into(), QueueMove::First);
+        assert_eq!(
+            sent(54),
+            json!({"type": "usage.queue", "threadId": "t1", "direction": "first"})
+        );
+        source.queue_protection("t1".into(), QueueMove::Cancel);
+        assert_eq!(
+            sent(55),
+            json!({"type": "usage.queue", "threadId": "t1", "direction": "cancel"})
+        );
+
+        // The stats screen: the numbers for the range, and the saved card.
+        source.read_stats(StatsRange::All);
+        wait_for("usage stats", || {
+            source
+                .stats(StatsRange::All)
+                .as_deref()
+                .and_then(|stats| stats.data.as_ref())
+                .is_some()
+        });
+        assert_eq!(
+            queried(&queries, "usage.stats"),
+            json!({"type": "usage.stats", "range": "all"})
+        );
+        let data = source
+            .stats(StatsRange::All)
+            .expect("stats")
+            .data
+            .clone()
+            .expect("stats data");
+        assert_eq!(
+            (data.sessions, data.turns, data.total_tokens),
+            (3, 48, 663_000)
+        );
+        assert_eq!(data.by_model.len(), 1);
+        assert_eq!(
+            data.daily.first().map(|day| day.day.as_str()),
+            Some("2026-11-16")
+        );
+        source.read_card(StatsRange::All);
+        wait_for("the stats card", || {
+            source
+                .card(StatsRange::All)
+                .as_deref()
+                .is_some_and(|card| !card.busy)
+        });
+        assert_eq!(
+            queried(&queries, "usage.card"),
+            json!({"type": "usage.card", "range": "all"})
+        );
+        let card = source.card(StatsRange::All).expect("card");
+        assert!(card.error.is_none());
+        let path = card.path.clone().expect("card path");
+        assert_eq!(std::fs::read(&path).expect("card bytes"), b"hi");
+        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3740,7 +4611,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let _commands = fake_server(path.clone());
+        let (_commands, queries) = fake_server(path.clone());
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the parent and child threads", || source.children(0) == [1]);
         source.focus(0);
@@ -3789,6 +4660,26 @@ mod tests {
             Some(Ok(View::Background(list))) if list.partial && list.tasks.len() == 2 && !list.tasks[1].stoppable));
         assert!(matches!(source.work(1, &Read::Delegation).as_deref(),
             Some(Ok(View::Delegation(link))) if link.notify && link.status.as_deref() == Some("running")));
+        assert_eq!(
+            queried(&queries, "thread.subagent"),
+            json!({"type": "thread.subagent", "threadId": "t1", "agentId": "agent-1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.background.output"),
+            json!({"type": "thread.background.output", "threadId": "t1", "taskId": "shell-1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.background.list"),
+            json!({"type": "thread.background.list", "threadId": "t1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.delegation"),
+            json!({"type": "thread.delegation", "threadId": "child"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.task.status"),
+            json!({"type": "thread.task.status", "parentThreadId": "t1", "taskId": "child"})
+        );
 
         source.stop_background(0, "shell-1");
         wait_for("the refreshed background list", || {

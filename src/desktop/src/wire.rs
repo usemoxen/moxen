@@ -43,6 +43,9 @@ impl WireError {
             message: message.into(),
         }
     }
+    pub(crate) fn failed(code: &str, message: impl Into<String>) -> Self {
+        Self::local(code, message)
+    }
     fn from_json(value: &Value) -> Self {
         let text = |key| value.get(key).and_then(Value::as_str).unwrap_or_default();
         Self::local(text("code"), text("message"))

@@ -12,7 +12,7 @@
 
 use crate::{
     live::{ms, parse_iso_ms, text},
-    model::Message,
+    model::{ContinuedKind, Message, TaskNotice},
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +21,102 @@ use std::collections::{HashMap, HashSet};
 const OUTPUT_LINES: usize = 120;
 const OUTPUT_CHARS: usize = 8_000;
 const SUMMARY_CHARS: usize = 160;
+
+/// What a continue after a usage limit sends once the limit resets
+/// (`USAGE_CONTINUE_PROMPT` in `src/core/threads/views.ts`): threads from
+/// before the origin tag carry the fixed text.
+const USAGE_CONTINUE_PROMPT: &str =
+    "The usage limit that stopped the last turn has reset. Continue the task where you left off.";
+/// The wrap-up prompt's first line (`WRAP_UP_PROMPT` in
+/// `src/core/usage/protection.ts`): a usage-continue carrying it is still
+/// under protection, not resuming.
+const WRAP_UP_PREFIX: &str = "The provider's shared usage allowance is nearly exhausted.";
+
+/// The tasks a moxen-written "delegated tasks settled" message reports, or
+/// None for any other message: the text of a task-notification message is the
+/// raw block, and the card reads the notification it carries instead
+/// (`taskNotifications` in `src/tui/model/thread.ts`).
+pub(crate) fn task_notices(message: &Value) -> Option<Vec<TaskNotice>> {
+    if text(message, &["origin"]) != Some("task-notification") {
+        return None;
+    }
+    let tasks = message.get("notification")?.get("tasks")?.as_array()?;
+    let words = |task: &Value, key: &str| {
+        task.get(key)
+            .and_then(Value::as_str)
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+    };
+    let mut notices = vec![];
+    for task in tasks {
+        let Some(task_id) = words(task, "taskId") else {
+            continue;
+        };
+        let review = task.get("review");
+        notices.push(TaskNotice {
+            task_id,
+            // The default title of a delegated task, stored with it.
+            title: words(task, "title").unwrap_or_else(|| "Delegated task".to_string()),
+            status: words(task, "status").unwrap_or_else(|| "completed".to_string()),
+            duration_ms: task.get("durationMs").and_then(Value::as_i64),
+            model: words(task, "model"),
+            branch: words(task, "branch"),
+            headline: words(task, "headline"),
+            files: task
+                .get("filesChanged")
+                .and_then(Value::as_i64)
+                .map(|changed| {
+                    (
+                        changed,
+                        task.get("additions").and_then(Value::as_i64).unwrap_or(0),
+                        task.get("deletions").and_then(Value::as_i64).unwrap_or(0),
+                    )
+                }),
+            verdict: review
+                .and_then(|review| review.get("verdict"))
+                .and_then(Value::as_str)
+                .filter(|verdict| !verdict.is_empty())
+                .map(str::to_string),
+            review: matches!(review, Some(Value::Object(_))),
+            resumes_at: task
+                .get("resumesAt")
+                .and_then(Value::as_str)
+                .filter(|at| !at.is_empty())
+                .map(str::to_string),
+            cancelled: task.get("cancelled").and_then(Value::as_bool) == Some(true),
+            native: task.get("source").and_then(Value::as_str) == Some("native"),
+        });
+    }
+    if notices.is_empty() {
+        None
+    } else {
+        Some(notices)
+    }
+}
+
+/// The provider's own one-line "limit reached" reply: "You've hit your
+/// session limit · resets 4:40am" (`PROVIDER_LIMIT_TEXT` in
+/// `src/tui/model/thread.ts`).
+fn is_provider_limit(text: &str) -> bool {
+    let line = text.trim();
+    if line.contains('\n') {
+        return false;
+    }
+    let lower = line.to_lowercase();
+    let Some(after_you) = lower
+        .strip_prefix("you've ")
+        .or_else(|| lower.strip_prefix("you’ve "))
+    else {
+        return false;
+    };
+    let Some(after_verb) = after_you
+        .strip_prefix("hit your ")
+        .or_else(|| after_you.strip_prefix("reached your "))
+    else {
+        return false;
+    };
+    after_verb.contains("limit")
+}
 
 /// A message plus the id the server gave it: a message's own id, or a tool
 /// call's `toolCallId`. Live deltas find their row by it.
@@ -75,6 +171,20 @@ pub fn project(thread: &Value) -> Vec<Row> {
     // (when, tie-break, row): messages sort before the steps they began.
     let mut rows: Vec<(i64, usize, Row)> = vec![];
     let unstarted = unstarted_turns(thread);
+    // Turns a usage limit stopped: the provider's own "limit reached" reply
+    // says what the turn's usage-limit notice already shows, better.
+    let limited: HashSet<&str> = thread["activities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|activity| {
+            matches!(
+                text(activity, &["kind"]),
+                Some("usage.limit" | "usage.wrap-up")
+            )
+        })
+        .filter_map(|activity| text(activity, &["turnId"]))
+        .collect();
     for (n, message) in thread["messages"]
         .as_array()
         .into_iter()
@@ -94,18 +204,65 @@ pub fn project(thread: &Value) -> Vec<Row> {
         let when = ms(message, &["createdAt"]).unwrap_or(0);
         let streaming = message.get("streaming").and_then(Value::as_bool) == Some(true);
         let message = match role {
-            // The Git tab's ask to open a request is a short line, not the instructions.
-            "user" => {
-                let body = crate::git::open_request_summary(&body).unwrap_or(body);
-                let (text, images) = crate::attachments::user_images(message, &body);
-                Message::User { text, images }
-            }
+            // Moxen's own blocks render as cards and quiet lines, never as
+            // the raw text the stored message carries — and control input is
+            // not a prompt at all (`src/tui/features/timeline/timeline.tsx`).
+            "user" => match text(message, &["origin"]) {
+                Some("question-answer") => continue,
+                Some("task-notification") => match task_notices(message) {
+                    Some(tasks) => Message::TaskNotification {
+                        tasks,
+                        at: clock(when),
+                    },
+                    None => {
+                        // The Git tab's ask to open a request is a short
+                        // line, not the instructions.
+                        let body = crate::git::open_request_summary(&body).unwrap_or(body);
+                        let (text, images) = crate::attachments::user_images(message, &body);
+                        Message::User { text, images }
+                    }
+                },
+                Some("usage-protection") => Message::UsageProtection { at: clock(when) },
+                Some("usage-continue") if body.starts_with(WRAP_UP_PREFIX) => {
+                    Message::UsageProtection { at: clock(when) }
+                }
+                Some("usage-continue") => Message::Continued {
+                    kind: ContinuedKind::UsageReset,
+                    at: clock(when),
+                },
+                Some("background-notification") => Message::Continued {
+                    kind: ContinuedKind::Background,
+                    at: clock(when),
+                },
+                Some("handoff-summary") => Message::Continued {
+                    kind: ContinuedKind::Handoff,
+                    at: clock(when),
+                },
+                // A continue from before the origin tag: the fixed text.
+                _ if body == USAGE_CONTINUE_PROMPT => Message::Continued {
+                    kind: ContinuedKind::UsageReset,
+                    at: clock(when),
+                },
+                // The Git tab's ask to open a request is a short line, not the instructions.
+                _ => {
+                    let body = crate::git::open_request_summary(&body).unwrap_or(body);
+                    let (text, images) = crate::attachments::user_images(message, &body);
+                    Message::User { text, images }
+                }
+            },
             // A reply with no text yet is still being written; an empty,
             // finished one (a turn that was all tool calls) has nothing to show.
-            "assistant" if !body.is_empty() || streaming => Message::Assistant {
-                text: body,
-                at: clock(when),
-            },
+            "assistant" if !body.is_empty() || streaming => {
+                if text(message, &["turnId"]).is_some_and(|turn| limited.contains(turn))
+                    && is_provider_limit(&body)
+                {
+                    continue;
+                }
+                Message::Assistant {
+                    text: body,
+                    at: clock(when),
+                }
+            }
             _ => continue,
         };
         rows.push((
@@ -170,6 +327,29 @@ pub fn project(thread: &Value) -> Vec<Row> {
             continue;
         }
         if kind != "reasoning" && !kind.starts_with("tool-call") {
+            // The provider stopped the turn at its usage limit, or is wrapping
+            // up before it does: the record of when it happened and when it
+            // lifts, as the TUI's usage-limit line shows it.
+            if matches!(kind, "usage.limit" | "usage.wrap-up") {
+                let payload = activity.get("payload");
+                rows.push((
+                    when,
+                    1_000_000 + n,
+                    Row {
+                        key: text(activity, &["id"]).unwrap_or_default().to_string(),
+                        message: Message::UsageLimit {
+                            label: payload
+                                .and_then(|payload| text(payload, &["label"]))
+                                .map(str::to_string),
+                            resets_at: payload
+                                .and_then(|payload| text(payload, &["resetsAt"]))
+                                .map(str::to_string),
+                            wrap_up: kind == "usage.wrap-up",
+                            at: clock(when),
+                        },
+                    },
+                ));
+            }
             continue;
         }
         let Some(payload) = activity.get("payload") else {
@@ -553,6 +733,10 @@ mod tests {
                 Message::Assistant { text, .. } => format!("assistant:{text}"),
                 Message::Tool { name, .. } => name.clone(),
                 Message::Plan { .. } => "plan".into(),
+                Message::UsageLimit { .. } => "usage-limit".into(),
+                Message::TaskNotification { .. } => "task-notification".into(),
+                Message::UsageProtection { .. } => "usage-protection".into(),
+                Message::Continued { .. } => "continued".into(),
             })
             .collect();
         // The empty finished reply (m3) and the context update have nothing to show.
@@ -670,5 +854,134 @@ mod tests {
         assert_eq!(duration(2500), "2.5s");
         assert_eq!(duration(45_000), "45s");
         assert_eq!(duration(185_000), "3m 05s");
+    }
+
+    #[test]
+    fn usage_limits_are_rows_of_their_own() {
+        let mut value = thread();
+        value["activities"] = json!([
+            activity(
+                "limit",
+                "usage.limit",
+                "2026-11-16T10:00:28.000Z",
+                json!({"label": "Session", "resetsAt": "2026-11-16T11:00:00.000Z"})
+            ),
+            activity(
+                "wrap",
+                "usage.wrap-up",
+                "2026-11-16T10:00:29.000Z",
+                json!({"label": null, "resetsAt": null})
+            ),
+        ]);
+        let rows = project(&value);
+        assert_eq!(rows.len(), 4);
+        let Message::UsageLimit {
+            label,
+            resets_at,
+            wrap_up,
+            ..
+        } = &rows[1].message
+        else {
+            panic!("a usage limit")
+        };
+        assert_eq!(
+            (label.as_deref(), resets_at.as_deref(), *wrap_up),
+            (Some("Session"), Some("2026-11-16T11:00:00.000Z"), false)
+        );
+        let Message::UsageLimit {
+            label,
+            resets_at,
+            wrap_up,
+            ..
+        } = &rows[2].message
+        else {
+            panic!("a wrap-up")
+        };
+        assert_eq!(
+            (label.as_deref(), resets_at.as_deref(), *wrap_up),
+            (None, None, true)
+        );
+    }
+
+    #[test]
+    fn moxen_blocks_render_as_cards_and_lines_not_raw_text() {
+        let message = |id: &str, role: &str, text: &str, origin: Option<&str>| {
+            let mut message = json!({"id": id, "role": role, "text": text, "createdAt": "2026-11-16T10:00:00.000Z"});
+            if let Some(origin) = origin {
+                message["origin"] = origin.into();
+            }
+            message
+        };
+        let value = json!({
+            "messages": [
+                message("m1", "user", "<task-notification>\nA task settled.\n</task-notification>", Some("task-notification")),
+                message("m2", "user", "wrap now", Some("usage-protection")),
+                message("m3", "user", "go on", Some("usage-continue")),
+                message("m4", "user", "The usage limit that stopped the last turn has reset. Continue the task where you left off.", None),
+                message("m5", "user", "done", Some("background-notification")),
+                message("m6", "user", "handing off", Some("handoff-summary")),
+                message("m7", "user", "> Which?\n\nAll", Some("question-answer")),
+                message("m8", "user", "<task-notification>oops</task-notification>", Some("task-notification")),
+                {"id": "m9", "role": "assistant", "text": "You've hit your session limit · resets 4:40am", "turnId": "t", "createdAt": "2026-11-16T10:00:30.000Z"},
+                {"id": "m10", "role": "assistant", "text": "You've hit your session limit · resets 4:40am", "turnId": "other", "createdAt": "2026-11-16T10:00:31.000Z"},
+            ],
+            "activities": [
+                {"id": "a1", "kind": "usage.limit", "tone": "info", "createdAt": "2026-11-16T10:00:20.000Z", "turnId": "t", "summary": "", "payload": {}},
+            ],
+        });
+        // The notification payload the card reads instead of the raw block.
+        let mut value = value;
+        value["messages"][0]["notification"] = json!({"tasks": [
+            {"taskId": "t1", "title": "Backfill", "status": "completed", "durationMs": 92_000},
+        ]});
+        let rows = project(&value);
+        let kinds: Vec<String> = rows
+            .iter()
+            .map(|row| match &row.message {
+                Message::User { text, .. } => format!("user:{text}"),
+                Message::Assistant { text, .. } => format!("assistant:{text}"),
+                Message::UsageLimit { .. } => "usage-limit".into(),
+                Message::TaskNotification { tasks, .. } => {
+                    format!(
+                        "notice:{}",
+                        tasks
+                            .iter()
+                            .map(|task| task.title.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                }
+                Message::UsageProtection { .. } => "protection".into(),
+                Message::Continued { kind, .. } => format!("continued:{kind:?}"),
+                _ => "?".into(),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "notice:Backfill",
+                "protection",
+                "continued:UsageReset",
+                "continued:UsageReset",
+                "continued:Background",
+                "continued:Handoff",
+                "user:<task-notification>oops</task-notification>",
+                "usage-limit",
+                "assistant:You've hit your session limit · resets 4:40am",
+            ]
+        );
+        // No raw task-notification block reaches a user bubble, and control
+        // input never reaches the transcript.
+        assert!(!rows.iter().any(
+            |row| matches!(&row.message, Message::User { text, .. } if text.contains("A task settled"))
+        ));
+        // The card keeps what the notice reported.
+        let Message::TaskNotification { tasks, .. } = &rows[0].message else {
+            panic!("a task notice")
+        };
+        assert_eq!(
+            (tasks[0].title.as_str(), tasks[0].duration_ms),
+            ("Backfill", Some(92_000))
+        );
     }
 }

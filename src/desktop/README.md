@@ -1,9 +1,11 @@
 # Moxen Agent — native desktop
 
 A standalone Rust/GPUI client. By default it connects to this machine's Moxen
-server and lists the user's real projects and threads, live. The inspector's
-Context view still has fixtures only (`--mock` or demo); it shows no made-up
-numbers against a real server. The desktop parity work is tracked under MXN-30.
+server and lists the user's real projects and threads, live. The Context tab,
+the usage control and the stats screen read the server; with `--mock` they
+show fixtures. Over the real server nothing made-up is ever shown: a reading
+that has not arrived yet says so, and a missing one reads as "no data", never
+as 0% or unlimited. The desktop parity work is tracked under MXN-30.
 
 ## The server connection
 
@@ -12,7 +14,11 @@ numbers against a real server. The desktop parity work is tracked under MXN-30.
 else `~/.moxen/server.sock`. `live.rs` is the `ThreadSource` over the shell
 subscription; its ordering, nesting and status rules follow the TUI's sidebar
 (`src/tui/model/sidebar.ts`, `shell.ts`). The thread subscription includes the
-same native subagent rows the TUI derives from the activity history.
+same native subagent rows the TUI derives from the activity history. Context,
+limits, protection and stats ride their own queries (`thread.context`,
+`thread.context-reading`, `usage.limits`, `usage.protection`, `usage.stats`,
+`usage.card`) and commands (`usage.wrap`, `usage.queue`), read on the TUI's
+timers; the thread's own hold and recorded totals come off its snapshot.
 
 - The server refuses a client from another build. The desktop is not built
   from the same code, so it asks once with a placeholder build, reads the
@@ -29,7 +35,12 @@ same native subagent rows the TUI derives from the activity history.
   (`src/tui/model/activity.ts`) for the common tools; the TUI's richer views
   (todos, tasks, questions, memory, web, image) show as generic tool rows for now.
   A run of consecutive steps folds under one summary row; finished runs start
-  folded, the last stays open while it ends the conversation.
+  folded, the last stays open while it ends the conversation. The provider's
+  stop at its usage limit is its own row, with the window and when it lifts.
+  Moxen's own user messages render as their cards and quiet lines, never as
+  the raw blocks the stored messages carry (a delegated task's settlement,
+  usage protection, continue and background notices), and control input
+  (question answers) is hidden — as the TUI's timeline does.
 - Sending, stopping and queueing drive real turns (`live.rs`, over `Wire::dispatch`;
   every command runs on its own thread, so the window never waits for the
   server). Enter on an idle thread sends `thread.turn.start` (a settled thread
@@ -145,6 +156,27 @@ same native subagent rows the TUI derives from the activity history.
   refresh while the tab is visible (`thread.background.list`,
   `thread.background.output`). Stop dispatches `thread.background.stop` for
   that job, not the thread's turn. A partial list is marked as such.
+- **Context** reads what fills the thread's window: the live breakdown
+  (`thread.context`) with its categories and heaviest tools, behind it the
+  last recorded reading (`thread.context-reading`, marked when a compaction
+  has made it stale), and the account's plan usage (`usage.limits`) for the
+  thread's provider with each window's reset time. The composer's status
+  line shows the same numbers as a chip (the snapshot's recorded totals keep
+  it fresh without another query), and opens the tab on click. The transcript
+  keeps the usage-limit block: the provider stopped the turn, or is wrapping
+  up, with the window and when it lifts.
+- **Stats** (the sidebar footer, `usage.stats`) is the overview and models
+  tabs over all time, 30 days or 7 days, with the shared wording and layout
+  rules (`core/usage/present.ts`): short counts, the cost in words, each
+  model's share, the activity heatmap grid, and the stacked daily bars whose
+  parts add up to their column. Save card (`usage.card`) saves the server's
+  shareable PNG where it runs and names the path. Escape closes the screen,
+  as it closes every other panel before a turn is interrupted.
+- Usage protection holds (`usage.protection`) banner over the composer: the
+  thread's own hold, the forecasts that say to wrap up (with Wrap up all,
+  `usage.wrap`) and the recovery queue (with Move first, Move last and Cancel
+  recovery, `usage.queue`). A failed read keeps the last answer and names
+  itself in the banner.
 - With no server running the window says so and offers Retry. It does not
   start the server (a later issue).
 - macOS and Linux (unix sockets) only. The Windows named pipe needs
@@ -230,8 +262,9 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   in flight at a time; Show last side answer reopens the answer for that thread.
   Right-click a message with a checkpoint to revert to before its turn, with or without
   restoring files. A reverted prompt returns to the draft.
-- Git, Diff, Agents and Background show the server's data (fixtures with
-  `--mock`). The mock usage control opens Context.
+- Git, Diff, Context, Agents and Background show the server's data (fixtures
+  with `--mock`). The mock usage control opens Context; the mock sidebar
+  footer opens Stats.
 - The composer preserves native multiline input, Unicode grapheme deletion,
   Left/Right, Up/Down, Select All and paste. Enter sends; Shift+Enter adds a line;
   Cmd/Ctrl+Enter queues while a turn runs. Send uses the same action. In the mock, Stop (Escape) cancels the simulated
@@ -246,9 +279,8 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
 
 The interaction below describes the mock window (`--mock`).
 
-Settings, commit history,
-real usage, queued-send execution and forge actions are not wired to a
-backend; their controls say so in a tooltip. The initial running fixture stays
+Settings, access selection, commit history, queued-send execution and forge
+actions are not wired to a backend; their controls say so in a tooltip. The initial running fixture stays
 live until Stop is clicked.
 
 ## Look and motion
@@ -339,9 +371,8 @@ offscreen GPUI render to `screenshots/harness-<stage>.png`; those files are not
 kept. Native window controls are outside that render.
 
 Remaining differences from the mockup: the mock has two settled threads
-rather than 170; there is no usage-limit block, edit receipt or image
-thumbnail in the fixture; the Git fixture is a shortened history and one
-pull request.
+rather than 170; there is no edit receipt or image thumbnail in the fixture;
+the Git fixture is a shortened history and one pull request.
 
 ## Implementation and design assets
 
@@ -360,7 +391,9 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
   pinned tokens, and layout constants.
 - `ui.rs`: shared primitives: icons, state glyphs, controls and tooltips, key
   caps, `Segmented`, section labels and transition timing.
-- `inspector.rs`, `usage.rs`: the pinned checklist, tabs and the Context view.
+- `inspector.rs`, `usage.rs`: the pinned checklist, tabs and the Context view;
+  `usage.rs` also holds the usage decoding and wording rules and the
+  protection banner. `stats.rs` is the stats screen's data, rules and modal.
 - `work.rs`, `work_view.rs`: data and inspector controls for checklists,
   delegated threads, provider subagents and background jobs.
 - `git.rs`: the Git and Diff data and its rules (decoders, patch parser, CI

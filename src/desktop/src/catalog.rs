@@ -5,6 +5,7 @@
 //! and `tui/model/continue.ts`; the data comes from the source, so the same
 //! picker serves the mock's fixtures and the real server.
 
+use crate::usage::ProviderLimits;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -37,7 +38,7 @@ pub struct ModelInfo {
     pub knobs: Vec<Knob>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Provider {
     pub instance: String,
     pub driver: String,
@@ -48,9 +49,13 @@ pub struct Provider {
     pub status: Option<String>,
     pub auth: Option<String>,
     pub models: Vec<ModelInfo>,
+    /// The subscription windows the driver last reported for this provider
+    /// (`usageLimits` in `ProviderSummary`), so the usage control has
+    /// something to show before any session reports.
+    pub usage_limits: Option<ProviderLimits>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Catalog {
     pub providers: Vec<Provider>,
 }
@@ -401,6 +406,11 @@ fn provider_of(raw: &Value, settings: &Value) -> Option<Provider> {
         installed: raw["installed"].as_bool().unwrap_or(false),
         status: nonempty(&raw["status"]),
         auth: nonempty(&raw["auth"]["status"]),
+        usage_limits: if raw["usageLimits"].is_null() {
+            None
+        } else {
+            Some(ProviderLimits::from_json(&raw["usageLimits"]))
+        },
         models: raw["models"]
             .as_array()
             .into_iter()

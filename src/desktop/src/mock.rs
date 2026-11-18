@@ -37,6 +37,10 @@ pub struct MockSource {
     settled: Option<ThreadId>,
     side_answers: HashMap<ThreadId, SideAnswer>,
     reverted: Option<(ThreadId, Option<String>)>,
+    context: std::sync::Arc<ContextData>,
+    limits: std::sync::Arc<LimitsData>,
+    protection: std::sync::Arc<ProtectionData>,
+    card: Option<std::sync::Arc<CardState>>,
 }
 
 /// The `getConfig` answer the fixtures stand in for: the providers the
@@ -99,6 +103,89 @@ fn opus() -> Selection {
         model: "opus-5-5".into(),
         options: vec![("effort".into(), OptionValue::Text("medium".into()))],
     }
+}
+/// The Context tab fixture: the old usage control's numbers, read through
+/// the same decoders as the server's answers.
+fn fixture_context() -> ContextData {
+    let breakdown = crate::usage::Breakdown::from_json(&json!({
+        "usedTokens": 663_000, "maxTokens": 1_000_000,
+        "autoCompactThreshold": 800_000, "compactsAutomatically": true,
+        "categories": [
+            {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
+            {"name": "System and tools", "tokens": 180_000, "kind": "used"},
+            {"name": "Reasoning", "tokens": 120_000, "kind": "used"},
+            {"name": "Messages", "tokens": 83_000, "kind": "used"},
+        ],
+        "tools": [{"name": "Bash", "tokens": 40_000}],
+        "estimated": false,
+    }));
+    ContextData {
+        live: true,
+        breakdown,
+        reading: None,
+        error: None,
+    }
+}
+
+/// The account limits fixture: the old plan-usage numbers.
+fn fixture_limits() -> LimitsData {
+    LimitsData::from_json(
+        &json!({"providers": {"claude": {"checkedAt": "2026-11-16T09:00:00Z", "windows": [
+        {"id": "session", "kind": "session", "label": "Session", "usedPercent": 36.0, "resetsAt": null},
+        {"id": "weekly", "kind": "weekly", "label": "Weekly", "usedPercent": 43.0, "resetsAt": null},
+    ], "unavailable": null}}}),
+    )
+}
+
+/// A reset a screenshot can read: an ISO instant `hours` from now, in UTC.
+fn future_iso(hours: i64) -> String {
+    use chrono::{TimeDelta, Utc};
+    (Utc::now() + TimeDelta::hours(hours))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+/// The protection fixture: a forecast that says to wrap up, and one thread
+/// waiting on its allowance.
+fn fixture_protection() -> ProtectionData {
+    ProtectionData::from_json(&json!({
+        "forecasts": [{
+            "provider": "claude", "windowId": "session", "label": "Session",
+            "usedPercent": 97.0, "resetsAt": future_iso(1),
+            "remainingWorkMs": 1_800_000, "reservePercent": 3.0,
+            "shouldWrap": true, "running": 1,
+        }],
+        "queue": [{
+            "threadId": "held", "title": "Backfill the stats card",
+            "provider": "claude", "phase": "waiting",
+            "resetsAt": future_iso(2), "order": 1, "handoff": false,
+        }],
+    }))
+    .expect("fixture protection")
+}
+
+/// The stats fixture: a week of opus and haiku work.
+fn fixture_stats(range: StatsRange) -> StatsState {
+    let bucket = |key: &str, tokens: i64, share: f64, cost: f64| {
+        json!({"key": key, "usage": {"input": tokens / 2, "cacheRead": tokens / 4, "cacheCreate": 0, "output": tokens / 4, "thinking": 0, "turns": 4},
+               "tokens": tokens, "share": share, "sessions": 2, "costUsd": cost, "unpricedTurns": 0})
+    };
+    let data = StatsData::from_json(
+        range,
+        &json!({
+            "range": range.wire(), "sessions": 3, "messages": 340, "turns": 48,
+            "totalTokens": 663_000, "costUsd": 1.5, "unpricedTurns": 1,
+            "activeDays": 5, "bestStreak": 3, "peakHour": 9, "favoriteModel": "opus-5-5",
+            "byProvider": [bucket("claude", 663_000, 1.0, 1.5)],
+            "byModel": [bucket("opus-5-5", 400_000, 0.6, 1.0), bucket("haiku-4-5", 263_000, 0.4, 0.5)],
+            "daily": [
+                {"day": "2026-11-12", "tokens": 100_000, "byModel": {"opus-5-5": 100_000}, "byProvider": {}},
+                {"day": "2026-11-13", "tokens": 200_000, "byModel": {"opus-5-5": 120_000, "haiku-4-5": 80_000}, "byProvider": {}},
+                {"day": "2026-11-14", "tokens": 363_000, "byModel": {"opus-5-5": 180_000, "haiku-4-5": 183_000}, "byProvider": {}},
+            ],
+        }),
+    );
+    StatsState { data, error: None }
 }
 impl MockSource {
     pub fn new() -> Self {
@@ -242,6 +329,10 @@ impl MockSource {
             settled: None,
             side_answers: HashMap::new(),
             reverted: None,
+            context: std::sync::Arc::new(fixture_context()),
+            limits: std::sync::Arc::new(fixture_limits()),
+            protection: std::sync::Arc::new(fixture_protection()),
+            card: None,
         }
     }
     pub fn preview() -> Self {
@@ -354,6 +445,33 @@ impl MockSource {
             text: "1. Add a header scanner that resyncs after a bad frame.\n2. Keep the partial bytes until the next frame starts.\n3. Cover truncated and oversized headers with tests.".into(),
             implemented: false,
             at: "Thu 09:41".into(),
+        });
+        // The provider stopped at its usage limit: the transcript keeps the
+        // record of when it happened and when it lifts.
+        source.messages[7].push(Message::UsageLimit {
+            label: Some("Session".into()),
+            resets_at: Some(future_iso(1)),
+            wrap_up: false,
+            at: "Thu 09:52".into(),
+        });
+        // A delegated task settling reads as its card, never the raw block.
+        source.messages[1].push(Message::TaskNotification {
+            tasks: vec![TaskNotice {
+                task_id: "t9".into(),
+                title: "Backfill the stats card".into(),
+                status: "completed".into(),
+                duration_ms: Some(92_000),
+                model: None,
+                branch: Some("task/stats".into()),
+                headline: Some("The card lands in the modal.".into()),
+                files: Some((2, 10, 3)),
+                verdict: None,
+                review: false,
+                resumes_at: None,
+                cancelled: false,
+                native: false,
+            }],
+            at: "Thu 09:53".into(),
         });
         source
     }
@@ -631,6 +749,37 @@ impl ThreadSource for MockSource {
     }
     fn children(&self, id: ThreadId) -> Vec<ThreadId> {
         if id == 0 { vec![1] } else { vec![] }
+    }
+    fn context(&self, _: ThreadId) -> Option<Arc<ContextData>> {
+        Some(self.context.clone())
+    }
+    fn snapshot_usage(&self, _: ThreadId) -> Option<SnapshotUsage> {
+        Some(SnapshotUsage {
+            used: 663_000,
+            max: Some(1_000_000),
+            ..SnapshotUsage::default()
+        })
+    }
+    fn limits(&self) -> Option<Arc<LimitsData>> {
+        Some(self.limits.clone())
+    }
+    fn protection(&self) -> Option<Arc<ProtectionData>> {
+        Some(self.protection.clone())
+    }
+    fn stats(&self, range: StatsRange) -> Option<Arc<StatsState>> {
+        Some(Arc::new(fixture_stats(range)))
+    }
+    fn card(&self, _: StatsRange) -> Option<Arc<CardState>> {
+        self.card.clone()
+    }
+    fn read_card(&mut self, range: StatsRange) {
+        let path = std::env::temp_dir().join(format!("moxen-stats-{}.png", range.wire()));
+        std::fs::write(&path, b"mock card").ok();
+        self.card = Some(Arc::new(CardState {
+            path: Some(path.to_string_lossy().into_owned()),
+            error: None,
+            busy: false,
+        }));
     }
     fn delegated(&self, id: ThreadId) -> Option<Delegated> {
         (id == 1).then(|| Delegated {

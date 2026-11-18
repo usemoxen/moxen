@@ -490,36 +490,72 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
     ));
     match read.as_deref() {
         Some(Ok(View::Subagent(Some(rows)))) if !rows.is_empty() => {
-            pane = pane.children(rows.iter().map(|row| match &row.message {
-                Message::User { text, .. } => detail_line("Prompt", text.clone()),
-                Message::Assistant { text, .. } => detail_line("Reply", text.clone()),
-                Message::Plan { text, .. } => detail_line("Plan", text.clone()),
-                Message::Tool {
-                    name,
-                    summary,
-                    output,
-                    ..
-                } => {
-                    let label = match name.as_str() {
-                        "command" => "Command",
-                        "thought" => "Thought",
-                        "read" => "Read",
-                        "edit" => "Edit",
-                        "search" => "Search",
-                        _ => "Tool",
-                    };
-                    detail_line(label, summary.clone()).when(
-                        !output.is_empty() && output != summary,
-                        |s| {
-                            s.child(
-                                div()
-                                    .mt(px(4.))
-                                    .font_family(theme::MONO)
-                                    .text_size(px(12.))
-                                    .child(output.clone()),
+            pane = pane.children(rows.iter().map(|row| {
+                match &row.message {
+                    Message::User { text, .. } => detail_line("Prompt", text.clone()),
+                    Message::Assistant { text, .. } => detail_line("Reply", text.clone()),
+                    Message::Plan { text, .. } => detail_line("Plan", text.clone()),
+                    Message::UsageLimit { wrap_up, label, .. } => detail_line(
+                        "Usage limit",
+                        if *wrap_up {
+                            "Wrapping up".to_string()
+                        } else {
+                            format!(
+                                "{} limit reached",
+                                label.clone().unwrap_or_else(|| "Plan".to_string())
                             )
                         },
-                    )
+                    ),
+                    Message::TaskNotification { tasks, .. } => detail_line(
+                        "Task update",
+                        tasks
+                            .iter()
+                            .map(|task| task.title.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    Message::UsageProtection { .. } => detail_line(
+                        "Usage protection",
+                        "Shared usage is nearly exhausted.".to_string(),
+                    ),
+                    Message::Continued { kind, .. } => detail_line(
+                        "Continued",
+                        match kind {
+                            crate::model::ContinuedKind::Handoff => "Preparing a handoff",
+                            crate::model::ContinuedKind::Background => "Background task finished",
+                            crate::model::ContinuedKind::UsageReset => {
+                                "Continued after the usage limit reset"
+                            }
+                        }
+                        .to_string(),
+                    ),
+                    Message::Tool {
+                        name,
+                        summary,
+                        output,
+                        ..
+                    } => {
+                        let label = match name.as_str() {
+                            "command" => "Command",
+                            "thought" => "Thought",
+                            "read" => "Read",
+                            "edit" => "Edit",
+                            "search" => "Search",
+                            _ => "Tool",
+                        };
+                        detail_line(label, summary.clone()).when(
+                            !output.is_empty() && output != summary,
+                            |s| {
+                                s.child(
+                                    div()
+                                        .mt(px(4.))
+                                        .font_family(theme::MONO)
+                                        .text_size(px(12.))
+                                        .child(output.clone()),
+                                )
+                            },
+                        )
+                    }
                 }
             }));
         }

@@ -118,6 +118,13 @@ pub struct Workspace {
     pub git_ui: crate::git_view::GitUi,
     pub work_ui: crate::work_view::WorkUi,
     pub work_focus: FocusHandle,
+    /// The stats overlay: open, and the tab and range it shows.
+    pub stats_open: bool,
+    pub stats_tab: crate::stats::StatsTab,
+    pub stats_range: crate::stats::StatsRange,
+    /// The sidebar Stats row is hovered: its tip shows to the right of the
+    /// row instead of a window tooltip over the label.
+    pub stats_tip: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -244,6 +251,7 @@ impl Workspace {
                     .update(cx, |this, cx| {
                         if ticks == 0 {
                             this.refresh_work();
+                            this.refresh_usage();
                         }
                         let revision = this.source.revision();
                         if seen != Some(revision) {
@@ -372,6 +380,10 @@ impl Workspace {
             tasks_open: true,
             picker_open: false,
             palette_open: false,
+            stats_open: false,
+            stats_tab: crate::stats::StatsTab::default(),
+            stats_range: crate::stats::StatsRange::default(),
+            stats_tip: false,
             model_focus: cx.focus_handle(),
             group: 1,
             tab: 1,
@@ -997,6 +1009,22 @@ impl Workspace {
             cx.notify();
         }
     }
+    /// Re-reads usage while it is on screen: the account's limits and
+    /// protection on their timers, and the open thread's context on the TUI's
+    /// timer — the status line shows it whether or not the Context tab does.
+    pub fn refresh_usage(&mut self) {
+        if self.source.preview() {
+            return;
+        }
+        self.source.read_limits();
+        self.source.read_protection();
+        if !self.creating {
+            self.source.read_context(self.selected);
+        }
+        if self.stats_open && self.source.stats(self.stats_range).is_none() {
+            self.source.read_stats(self.stats_range);
+        }
+    }
     /// Resizes the open thread's list to a live transcript that changed:
     /// everything from the first changed row is measured again, and a reader
     /// who is at the end stays there as it grows. The mock changes its list
@@ -1058,6 +1086,12 @@ impl Workspace {
     pub fn clear_thread_tip(&mut self) {
         self.thread_tip = None;
         self.thread_tip_order.clear();
+    }
+    pub fn open_stats(&mut self, cx: &mut Context<Self>) {
+        self.stats_open = true;
+        self.stats_tab = crate::stats::StatsTab::default();
+        self.source.read_stats(self.stats_range);
+        cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread_form.is_some() {
@@ -1368,6 +1402,8 @@ impl Render for Workspace {
                     } else if this.palette_open {
                         this.palette_open = false;
                         window.focus(&this.sidebar_focus, cx);
+                    } else if this.stats_open {
+                        this.stats_open = false;
                     } else if this.composer_visible()
                         && this.active_composer().read(cx).slash().is_some()
                     {
@@ -1511,6 +1547,32 @@ impl Render for Workspace {
                         .line_height(px(16.))
                         .text_color(color("ink"))
                         .child(title),
+                )
+            })
+            .when(self.stats_open, |s| s.child(crate::stats::render(self, cx)))
+            .when(self.stats_tip, |s| {
+                // To the right of the sidebar's Stats row: a window tooltip
+                // here would flip up over the label, since the footer sits
+                // at the window's edge. The footer is padding 8 with three
+                // 30px rows; Stats is second.
+                let top = f32::from(window.viewport_size().height) - 106. + 38.;
+                s.child(
+                    div()
+                        .absolute()
+                        .left(px(theme::SIDEBAR + 8.))
+                        .top(px(top.max(0.)))
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(theme::px_token("radius", "radius-sm")))
+                        .bg(color("raised"))
+                        .shadow(theme::float_shadow())
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(color("ink"))
+                        .child("Usage stats"),
                 )
             })
             .into_any_element()
