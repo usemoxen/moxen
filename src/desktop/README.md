@@ -35,7 +35,12 @@ timers; the thread's own hold and recorded totals come off its snapshot.
   (`src/tui/model/activity.ts`) for the common tools; the TUI's richer views
   (todos, tasks, questions, memory, web, image) show as generic tool rows for now.
   A run of consecutive steps folds under one summary row; finished runs start
-  folded, the last stays open while it ends the conversation.
+  folded, the last stays open while it ends the conversation. The provider's
+  stop at its usage limit is its own row, with the window and when it lifts.
+  Moxen's own user messages render as their cards and quiet lines, never as
+  the raw blocks the stored messages carry (a delegated task's settlement,
+  usage protection, continue and background notices), and control input
+  (question answers) is hidden — as the TUI's timeline does.
 - Sending, stopping and queueing drive real turns (`live.rs`, over `Wire::dispatch`;
   every command runs on its own thread, so the window never waits for the
   server). Enter on an idle thread sends `thread.turn.start` (a settled thread

@@ -150,6 +150,7 @@ fn fixture_protection() -> ProtectionData {
             "resetsAt": future_iso(2), "order": 1, "handoff": false,
         }],
     }))
+    .expect("fixture protection")
 }
 
 /// The stats fixture: a week of opus and haiku work.
@@ -394,6 +395,25 @@ impl MockSource {
             wrap_up: false,
             at: "Thu 09:52".into(),
         });
+        // A delegated task settling reads as its card, never the raw block.
+        source.messages[1].push(Message::TaskNotification {
+            tasks: vec![TaskNotice {
+                task_id: "t9".into(),
+                title: "Backfill the stats card".into(),
+                status: "completed".into(),
+                duration_ms: Some(92_000),
+                model: None,
+                branch: Some("task/stats".into()),
+                headline: Some("The card lands in the modal.".into()),
+                files: Some((2, 10, 3)),
+                verdict: None,
+                review: false,
+                resumes_at: None,
+                cancelled: false,
+                native: false,
+            }],
+            at: "Thu 09:53".into(),
+        });
         source
     }
 }
@@ -569,6 +589,7 @@ impl ThreadSource for MockSource {
         Some(SnapshotUsage {
             used: 663_000,
             max: Some(1_000_000),
+            ..SnapshotUsage::default()
         })
     }
     fn limits(&self) -> Option<Arc<LimitsData>> {

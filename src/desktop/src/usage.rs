@@ -11,6 +11,7 @@
 //! as 0% or unlimited.
 
 use crate::{
+    catalog::Catalog,
     live::{now_ms, text},
     theme::{self, color},
     ui,
@@ -80,12 +81,13 @@ pub fn until_label(target_ms: i64, now_ms: i64) -> String {
 }
 
 /// A reset time as the plan-usage rows show it: `↻ 2h 5m`, without the "in".
-/// A reset that already passed (or never parses) is not a reset.
+/// A reset that already passed reads as due now, as the TUI's rows do; one
+/// that never parses is not a reset.
 pub fn reset_label(resets_at: Option<&str>, now: i64) -> Option<String> {
     let at = resets_at?;
     let target = crate::live::parse_iso_ms(at)?;
     if target <= now {
-        return None;
+        return Some("↻ now".to_string());
     }
     Some(format!(
         "↻ {}",
@@ -167,7 +169,7 @@ pub struct LimitsData {
 }
 
 impl LimitsData {
-    pub fn from_json(value: &Value) -> Self {
+    pub(crate) fn from_json(value: &Value) -> Self {
         let providers = value
             .get("providers")
             .and_then(Value::as_object)
@@ -193,6 +195,20 @@ impl LimitsData {
             self.providers.get(kind)
         })
     }
+}
+
+/// The plan usage for a thread's provider: the account's own windows first,
+/// then its driver's, then what the catalog last reported for that provider —
+/// as the TUI's composer does, so an account the server never recorded still
+/// shows its limits.
+pub fn provider_limits<'a>(
+    limits: Option<&'a LimitsData>,
+    catalog: Option<&'a Catalog>,
+    instance: &str,
+) -> Option<&'a ProviderLimits> {
+    limits
+        .and_then(|limits| limits.for_instance(instance))
+        .or_else(|| catalog.as_ref()?.provider(instance)?.usage_limits.as_ref())
 }
 
 /// The driver an instance id routes to (`driverKindOfInstance` in
@@ -245,19 +261,310 @@ pub fn plan_gauges(limits: Option<&ProviderLimits>) -> Vec<Gauge> {
                 percent: window.used_percent,
             });
         } else if window.used_percent >= 70. {
-            // "Weekly – Opus" → "Opus".
+            // "Weekly – Opus" → "Opus"; a label that is only a dash falls
+            // back to the whole label rather than an empty gauge.
             let name = window
                 .label
                 .split(['–', '-'])
                 .next_back()
                 .unwrap_or(&window.label);
+            let short = name.trim();
             gauges.push(Gauge {
-                short: name.trim().to_string(),
+                short: if short.is_empty() {
+                    window.label.trim().to_string()
+                } else {
+                    short.to_string()
+                },
                 percent: window.used_percent,
             });
         }
     }
     gauges
+}
+
+/// `0` → `"$0.00"`, `1.234` → `"$1.23"`, `0.0041` → `"$0.0041"` (small spends
+/// keep their precision): the TUI's `formatUsd` (`src/tui/model/turns.ts`).
+pub fn format_usd(value: f64) -> String {
+    if value > 0. && value < 0.01 {
+        format!("${value:.4}")
+    } else {
+        format!("${value:.2}")
+    }
+}
+
+/// The window's share in words: rounded like the TUI's composer, so two
+/// thirds of the window read 67%, never 66%.
+pub fn window_percent(used: i64, max: i64) -> i64 {
+    if max <= 0 {
+        return 0;
+    }
+    (used as f64 / max as f64 * 100.).round() as i64
+}
+
+/// `mcp__claude_ai_Linear__list_issues` → `Linear · List issues`; any other
+/// name as it is (`prettyToolName` in `src/tui/model/activity.ts`).
+pub fn pretty_tool_name(name: &str) -> String {
+    let name = name.trim();
+    let Some(rest) = name.strip_prefix("mcp__") else {
+        return name.to_string();
+    };
+    let Some((server, tool)) = rest.split_once("__") else {
+        return name.to_string();
+    };
+    if server.is_empty() || tool.is_empty() {
+        return name.to_string();
+    }
+    format!("{} · {}", pretty_mcp_server(server), pretty_mcp_tool(tool))
+}
+
+fn is_mcp_sep(char: char) -> bool {
+    char == '_' || char == '.' || char.is_whitespace()
+}
+
+/// `claude_ai_Linear` → `Linear`, `plugin_figma_figma` → `figma`,
+/// `claude_ai_Claude_Docs` → `Claude Docs`: connector and plugin prefixes
+/// read badly verbatim, and a plugin named for its one server says it twice.
+fn pretty_mcp_server(server: &str) -> String {
+    let chars: Vec<char> = server.chars().collect();
+    let mut start = 0;
+    // `claude[_.\s]ai[_.\s]+`, case-insensitive.
+    if chars.len() > 9
+        && chars[..6]
+            .iter()
+            .collect::<String>()
+            .eq_ignore_ascii_case("claude")
+        && is_mcp_sep(chars[6])
+        && chars[7..9]
+            .iter()
+            .collect::<String>()
+            .eq_ignore_ascii_case("ai")
+        && is_mcp_sep(chars[9])
+    {
+        start = 10;
+        while start < chars.len() && is_mcp_sep(chars[start]) {
+            start += 1;
+        }
+    }
+    // `plugin[_-]+`, case-insensitive.
+    if chars.len() > start + 7
+        && chars[start..start + 6]
+            .iter()
+            .collect::<String>()
+            .eq_ignore_ascii_case("plugin")
+        && (chars[start + 6] == '_' || chars[start + 6] == '-')
+    {
+        start += 7;
+        while start < chars.len() && (chars[start] == '_' || chars[start] == '-') {
+            start += 1;
+        }
+    }
+    let mut rest: Vec<String> = chars[start..]
+        .iter()
+        .collect::<String>()
+        .split(|c: char| c == '_' || c == '-' || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect();
+    // `plugin_linear_linear`: a plugin named for its one server says it twice.
+    if rest.len().is_multiple_of(2) && !rest.is_empty() {
+        let half = rest.len() / 2;
+        if rest[..half].join(" ").to_lowercase() == rest[half..].join(" ").to_lowercase() {
+            rest.truncate(half);
+        }
+    }
+    // A name that is all lowercase (`linear`) is capitalised; one that
+    // already has capitals (`Claude Docs`) is left as written.
+    if rest.is_empty() {
+        return server.to_string();
+    }
+    rest.into_iter()
+        .map(|word| {
+            if word == word.to_lowercase() {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => word,
+                }
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `list_issues` → `List issues`, `getTeam` → `Get team`.
+fn pretty_mcp_tool(tool: &str) -> String {
+    let mut spaced = String::new();
+    let mut previous: Option<char> = None;
+    for char in tool.chars() {
+        if let Some(prev) = previous
+            && (prev.is_ascii_lowercase() || prev.is_ascii_digit())
+            && char.is_ascii_uppercase()
+        {
+            spaced.push(' ');
+        }
+        spaced.push(char);
+        previous = Some(char);
+    }
+    let words: Vec<String> = spaced
+        .split(|c: char| c == '_' || c == '-' || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_lowercase())
+        .collect();
+    let text = words.join(" ");
+    if text.is_empty() {
+        return tool.to_string();
+    }
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => tool.to_string(),
+    }
+}
+
+/// The tool a call row names, as the harness recorded it (`data.tool`).
+/// MCP tools drop their `mcp__server__` prefix. Never guessed from the
+/// summary: that is prose.
+fn estimate_tool_name(payload: &Value) -> String {
+    let name = payload
+        .get("data")
+        .and_then(|data| data.get("tool").or_else(|| data.get("toolName")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if name.is_empty() {
+        return "Other".to_string();
+    }
+    if let Some(rest) = name.strip_prefix("mcp__")
+        && let Some((server, tool)) = rest.split_once("__")
+        && !server.is_empty()
+        && !tool.is_empty()
+    {
+        return tool.to_string();
+    }
+    name.to_string()
+}
+
+fn chars_of(value: &Value) -> i64 {
+    match value {
+        Value::String(text) => text.chars().count() as i64,
+        Value::Null => 0,
+        _ => serde_json::to_string(value)
+            .map(|json| json.chars().count() as i64)
+            .unwrap_or(0),
+    }
+}
+
+const CHARS_PER_TOKEN: f64 = 4.;
+
+/// What fills the window when the provider only reports the total (or no
+/// live session runs here): the transcript's own text, at ~4 chars/token per
+/// role, scaled to the real total — exactly like the TUI's breakdown. Whatever
+/// the messages do not account for is the system prompt and tools. Null when
+/// there is no reading to scale against (`estimateContextBreakdown` in
+/// `model/sidepanel.ts`).
+pub(crate) fn estimate_breakdown(usage: &SnapshotUsage, thread: &Value) -> Breakdown {
+    let mut user = 0;
+    let mut assistant = 0;
+    let mut reasoning = 0;
+    let mut tools = 0;
+    let mut per_tool: HashMap<String, i64> = HashMap::new();
+    for message in thread["messages"].as_array().into_iter().flatten() {
+        let chars = message.get("text").map(chars_of).unwrap_or(0);
+        match text(message, &["role"]) {
+            Some("user") => user += chars,
+            Some("assistant") => assistant += chars,
+            _ => user += chars,
+        }
+    }
+    // Each call writes a row as it starts and again as it ends, so the
+    // newest row per id stands for the call.
+    let mut calls: HashMap<&str, &Value> = HashMap::new();
+    for activity in thread["activities"].as_array().into_iter().flatten() {
+        let Some(payload) = activity.get("payload") else {
+            continue;
+        };
+        if !payload.is_object() {
+            continue;
+        }
+        if let Some(call) = text(payload, &["toolCallId"]) {
+            calls.insert(call, payload);
+        }
+    }
+    for payload in calls.values() {
+        if text(payload, &["itemType"]) == Some("reasoning") {
+            reasoning += payload.get("text").map(chars_of).unwrap_or(0);
+            continue;
+        }
+        let tool_chars = chars_of(payload);
+        if tool_chars == 0 {
+            continue;
+        }
+        tools += tool_chars;
+        *per_tool.entry(estimate_tool_name(payload)).or_default() += tool_chars;
+    }
+    let to_tokens = |chars: i64| chars as f64 / CHARS_PER_TOKEN;
+    let message_total =
+        to_tokens(user) + to_tokens(assistant) + to_tokens(reasoning) + to_tokens(tools);
+    let scale = if message_total > usage.used as f64 && message_total > 0. {
+        usage.used as f64 / message_total
+    } else {
+        1.
+    };
+    let round = |tokens: f64| (tokens * scale).round() as i64;
+    let used_rows = [
+        ("User messages", round(to_tokens(user))),
+        ("Assistant messages", round(to_tokens(assistant))),
+        ("Reasoning", round(to_tokens(reasoning))),
+        ("Tool calls", round(to_tokens(tools))),
+    ];
+    let accounted: i64 = used_rows.iter().map(|(_, tokens)| tokens).sum();
+    let mut categories = vec![Category {
+        name: "System prompt & tools".to_string(),
+        tokens: (usage.used - accounted).max(0),
+        kind: CategoryKind::Used,
+    }];
+    for (name, tokens) in used_rows {
+        if tokens > 0 {
+            categories.push(Category {
+                name: name.to_string(),
+                tokens,
+                kind: CategoryKind::Used,
+            });
+        }
+    }
+    if let Some(max) = usage.max {
+        categories.push(Category {
+            name: "Free space".to_string(),
+            tokens: (max - usage.used).max(0),
+            kind: CategoryKind::Free,
+        });
+    }
+    let mut tool_shares: Vec<ToolShare> = per_tool
+        .into_iter()
+        .map(|(name, chars)| ToolShare {
+            name,
+            tokens: (chars as f64 / CHARS_PER_TOKEN * scale).round() as i64,
+        })
+        .filter(|share| share.tokens > 0)
+        .collect();
+    tool_shares.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then(left.name.cmp(&right.name))
+    });
+    Breakdown {
+        used: usage.used,
+        max: usage.max,
+        cached: usage.cached,
+        threshold: usage.threshold,
+        compacts: usage.compacts,
+        cost: usage.cost,
+        categories,
+        tools: tool_shares,
+        estimated: true,
+    }
 }
 
 /// What fills the context window, by category, from `ContextBreakdown` in
@@ -622,7 +929,9 @@ impl QueueMove {
 }
 
 /// Usage protection as `usage.protection` reports it: the forecasts and the
-/// recovery queue. `error` is a read that failed.
+/// recovery queue. `error` is a read that failed. A malformed answer (no
+/// forecasts or queue at all) is not protection state: decoding returns
+/// nothing and the last state stands.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProtectionData {
     pub forecasts: Vec<Forecast>,
@@ -631,22 +940,14 @@ pub struct ProtectionData {
 }
 
 impl ProtectionData {
-    pub fn from_json(value: &Value) -> Self {
-        let forecasts = value
-            .get("forecasts")
-            .and_then(Value::as_array)
-            .map(|forecasts| forecasts.iter().filter_map(Forecast::from_json).collect())
-            .unwrap_or_default();
-        let queue = value
-            .get("queue")
-            .and_then(Value::as_array)
-            .map(|queue| queue.iter().filter_map(QueueEntry::from_json).collect())
-            .unwrap_or_default();
-        Self {
-            forecasts,
-            queue,
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
+        let forecasts = value.get("forecasts")?.as_array()?;
+        let queue = value.get("queue")?.as_array()?;
+        Some(Self {
+            forecasts: forecasts.iter().filter_map(Forecast::from_json).collect(),
+            queue: queue.iter().filter_map(QueueEntry::from_json).collect(),
             error: None,
-        }
+        })
     }
 }
 
@@ -659,7 +960,7 @@ pub struct Hold {
 }
 
 impl Hold {
-    pub fn from_json(value: &Value) -> Option<Self> {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let protection = value.get("protection")?;
         if protection.get("protected").and_then(Value::as_bool) != Some(true) {
             return None;
@@ -691,15 +992,25 @@ impl Hold {
 }
 
 /// The thread's recorded context totals, off its snapshot: what the status
-/// line reads without another query.
+/// line reads without another query, and what the Context tab falls back to
+/// when the live breakdown names no categories.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SnapshotUsage {
     pub used: i64,
     pub max: Option<i64>,
+    /// Tokens the session has processed, when the snapshot records it.
+    pub processed: Option<i64>,
+    /// Where the provider compacts on its own, when it does.
+    pub threshold: Option<i64>,
+    pub compacts: Option<bool>,
+    /// Running session total in USD, when the driver reports one.
+    pub cost: Option<f64>,
+    /// Of `used`, how much the last request read from the prompt cache.
+    pub cached: Option<i64>,
 }
 
 impl SnapshotUsage {
-    pub fn from_json(thread: &Value) -> Option<Self> {
+    pub(crate) fn from_json(thread: &Value) -> Option<Self> {
         let usage = thread.get("contextUsage")?;
         if usage.is_null() {
             return None;
@@ -707,6 +1018,11 @@ impl SnapshotUsage {
         Some(Self {
             used: number(usage, &["usedTokens"])?,
             max: number(usage, &["maxTokens"]),
+            processed: number(usage, &["totalProcessedTokens"]),
+            threshold: number(usage, &["autoCompactThreshold"]),
+            compacts: usage.get("compactsAutomatically").and_then(Value::as_bool),
+            cost: usage.get("costUsd").and_then(Value::as_f64),
+            cached: number(usage, &["cachedInputTokens"]),
         })
     }
 }
@@ -763,6 +1079,7 @@ pub fn meter(shares: &[Share], width: f32, height: f32) -> impl IntoElement {
 /// Missing readings read as "no data", never as 0% or unlimited.
 pub fn render(
     data: &ContextData,
+    snapshot: Option<&SnapshotUsage>,
     limits: Option<&ProviderLimits>,
     provider_name: Option<&str>,
 ) -> impl IntoElement {
@@ -772,12 +1089,29 @@ pub fn render(
         .totals()
         .map(|(used, max)| (Some(used), max))
         .unwrap_or((None, None));
+    // The snapshot's recorded totals stand in where neither the live
+    // breakdown nor the last reading reported any.
+    let (used, max): (Option<i64>, Option<i64>) = match (used, max) {
+        (Some(used), max) => (Some(used), max),
+        (None, _) => snapshot
+            .map(|usage| (Some(usage.used), usage.max))
+            .unwrap_or((None, None)),
+    };
     let shares = breakdown
         .map(|breakdown| context_shares(&breakdown.categories, breakdown.max, breakdown.used))
         .unwrap_or_default();
-    let threshold = breakdown.and_then(|breakdown| breakdown.threshold);
-    let compacts = breakdown.and_then(|breakdown| breakdown.compacts);
-    let cost = breakdown.and_then(|breakdown| breakdown.cost);
+    // The snapshot's reading stands in for what the live breakdown does not
+    // say, as the TUI's Context tab does.
+    let threshold = breakdown
+        .and_then(|breakdown| breakdown.threshold)
+        .or_else(|| snapshot.and_then(|usage| usage.threshold));
+    let compacts = breakdown
+        .and_then(|breakdown| breakdown.compacts)
+        .or_else(|| snapshot.and_then(|usage| usage.compacts));
+    let cost = breakdown
+        .and_then(|breakdown| breakdown.cost)
+        .or_else(|| snapshot.and_then(|usage| usage.cost));
+    let processed = snapshot.and_then(|usage| usage.processed);
     let estimated = breakdown.is_some_and(|breakdown| breakdown.estimated);
     let mut body = div().p(px(16.)).flex().flex_col().gap(px(24.)).child(
         div().flex().flex_col().gap(px(8.)).child(
@@ -795,7 +1129,7 @@ pub fn render(
                                     "{} / {} · {}%",
                                     format_count(used),
                                     format_count(max),
-                                    used * 100 / max.max(1)
+                                    window_percent(used, max)
                                 )
                             }
                             (Some(used), _) => format!("{} tokens in context", format_count(used)),
@@ -917,20 +1251,19 @@ pub fn render(
                             .items_center()
                             .gap(px(10.))
                             .text_size(px(13.))
-                            .child(div().flex_1().child(tool.name.clone()))
+                            .child(div().flex_1().child(pretty_tool_name(&tool.name)))
                             .child(mono(format_count(tool.tokens)))
                     })),
             );
         }
     }
     if let Some(cost) = cost {
+        body = body.child(mono(format!("Session cost {}", format_usd(cost))));
+    }
+    if let Some(processed) = processed {
         body = body.child(mono(format!(
-            "Session cost {}",
-            if cost > 0. && cost < 0.01 {
-                "<$0.01".to_string()
-            } else {
-                format!("${cost:.2}")
-            }
+            "{} tokens processed",
+            format_count(processed)
         )));
     }
     body = body.child(plan_usage(limits, provider_name, now));
@@ -994,6 +1327,14 @@ fn plan_usage(
         .map(|(_, percent, _)| format!("{}%", percent.round() as i64).len())
         .max()
         .unwrap_or(0);
+    // The label column fits the longest window, like the TUI's shared
+    // columns, so a second weekly window never wraps under the bar.
+    let longest = rows
+        .iter()
+        .map(|(label, _, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let label_width = ((longest as f32) * 7.5).clamp(64., 116.);
     section.child(
         div()
             .flex()
@@ -1014,7 +1355,7 @@ fn plan_usage(
                     .gap(px(10.))
                     .font_family(theme::MONO)
                     .text_size(px(12.))
-                    .child(div().w(px(64.)).child(label))
+                    .child(div().w(px(label_width)).flex_shrink_0().child(label))
                     .child(
                         div()
                             .flex_1()
@@ -1054,6 +1395,17 @@ mod tests {
         assert_eq!(format_count(999_999), "1m");
         assert_eq!(format_count(1_400_000), "1.4m");
         assert_eq!(format_count(4_600_000_000), "4600m");
+        // The TUI rounds the window's share: two thirds read 67%, not 66%.
+        assert_eq!(super::window_percent(667_000, 1_000_000), 67);
+        assert_eq!(super::window_percent(663_000, 1_000_000), 66);
+        assert_eq!(super::window_percent(0, 0), 0);
+    }
+
+    #[test]
+    fn costs_keep_small_spends_precise() {
+        assert_eq!(super::format_usd(0.), "$0.00");
+        assert_eq!(super::format_usd(1.234), "$1.23");
+        assert_eq!(super::format_usd(0.0041), "$0.0041");
     }
 
     #[test]
@@ -1078,7 +1430,10 @@ mod tests {
         );
         assert_eq!(reset_label(Some("not a date"), reset), None);
         assert_eq!(reset_label(None, reset), None);
-        assert_eq!(reset_label(Some("2026-08-04T10:04:00.000Z"), reset), None);
+        assert_eq!(
+            reset_label(Some("2026-08-04T10:04:00.000Z"), reset),
+            Some("↻ now".to_string())
+        );
     }
 
     #[test]
@@ -1117,6 +1472,7 @@ mod tests {
             {"id": "w", "kind": "weekly", "label": "Weekly", "usedPercent": 43.0, "resetsAt": null},
             {"id": "o", "kind": "weekly", "label": "Weekly – Opus", "usedPercent": 71.0, "resetsAt": null},
             {"id": "q", "kind": "weekly", "label": "Weekly – Quiet", "usedPercent": 10.0, "resetsAt": null},
+            {"id": "d", "kind": "weekly", "label": " – ", "usedPercent": 80.0, "resetsAt": null},
         ], "unavailable": null}}}),
         );
         let gauges = plan_gauges(limits.for_instance("claude"));
@@ -1125,7 +1481,7 @@ mod tests {
                 .iter()
                 .map(|gauge| (gauge.short.as_str(), gauge.percent as i64))
                 .collect::<Vec<_>>(),
-            [("5h", 36), ("wk", 43), ("Opus", 71)]
+            [("5h", 36), ("wk", 43), ("Opus", 71), ("–", 80)]
         );
     }
 
@@ -1178,6 +1534,24 @@ mod tests {
     }
 
     #[test]
+    fn tool_names_read_like_the_timeline() {
+        assert_eq!(
+            super::pretty_tool_name("mcp__claude_ai_Linear__list_issues"),
+            "Linear · List issues"
+        );
+        assert_eq!(
+            super::pretty_tool_name("mcp__plugin_figma_figma__get_file"),
+            "Figma · Get file"
+        );
+        assert_eq!(
+            super::pretty_tool_name("mcp__linear__getTeam"),
+            "Linear · Get team"
+        );
+        assert_eq!(super::pretty_tool_name("Bash"), "Bash");
+        assert_eq!(super::pretty_tool_name("mcp__"), "mcp__");
+    }
+
+    #[test]
     fn holds_and_categories_decode() {
         let hold = Hold::from_json(
             &json!({"protection": {"protected": true, "forced": false, "waitingWakeUps": 2}}),
@@ -1199,11 +1573,119 @@ mod tests {
 
     #[test]
     fn snapshot_usage_keeps_the_recorded_total() {
-        let usage = super::SnapshotUsage::from_json(
-            &json!({"contextUsage": {"usedTokens": 663_000, "maxTokens": 1_000_000}}),
-        )
+        let usage = super::SnapshotUsage::from_json(&json!({"contextUsage": {
+            "usedTokens": 663_000, "maxTokens": 1_000_000, "totalProcessedTokens": 2_000_000,
+            "autoCompactThreshold": 800_000, "compactsAutomatically": true,
+            "costUsd": 1.25, "cachedInputTokens": 500,
+        }}))
         .expect("usage");
         assert_eq!((usage.used, usage.max), (663_000, Some(1_000_000)));
+        assert_eq!(
+            (
+                usage.processed,
+                usage.threshold,
+                usage.compacts,
+                usage.cost,
+                usage.cached
+            ),
+            (
+                Some(2_000_000),
+                Some(800_000),
+                Some(true),
+                Some(1.25),
+                Some(500)
+            )
+        );
         assert!(super::SnapshotUsage::from_json(&json!({})).is_none());
+        assert!(super::SnapshotUsage::from_json(&json!({"contextUsage": {}})).is_none());
+    }
+
+    #[test]
+    fn a_malformed_protection_answer_is_not_protection_state() {
+        assert!(super::ProtectionData::from_json(&json!({})).is_none());
+        assert!(super::ProtectionData::from_json(&json!({"forecasts": []})).is_none());
+        let empty = super::ProtectionData::from_json(&json!({"forecasts": [], "queue": []}))
+            .expect("empty protection");
+        assert!(empty.forecasts.is_empty() && empty.queue.is_empty());
+    }
+
+    #[test]
+    fn the_transcript_estimate_scales_message_sizes_to_the_real_total() {
+        let usage = super::SnapshotUsage {
+            used: 2000,
+            max: Some(4000),
+            ..super::SnapshotUsage::default()
+        };
+        let thread = json!({
+            "messages": [
+                {"role": "user", "text": "u".repeat(8000)},
+                {"role": "assistant", "text": "a".repeat(1600)},
+            ],
+            "activities": [],
+        });
+        let breakdown = super::estimate_breakdown(&usage, &thread);
+        assert!(breakdown.estimated);
+        assert_eq!((breakdown.used, breakdown.max), (2000, Some(4000)));
+        let categories: Vec<(&str, i64)> = breakdown
+            .categories
+            .iter()
+            .map(|category| (category.name.as_str(), category.tokens))
+            .collect();
+        // 2000 + 400 message tokens scale to the real 2000; nothing is left
+        // for the system prompt (kept, at zero, as the TUI keeps it), and the
+        // free space is what the window keeps.
+        assert_eq!(
+            categories,
+            [
+                ("System prompt & tools", 0),
+                ("User messages", 1667),
+                ("Assistant messages", 333),
+                ("Free space", 2000)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_estimate_names_tools_and_gathers_what_messages_leave_out() {
+        let usage = super::SnapshotUsage {
+            used: 500,
+            max: None,
+            ..super::SnapshotUsage::default()
+        };
+        let thread = json!({
+            "messages": [],
+            "activities": [
+                {"payload": {"toolCallId": "c9", "data": {"tool": "mcp__linear__list_issues"}}},
+                {"payload": {"toolCallId": "r1", "itemType": "reasoning", "text": "hmm"}},
+            ],
+        });
+        let breakdown = super::estimate_breakdown(&usage, &thread);
+        // The 63-char call and the 3-char thought, at ~4 chars/token.
+        assert_eq!(
+            breakdown
+                .categories
+                .iter()
+                .map(|category| (category.name.as_str(), category.tokens))
+                .collect::<Vec<_>>(),
+            [
+                ("System prompt & tools", 483),
+                ("Reasoning", 1),
+                ("Tool calls", 16)
+            ]
+        );
+        assert!(
+            breakdown
+                .categories
+                .iter()
+                .all(|category| category.kind == super::CategoryKind::Used)
+        );
+        assert_eq!(
+            breakdown
+                .tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.tokens))
+                .collect::<Vec<_>>(),
+            [("list_issues", 16)]
+        );
     }
 }

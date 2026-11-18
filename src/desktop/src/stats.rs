@@ -838,11 +838,16 @@ fn month_name(month: u32) -> &'static str {
 }
 
 /// The activity heatmap: one column a week, Monday first, graded in quarters
-/// of the range's busiest day; active days before the range stay grey.
+/// of the range's busiest day; active days before the range stay grey. A week
+/// is two 12px cells and a gap, like the TUI's two cells a week, so the count
+/// comes off the content width as its does.
 fn heatmap_view(data: &StatsData, today: &str) -> impl IntoElement {
-    let map = heatmap(&data.daily, today, 26, data.range);
+    const CONTENT: f32 = 528.;
+    const WEEK: f32 = 16.4;
+    let weeks = ((CONTENT - 16.) / WEEK).floor().clamp(4., 53.) as usize;
+    let map = heatmap(&data.daily, today, weeks, data.range);
     let header: String = {
-        let mut cells = vec![" ".to_string(); 2 + 26 * 2];
+        let mut cells = vec![" ".to_string(); 2 + weeks * 2];
         for (week, month) in &map.month_starts {
             let name = month_name(*month);
             let at = 2 + week * 2;
@@ -864,7 +869,7 @@ fn heatmap_view(data: &StatsData, today: &str) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::MONO)
-                .text_size(px(10.))
+                .text_size(px(12.))
                 .text_color(color("ink-2"))
                 .child(header),
         )
@@ -876,22 +881,22 @@ fn heatmap_view(data: &StatsData, today: &str) -> impl IntoElement {
                 .gap(px(2.))
                 .child(
                     div()
-                        .w(px(10.))
+                        .w(px(14.))
                         .font_family(theme::MONO)
-                        .text_size(px(10.))
+                        .text_size(px(12.))
                         .text_color(color("ink-2"))
                         .child(ROWS[weekday].to_string()),
                 )
                 .children(row.iter().map(|cell| {
                     let (token, glyph) = match cell {
                         None => ("sunk", "  "),
-                        Some(cell) if cell.muted => ("ink-2", "▪ "),
+                        Some(cell) if cell.muted => ("ink-2", "■ "),
                         Some(cell) if cell.level == 0 => ("rule", "· "),
-                        Some(_) => ("live", "▪ "),
+                        Some(_) => ("live", "■ "),
                     };
                     div()
                         .font_family(theme::MONO)
-                        .text_size(px(10.))
+                        .text_size(px(12.))
                         .text_color(color(token))
                         .child(glyph.to_string())
                 }))
@@ -908,9 +913,16 @@ fn models(data: &StatsData) -> impl IntoElement {
             .daily
             .first()
             .and_then(|first| {
-                let days = (crate::live::parse_iso_ms(&format!("{}T00:00:00Z", today))?
-                    - crate::live::parse_iso_ms(&format!("{}T00:00:00Z", first.day))?)
-                    / 86_400_000;
+                // Local midnights, rounded, as the TUI's chart does: the span
+                // is whole days from the first active day to now.
+                use chrono::{Local, NaiveDate, TimeZone};
+                let day = NaiveDate::parse_from_str(first.day.as_str(), "%Y-%m-%d").ok()?;
+                let midnight = day.and_hms_opt(0, 0, 0)?;
+                let first_ms = Local
+                    .from_local_datetime(&midnight)
+                    .single()
+                    .map(|dt| dt.timestamp_millis())?;
+                let days = ((crate::live::now_ms() - first_ms) as f64 / 86_400_000.).round() as i64;
                 Some(days.max(7) as usize + 1)
             })
             .unwrap_or(7),
@@ -1163,7 +1175,7 @@ fn card_row(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             card.error.clone().unwrap_or_default()
                         )
                     }
-                    _ => "esc closes".to_string(),
+                    _ => String::new(),
                 }),
         )
 }

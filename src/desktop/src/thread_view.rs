@@ -355,6 +355,268 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     })
                                     .into_any_element()
                             }
+                            Message::TaskNotification { tasks, at } => {
+                                let native = tasks.iter().all(|task| task.native);
+                                let settled = tasks.iter().all(|task| {
+                                    matches!(
+                                        task.status.as_str(),
+                                        "completed" | "failed" | "interrupted"
+                                    )
+                                });
+                                let header = if tasks.len() == 1 {
+                                    None
+                                } else if settled {
+                                    Some(if native {
+                                        format!("{} subagents settled", tasks.len())
+                                    } else {
+                                        format!("{} delegated tasks settled", tasks.len())
+                                    })
+                                } else {
+                                    Some(format!("{} delegated task updates", tasks.len()))
+                                };
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .border_l_2()
+                                    .border_color(color("rule"))
+                                    .pl(px(14.))
+                                    .py(px(4.))
+                                    .gap(px(8.))
+                                    .children(header.map(|header| {
+                                        div()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(13.5))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(header),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_family(theme::MONO)
+                                                    .text_size(px(12.))
+                                                    .text_color(color("ink-2"))
+                                                    .child(at.clone()),
+                                            )
+                                    }))
+                                    .children(tasks.iter().map(|task| {
+                                        let (glyph, token) = match task.status.as_str() {
+                                            "completed" => ("✓", "added"),
+                                            "failed" => ("✗", "broken"),
+                                            "cancelled" | "interrupted" => ("■", "held"),
+                                            _ => ("●", "held"),
+                                        };
+                                        let verb = match task.status.as_str() {
+                                            "completed" => "finished",
+                                            "failed" => "failed",
+                                            "cancelled" => "cancelled",
+                                            "interrupted" => "stopped",
+                                            _ => "running",
+                                        };
+                                        let outcome = match task.duration_ms {
+                                            None => verb.to_string(),
+                                            Some(ms) if task.status == "running" => {
+                                                format!("running for {}", crate::transcript::duration(ms.max(1000)))
+                                            }
+                                            Some(ms) => {
+                                                format!("{verb} in {}", crate::transcript::duration(ms.max(1000)))
+                                            }
+                                        };
+                                        let kind = (task.native && task.model.is_none())
+                                            .then_some("subagent");
+                                        let mut facts = vec![outcome];
+                                        facts.extend(task.model.clone());
+                                        facts.extend(kind.map(str::to_string));
+                                        if tasks.len() == 1 {
+                                            facts.push(at.clone());
+                                        }
+                                        let one_line = task.title.len() + facts.join("  ·  ").len() <= 80;
+                                        let title = div()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(8.))
+                                            .child(div().text_color(color(token)).child(glyph))
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_size(px(13.5))
+                                                    .child(task.title.clone()),
+                                            );
+                                        let facts_row = |lead: &'static str| {
+                                            div()
+                                                .flex()
+                                                .items_baseline()
+                                                .gap(px(8.))
+                                                .child(div().text_color(color("ink-2")).child(lead))
+                                                .child(
+                                                    div()
+                                                        .font_family(theme::MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(color("ink-2"))
+                                                        .child(facts.join("  ·  ")),
+                                                )
+                                        };
+                                        let resume = (task.status == "running").then(|| {
+                                            task.resumes_at.as_deref().map_or_else(
+                                                || "Resumes when the provider allows".to_string(),
+                                                |at| {
+                                                    format!(
+                                                        "Resumes {}",
+                                                        crate::live::parse_iso_ms(at).map_or_else(
+                                                            || at.to_string(),
+                                                            crate::transcript::clock
+                                                        )
+                                                    )
+                                                },
+                                            )
+                                        });
+                                        let files = task.files.and_then(|(changed, added, removed)| {
+                                            (changed != 0).then(|| {
+                                                format!(
+                                                    "+{added} −{removed} · {}",
+                                                    if changed == 1 {
+                                                        "1 file".to_string()
+                                                    } else {
+                                                        format!("{changed} files")
+                                                    }
+                                                )
+                                            })
+                                        });
+                                        let footer: Vec<String> = resume
+                                            .into_iter()
+                                            .chain(files)
+                                            .chain(task.branch.clone().map(|branch| format!("branch {branch}")))
+                                            .collect();
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(if one_line {
+                                                title.child(
+                                                    div()
+                                                        .font_family(theme::MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(color("ink-2"))
+                                                        .child(format!("  ·  {}", facts.join("  ·  "))),
+                                                )
+                                            } else {
+                                                title
+                                            })
+                                            .when(!one_line, |s| s.child(facts_row("  ")))
+                                            .children(task.headline.clone().map(|headline| {
+                                                div()
+                                                    .text_size(px(theme::BODY))
+                                                    .line_height(px(theme::LINE))
+                                                    .text_color(color("ink"))
+                                                    .child(headline)
+                                            }))
+                                            .children((task.review
+                                                && task.verdict.as_deref() != Some("MERGE"))
+                                            .then(|| {
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .text_color(color(if task.verdict.is_none() {
+                                                        "held"
+                                                    } else {
+                                                        "broken"
+                                                    }))
+                                                    .child(
+                                                        task.verdict.clone().map_or_else(
+                                                            || {
+                                                                "No verdict — this is not a finished review"
+                                                                    .to_string()
+                                                            },
+                                                            |verdict| format!("Verdict: {verdict}"),
+                                                        ),
+                                                    )
+                                            }))
+                                            .children((task.review
+                                                && task.verdict.as_deref() == Some("MERGE"))
+                                            .then(|| {
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .text_color(color("added"))
+                                                    .child(format!(
+                                                        "Verdict: {}",
+                                                        task.verdict.clone().unwrap_or_default()
+                                                    ))
+                                            }))
+                                            .when(!footer.is_empty(), |s| {
+                                                s.child(
+                                                    div()
+                                                        .font_family(theme::MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(color("ink-2"))
+                                                        .child(format!("  {}", footer.join("  ·  "))),
+                                                )
+                                            })
+                                    }))
+                                    .into_any_element()
+                            }
+                            Message::UsageProtection { at } => div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .border_l_2()
+                                .border_color(color("rule"))
+                                .pl(px(14.))
+                                .py(px(4.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .gap(px(8.))
+                                        .child(div().text_color(color("held")).child("◔"))
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_size(px(13.5))
+                                                .text_color(color("held"))
+                                                .child("Usage protection"),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(theme::MONO)
+                                                .text_size(px(12.))
+                                                .text_color(color("ink-2"))
+                                                .child(at.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(color("ink-2"))
+                                        .child(
+                                            "Shared usage is nearly exhausted. Wrapping up safely before waiting for recovery.",
+                                        ),
+                                )
+                                .into_any_element(),
+                            Message::Continued { kind, at } => {
+                                let text = match kind {
+                                    crate::model::ContinuedKind::Handoff => "Preparing a handoff",
+                                    crate::model::ContinuedKind::Background => "Background task finished",
+                                    crate::model::ContinuedKind::UsageReset => {
+                                        "Continued after the usage limit reset"
+                                    }
+                                };
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(8.))
+                                    .text_size(px(13.))
+                                    .child(div().text_color(color("held")).child("↻"))
+                                    .child(div().text_color(color("ink-2")).child(text))
+                                    .child(
+                                        div()
+                                            .font_family(theme::MONO)
+                                            .text_size(px(12.))
+                                            .text_color(color("ink-2"))
+                                            .child(format!("  ·  {at}")),
+                                    )
+                                    .into_any_element()
+                            }
                             Message::Tool {
                                 name,
                                 summary: target,
@@ -1372,15 +1634,24 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
         .flex()
         .items_center()
         .gap(px(4.))
+        .min_w_0()
+        .overflow_hidden()
         .font_family(theme::MONO)
         .text_size(px(12.))
         .text_color(color("ink-2"))
         .when(has_branch(w), |s| {
             s.child(
                 chip("branch", "Open Git")
+                    .min_w_0()
                     .child(ui::icon("git-branch", "ink-2"))
                     .child(div().text_color(color("ink")).child(branch))
-                    .children(changed.map(|line| div().text_color(color("effort")).child(line)))
+                    .children(changed.map(|line| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(color("effort"))
+                            .child(line)
+                    }))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = 1;
                         this.set_inspector(true);
@@ -1405,7 +1676,9 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
 }
 
 /// The usage chip: the thread's context share and the account's plan gauges,
-/// from the server. Missing numbers leave it out rather than show made-up ones.
+/// from the server. The context segment shows whenever the thread's totals
+/// are known; the gauges whenever the account's limits are — like the TUI's
+/// composer footer, which keeps its gauges on an idle thread with no reading.
 fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let id = w.selected;
     let context = w.source.context(id);
@@ -1422,13 +1695,11 @@ fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
         .and_then(|context| context.breakdown.as_ref());
     let instance = w.source.selection(id).map(|selection| selection.instance);
     let limits = w.source.limits();
-    let gauges = crate::usage::plan_gauges(
-        instance
-            .as_deref()
-            .and_then(|instance| limits.as_deref()?.for_instance(instance)),
-    );
-    let (used, max) = totals?;
-    if gauges.is_empty() && breakdown.is_none() {
+    let catalog = w.catalog();
+    let gauges = crate::usage::plan_gauges(instance.as_deref().and_then(|instance| {
+        crate::usage::provider_limits(limits.as_deref(), catalog.as_deref(), instance)
+    }));
+    if totals.is_none() && gauges.is_empty() {
         return None;
     }
     let shares = breakdown
@@ -1436,21 +1707,31 @@ fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
             crate::usage::context_shares(&breakdown.categories, breakdown.max, breakdown.used)
         })
         .unwrap_or_default();
-    let percent = max
-        .filter(|max| *max > 0)
-        .map(|max| used.clamp(0, max) * 100 / max.max(1));
-    let label = match (percent, max) {
-        (Some(percent), Some(max)) => format!(
-            "{percent}%  {} / {}",
-            crate::usage::format_count(used),
-            crate::usage::format_count(max)
-        ),
-        _ => format!("{} tokens in context", crate::usage::format_count(used)),
-    };
+    let label = totals.map(|(used, max)| {
+        let percent = max
+            .filter(|max| *max > 0)
+            .map(|max| crate::usage::window_percent(used, max));
+        match (percent, max) {
+            // Like the TUI's composer footer: the share, then the used and
+            // ceiling without spaces around the slash.
+            (Some(percent), Some(max)) => format!(
+                "{percent}% · {}/{}",
+                crate::usage::format_count(used),
+                crate::usage::format_count(max)
+            ),
+            _ => format!("{} tokens in context", crate::usage::format_count(used)),
+        }
+    });
     let usage = chip("usage", "Context and plan usage")
-        .children((!shares.is_empty()).then(|| crate::usage::meter(&shares, 32., 5.)))
-        .child(div().text_color(color("ink")).child(label))
-        .children(gauges.iter().flat_map(|gauge| {
+        .flex_shrink_0()
+        .children((!shares.is_empty()).then(|| crate::usage::meter(&shares, 24., 5.)))
+        .children(label.map(|label| {
+            div()
+                .text_color(color("ink"))
+                .child(label)
+                .into_any_element()
+        }))
+        .children(gauges.iter().enumerate().flat_map(|(at, gauge)| {
             let token = if gauge.percent >= 90. {
                 "broken"
             } else if gauge.percent >= 70. {
@@ -1458,19 +1739,27 @@ fn usage_chip(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
             } else {
                 "ink-2"
             };
+            // The separator divides the gauges from what stands before them.
+            let divided = totals.is_some() || !shares.is_empty() || at > 0;
             [
-                div()
-                    .w(px(1.))
-                    .h(px(12.))
-                    .mx(px(4.))
-                    .bg(color("rule"))
-                    .into_any_element(),
-                div().child(gauge.short.clone()).into_any_element(),
-                div()
-                    .text_color(color(token))
-                    .child(format!("{}%", gauge.percent.round() as i64))
-                    .into_any_element(),
+                divided.then(|| {
+                    div()
+                        .w(px(1.))
+                        .h(px(12.))
+                        .mx(px(2.))
+                        .bg(color("rule"))
+                        .into_any_element()
+                }),
+                Some(div().child(gauge.short.clone()).into_any_element()),
+                Some(
+                    div()
+                        .text_color(color(token))
+                        .child(format!("{}%", gauge.percent.round() as i64))
+                        .into_any_element(),
+                ),
             ]
+            .into_iter()
+            .flatten()
         }))
         .on_click(cx.listener(|this, _, _, cx| {
             this.tab = 2;

@@ -620,8 +620,8 @@ impl Workspace {
     }
     /// Re-reads usage while it is on screen: the account's limits and
     /// protection on their timers, the open thread's context with its tab, and
-    /// the stats range the overlay shows. Reads are cheap snapshots; each
-    /// guards its own in-flight round.
+    /// the stats range the overlay shows but has not read yet. Reads are cheap
+    /// snapshots; each guards its own in-flight round.
     pub fn refresh_usage(&mut self) {
         if self.source.preview() {
             return;
@@ -631,7 +631,7 @@ impl Workspace {
         if self.inspector_open && !self.creating && self.tab == 2 {
             self.source.read_context(self.selected);
         }
-        if self.stats_open {
+        if self.stats_open && self.source.stats(self.stats_range).is_none() {
             self.source.read_stats(self.stats_range);
         }
     }
@@ -934,7 +934,7 @@ impl Render for Workspace {
                     .flex()
                     .child(crate::sidebar::render(self, window, cx))
                     .child(crate::thread_view::render(self, window, cx))
-                    .when(shown > 0. && self.source.preview(), |s| {
+                    .when(shown > 0., |s| {
                         // Slides in from the window's right edge: the pane
                         // keeps its width and the clip around it grows.
                         s.child(

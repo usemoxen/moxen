@@ -306,7 +306,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         })),
                 )
                 .child(
-                    row("stats", "Usage across every thread and provider")
+                    row("stats", "Usage stats")
                         .child(ui::icon("circle-gauge", "ink-2"))
                         .child(div().flex_1().child("Stats"))
                         .on_click(cx.listener(|this, _, _, cx| {

@@ -20,7 +20,7 @@ use crate::{
     pending,
     stats::StatsData,
     transcript::{self, Row},
-    usage::{Breakdown, Reading},
+    usage::{Breakdown, Reading, estimate_breakdown},
     wire::{Wire, WireError},
     work::{self, Background, Delegated, Delegation, InspectorData, Read, View},
 };
@@ -422,8 +422,13 @@ struct State {
     /// Each followed thread's own protection hold, off its snapshot.
     holds: HashMap<ThreadId, Hold>,
     /// Each followed thread's recorded context totals, off its snapshot: what
-    /// the status line reads without another query.
+    /// the status line reads without another query, and what the transcript
+    /// estimate scales against.
     snapshot_usage: HashMap<ThreadId, SnapshotUsage>,
+    /// Each followed thread's transcript estimate, for providers that only
+    /// report a total: what fills the window, from its own messages and
+    /// tool calls.
+    estimated: HashMap<ThreadId, Breakdown>,
     /// Usage stats and saved cards, by range, once read.
     stats: HashMap<StatsRange, Arc<StatsState>>,
     stats_reads: HashSet<StatsRange>,
@@ -854,10 +859,14 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
                 }
                 match SnapshotUsage::from_json(thread) {
                     Some(usage) => {
-                        state.snapshot_usage.insert(id, usage);
+                        state.snapshot_usage.insert(id, usage.clone());
+                        state
+                            .estimated
+                            .insert(id, estimate_breakdown(&usage, thread));
                     }
                     None => {
                         state.snapshot_usage.remove(&id);
+                        state.estimated.remove(&id);
                     }
                 }
                 state.queues.insert(id, queue_of(thread, read.as_ref()));
@@ -1164,8 +1173,9 @@ impl ThreadSource for ServerSource {
         });
         let (detail, runs) = (self.shared.clone(), self.shared.clone());
         let (detail_sha, runs_sha) = (sha.clone(), sha);
+        let drop_sha = detail_sha.clone();
         let (detail_uuid, runs_uuid) = (uuid.clone(), uuid);
-        with_wire(&self.shared, move |wire| {
+        if !with_wire(&self.shared, move |wire| {
             let fields = json!({ "threadId": detail_uuid, "sha": detail_sha });
             let result = wire.query("git.commit.detail", fields);
             detail.update(|state| {
@@ -1179,7 +1189,18 @@ impl ThreadSource for ServerSource {
                     Err(error) => git.error = Some(error.message),
                 }
             });
-        });
+        }) {
+            self.shared.update(|state| {
+                let git = state.git_of(id);
+                let Some(open) = git.commit.as_mut().filter(|open| open.sha == drop_sha) else {
+                    return;
+                };
+                open.loading = false;
+                git.error = Some(dropped());
+            });
+        }
+        // CI is optional: without it the commit stands without runs, as with a
+        // slow forge, so a dropped read needs no cleanup.
         with_wire(&self.shared, move |wire| {
             let fields = json!({ "threadId": runs_uuid, "sha": runs_sha });
             // CI is the forge's and may be slow or absent: the commit stands without it.
@@ -1312,7 +1333,8 @@ impl ThreadSource for ServerSource {
             state.patches.insert((id, turn), Patch::Loading);
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        let dropped = self.shared.clone();
+        if !with_wire(&shared.clone(), move |wire| {
             let result = wire.request(
                 "turnDiff",
                 Some(json!({ "threadId": uuid, "toTurnCount": turn })),
@@ -1325,7 +1347,12 @@ impl ThreadSource for ServerSource {
             shared.update(|state| {
                 state.patches.insert((id, turn), patch);
             });
-        });
+        }) {
+            // Back to unasked: the Diff tab asks again while it shows the turn.
+            dropped.update(|state| {
+                state.patches.remove(&(id, turn));
+            });
+        }
     }
     fn tree_patch(&self, id: ThreadId) -> Option<Patch> {
         let state = self.shared.state.lock().expect("live state");
@@ -1343,12 +1370,18 @@ impl ThreadSource for ServerSource {
                 .and_then(|g| g.overview.as_ref()?.root.clone())
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        let dropped = self.shared.clone();
+        if !with_wire(&shared.clone(), move |wire| {
             let patch = read_tree(&wire, &uuid, root).unwrap_or_else(Patch::Failed);
             shared.update(|state| {
                 state.trees.insert(id, patch);
             });
-        });
+        }) {
+            // Back to unasked: the Diff tab asks again while it shows the tree.
+            dropped.update(|state| {
+                state.trees.remove(&id);
+            });
+        }
     }
     fn send_message(&mut self, id: ThreadId, text: String, delivery: Delivery) -> Option<Reply> {
         let (uuid, busy) = {
@@ -1670,7 +1703,7 @@ impl ServerSource {
             git.notice = None;
         });
         let shared = self.shared.clone();
-        with_wire(&shared.clone(), move |wire| {
+        if !with_wire(&shared.clone(), move |wire| {
             let result = wire.dispatch(command, fields);
             let branch = shared.update(|state| {
                 let git = state.git_of(id);
@@ -1685,7 +1718,13 @@ impl ServerSource {
             if result.is_ok() && command != "forge.request.comment" {
                 begin_read(&shared, id, &uuid, branch);
             }
-        });
+        }) {
+            self.shared.update(|state| {
+                let git = state.git_of(id);
+                git.busy = None;
+                git.error = Some(dropped());
+            });
+        }
     }
 }
 
@@ -1705,12 +1744,23 @@ fn begin_read(shared: &Arc<Shared>, id: ThreadId, uuid: &str, branch: Option<Str
     });
     let (history, forge) = (shared.clone(), shared.clone());
     let (history_uuid, forge_uuid) = (uuid.to_string(), uuid.to_string());
-    with_wire(shared, move |wire| {
+    let (history_drop, forge_drop) = (shared.clone(), shared.clone());
+    if !with_wire(shared, move |wire| {
         read_history(&history, &wire, id, read, &history_uuid, branch.as_deref())
-    });
-    with_wire(shared, move |wire| {
+    }) {
+        history_drop.update_git(id, read, |git| {
+            git.loading_git = false;
+            git.error = Some(dropped());
+        });
+    }
+    if !with_wire(shared, move |wire| {
         read_forge(&forge, &wire, id, read, &forge_uuid)
-    });
+    }) {
+        forge_drop.update_git(id, read, |git| {
+            git.loading_forge = false;
+            git.error = Some(dropped());
+        });
+    }
 }
 
 /// Polls each visible view without overlapping reads of it. Thread and work
@@ -1729,7 +1779,9 @@ fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
         names
     };
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    let drop_key = key.clone();
+    if !with_wire(shared, move |wire| {
         let answer = match &key.1 {
             Read::Delegation => (|| {
                 let link = wire.query("thread.delegation", json!({ "threadId": uuid }))?;
@@ -1779,18 +1831,31 @@ fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
                 }
             }
         });
-    });
+    }) {
+        // Back to unasked: the inspector asks again while the view shows.
+        dropped.update(|state| {
+            state.work_reads.remove(&drop_key);
+        });
+    }
 }
 
-/// Runs a read on its own thread with the open connection; nothing if there is none.
-fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) {
+/// Runs a read on its own thread with the open connection. Reports whether
+/// the job was started: a dropped job (no connection, so nothing runs) leaves
+/// its caller to release whatever guard it set, so a later read still runs.
+fn with_wire(shared: &Arc<Shared>, job: impl FnOnce(Arc<Wire>) + Send + 'static) -> bool {
     let wire = shared.state.lock().expect("live state").wire.clone();
     let Some(wire) = wire else {
-        return;
+        return false;
     };
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("moxen-read".into())
-        .spawn(move || job(wire));
+        .spawn(move || job(wire))
+        .is_ok()
+}
+
+/// What a read that never reached the server says.
+fn dropped() -> String {
+    "Not connected to the Moxen server.".to_string()
 }
 
 /// The checkout's history: status, branches and commits, then each commit's CI.
@@ -1928,12 +1993,13 @@ fn read_context(shared: &Arc<Shared>, id: ThreadId) {
         return;
     };
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
         let breakdown = wire.query("thread.context", json!({ "threadId": uuid }));
         let reading = wire.query("thread.context-reading", json!({ "threadId": uuid }));
         target.update(|state| {
             state.context_reads.remove(&id);
-            let previous = state.contexts.get(&id);
+            let previous = state.contexts.get(&id).cloned();
             let error = match (&breakdown, &reading) {
                 (Err(error), _) | (_, Err(error)) => Some(error.message.clone()),
                 _ => None,
@@ -1944,24 +2010,52 @@ fn read_context(shared: &Arc<Shared>, id: ThreadId) {
                 .and_then(|value| value.get("live"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let next = breakdown
-                .as_ref()
-                .ok()
-                .and_then(|value| Breakdown::from_json(&value["breakdown"]));
-            let last = reading.as_ref().ok().and_then(Reading::from_json);
+            let failed = breakdown.is_err() && reading.is_err();
+            let next = if failed {
+                // A failed pair keeps the last answer, as the banner does.
+                previous
+                    .as_ref()
+                    .and_then(|previous| previous.breakdown.clone())
+            } else {
+                breakdown
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| Breakdown::from_json(&value["breakdown"]))
+                    .filter(|breakdown| !breakdown.categories.is_empty())
+                    // A total-only reading still shows what fills the
+                    // window: the transcript estimate, like the TUI's.
+                    .or_else(|| state.estimated.get(&id).cloned())
+            };
+            let last = if failed {
+                previous
+                    .as_ref()
+                    .and_then(|previous| previous.reading.clone())
+            } else {
+                reading
+                    .as_ref()
+                    .ok()
+                    .and_then(Reading::from_json)
+                    .or_else(|| {
+                        previous
+                            .as_ref()
+                            .and_then(|previous| previous.reading.clone())
+                    })
+            };
             state.contexts.insert(
                 id,
                 Arc::new(ContextData {
                     live,
-                    breakdown: next
-                        .or_else(|| previous.and_then(|previous| previous.breakdown.clone())),
-                    reading: last
-                        .or_else(|| previous.and_then(|previous| previous.reading.clone())),
+                    breakdown: next,
+                    reading: last,
                     error,
                 }),
             );
         });
-    });
+    }) {
+        dropped.update(|state| {
+            state.context_reads.remove(&id);
+        });
+    }
 }
 
 /// The account's plan windows, re-read on the TUI's slow timer: live events
@@ -1982,7 +2076,8 @@ fn read_limits(shared: &Arc<Shared>) {
         return;
     }
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
         let answer = wire.query("usage.limits", json!({}));
         target.update(|state| {
             state.limits_reading = false;
@@ -2000,7 +2095,11 @@ fn read_limits(shared: &Arc<Shared>) {
                 Err(_) => {}
             }
         });
-    });
+    }) {
+        dropped.update(|state| {
+            state.limits_reading = false;
+        });
+    }
 }
 
 /// Usage protection on the TUI's fast timer: a reconnect keeps the last
@@ -2018,14 +2117,23 @@ fn read_protection(shared: &Arc<Shared>) {
         return;
     }
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
         let answer = wire.query("usage.protection", json!({}));
         target.update(|state| {
             state.protection_reading = false;
             match answer {
-                Ok(value) => {
-                    state.protection = Some(Arc::new(ProtectionData::from_json(&value)));
-                }
+                // A malformed answer is not protection state: the last
+                // answer stands, so a hiccup never clears the queue.
+                Ok(value) => match ProtectionData::from_json(&value) {
+                    Some(protection) => {
+                        state.protection = Some(Arc::new(protection));
+                    }
+                    None if state.protection.is_none() => {
+                        state.protection = Some(Arc::new(ProtectionData::default()));
+                    }
+                    None => {}
+                },
                 Err(error) if state.protection.is_none() => {
                     state.protection = Some(Arc::new(ProtectionData {
                         error: Some(error.message),
@@ -2035,7 +2143,11 @@ fn read_protection(shared: &Arc<Shared>) {
                 Err(_) => {}
             }
         });
-    });
+    }) {
+        dropped.update(|state| {
+            state.protection_reading = false;
+        });
+    }
 }
 
 /// Usage stats for a range, read when the stats screen opens it.
@@ -2050,7 +2162,8 @@ fn read_stats(shared: &Arc<Shared>, range: StatsRange) {
         return;
     }
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
         let answer = wire.query("usage.stats", json!({ "range": range.wire() }));
         target.update(|state| {
             state.stats_reads.remove(&range);
@@ -2076,7 +2189,11 @@ fn read_stats(shared: &Arc<Shared>, range: StatsRange) {
                 }
             }
         });
-    });
+    }) {
+        dropped.update(|state| {
+            state.stats_reads.remove(&range);
+        });
+    }
 }
 
 /// The shareable PNG card for a range: the server draws it, the client saves
@@ -2099,7 +2216,8 @@ fn read_card(shared: &Arc<Shared>, range: StatsRange) {
         return;
     }
     let target = shared.clone();
-    with_wire(shared, move |wire| {
+    let dropped = shared.clone();
+    if !with_wire(shared, move |wire| {
         let saved: Result<String, WireError> = (|| {
             let card = wire.query("usage.card", json!({ "range": range.wire() }))?;
             let bytes = base64::Engine::decode(
@@ -2143,7 +2261,13 @@ fn read_card(shared: &Arc<Shared>, range: StatsRange) {
                 }
             }
         });
-    });
+    }) {
+        // A job that never ran leaves no busy card behind.
+        dropped.update(|state| {
+            state.card_reads.remove(&range);
+            state.cards.remove(&range);
+        });
+    }
 }
 
 /// What a refused or failed command tells the user.
@@ -2433,18 +2557,25 @@ mod tests {
     }
 
     /// A server that serves one running thread with a message waiting in its
-    /// queue, and records every command it is sent.
+    /// queue, and records every command it is sent and every query it is
+    /// asked. Query payloads are recorded for the test thread to assert, so
+    /// a mismatch fails with the diff rather than a timeout on a panicking
+    /// server thread.
+    type Recorded = Arc<Mutex<Vec<Value>>>;
     #[cfg(unix)]
-    fn fake_server(path: std::path::PathBuf) -> Arc<Mutex<Vec<Value>>> {
+    fn fake_server(path: std::path::PathBuf) -> (Recorded, Recorded) {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
         let listener = UnixListener::bind(&path).expect("bind");
         let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
         let seen = commands.clone();
+        let queries = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_queries = queries.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = stream.expect("accept");
                 let seen = seen.clone();
+                let seen_queries = seen_queries.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -2494,184 +2625,152 @@ mod tests {
                             "turnDiff" => json!(
                                 "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n"
                             ),
-                            "query" => match params["type"].as_str() {
-                                Some("thread.delegation") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.delegation", "threadId": "child"})
-                                    );
-                                    json!({"parentThreadId": "t1", "notify": true})
-                                }
-                                Some("thread.task.status") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.task.status", "parentThreadId": "t1", "taskId": "child"})
-                                    );
-                                    json!({"task": {"status": "running", "summary": "Checking focus"}})
-                                }
-                                Some("thread.subagent") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.subagent", "threadId": "t1", "agentId": "agent-1"})
-                                    );
-                                    json!({"available": true, "messages": [
-                                        {"id": "m1", "role": "user", "text": "Trace the key path"},
-                                        {"id": "m2", "role": "assistant", "text": "Found the listener"},
-                                    ]})
-                                }
-                                Some("thread.background.list") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.background.list", "threadId": "t1"})
-                                    );
-                                    let stopped = seen.lock().unwrap().iter().any(|m| {
-                                        m["type"] == "thread.background.stop"
-                                            && m["taskId"] == "shell-1"
-                                    });
-                                    if stopped {
-                                        json!({"live": true, "partial": true, "tasks": []})
-                                    } else {
-                                        json!({"live": true, "partial": true, "tasks": [{
-                                            "taskId": "shell-1", "toolName": "Bash", "description": "Checks", "command": "cargo test"
-                                        }, {
-                                            "taskId": "watch", "toolName": "Monitor", "description": "Logs", "stoppable": false
-                                        }]})
+                            "query" => {
+                                // Recorded for the test thread: a payload mismatch
+                                // fails there with the diff, not here with a
+                                // timeout on a panicking server thread.
+                                seen_queries.lock().unwrap().push(params.clone());
+                                match params["type"].as_str() {
+                                    Some("thread.delegation") => {
+                                        json!({"parentThreadId": "t1", "notify": true})
                                     }
-                                }
-                                Some("thread.background.output") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.background.output", "threadId": "t1", "taskId": "shell-1"})
-                                    );
-                                    if seen.lock().unwrap().iter().any(|m| {
-                                        m["type"] == "thread.background.stop"
-                                            && m["taskId"] == "shell-1"
-                                    }) {
-                                        json!({"available": false, "lines": []})
-                                    } else {
-                                        json!({"available": true, "lines": ["running", "done"]})
+                                    Some("thread.task.status") => {
+                                        json!({"task": {"status": "running", "summary": "Checking focus"}})
                                     }
-                                }
-                                Some("git.overview") => {
-                                    json!({"isRepository": true, "root": "/work",
+                                    Some("thread.subagent") => {
+                                        json!({"available": true, "messages": [
+                                            {"id": "m1", "role": "user", "text": "Trace the key path"},
+                                            {"id": "m2", "role": "assistant", "text": "Found the listener"},
+                                        ]})
+                                    }
+                                    Some("thread.background.list") => {
+                                        let stopped = seen.lock().unwrap().iter().any(|m| {
+                                            m["type"] == "thread.background.stop"
+                                                && m["taskId"] == "shell-1"
+                                        });
+                                        if stopped {
+                                            json!({"live": true, "partial": true, "tasks": []})
+                                        } else {
+                                            json!({"live": true, "partial": true, "tasks": [{
+                                                "taskId": "shell-1", "toolName": "Bash", "description": "Checks", "command": "cargo test"
+                                            }, {
+                                                "taskId": "watch", "toolName": "Monitor", "description": "Logs", "stoppable": false
+                                            }]})
+                                        }
+                                    }
+                                    Some("thread.background.output") => {
+                                        if seen.lock().unwrap().iter().any(|m| {
+                                            m["type"] == "thread.background.stop"
+                                                && m["taskId"] == "shell-1"
+                                        }) {
+                                            json!({"available": false, "lines": []})
+                                        } else {
+                                            json!({"available": true, "lines": ["running", "done"]})
+                                        }
+                                    }
+                                    Some("git.overview") => {
+                                        json!({"isRepository": true, "root": "/work",
                                     "status": {"branch": "feature", "staged": 0, "unstaged": 2, "untracked": 0, "conflicted": 0},
                                     "branches": [{"name": "feature", "current": true, "remote": false, "ahead": 1, "behind": 0},
                                                  {"name": "main", "current": false, "remote": false, "ahead": null, "behind": null}],
                                     "commits": [{"sha": "abc1234567", "shortSha": "abc1234", "author": "A",
                                                  "date": "2026-11-16T10:00:00Z", "subject": "Fix", "refs": []}],
                                     "branch": "feature", "defaultBranch": "main"})
-                                }
-                                Some("forge.commits.checks") => {
-                                    json!({"checks": {"abc1234567": {"passed": 3, "failed": 1, "pending": 0}}})
-                                }
-                                Some("forge.detect") => {
-                                    json!({"kind": "github", "slug": "o/r", "installed": true, "authenticated": true})
-                                }
-                                Some("forge.requests.list") => json!({"requests": [
+                                    }
+                                    Some("forge.commits.checks") => {
+                                        json!({"checks": {"abc1234567": {"passed": 3, "failed": 1, "pending": 0}}})
+                                    }
+                                    Some("forge.detect") => {
+                                        json!({"kind": "github", "slug": "o/r", "installed": true, "authenticated": true})
+                                    }
+                                    Some("forge.requests.list") => json!({"requests": [
                                     {"number": 5, "title": "Other", "state": "open"},
                                     {"number": 7, "title": "Mine", "state": "open"}]}),
-                                Some("forge.request.status") => {
-                                    json!({"request": {"number": 7, "title": "Mine", "state": "open",
+                                    Some("forge.request.status") => {
+                                        json!({"request": {"number": 7, "title": "Mine", "state": "open",
                                     "url": "https://x/7", "targetBranch": "main", "runs": [], "mergeable": "mergeable"}})
-                                }
-                                Some("git.commit.detail") => {
-                                    json!({"commit": {"sha": "abc1234567", "subject": "Fix", "body": "",
+                                    }
+                                    Some("git.commit.detail") => {
+                                        json!({"commit": {"sha": "abc1234567", "subject": "Fix", "body": "",
                                     "author": "A", "date": "2026-11-16T10:00:00Z", "committer": "A", "committerDate": "2026-11-16T10:00:00Z",
                                     "parents": [], "refs": [], "files": [], "diff": null}})
-                                }
-                                Some("forge.commit.runs") => {
-                                    json!({"runs": [{"name": "ci", "state": "failed", "url": "https://x/run"}]})
-                                }
-                                Some("workspace.git") if params["call"] == "changed" => {
-                                    json!({"stdout": "src/a.rs\0"})
-                                }
-                                Some("workspace.git") => {
-                                    json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
-                                }
-                                Some("queue.read") => json!({"entries": [
-                                    {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
-                                    {"threadId": "other", "turnId": "x", "policy": {"held": false}},
-                                    {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
-                                ]}),
-                                Some("thread.context") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.context", "threadId": "t1"})
-                                    );
-                                    json!({"live": true, "breakdown": {
-                                        "usedTokens": 663_000, "maxTokens": 1_000_000,
-                                        "cachedInputTokens": 1000, "autoCompactThreshold": 800_000,
-                                        "compactsAutomatically": true, "costUsd": 1.25,
-                                        "categories": [
-                                            {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
-                                            {"name": "System and tools", "tokens": 180_000, "kind": "used"},
-                                            {"name": "Reasoning", "tokens": 120_000, "kind": "used"},
-                                            {"name": "Messages", "tokens": 83_000, "kind": "used"},
-                                            {"name": "Free space", "tokens": 337_000, "kind": "free"},
-                                        ],
-                                        "tools": [{"name": "Bash", "tokens": 40_000}],
-                                        "estimated": false,
-                                    }})
-                                }
-                                Some("thread.context-reading") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "thread.context-reading", "threadId": "t1"})
-                                    );
-                                    json!({"reading": {"usedTokens": 600_000, "maxTokens": 1_000_000,
+                                    }
+                                    Some("forge.commit.runs") => {
+                                        json!({"runs": [{"name": "ci", "state": "failed", "url": "https://x/run"}]})
+                                    }
+                                    Some("workspace.git") if params["call"] == "changed" => {
+                                        json!({"stdout": "src/a.rs\0"})
+                                    }
+                                    Some("workspace.git") => {
+                                        json!({"stdout": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"})
+                                    }
+                                    Some("queue.read") => json!({"entries": [
+                                        {"threadId": "t1", "turnId": "t1", "policy": {"held": false}},
+                                        {"threadId": "other", "turnId": "x", "policy": {"held": false}},
+                                        {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
+                                    ]}),
+                                    Some("thread.context") => {
+                                        json!({"live": true, "breakdown": {
+                                            "usedTokens": 663_000, "maxTokens": 1_000_000,
+                                            "cachedInputTokens": 1000, "autoCompactThreshold": 800_000,
+                                            "compactsAutomatically": true, "costUsd": 1.25,
+                                            "categories": [
+                                                {"name": "Tool calls", "tokens": 280_000, "kind": "used"},
+                                                {"name": "System and tools", "tokens": 180_000, "kind": "used"},
+                                                {"name": "Reasoning", "tokens": 120_000, "kind": "used"},
+                                                {"name": "Messages", "tokens": 83_000, "kind": "used"},
+                                                {"name": "Free space", "tokens": 337_000, "kind": "free"},
+                                            ],
+                                            "tools": [{"name": "Bash", "tokens": 40_000}],
+                                            "estimated": false,
+                                        }})
+                                    }
+                                    Some("thread.context-reading") => {
+                                        json!({"reading": {"usedTokens": 600_000, "maxTokens": 1_000_000,
                                         "takenAt": "2026-11-16T10:00:00.000Z", "compactedSince": false}})
-                                }
-                                Some("usage.limits") => {
-                                    assert_eq!(params, &json!({"type": "usage.limits"}));
-                                    json!({"providers": {"claude": {
+                                    }
+                                    Some("usage.limits") => {
+                                        json!({"providers": {"claude": {
                                         "checkedAt": "2026-11-16T10:00:00.000Z", "windows": [
                                             {"id": "session", "kind": "session", "label": "Session",
                                              "usedPercent": 36.0, "resetsAt": "2026-11-16T12:00:00.000Z"},
                                             {"id": "weekly", "kind": "weekly", "label": "Weekly",
                                              "usedPercent": 43.0, "resetsAt": null},
                                         ], "unavailable": null}}})
+                                    }
+                                    Some("usage.protection") => {
+                                        json!({"forecasts": [{
+                                            "provider": "claude", "windowId": "session", "label": "Session",
+                                            "usedPercent": 97.0, "resetsAt": "2026-11-16T12:00:00.000Z",
+                                            "remainingWorkMs": 1_800_000, "reservePercent": 3.0,
+                                            "shouldWrap": true, "running": 1,
+                                        }], "queue": [{
+                                            "threadId": "t1", "title": "Fix", "provider": "claude",
+                                            "phase": "waiting", "resetsAt": "2026-11-16T12:00:00.000Z",
+                                            "order": 1, "handoff": false,
+                                        }]})
+                                    }
+                                    Some("usage.stats") => {
+                                        json!({
+                                            "range": "all", "sessions": 3, "messages": 340, "turns": 48,
+                                            "totalTokens": 663_000, "costUsd": 1.5, "unpricedTurns": 1,
+                                            "activeDays": 5, "bestStreak": 3, "peakHour": 9, "favoriteModel": "opus-5-5",
+                                            "byProvider": [{"key": "claude",
+                                                "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                                "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                            "byModel": [{"key": "opus-5-5",
+                                                "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
+                                                "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
+                                            "daily": [{"day": "2026-11-16", "tokens": 6,
+                                                "byModel": {"opus-5-5": 6}, "byProvider": {}}],
+                                        })
+                                    }
+                                    Some("usage.card") => {
+                                        json!({"png": "aGk=", "filename": "moxen-stats-test.png"})
+                                    }
+                                    other => panic!("unexpected fake-server query: {other:?}"),
                                 }
-                                Some("usage.protection") => {
-                                    assert_eq!(params, &json!({"type": "usage.protection"}));
-                                    json!({"forecasts": [{
-                                        "provider": "claude", "windowId": "session", "label": "Session",
-                                        "usedPercent": 97.0, "resetsAt": "2026-11-16T12:00:00.000Z",
-                                        "remainingWorkMs": 1_800_000, "reservePercent": 3.0,
-                                        "shouldWrap": true, "running": 1,
-                                    }], "queue": [{
-                                        "threadId": "t1", "title": "Fix", "provider": "claude",
-                                        "phase": "waiting", "resetsAt": "2026-11-16T12:00:00.000Z",
-                                        "order": 1, "handoff": false,
-                                    }]})
-                                }
-                                Some("usage.stats") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "usage.stats", "range": "all"})
-                                    );
-                                    json!({
-                                        "range": "all", "sessions": 3, "messages": 340, "turns": 48,
-                                        "totalTokens": 663_000, "costUsd": 1.5, "unpricedTurns": 1,
-                                        "activeDays": 5, "bestStreak": 3, "peakHour": 9, "favoriteModel": "opus-5-5",
-                                        "byProvider": [{"key": "claude",
-                                            "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
-                                            "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
-                                        "byModel": [{"key": "opus-5-5",
-                                            "usage": {"input": 1, "cacheRead": 2, "cacheCreate": 0, "output": 3, "thinking": 0, "turns": 4},
-                                            "tokens": 6, "share": 0.5, "sessions": 2, "costUsd": 1.5, "unpricedTurns": 1}],
-                                        "daily": [{"day": "2026-11-16", "tokens": 6,
-                                            "byModel": {"opus-5-5": 6}, "byProvider": {}}],
-                                    })
-                                }
-                                Some("usage.card") => {
-                                    assert_eq!(
-                                        params,
-                                        &json!({"type": "usage.card", "range": "all"})
-                                    );
-                                    json!({"png": "aGk=", "filename": "moxen-stats-test.png"})
-                                }
-                                other => panic!("unexpected fake-server query: {other:?}"),
-                            },
+                            }
                             "dispatch" => {
                                 seen.lock().unwrap().push(params.clone());
                                 match params["type"].as_str() {
@@ -2692,7 +2791,7 @@ mod tests {
                 });
             }
         });
-        commands
+        (commands, queries)
     }
 
     #[cfg(unix)]
@@ -2704,6 +2803,81 @@ mod tests {
         }
     }
 
+    /// The fake server's record of a read, asserted on the test thread: a
+    /// payload mismatch fails here with the diff, not after a 10 s timeout.
+    #[cfg(unix)]
+    fn queried(queries: &Arc<Mutex<Vec<Value>>>, kind: &str) -> Value {
+        wait_for(&format!("the {kind} query"), || {
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|query| query["type"] == kind)
+        });
+        queries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|query| query["type"] == kind)
+            .cloned()
+            .expect("query")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_read_releases_its_guard_for_the_next_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // No connection: with_wire reports the drop and the job never runs.
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            revision: AtomicU64::new(0),
+        });
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_job = ran.clone();
+        assert!(!with_wire(&shared, move |_| {
+            ran_job.store(true, Ordering::SeqCst);
+        }));
+        assert!(!ran.load(Ordering::SeqCst));
+        // A limits read with no wire leaves the flag clear and reads nothing.
+        read_limits(&shared);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.limits_reading);
+            assert!(state.limits.is_none());
+        }
+        // A later read, once the wire is there, succeeds through the same guard.
+        let dir = std::env::temp_dir().join(format!("moxen-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let (_commands, _queries) = fake_server(path.clone());
+        let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
+        shared.state.lock().expect("live state").wire = Some(Arc::new(wire));
+        let ran_read = Arc::new(AtomicBool::new(false));
+        let ran_read_job = ran_read.clone();
+        assert!(with_wire(&shared, move |_| {
+            ran_read_job.store(true, Ordering::SeqCst);
+        }));
+        read_limits(&shared);
+        wait_for("plan usage", || {
+            shared.state.lock().expect("live state").limits.is_some()
+        });
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.limits_reading);
+            assert!(
+                state
+                    .limits
+                    .as_deref()
+                    .is_some_and(|limits| limits.for_instance("claude").is_some())
+            );
+        }
+        wait_for("the dropped job's stand-in", || {
+            ran_read.load(Ordering::SeqCst)
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn sends_steers_queues_and_edits_through_the_servers_commands() {
@@ -2711,7 +2885,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let commands = fake_server(path.clone());
+        let (commands, queries) = fake_server(path.clone());
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the thread list", || !source.list_threads().is_empty());
         source.focus(0);
@@ -2720,6 +2894,10 @@ mod tests {
         let queue = source.queued(0);
         assert_eq!(queue[0].key, "t1");
         assert!(queue[1].held);
+        assert_eq!(
+            queried(&queries, "queue.read"),
+            json!({"type": "queue.read"})
+        );
         let sent = |expected: usize| {
             wait_for("the command", || commands.lock().unwrap().len() >= expected);
             commands.lock().unwrap()[expected - 1].clone()
@@ -2966,6 +3144,14 @@ mod tests {
                 .and_then(|context| context.breakdown.as_ref())
                 .is_some()
         });
+        assert_eq!(
+            queried(&queries, "thread.context"),
+            json!({"type": "thread.context", "threadId": "t1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.context-reading"),
+            json!({"type": "thread.context-reading", "threadId": "t1"})
+        );
         let context = source.context(0).expect("context");
         assert!(context.live && context.error.is_none());
         let breakdown = context.breakdown.as_ref().expect("breakdown");
@@ -2992,6 +3178,10 @@ mod tests {
         // its own account, then its driver's.
         source.read_limits();
         wait_for("plan usage", || source.limits().is_some());
+        assert_eq!(
+            queried(&queries, "usage.limits"),
+            json!({"type": "usage.limits"})
+        );
         let limits = source.limits().expect("limits");
         assert!(limits.error.is_none());
         let claude = limits.for_instance("claude").expect("claude limits");
@@ -3028,6 +3218,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|protection| !protection.queue.is_empty())
         });
+        assert_eq!(
+            queried(&queries, "usage.protection"),
+            json!({"type": "usage.protection"})
+        );
         let protection = source.protection().expect("protection");
         assert!(protection.error.is_none());
         let forecast = protection
@@ -3066,6 +3260,10 @@ mod tests {
                 .and_then(|stats| stats.data.as_ref())
                 .is_some()
         });
+        assert_eq!(
+            queried(&queries, "usage.stats"),
+            json!({"type": "usage.stats", "range": "all"})
+        );
         let data = source
             .stats(StatsRange::All)
             .expect("stats")
@@ -3088,6 +3286,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|card| !card.busy)
         });
+        assert_eq!(
+            queried(&queries, "usage.card"),
+            json!({"type": "usage.card", "range": "all"})
+        );
         let card = source.card(StatsRange::All).expect("card");
         assert!(card.error.is_none());
         let path = card.path.clone().expect("card path");
@@ -3103,7 +3305,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let _commands = fake_server(path.clone());
+        let (_commands, queries) = fake_server(path.clone());
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the parent and child threads", || source.children(0) == [1]);
         source.focus(0);
@@ -3152,6 +3354,26 @@ mod tests {
             Some(Ok(View::Background(list))) if list.partial && list.tasks.len() == 2 && !list.tasks[1].stoppable));
         assert!(matches!(source.work(1, &Read::Delegation).as_deref(),
             Some(Ok(View::Delegation(link))) if link.notify && link.status.as_deref() == Some("running")));
+        assert_eq!(
+            queried(&queries, "thread.subagent"),
+            json!({"type": "thread.subagent", "threadId": "t1", "agentId": "agent-1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.background.output"),
+            json!({"type": "thread.background.output", "threadId": "t1", "taskId": "shell-1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.background.list"),
+            json!({"type": "thread.background.list", "threadId": "t1"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.delegation"),
+            json!({"type": "thread.delegation", "threadId": "child"})
+        );
+        assert_eq!(
+            queried(&queries, "thread.task.status"),
+            json!({"type": "thread.task.status", "parentThreadId": "t1", "taskId": "child"})
+        );
 
         source.stop_background(0, "shell-1");
         wait_for("the refreshed background list", || {
