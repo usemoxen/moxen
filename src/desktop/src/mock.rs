@@ -1048,7 +1048,13 @@ impl ThreadSource for MockSource {
         Some(crate::mock_git::patch())
     }
     fn list_threads(&self) -> Vec<Thread> {
-        self.threads.clone()
+        let mut threads = self.threads.clone();
+        for thread in &mut threads {
+            if self.removed_projects.contains(&thread.project) {
+                thread.project = "Unknown project".into();
+            }
+        }
+        threads
     }
     fn messages(&self, id: ThreadId) -> std::sync::Arc<Vec<Message>> {
         std::sync::Arc::new(self.messages[id].clone())

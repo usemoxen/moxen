@@ -1054,6 +1054,24 @@ impl Workspace {
             self.source.set_model(self.selected, selection);
         }
     }
+    pub fn thread_project_title(&self, project: &str, fallback: &str) -> String {
+        self.source
+            .projects()
+            .into_iter()
+            .find(|entry| entry.id == project)
+            .map_or_else(
+                || {
+                    if fallback == "Unknown project" {
+                        crate::language::capitalized(crate::language::message(
+                            "sidebar.unknownProject",
+                        ))
+                    } else {
+                        fallback.to_owned()
+                    }
+                },
+                |entry| entry.title,
+            )
+    }
     pub fn new_project_title(&self) -> Option<String> {
         if !self.creating {
             return None;

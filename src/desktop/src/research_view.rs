@@ -475,7 +475,7 @@ pub fn notice(text: &str, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
-/// "Researcher 1", "Critic 2 · Risks", message("run.role.finalizer"): what a column and the
+/// "Researcher 1", "Critic 2 · Risks", "Finalizer": what a column and the
 /// roster call an agent.
 pub(crate) fn agent_title(summary: &RunSummary, agent: &RunAgent) -> String {
     match agent.role {
@@ -725,11 +725,17 @@ fn role_rows(
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                Message::UsageProtection { .. } => notice("Usage protection".into()),
+                Message::UsageProtection { .. } => {
+                    notice(message("timeline.usageProtection").into())
+                }
                 Message::Continued { kind, .. } => notice(
                     match kind {
-                        crate::model::ContinuedKind::Handoff => "Preparing a handoff",
-                        crate::model::ContinuedKind::Background => "Background task finished",
+                        crate::model::ContinuedKind::Handoff => {
+                            message("timeline.preparingHandoff")
+                        }
+                        crate::model::ContinuedKind::Background => {
+                            message("timeline.backgroundNotification")
+                        }
                         crate::model::ContinuedKind::UsageReset => message("timeline.continued"),
                     }
                     .into(),
@@ -1003,7 +1009,9 @@ pub fn run_view(
                             div()
                                 .flex()
                                 .items_baseline()
+                                .flex_wrap()
                                 .justify_between()
+                                .gap(px(4.))
                                 .px(px(10.))
                                 .pt(px(8.))
                                 .child(

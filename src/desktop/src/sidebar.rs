@@ -111,13 +111,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         // Group headers carry the project id: titles repeat for two checkouts
         // with the same basename, so resolving by title would hit the wrong one.
         let pid = w.source.project_id(i).unwrap_or_else(|| t.project.clone());
-        let title = w
-            .source
-            .projects()
-            .into_iter()
-            .find(|project| project.id == pid)
-            .map(|project| project.title)
-            .unwrap_or_else(|| t.project.clone());
+        let title = w.thread_project_title(&pid, &t.project);
         if w.group != 0 && !projects.contains(&pid) {
             let first = projects.is_empty();
             let label = ["label-2", "label-6", "label-4", "label-3"][projects.len() % 4];

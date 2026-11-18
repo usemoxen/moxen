@@ -80,7 +80,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .text_color(color("ink-2"))
-                        .child(w.new_project_title().unwrap_or_else(|| t.project.clone())),
+                        .child(w.new_project_title().unwrap_or_else(|| {
+                            let project = w.source.project_id(t.id);
+                            w.thread_project_title(
+                                project.as_deref().unwrap_or(&t.project),
+                                &t.project,
+                            )
+                        })),
                 )
                 .child(
                     div()
