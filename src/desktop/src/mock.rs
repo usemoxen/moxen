@@ -39,6 +39,7 @@ pub struct MockSource {
     side_answers: HashMap<ThreadId, SideAnswer>,
     reverted: Option<(ThreadId, Option<String>)>,
     settings: Option<Snapshot>,
+    settings_write: Option<Result<(), String>>,
     settings_notice: Option<SettingsNotice>,
     harness_run: Option<HarnessRun>,
     discovered: Option<Discovery>,
@@ -257,6 +258,7 @@ impl MockSource {
             side_answers: HashMap::new(),
             reverted: None,
             settings: None,
+            settings_write: None,
             settings_notice: None,
             harness_run: None,
             discovered: None,
@@ -836,12 +838,29 @@ impl ThreadSource for MockSource {
         if let Some(snapshot) = self.settings.as_mut() {
             crate::mock_settings::apply_set(snapshot, key, value);
         }
+        if key == "remote.enabled" {
+            self.read_remote();
+            if let Some(state) = self.remote.as_mut() {
+                state.enabled = value == "true";
+                state.listening = if state.enabled {
+                    crate::mock_settings::remote_fixture().listening
+                } else {
+                    vec![]
+                };
+                state.pairing = None;
+            }
+        }
+        self.settings_write = Some(Ok(()));
     }
     fn duplicate_setting(&mut self, key: &str, id: &str, new_id: &str) {
         self.read_settings();
         if let Some(snapshot) = self.settings.as_mut() {
             crate::mock_settings::duplicate_item(snapshot, key, id, new_id);
         }
+        self.settings_write = Some(Ok(()));
+    }
+    fn take_settings_write(&mut self) -> Option<Result<(), String>> {
+        self.settings_write.take()
     }
     fn test_harness(&mut self, profile: &str, _model: Option<String>) {
         self.harness_run = Some(HarnessRun::Done {
@@ -899,10 +918,15 @@ impl ThreadSource for MockSource {
         self.profile_document.take()
     }
     fn import_profile(&mut self, _text: &str) {
+        self.settings_write = Some(Ok(()));
         self.settings_notice = Some(SettingsNotice {
             text: "Imported profile branch.".into(),
             error: false,
         });
+    }
+    fn clear_settings_transients(&mut self) {
+        self.discovered = None;
+        self.profile_document = None;
     }
     fn take_settings_notice(&mut self) -> Option<SettingsNotice> {
         self.settings_notice.take()

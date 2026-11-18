@@ -232,11 +232,13 @@ impl Workspace {
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
         self.settings_form = None;
+        self.settings_form_saving = false;
         self.settings_confirm = None;
         self.settings_error = None;
         self.settings_memory_new = None;
         self.settings_profile_new = None;
         self.settings_mcp_new = None;
+        self.clear_settings_transients();
         window.focus(&self.sidebar_focus, cx);
         cx.notify();
     }
@@ -251,12 +253,13 @@ impl Workspace {
             || self.settings_export.is_some()
         {
             self.settings_form = None;
+            self.settings_form_saving = false;
             self.settings_confirm = None;
             self.settings_error = None;
             self.settings_memory_new = None;
             self.settings_profile_new = None;
             self.settings_mcp_new = None;
-            self.settings_export = None;
+            self.clear_settings_transients();
             window.focus(&self.settings_focus, cx);
             cx.notify();
         } else {
@@ -264,7 +267,24 @@ impl Workspace {
         }
     }
 
+    fn clear_settings_transients(&mut self) {
+        self.settings_export = None;
+        self.settings_discovered = None;
+        self.source.clear_settings_transients();
+    }
+
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(result) = self.source.take_settings_write() {
+            if self.settings_form_saving && self.settings_form.is_some() {
+                match result {
+                    Ok(()) => self.settings_form = None,
+                    Err(message) => self.settings_error = Some(message),
+                }
+            } else if let Err(message) = result {
+                self.settings_notice = Some((message, true));
+            }
+            self.settings_form_saving = false;
+        }
         if let Some(notice) = self.source.take_settings_notice() {
             self.settings_notice = Some((notice.text, notice.error));
         }
@@ -320,6 +340,7 @@ impl Workspace {
             input.set_text(initial.into(), cx);
         });
         self.settings_form = Some(form);
+        self.settings_form_saving = false;
         cx.notify();
     }
 
@@ -420,6 +441,9 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source.settings_saving().is_some() {
+            return;
+        }
         if self.settings_form.is_none() {
             self.submit_wizard_text(text, cx);
             return;
@@ -443,7 +467,7 @@ impl Workspace {
                         Err(message) => self.settings_error = Some(message),
                         Ok(value) => {
                             self.source.set_setting(&key, &value);
-                            self.settings_form = None;
+                            self.settings_form_saving = true;
                         }
                     },
                 }
@@ -464,7 +488,7 @@ impl Workspace {
                             // A secret pair line of `KEY=<hidden>` keeps the stored value.
                             self.source
                                 .set_setting(&format!("{key}[{id}].{path}"), &value);
-                            self.settings_form = None;
+                            self.settings_form_saving = true;
                         }
                     },
                 }
@@ -475,7 +499,7 @@ impl Workspace {
                 } else {
                     // Copying is non-destructive: it runs at once.
                     self.source.duplicate_setting(&key, &id, &text);
-                    self.settings_form = None;
+                    self.settings_form_saving = true;
                     self.settings_item = Some(text);
                 }
             }
@@ -486,7 +510,7 @@ impl Workspace {
                     let model = text.trim();
                     self.source
                         .set_setting(&format!("{key}[{profile}].models[{model}]"), "{}");
-                    self.settings_form = None;
+                    self.settings_form_saving = true;
                 }
             }
             SettingsForm::Import => {
@@ -494,7 +518,7 @@ impl Workspace {
                     self.settings_error = Some("Paste an exported profile.".into());
                 } else {
                     self.source.import_profile(&text);
-                    self.settings_form = None;
+                    self.settings_form_saving = true;
                 }
             }
             SettingsForm::ImportSkill { source } => {
@@ -837,7 +861,15 @@ fn section_tab(
             group = view.group.clone().unwrap_or_default();
             out = out.child(group_heading(&group));
         }
-        out = out.child(setting_row(w, view, cx));
+        if view.key == "remote.enabled" {
+            out = out.child(match w.source.remote().as_deref() {
+                Some(Ok(state)) => remote_status_row(w, state, cx),
+                Some(Err(message)) => error_row(message, w, cx),
+                None => loading("Reading remote access…"),
+            });
+        } else {
+            out = out.child(setting_row(w, view, cx));
+        }
         if view.key == "providers.harness.profiles" || view.key == "mcp.servers" {
             out = out.child(list_block(w, view, cx));
         }
@@ -1832,7 +1864,11 @@ fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> 
             .gap(px(8.))
             .child(small_button(
                 ("settings-save", 0),
-                "Save",
+                if w.settings_form_saving {
+                    "Saving…"
+                } else {
+                    "Save"
+                },
                 "Write the value through the server",
                 cx.listener(move |this, _, window, cx| {
                     let text = this.settings_input.read(cx).text().to_string();
@@ -2811,12 +2847,8 @@ fn remote_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             out = out.child(error_row(message, w, cx));
         }
         Ok(state) => {
-            if !state.available {
-                out = out.child(sub_line("Remote access is unavailable on this server."));
-                return out.into_any_element();
-            }
             out = out.child(remote_status_row(w, state, cx));
-            if state.enabled {
+            if state.available && state.enabled {
                 out = out.child(pairing_block(w, state, cx));
                 out = out.child(div().pt(px(6.)).child(ui::caps("Devices")));
                 if state.devices.is_empty() {
@@ -2831,8 +2863,9 @@ fn remote_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     out.into_any_element()
 }
 
-fn remote_status_row(_w: &Workspace, state: &RemoteState, cx: &mut Context<Workspace>) -> Div {
+fn remote_status_row(w: &Workspace, state: &RemoteState, cx: &mut Context<Workspace>) -> Div {
     let enabled = state.enabled;
+    let saving = w.source.settings_saving().as_deref() == Some("remote.enabled");
     div()
         .flex()
         .flex_col()
@@ -2843,30 +2876,38 @@ fn remote_status_row(_w: &Workspace, state: &RemoteState, cx: &mut Context<Works
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .flex_1()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Remote access"),
-                )
-                .child(
-                    div()
-                        .id("settings-remote-toggle")
-                        .control(if enabled {
-                            "Turn remote access off"
-                        } else {
-                            "Turn remote access on"
-                        })
-                        .text_color(color(if enabled { "live" } else { "ink-2" }))
-                        .child(if enabled { "On" } else { "Off" })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.source.set_setting(
-                                "remote.enabled",
-                                if enabled { "false" } else { "true" },
-                            );
-                            cx.notify();
-                        })),
-                ),
+                .when(state.available, |row| {
+                    row.child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Remote access"),
+                    )
+                    .child(
+                        div()
+                            .id("settings-remote-toggle")
+                            .control(if enabled {
+                                "Turn remote access off"
+                            } else {
+                                "Turn remote access on"
+                            })
+                            .text_color(color(if enabled { "live" } else { "ink-2" }))
+                            .child(if saving {
+                                "Saving…"
+                            } else if enabled {
+                                "On"
+                            } else {
+                                "Off"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.source.set_setting(
+                                    "remote.enabled",
+                                    if enabled { "false" } else { "true" },
+                                );
+                                cx.notify();
+                            })),
+                    )
+                }),
         )
         .child(sub_line(&state.line()))
 }

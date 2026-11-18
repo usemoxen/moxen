@@ -537,6 +537,9 @@ struct State {
     settings: Option<Arc<Result<Snapshot, String>>>,
     /// The key a `settings.set` is writing, for the row's pending mark.
     settings_pending: Option<String>,
+    settings_write: Option<Result<(), String>>,
+    settings_reads: HashMap<(&'static str, Option<ThreadId>), u64>,
+    settings_read_id: u64,
     /// The last settings export or import, in a line.
     settings_notice: Option<SettingsNotice>,
     /// The last harness or MCP test or probe, while it runs and after.
@@ -1119,6 +1122,7 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
         state.wire = Some(wire.clone());
         state.work.clear();
         state.work_reads.clear();
+        state.settings_reads.clear();
     });
     // A thread opened before the connection existed starts being followed now.
     follow(shared);
@@ -1135,12 +1139,19 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
         }
         Ok(())
     })();
-    shared.update(|state| {
-        state.wire = None;
-        // Ends the open thread's watcher.
-        state.watch += 1;
-    });
+    shared.update(end_session);
     ended
+}
+
+fn end_session(state: &mut State) {
+    state.wire = None;
+    // Ends the open thread's watcher.
+    state.watch += 1;
+    state.settings_reads.clear();
+    if state.settings_pending.take().is_some() {
+        state.settings_write = Some(Err(not_connected().message));
+    }
+    state.harness_run = None;
 }
 
 /// Reads the providers, models and efforts (`getConfig`) on its own thread.
@@ -2250,6 +2261,28 @@ impl ThreadSource for ServerSource {
             .settings_pending
             .clone()
     }
+
+    fn take_settings_write(&mut self) -> Option<Result<(), String>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .settings_write
+            .take()
+    }
+
+    fn clear_settings_transients(&mut self) {
+        self.shared.update(|state| {
+            state.discovered = None;
+            state.profile_document = None;
+            state
+                .settings_reads
+                .remove(&("harness.models.discover", None));
+            state
+                .settings_reads
+                .remove(&("harness.profile.export", None));
+        });
+    }
     fn set_setting(&mut self, key: &str, value: &str) {
         send_setting(&self.shared, key, value);
     }
@@ -2908,18 +2941,19 @@ fn background_result(
     let spawned = std::thread::Builder::new()
         .name("moxen-command".into())
         .spawn(move || {
-            let outcome = job(
-                wire.ok_or_else(|| WireError {
-                    code: "NOT_CONNECTED".into(),
-                    message: "Not connected to the Moxen server.".into(),
-                }),
-                &shared,
-            );
+            let outcome = job(wire.ok_or_else(not_connected), &shared);
             if let Err(failed) = outcome {
                 shared.update(|state| state.problems.push_back(failed));
             }
         });
     drop(spawned);
+}
+
+fn not_connected() -> WireError {
+    WireError {
+        code: "NOT_CONNECTED".into(),
+        message: "Not connected to the Moxen server.".into(),
+    }
 }
 
 /// A thread's address for memory reads and writes: its own id, so the server
@@ -2952,42 +2986,141 @@ fn skill_fields(
     fields
 }
 
-/// Reads `settings.read` on its own thread; the window redraws from the answer.
-fn read_settings_snapshot(shared: &Arc<Shared>) {
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let snapshot = wire
-            .query("settings.read", json!({}))
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                Snapshot::from_json(&value)
-                    .ok_or_else(|| "The server's settings answer was unreadable.".to_string())
+/// Reads settings on the current wire. A keyed read coalesces duplicate
+/// requests while it is pending, and can be superseded after a write.
+fn settings_read<T: Send + 'static>(
+    shared: &Arc<Shared>,
+    key: Option<(&'static str, Option<ThreadId>)>,
+    read: impl FnOnce(&Wire) -> T + Send + 'static,
+    apply: impl FnOnce(&mut State, T) + Send + 'static,
+) {
+    let (wire, epoch, id) = {
+        let mut state = shared.state.lock().expect("live state");
+        let Some(wire) = state.wire.clone() else {
+            return;
+        };
+        if key.is_some_and(|key| state.settings_reads.contains_key(&key)) {
+            return;
+        }
+        state.settings_read_id += 1;
+        let id = state.settings_read_id;
+        if let Some(key) = key {
+            state.settings_reads.insert(key, id);
+        }
+        (wire, state.wire_epoch, id)
+    };
+    let worker = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("moxen-settings-read".into())
+        .spawn(move || {
+            let answer = read(&wire);
+            worker.update(|state| {
+                if state.wire_epoch != epoch || state.wire.is_none() {
+                    return;
+                }
+                if let Some(key) = key {
+                    if state.settings_reads.get(&key) != Some(&id) {
+                        return;
+                    }
+                    state.settings_reads.remove(&key);
+                }
+                apply(state, answer);
             });
-        shared.update(|state| {
-            state.settings = Some(Arc::new(snapshot));
-            state.settings_pending = None;
         });
-    });
+    if spawned.is_err()
+        && let Some(key) = key
+    {
+        shared.update(|state| {
+            if state.settings_reads.get(&key) == Some(&id) {
+                state.settings_reads.remove(&key);
+            }
+        });
+    }
 }
 
-/// A `settings.set` / `settings.duplicate` answer replaces the snapshot, like
-/// the TUI's page: what is drawn is what the server accepted.
-fn apply_settings_answer(shared: &Arc<Shared>, updated: &Value) -> Result<(), Problem> {
-    match Snapshot::from_json(updated) {
-        Some(snapshot) => {
-            shared.update(|state| {
-                state.settings = Some(Arc::new(Ok(snapshot)));
+/// Reads `settings.read` on its own thread; the window redraws from the answer.
+fn read_settings_snapshot(shared: &Arc<Shared>) {
+    settings_read(
+        shared,
+        Some(("settings.read", None)),
+        |wire| {
+            wire.query("settings.read", json!({}))
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    Snapshot::from_json(&value)
+                        .ok_or_else(|| "The server's settings answer was unreadable.".to_string())
+                })
+        },
+        |state, snapshot| state.settings = Some(Arc::new(snapshot)),
+    );
+}
+
+/// A settings write replaces the snapshot with what the server accepted.
+fn write_settings(shared: &Arc<Shared>, key: &str, command: &'static str, fields: Value) {
+    let (epoch, wire) = shared.update(|state| {
+        if state.settings_pending.is_some() {
+            return (state.wire_epoch, None);
+        }
+        let Some(wire) = state.wire.clone() else {
+            state.settings_write = Some(Err(not_connected().message));
+            return (state.wire_epoch, None);
+        };
+        state.settings_pending = Some(key.to_string());
+        state.settings_write = None;
+        (state.wire_epoch, Some(wire))
+    });
+    let Some(wire) = wire else { return };
+    let refresh_remote = key.starts_with("remote.");
+    let worker = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("moxen-settings-write".into())
+        .spawn(move || {
+            let answer = wire
+                .dispatch(command, fields)
+                .map_err(|error| error.message);
+            let accepted = worker.update(|state| {
+                if state.wire_epoch != epoch || state.wire.is_none() {
+                    return false;
+                }
                 state.settings_pending = None;
+                let result = answer.and_then(|updated| {
+                    let snapshot = Snapshot::from_json(&updated).ok_or_else(|| {
+                        "The server's settings answer was unreadable.".to_string()
+                    })?;
+                    state.settings_reads.remove(&("settings.read", None));
+                    state.settings = Some(Arc::new(Ok(snapshot)));
+                    if command == "harness.profile.import" {
+                        let id = text(&updated, &["id"]).unwrap_or_default();
+                        let file = text(&updated, &["fileId"]).unwrap_or_default();
+                        state.settings_notice = Some(SettingsNotice {
+                            text: if id == file {
+                                format!("Imported profile {id}.")
+                            } else {
+                                format!("Imported profile {id} (the file named {file}).")
+                            },
+                            error: false,
+                        });
+                    }
+                    if refresh_remote {
+                        state.settings_reads.remove(&("remote.status", None));
+                    }
+                    Ok(())
+                });
+                let accepted = result.is_ok();
+                state.settings_write = Some(result);
+                accepted
             });
-            Ok(())
-        }
-        None => {
-            shared.update(|state| state.settings_pending = None);
-            Err(Problem {
-                message: "The server's settings answer was unreadable.".into(),
-                unsent: None,
-            })
-        }
+            if accepted && refresh_remote {
+                read_remote_state(&worker);
+            }
+        });
+    if let Err(error) = spawned {
+        shared.update(|state| {
+            if state.wire_epoch == epoch && state.wire.is_some() {
+                state.settings_pending = None;
+                state.settings_write = Some(Err(error.to_string()));
+            }
+        });
     }
 }
 
@@ -2995,157 +3128,98 @@ fn apply_settings_answer(shared: &Arc<Shared>, updated: &Value) -> Result<(), Pr
 /// and a refusal reaches the person as a problem.
 fn send_setting(shared: &Arc<Shared>, key: &str, value: &str) {
     let fields = json!({"key": key, "value": value});
-    shared.update(|state| state.settings_pending = Some(key.to_string()));
-    let shared = shared.clone();
-    background(&shared.clone(), move |wire| {
-        let updated = wire
-            .dispatch("settings.set", fields)
-            .map_err(|error| problem(&error, None))?;
-        apply_settings_answer(&shared, &updated)
-    });
+    write_settings(shared, key, "settings.set", fields);
 }
 
 /// Copies one list entry under a new id; the snapshot refreshes from the answer.
 fn send_duplicate(shared: &Arc<Shared>, key: &str, id: &str, new_id: &str) {
     let fields = json!({"key": key, "id": id, "newId": new_id});
-    shared.update(|state| state.settings_pending = Some(key.to_string()));
-    let shared = shared.clone();
-    background(&shared.clone(), move |wire| {
-        let updated = wire
-            .dispatch("settings.duplicate", fields)
-            .map_err(|error| problem(&error, None))?;
-        apply_settings_answer(&shared, &updated)
-    });
+    write_settings(shared, key, "settings.duplicate", fields);
 }
 
 /// One tiny request to a Harness profile's endpoint. The answer stays on the
 /// run for the settings window to draw; there is no toast for it.
 fn run_harness_test(shared: &Arc<Shared>, profile: &str, model: Option<String>) {
-    if !shared.update(|state| {
-        if state
-            .harness_run
-            .as_ref()
-            .is_some_and(|run| matches!(run, HarnessRun::Running { .. }))
-        {
-            return false;
-        }
-        state.harness_run = Some(HarnessRun::running("harness", "test", profile));
-        true
-    }) {
-        return;
-    }
-    let mut fields = json!({"profileId": profile});
-    if let Some(model) = model {
-        fields["model"] = json!(model);
-    }
-    let shared = shared.clone();
-    let profile = profile.to_string();
-    background(&shared.clone(), move |wire| {
-        match wire.dispatch("harness.profile.test", fields) {
-            Ok(result) => {
-                shared.update(|state| {
-                    state.harness_run =
-                        Some(HarnessRun::test_done("harness", "test", &profile, &result));
-                });
-            }
-            Err(error) => {
-                shared.update(|state| {
-                    state.harness_run = Some(HarnessRun::failed(
-                        "harness",
-                        "test",
-                        &profile,
-                        error.message.clone(),
-                    ));
-                });
-            }
-        }
-        Ok(())
-    });
+    run_settings_check(shared, "harness", "test", profile, model);
 }
 
 /// The probe battery against one profile's model; it writes the findings to
 /// the config, so the snapshot reloads after.
 fn run_harness_probe(shared: &Arc<Shared>, profile: &str, model: Option<String>) {
-    if !shared.update(|state| {
-        if state
-            .harness_run
-            .as_ref()
-            .is_some_and(|run| matches!(run, HarnessRun::Running { .. }))
-        {
-            return false;
-        }
-        state.harness_run = Some(HarnessRun::running("harness", "probe", profile));
-        true
-    }) {
-        return;
-    }
-    let mut fields = json!({"profileId": profile});
-    if let Some(model) = model {
-        fields["model"] = json!(model);
-    }
-    let shared = shared.clone();
-    let profile = profile.to_string();
-    background(&shared.clone(), move |wire| {
-        match wire.dispatch("harness.profile.probe", fields) {
-            Ok(result) => {
-                shared.update(|state| {
-                    state.harness_run = Some(HarnessRun::probe_done(&profile, &result));
-                });
-                read_settings_snapshot(&shared);
-            }
-            Err(error) => {
-                shared.update(|state| {
-                    state.harness_run = Some(HarnessRun::failed(
-                        "harness",
-                        "probe",
-                        &profile,
-                        error.message.clone(),
-                    ));
-                });
-            }
-        }
-        Ok(())
-    });
+    run_settings_check(shared, "harness", "probe", profile, model);
 }
 
 /// Starts one MCP server, lists its tools and stops it again.
 fn run_mcp_test(shared: &Arc<Shared>, name: &str) {
-    if !shared.update(|state| {
-        if state
-            .harness_run
-            .as_ref()
-            .is_some_and(|run| matches!(run, HarnessRun::Running { .. }))
-        {
-            return false;
+    run_settings_check(shared, "mcp", "test", name, None);
+}
+
+fn run_settings_check(
+    shared: &Arc<Shared>,
+    scope: &'static str,
+    kind: &'static str,
+    name: &str,
+    model: Option<String>,
+) {
+    let connection = shared.update(|state| {
+        if matches!(state.harness_run, Some(HarnessRun::Running { .. })) {
+            return None;
         }
-        state.harness_run = Some(HarnessRun::running("mcp", "test", name));
-        true
-    }) {
-        return;
-    }
-    let fields = json!({"name": name});
-    let shared = shared.clone();
-    let name = name.to_string();
-    background(&shared.clone(), move |wire| {
-        match wire.dispatch("mcp.server.test", fields) {
-            Ok(result) => {
-                shared.update(|state| {
-                    state.harness_run = Some(HarnessRun::test_done("mcp", "test", &name, &result));
-                });
-            }
-            Err(error) => {
-                shared.update(|state| {
-                    state.harness_run = Some(HarnessRun::failed(
-                        "mcp",
-                        "test",
-                        &name,
-                        error.message.clone(),
-                    ));
-                });
-            }
-        }
-        Ok(())
+        let Some(wire) = state.wire.clone() else {
+            state.harness_run = Some(HarnessRun::failed(
+                scope,
+                kind,
+                name,
+                not_connected().message,
+            ));
+            return None;
+        };
+        state.harness_run = Some(HarnessRun::running(scope, kind, name));
+        Some((wire, state.wire_epoch))
     });
+    let Some((wire, epoch)) = connection else {
+        return;
+    };
+    let (command, mut fields) = match (scope, kind) {
+        ("harness", "test") => ("harness.profile.test", json!({"profileId": name})),
+        ("harness", "probe") => ("harness.profile.probe", json!({"profileId": name})),
+        _ => ("mcp.server.test", json!({"name": name})),
+    };
+    if let Some(model) = model {
+        fields["model"] = json!(model);
+    }
+    let worker = shared.clone();
+    let target = name.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("moxen-settings-check".into())
+        .spawn(move || {
+            let result = wire.dispatch(command, fields);
+            let refresh = result.is_ok() && kind == "probe";
+            let current = worker.update(|state| {
+                if state.wire_epoch != epoch || state.wire.is_none() {
+                    return false;
+                }
+                state.harness_run = Some(match result {
+                    Ok(result) if kind == "probe" => HarnessRun::probe_done(&target, &result),
+                    Ok(result) => HarnessRun::test_done(scope, kind, &target, &result),
+                    Err(error) => HarnessRun::failed(scope, kind, &target, error.message),
+                });
+                if refresh {
+                    state.settings_reads.remove(&("settings.read", None));
+                }
+                true
+            });
+            if current && refresh {
+                read_settings_snapshot(&worker);
+            }
+        });
+    if let Err(error) = spawned {
+        shared.update(|state| {
+            if state.wire_epoch == epoch && state.wire.is_some() {
+                state.harness_run = Some(HarnessRun::failed(scope, kind, name, error.to_string()));
+            }
+        });
+    }
 }
 
 /// Which models a server lists, before a profile for it exists.
@@ -3159,89 +3233,75 @@ fn run_discover(
     if let Some(env) = api_key_env {
         fields["apiKeyEnv"] = json!(env);
     }
-    let shared = shared.clone();
-    background(&shared.clone(), move |wire| {
-        match wire.dispatch("harness.models.discover", fields) {
-            Ok(result) => {
-                shared.update(|state| state.discovered = Some(Discovery::from_json(&result)));
-            }
-            Err(error) => {
-                shared.update(|state| {
-                    state.discovered = Some(Discovery {
-                        host: None,
-                        models: vec![],
-                        error: Some(error.message.clone()),
-                    });
-                });
-            }
-        }
-        Ok(())
-    });
+    settings_read(
+        shared,
+        Some(("harness.models.discover", None)),
+        move |wire| match wire.dispatch("harness.models.discover", fields) {
+            Ok(result) => Discovery::from_json(&result),
+            Err(error) => Discovery {
+                host: None,
+                models: vec![],
+                error: Some(error.message),
+            },
+        },
+        |state, answer| state.discovered = Some(answer),
+    );
 }
 
 /// Shares one profile as a JSON document (no saved key, no probe results).
 fn run_export(shared: &Arc<Shared>, profile: &str) {
     let fields = json!({"profileId": profile});
-    let shared = shared.clone();
     let profile = profile.to_string();
-    background(&shared.clone(), move |wire| {
-        let exported = wire
-            .dispatch("harness.profile.export", fields)
-            .map_err(|error| problem(&error, None))?;
-        match text(&exported, &["text"]) {
-            Some(document) => {
-                shared.update(|state| {
-                    state.profile_document = Some((profile, document.to_string()));
-                });
-                Ok(())
+    settings_read(
+        shared,
+        Some(("harness.profile.export", None)),
+        move |wire| {
+            wire.query("harness.profile.export", fields)
+                .map_err(|error| error.message)
+                .and_then(|exported| {
+                    text(&exported, &["text"])
+                        .map(str::to_string)
+                        .ok_or_else(|| "The server's export answer was unreadable.".to_string())
+                })
+        },
+        move |state, result| match result {
+            Ok(document) => state.profile_document = Some((profile, document)),
+            Err(message) => {
+                state.settings_notice = Some(SettingsNotice {
+                    text: message,
+                    error: true,
+                })
             }
-            None => Err(Problem {
-                message: "The server's export answer was unreadable.".into(),
-                unsent: None,
-            }),
-        }
-    });
+        },
+    );
 }
 
 /// Adds a profile from an exported document; the server renames on a taken id.
 fn run_import(shared: &Arc<Shared>, document: &str) {
-    let fields = json!({"text": document, "onConflict": "rename"});
-    let shared = shared.clone();
-    background(&shared.clone(), move |wire| {
-        let imported = wire
-            .dispatch("harness.profile.import", fields)
-            .map_err(|error| problem(&error, None))?;
-        apply_settings_answer(&shared, &imported)?;
-        let id = text(&imported, &["id"]).unwrap_or_default().to_string();
-        let file = text(&imported, &["fileId"]).unwrap_or_default().to_string();
-        shared.update(|state| {
-            state.settings_notice = Some(SettingsNotice {
-                text: if id == file {
-                    format!("Imported profile {id}.")
-                } else {
-                    format!("Imported profile {id} (the file named {file}).")
-                },
-                error: false,
-            });
-        });
-        Ok(())
-    });
+    write_settings(
+        shared,
+        "providers.harness.profiles",
+        "harness.profile.import",
+        json!({"text": document, "onConflict": "rename"}),
+    );
 }
 
 /// Reads every memory the thread sees, global first.
 fn read_memory_list(shared: &Arc<Shared>, thread: Option<ThreadId>) {
     let address = memory_address(&shared.state.lock().expect("live state"), thread);
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let memories = wire
-            .query("memory.list", address)
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                MemoryList::from_json(&value)
-                    .ok_or_else(|| "The server's memories answer was unreadable.".to_string())
-            });
-        shared.update(|state| state.memories = Some(Arc::new(memories)));
-    });
+    settings_read(
+        shared,
+        Some(("memory.list", thread)),
+        move |wire| {
+            wire.query("memory.list", address)
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    MemoryList::from_json(&value)
+                        .ok_or_else(|| "The server's memories answer was unreadable.".to_string())
+                })
+        },
+        move |state, memories| state.memories = Some(Arc::new(memories)),
+    );
 }
 
 /// Reads one memory in full.
@@ -3250,19 +3310,21 @@ fn read_memory_detail(shared: &Arc<Shared>, thread: Option<ThreadId>, name: &str
     address["name"] = json!(name);
     address["scope"] = json!(scope);
     let key = (name.to_string(), scope.to_string());
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let memory = wire
-            .query("memory.read", address)
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                crate::settings::MemoryEntry::from_json(&value)
-                    .ok_or_else(|| "The server's memory answer was unreadable.".to_string())
-            });
-        shared.update(|state| {
+    settings_read(
+        shared,
+        None,
+        move |wire| {
+            wire.query("memory.read", address)
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    crate::settings::MemoryEntry::from_json(&value)
+                        .ok_or_else(|| "The server's memory answer was unreadable.".to_string())
+                })
+        },
+        move |state, memory| {
             state.memory_details.insert(key, Arc::new(memory));
-        });
-    });
+        },
+    );
 }
 
 /// Keyword matches with excerpts.
@@ -3270,17 +3332,19 @@ fn run_memory_search(shared: &Arc<Shared>, thread: Option<ThreadId>, query: &str
     let mut address = memory_address(&shared.state.lock().expect("live state"), thread);
     address["query"] = json!(query);
     address["limit"] = json!(30);
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let search = wire
-            .query("memory.search", address)
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                MemorySearch::from_json(&value)
-                    .ok_or_else(|| "The server's search answer was unreadable.".to_string())
-            });
-        shared.update(|state| state.memory_search = Some(Arc::new(search)));
-    });
+    settings_read(
+        shared,
+        None,
+        move |wire| {
+            wire.query("memory.search", address)
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    MemorySearch::from_json(&value)
+                        .ok_or_else(|| "The server's search answer was unreadable.".to_string())
+                })
+        },
+        move |state, search| state.memory_search = Some(Arc::new(search)),
+    );
 }
 
 /// Saves a memory, then reads the list again.
@@ -3305,10 +3369,14 @@ fn send_memory_delete(shared: &Arc<Shared>, thread: Option<ThreadId>, name: &str
     let mut fields = memory_address(&shared.state.lock().expect("live state"), thread);
     fields["name"] = json!(name);
     fields["scope"] = json!(scope);
+    let key = (name.to_string(), scope.to_string());
     let shared = shared.clone();
     background(&shared.clone(), move |wire| {
         wire.dispatch("memory.delete", fields)
             .map_err(|error| problem(&error, None))?;
+        shared.update(|state| {
+            state.memory_details.remove(&key);
+        });
         read_memory_list(&shared, thread);
         Ok(())
     });
@@ -3412,17 +3480,19 @@ fn send_memory_import_claude(shared: &Arc<Shared>, thread: Option<ThreadId>) {
 
 /// Reads the embeddings engine behind semantic search.
 fn read_embeddings_status(shared: &Arc<Shared>) {
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let embeddings = wire
-            .query("memory.embeddings.status", json!({}))
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                Embeddings::from_json(&value)
-                    .ok_or_else(|| "The server's embeddings answer was unreadable.".to_string())
-            });
-        shared.update(|state| state.embeddings = Some(Arc::new(embeddings)));
-    });
+    settings_read(
+        shared,
+        Some(("memory.embeddings.status", None)),
+        move |wire| {
+            wire.query("memory.embeddings.status", json!({}))
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    Embeddings::from_json(&value)
+                        .ok_or_else(|| "The server's embeddings answer was unreadable.".to_string())
+                })
+        },
+        move |state, embeddings| state.embeddings = Some(Arc::new(embeddings)),
+    );
 }
 
 /// Sets up or rebuilds the embeddings index, then reads it again.
@@ -3452,40 +3522,44 @@ fn send_embeddings(shared: &Arc<Shared>, command: &str, all: bool) {
 /// Reads the skills under the thread's project, or the user's own.
 fn read_skill_list(shared: &Arc<Shared>, thread: Option<ThreadId>) {
     let address = skills_address(&shared.state.lock().expect("live state"), thread);
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let skills = wire
-            .query("skills.manage.list", address)
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                value
-                    .get("skills")
-                    .and_then(Value::as_array)
-                    .map(|skills| skills.iter().filter_map(ManagedSkill::from_json).collect())
-                    .ok_or_else(|| "The server's skills answer was unreadable.".to_string())
-            });
-        shared.update(|state| state.managed_skills = Some(Arc::new(skills)));
-    });
+    settings_read(
+        shared,
+        Some(("skills.manage.list", thread)),
+        move |wire| {
+            wire.query("skills.manage.list", address)
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    value
+                        .get("skills")
+                        .and_then(Value::as_array)
+                        .map(|skills| skills.iter().filter_map(ManagedSkill::from_json).collect())
+                        .ok_or_else(|| "The server's skills answer was unreadable.".to_string())
+                })
+        },
+        move |state, skills| state.managed_skills = Some(Arc::new(skills)),
+    );
 }
 
 /// Reads one skill's text.
 fn read_skill_detail(shared: &Arc<Shared>, thread: Option<ThreadId>, source: &str, folder: &str) {
     let fields = skill_fields(shared, thread, source, folder);
     let key = (source.to_string(), folder.to_string());
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let detail = wire
-            .query("skills.manage.read", fields)
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                text(&value, &["text"])
-                    .map(str::to_string)
-                    .ok_or_else(|| "The server's skill answer was unreadable.".to_string())
-            });
-        shared.update(|state| {
+    settings_read(
+        shared,
+        None,
+        move |wire| {
+            wire.query("skills.manage.read", fields)
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    text(&value, &["text"])
+                        .map(str::to_string)
+                        .ok_or_else(|| "The server's skill answer was unreadable.".to_string())
+                })
+        },
+        move |state, detail| {
             state.skill_texts.insert(key, Arc::new(detail));
-        });
-    });
+        },
+    );
 }
 
 /// Saves a skill's text, then reads the list again.
@@ -3533,22 +3607,24 @@ fn send_skill_field(
 
 /// Reads remote access and the paired devices together.
 fn read_remote_state(shared: &Arc<Shared>) {
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let remote = wire
-            .query("remote.status", json!({}))
-            .map_err(|error| error.message)
-            .and_then(|status| {
-                RemoteState::status_from_json(&status)
-                    .ok_or_else(|| "The server's remote answer was unreadable.".to_string())
-            })
-            .and_then(|state| {
-                wire.query("remote.devices", json!({}))
-                    .map(|devices| state.with_devices(&devices))
-                    .map_err(|error| error.message)
-            });
-        shared.update(|state| state.remote = Some(Arc::new(remote)));
-    });
+    settings_read(
+        shared,
+        Some(("remote.status", None)),
+        move |wire| {
+            wire.query("remote.status", json!({}))
+                .map_err(|error| error.message)
+                .and_then(|status| {
+                    RemoteState::status_from_json(&status)
+                        .ok_or_else(|| "The server's remote answer was unreadable.".to_string())
+                })
+                .and_then(|state| {
+                    wire.query("remote.devices", json!({}))
+                        .map(|devices| state.with_devices(&devices))
+                        .map_err(|error| error.message)
+                })
+        },
+        move |state, remote| state.remote = Some(Arc::new(remote)),
+    );
 }
 
 /// Keeps the pairing on the last remote answer, if there is one.
@@ -3568,25 +3644,27 @@ fn set_pairing(shared: &Arc<Shared>, pairing: Option<settings::Pairing>) {
 
 /// Reads the providers' newest versions and Moxen's own update check together.
 fn read_update_state(shared: &Arc<Shared>) {
-    let shared = shared.clone();
-    with_wire(&shared.clone(), move |wire| {
-        let providers = wire
-            .query("provider.latest", json!({}))
-            .map(|value| UpdateState::providers_from_json(&value))
-            .unwrap_or_default();
-        let updates = wire
-            .query("app.update.check", json!({}))
-            .map_err(|error| error.message)
-            .and_then(|value| {
-                UpdateState::check_from_json(&value)
-                    .ok_or_else(|| "The server's update answer was unreadable.".to_string())
-            })
-            .map(|mut state| {
-                state.providers = providers;
-                state
-            });
-        shared.update(|state| state.updates = Some(Arc::new(updates)));
-    });
+    settings_read(
+        shared,
+        Some(("app.update.check", None)),
+        move |wire| {
+            let providers = wire
+                .query("provider.latest", json!({}))
+                .map(|value| UpdateState::providers_from_json(&value))
+                .unwrap_or_default();
+            wire.query("app.update.check", json!({}))
+                .map_err(|error| error.message)
+                .and_then(|value| {
+                    UpdateState::check_from_json(&value)
+                        .ok_or_else(|| "The server's update answer was unreadable.".to_string())
+                })
+                .map(|mut state| {
+                    state.providers = providers;
+                    state
+                })
+        },
+        move |state, updates| state.updates = Some(Arc::new(updates)),
+    );
 }
 
 /// Downloads, tests and switches to a release (or rolls back), then checks again.
@@ -4009,10 +4087,12 @@ mod tests {
         let listener = UnixListener::bind(&path).expect("bind");
         let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
         let seen = commands.clone();
+        let remote_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = stream.expect("accept");
                 let seen = seen.clone();
+                let remote_enabled = remote_enabled.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -4172,6 +4252,10 @@ mod tests {
                                     {"threadId": "t1", "turnId": "t2", "policy": {"held": true}},
                                 ]}),
                                 Some("settings.read") => settings_answer(),
+                                Some("harness.profile.export") => {
+                                    seen.lock().unwrap().push(params.clone());
+                                    json!({"id": params["profileId"], "text": "{\"id\": \"office\"}"})
+                                }
                                 Some("memory.list") => {
                                     assert_eq!(params["threadId"], "t1");
                                     json!({"projectId": "p", "index": null, "memories": [
@@ -4209,9 +4293,11 @@ mod tests {
                                     json!({"text": "# Review"})
                                 }
                                 Some("remote.status") => {
-                                    json!({"available": true, "enabled": true, "interfaces": {},
-                                        "port": 47317,
-                                        "listening": [{"host": "192.168.1.2", "port": 47317}]})
+                                    let enabled = remote_enabled.load(Ordering::SeqCst);
+                                    json!({"available": true, "enabled": enabled, "interfaces": {},
+                                        "port": 47317, "listening": if enabled {
+                                            json!([{"host": "192.168.1.2", "port": 47317}])
+                                        } else { json!([]) }})
                                 }
                                 Some("remote.devices") => {
                                     json!({"devices": [{"id": "d1", "name": "Laptop",
@@ -4272,7 +4358,20 @@ mod tests {
                                     Some("thread.turn.start" | "thread.turn.interrupt") => {
                                         json!({"accepted": true, "threadId": "new-thread"})
                                     }
+                                    Some("settings.set" | "settings.duplicate")
+                                        if params["value"] == "reject"
+                                            || params["newId"] == "reject" =>
+                                    {
+                                        writeln!(writer, "{}", json!({"id": id, "error": {
+                                            "code": "INVALID_CONFIG", "message": "Refused by the settings server."
+                                        }})).unwrap();
+                                        continue;
+                                    }
                                     Some("settings.set" | "settings.duplicate") => {
+                                        if params["key"] == "remote.enabled" {
+                                            remote_enabled
+                                                .store(params["value"] == "true", Ordering::SeqCst);
+                                        }
                                         settings_answer()
                                     }
                                     Some("harness.profile.test") => {
@@ -4294,10 +4393,6 @@ mod tests {
                                     Some("harness.models.discover") => {
                                         json!({"ok": true, "host": "localhost:8080",
                                             "models": [{"id": "large"}]})
-                                    }
-                                    Some("harness.profile.export") => {
-                                        json!({"id": params["profileId"],
-                                            "text": "{\"id\": \"office\"}"})
                                     }
                                     Some("harness.profile.import") => {
                                         let mut answer = settings_answer();
@@ -4369,6 +4464,178 @@ mod tests {
             assert!(Instant::now() < until, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn settings_source() -> ServerSource {
+        ServerSource {
+            endpoint: String::new(),
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::default()),
+                revision: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    #[test]
+    fn disconnected_settings_actions_do_not_stay_running() {
+        let mut source = settings_source();
+        source.set_setting("remote.enabled", "true");
+        assert!(source.settings_saving().is_none());
+        assert_eq!(
+            source.take_settings_write(),
+            Some(Err(not_connected().message))
+        );
+        for (scope, kind, action) in [
+            (
+                "harness",
+                "test",
+                ServerSource::test_harness as fn(&mut ServerSource, &str, Option<String>),
+            ),
+            ("harness", "probe", ServerSource::probe_harness),
+            (
+                "mcp",
+                "test",
+                |source: &mut ServerSource, name: &str, _: Option<String>| source.test_mcp(name),
+            ),
+        ] {
+            action(&mut source, "office", None);
+            assert_eq!(
+                source.harness_run(),
+                Some(HarnessRun::failed(
+                    scope,
+                    kind,
+                    "office",
+                    not_connected().message
+                ))
+            );
+        }
+        source.shared.update(|state| {
+            state.settings_pending = Some("remote.enabled".into());
+            state.harness_run = Some(HarnessRun::running("mcp", "test", "office"));
+            end_session(state);
+        });
+        assert!(source.settings_saving().is_none());
+        assert!(source.harness_run().is_none());
+        assert_eq!(
+            source.take_settings_write(),
+            Some(Err(not_connected().message))
+        );
+    }
+
+    #[test]
+    fn closing_settings_discards_discovery_and_export_answers() {
+        let mut source = settings_source();
+        source.shared.update(|state| {
+            state.discovered = Some(Discovery::from_json(&json!({"ok": true, "models": []})));
+            state.profile_document = Some(("office".into(), "{}".into()));
+            state
+                .settings_reads
+                .insert(("harness.models.discover", None), 1);
+            state
+                .settings_reads
+                .insert(("harness.profile.export", None), 2);
+        });
+        source.clear_settings_transients();
+        assert!(source.take_profile_document().is_none());
+        assert!(source.take_discovered().is_none());
+        assert!(
+            source
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .settings_reads
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    fn connect_settings_test(name: &str) -> (ServerSource, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("moxen-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temporary settings test directory");
+        let path = dir.join("s.sock");
+        fake_server(path.clone());
+        let (wire, _) = Wire::connect(path.to_str().expect("socket path")).expect("test wire");
+        let source = settings_source();
+        source
+            .shared
+            .update(|state| state.wire = Some(Arc::new(wire)));
+        (source, dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refused_settings_writes_release_pending_and_report_the_inline_error() {
+        let (mut source, dir) = connect_settings_test("settings-refused");
+        source.set_setting("ui.theme", "reject");
+        wait_for("the refused setting", || source.settings_saving().is_none());
+        assert_eq!(
+            source.take_settings_write(),
+            Some(Err("Refused by the settings server.".into()))
+        );
+        source.duplicate_setting("providers.harness.profiles", "office", "reject");
+        wait_for("the refused duplicate", || {
+            source.settings_saving().is_none()
+        });
+        assert_eq!(
+            source.take_settings_write(),
+            Some(Err("Refused by the settings server.".into()))
+        );
+        source.set_setting("ui.theme", "dark");
+        wait_for("the accepted retry", || source.settings_saving().is_none());
+        assert_eq!(source.take_settings_write(), Some(Ok(())));
+        std::fs::remove_dir_all(dir).expect("remove test socket");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_reads_coalesce_and_drop_answers_from_before_reconnect() {
+        use std::sync::mpsc::channel;
+        struct Answer(std::sync::mpsc::Sender<()>);
+        impl Drop for Answer {
+            fn drop(&mut self) {
+                self.0.send(()).expect("test receiver");
+            }
+        }
+
+        let (source, dir) = connect_settings_test("settings-epoch");
+        let key = Some(("settings.read", None));
+        let (started, started_rx) = channel();
+        let (release, release_rx) = channel();
+        let (dropped, dropped_rx) = channel();
+        settings_read(
+            &source.shared,
+            key,
+            move |_| {
+                started.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Answer(dropped)
+            },
+            |state, _| state.settings = Some(Arc::new(Err("stale".into()))),
+        );
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (duplicate, duplicate_rx) = channel();
+        settings_read(
+            &source.shared,
+            key,
+            move |_| Answer(duplicate),
+            |state, _| state.settings = Some(Arc::new(Err("duplicate".into()))),
+        );
+        assert!(matches!(
+            duplicate_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        source.shared.update(|state| {
+            state.wire_epoch += 1;
+            state.settings = Some(Arc::new(Err("new connection".into())));
+        });
+        release.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            source.settings().as_deref().unwrap().as_ref().unwrap_err(),
+            "new connection"
+        );
+        std::fs::remove_dir_all(dir).expect("remove test socket");
     }
 
     #[cfg(unix)]
@@ -4997,6 +5264,7 @@ mod tests {
         );
         source.set_setting("ui.theme", "dark");
         expect(json!({"type":"settings.set","key":"ui.theme","value":"dark"}));
+        wait_for("the settings write", || source.settings_saving().is_none());
         source.duplicate_setting("providers.harness.profiles", "office", "office-2");
         expect(
             json!({"type":"settings.duplicate","key":"providers.harness.profiles",
@@ -5129,6 +5397,11 @@ mod tests {
         );
         source.delete_memory(Some(0), "n", "global");
         expect(json!({"type":"memory.delete","threadId":"t1","name":"n","scope":"global"}));
+        source.delete_memory(Some(0), "tastes", "global");
+        expect(json!({"type":"memory.delete","threadId":"t1","name":"tastes","scope":"global"}));
+        wait_for("the deleted memory to leave the detail cache", || {
+            source.memory_detail("tastes", "global").is_none()
+        });
         source.edit_memory(Some(0), "n", "global", "a", "b", None);
         expect(
             json!({"type":"memory.edit","threadId":"t1","name":"n","scope":"global",
@@ -5234,6 +5507,13 @@ mod tests {
         expect(json!({"type":"remote.pairing.cancel"}));
         source.revoke_device("d1");
         expect(json!({"type":"remote.device.revoke","deviceId":"d1"}));
+        source.set_setting("remote.enabled", "false");
+        expect(json!({"type":"settings.set","key":"remote.enabled","value":"false"}));
+        wait_for("the remote switch to refresh after the write", || {
+            source
+                .remote()
+                .is_some_and(|state| state.as_ref().as_ref().is_ok_and(|state| !state.enabled))
+        });
         source.read_updates();
         wait_for("the updates", || source.updates().is_some());
         let updates = source.updates().expect("updates");

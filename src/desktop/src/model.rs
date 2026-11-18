@@ -515,6 +515,10 @@ pub trait ThreadSource {
     fn settings_saving(&self) -> Option<String> {
         None
     }
+    fn take_settings_write(&mut self) -> Option<Result<(), String>> {
+        None
+    }
+    fn clear_settings_transients(&mut self) {}
     /// Writes one key through the server; the snapshot refreshes from its answer.
     fn set_setting(&mut self, _key: &str, _value: &str) {}
     /// Copies one list entry under a new id.
