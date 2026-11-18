@@ -73,30 +73,68 @@ fn first_present(dir: &Path, names: &[&str], exists: impl Fn(&Path) -> bool) -> 
         .find(|path| exists(path))
 }
 
-/// How to start the launcher: a batch shim (`.cmd`/`.bat`, e.g. an npm
-/// install of Moxen on Windows) only runs under `cmd.exe`, with the shim and
-/// its arguments as separate arguments — never joined into one command
-/// string. Mirrors how `server/client.ts` starts its own shim.
-fn launch_command(launcher: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
-    let shim = launcher
+/// Whether the launcher is a batch shim (`.cmd`/`.bat`, e.g. an npm
+/// install of Moxen on Windows): it only runs under `cmd.exe`.
+fn is_shim(launcher: &Path) -> bool {
+    launcher
         .extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        });
-    if shim {
-        (
+        })
+}
+
+/// The `/c` line that runs a batch shim: the whole quoted invocation wrapped
+/// once more in quotes — `""<shim>" <bridge>"` — the shape `server/client.ts`
+/// passes through `shell: true` on Windows. With `/s`, `cmd.exe` strips the
+/// first and last quote of that line, leaving `"<shim>" <bridge>`; quoting
+/// each piece separately (or letting `Command` re-quote the parts) loses the
+/// outer pair, so a shim path with spaces no longer resolves. Inside double
+/// quotes cmd treats `&`, `|`, `<`, `>` and `^` literally, so wrapping is
+/// enough for them. A `%` still expands even inside quotes: a `%NAME%`
+/// stretch matching an environment variable would be replaced, but shim
+/// paths with one are unheard of, and an unmatched stretch passes through
+/// unchanged, so the path is passed as-is. A `"` cannot be quoted and is
+/// refused with a clear error.
+fn cmd_shim_line(shim: &Path, bridge: &str) -> Result<String, WireError> {
+    let shim = shim.to_str().ok_or_else(|| {
+        WireError::local(
+            "INVALID_LAUNCHER",
+            format!(
+                "Could not run {}: the path is not valid text, so it cannot be quoted for cmd.exe.",
+                shim.display()
+            ),
+        )
+    })?;
+    if shim.contains('"') {
+        return Err(WireError::local(
+            "INVALID_LAUNCHER",
+            format!(
+                "Could not run {shim}: the path contains a '\"', which cannot be quoted for cmd.exe."
+            ),
+        ));
+    }
+    Ok(format!("\"\"{shim}\" {bridge}\""))
+}
+
+/// How to start the launcher: the executable directly, or a batch shim
+/// through `cmd.exe` with the pre-quoted `/c` line from `cmd_shim_line` as
+/// its last argument — never the shim and its arguments as separate
+/// arguments. On Windows that last argument goes through `raw_arg`
+/// (see `open`): re-quoting it would break the outer pair again.
+fn launch_command(launcher: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>), WireError> {
+    if is_shim(launcher) {
+        Ok((
             PathBuf::from("cmd.exe"),
             vec![
                 "/d".into(),
                 "/s".into(),
                 "/c".into(),
-                launcher.into(),
-                BRIDGE.into(),
+                cmd_shim_line(launcher, BRIDGE)?.into(),
             ],
-        )
+        ))
     } else {
-        (launcher.into(), vec![BRIDGE.into()])
+        Ok((launcher.into(), vec![BRIDGE.into()]))
     }
 }
 
@@ -108,22 +146,35 @@ pub fn open(server: Option<&str>, starting: impl Fn()) -> Result<Halves, WireErr
         std::env::var_os("MOXEN_STORE_ROOT").as_deref(),
         Path::is_file,
     );
-    let (program, args) = launch_command(&binary);
+    let (program, args) = launch_command(&binary)?;
     let mut command = Command::new(&program);
     command
-        .args(&args)
         .env_remove("MOXEN_DESKTOP_SERVER")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(server) = server {
-        command.env("MOXEN_DESKTOP_SERVER", server);
-    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.creation_flags(CREATE_NO_WINDOW);
+        if is_shim(&binary) {
+            // The last argument is the whole `/c` line, already quoted for
+            // cmd.exe: it must go through verbatim. `arg` would wrap it in a
+            // second pair of quotes and escape the inner ones, so a shim
+            // path with spaces would no longer resolve.
+            command.args(&args[..3]);
+            command.raw_arg(&args[3]);
+        } else {
+            command.args(&args);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        command.args(&args);
+    }
+    if let Some(server) = server {
+        command.env("MOXEN_DESKTOP_SERVER", server);
     }
     open_command(&mut command, starting).map_err(|error| {
         if error.code == "BRIDGE_LAUNCH_FAILED" {
@@ -249,27 +300,30 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_shim_runs_under_cmd_with_separate_arguments() {
+    fn a_batch_shim_runs_as_one_pre_quoted_cmd_line() {
         let shimmed = |launcher: &str| {
-            let (program, args) = launch_command(Path::new(launcher));
+            let (program, args) = launch_command(Path::new(launcher)).unwrap();
             let args = args
                 .iter()
                 .map(|arg| arg.to_str().expect("text argument").to_string())
                 .collect::<Vec<_>>();
             (program, args)
         };
-        // The bridge flag travels as its own argument: the command is never
-        // joined into one string.
+        // The shape server/client.ts passes through `shell: true`: the whole
+        // quoted invocation wrapped once more, as a single `/c` argument.
+        // With /S, cmd strips the first and last quote of the line, leaving
+        // `"<shim>" <bridge>`; separate argv loses the outer pair, so a shim
+        // path with spaces would no longer resolve.
         assert_eq!(
-            shimmed("C:\\npm\\moxen.cmd"),
+            shimmed("C:\\Users\\Jane Doe\\AppData\\Roaming\\npm\\moxen.cmd"),
             (
                 PathBuf::from("cmd.exe"),
                 vec![
                     "/d".to_string(),
                     "/s".to_string(),
                     "/c".to_string(),
-                    "C:\\npm\\moxen.cmd".to_string(),
-                    BRIDGE.to_string(),
+                    "\"\"C:\\Users\\Jane Doe\\AppData\\Roaming\\npm\\moxen.cmd\" --moxen-internal-desktop\""
+                        .to_string(),
                 ]
             )
         );
@@ -285,6 +339,47 @@ mod tests {
             shimmed("moxen.exe"),
             (PathBuf::from("moxen.exe"), vec![BRIDGE.to_string()])
         );
+    }
+
+    #[test]
+    fn the_shim_line_quotes_a_spaceless_path_once_more() {
+        assert_eq!(
+            cmd_shim_line(Path::new("C:\\npm\\moxen.cmd"), BRIDGE).unwrap(),
+            "\"\"C:\\npm\\moxen.cmd\" --moxen-internal-desktop\""
+        );
+    }
+
+    #[test]
+    fn shell_metacharacters_are_literal_inside_the_quotes() {
+        // `&`, `^`, `|` `<` and `>` need no escaping inside double quotes;
+        // (`|` `<` `>` cannot appear in a Windows file name at all.)
+        assert_eq!(
+            cmd_shim_line(Path::new("C:\\AT&T\\R^D\\moxen.cmd"), BRIDGE).unwrap(),
+            "\"\"C:\\AT&T\\R^D\\moxen.cmd\" --moxen-internal-desktop\""
+        );
+    }
+
+    #[test]
+    fn a_percent_passes_through_inside_the_quotes() {
+        // cmd still expands a `%NAME%` stretch inside quotes, but shim paths
+        // with one are unheard of, and an unmatched stretch passes through
+        // unchanged — see `cmd_shim_line`.
+        assert_eq!(
+            cmd_shim_line(Path::new("C:\\100%\\npm\\moxen.cmd"), BRIDGE).unwrap(),
+            "\"\"C:\\100%\\npm\\moxen.cmd\" --moxen-internal-desktop\""
+        );
+    }
+
+    #[test]
+    fn a_double_quote_in_a_shim_path_is_refused() {
+        let error = cmd_shim_line(Path::new("C:\\odd\"name\\moxen.cmd"), BRIDGE).unwrap_err();
+        assert_eq!(error.code, "INVALID_LAUNCHER");
+        assert!(
+            error.message.contains('"'),
+            "the error says what cannot be quoted: {}",
+            error.message
+        );
+        assert!(launch_command(Path::new("C:\\odd\"name\\moxen.cmd")).is_err());
     }
 
     #[test]
