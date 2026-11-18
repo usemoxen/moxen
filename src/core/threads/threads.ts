@@ -146,12 +146,12 @@ export async function continuationInFlight(store: ThreadStore, thread: StoredThr
 }
 
 /** A turns ledger problem hiding rows of this thread, if one is reported. */
-function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
+export function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
   const file = store.turnsFile(threadId);
   return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
 }
 
-function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
+export function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
   return new CliError(
     "TURNS_LEDGER_CORRUPT",
     `Thread ${threadId} may have an active turn hidden in an unreadable ledger line (${problem.file}${problem.line === undefined ? "" : `:${problem.line}`}). Move the bad line aside first — the TUI warning offers it, or remove the line by hand — then retry.`,

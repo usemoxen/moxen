@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import { readFile } from "node:fs/promises";
+import { readFile, appendFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -864,6 +864,84 @@ describe("a manual continue with an active turn (MXN-372)", () => {
       expect(await w.store.readTurns(source.id)).toHaveLength(0);
     } finally {
       untrackContinuation(token);
+    }
+  });
+
+  it("refuses a manual continue when a turn hides in an unreadable ledger line", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const before = await w.store.listThreadIds();
+    await appendFile(w.store.turnsFile(source.id), "{not json\n", "utf8");
+    await expect(sendTurn(w.store, source.id, { prompt: "More" })).rejects.toMatchObject({ code: "TURNS_LEDGER_CORRUPT" });
+    // The manual reservation refuses the same way, before any claim, note
+    // or destination exists.
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toMatchObject({ code: "TURNS_LEDGER_CORRUPT" });
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    expect((await w.store.readActivities(source.id)).filter((a) => a.kind === "thread.continued")).toHaveLength(0);
+    await interruptTurn(w.store, source.id, running.id).catch(() => undefined);
+    await flushTurnRunners();
+    for (const id of [source.id]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
+  });
+
+  it("leaves a queued handoff queued when its continue joins another run, then prepares it", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const queued = (await sendTurn(w.store, source.id, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    expect(queued.status).toBe("queued");
+    // Start the queue pass first: an automatic run and a manual request both
+    // in flight behind it cannot settle before it reaches continueThread.
+    const preparing = prepareQueuedHandoff(w.ctx, source.id, queued.id, Date.now());
+    const auto = continueThread(w.ctx, { threadId: source.id, automatic: true });
+    const manual = continueThread(w.ctx, { threadId: source.id });
+    // The manual waits on the automatic run while the queue pass calls
+    // continueThread: it joins the automatic destination, which is not this
+    // entry's own, so the entry stays queued with nothing prepared.
+    await preparing;
+    const waiting = (await w.store.readTurns(source.id)).find((t) => t.id === queued.id)!;
+    expect(waiting.status).toBe("queued");
+    expect((await w.store.readActivities(source.id)).filter((a) => a.kind === "handoff.prepared")).toHaveLength(0);
+    const autoLanded = await auto;
+    const manualLanded = await manual;
+    expect(manualLanded.threadId).toBe(autoLanded.threadId);
+    // Once both landed, the next pass prepares the entry against its own
+    // destination.
+    await prepareQueuedHandoff(w.ctx, source.id, queued.id, Date.now());
+    const after = (await w.store.readTurns(source.id)).find((t) => t.id === queued.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoff).toBeDefined();
+    expect(after.handoff!.destinationThreadId).not.toBe(autoLanded.threadId);
+    expect(await w.store.readThreadRecord(after.handoff!.destinationThreadId)).not.toBeNull();
+    await flushTurnRunners();
+    for (const id of [source.id, autoLanded.threadId, after.handoff!.destinationThreadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
+    }
+  });
+
+  it("refuses an agent continue while a manual handoff is in flight", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const manual = continueThread(w.ctx, { threadId: source.id });
+    // The agent's request must not join the manual run: it is refused with
+    // the same clear busy error a racing send gets.
+    await expect(continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done." })).rejects.toMatchObject({
+      code: "THREAD_BUSY",
+      message: expect.stringContaining("being continued"),
+    });
+    const landed = await manual;
+    expect((await w.store.readThreadRecord(landed.threadId))?.continuedFrom).toBe(source.id);
+    await flushTurnRunners();
+    for (const id of [source.id, landed.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
     }
   });
 });

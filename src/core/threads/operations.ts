@@ -79,6 +79,7 @@ import {
   deleteThread,
   delegationForChild,
   failTurn,
+  hiddenTurnsProblem,
   isStaleContinueTurn,
   reconcileOrphanedTurn,
   holdStrandedPromotions,
@@ -97,6 +98,7 @@ import {
   trackContinuation,
   turnPrompt,
   untrackContinuation,
+  unreadableTurnsError,
   updateThreadMeta,
   wakeUpHasRiders,
   type SendTurnResult,
@@ -899,7 +901,13 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   }
   if (openTurn(await store.readTurns(threadId))) return;
   const policy: QueuePolicy = { ...turn.queue!, continuation: "same-thread", requestId: `handoff:${handoff.requestId}`, eventAfter: turn.queue!.eventAfter ?? turn.createdAt };
-  await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}) });
+  const continued = await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}) });
+  if (continued.threadId !== handoff.destinationThreadId) {
+    // The call joined another run's destination instead of preparing this
+    // entry's own: leave the entry queued for a later pass rather than
+    // marking it completed against a destination that never holds it.
+    return;
+  }
   await store.withThreadLock(threadId, async () => {
     const current = await store.readThreadRecord(threadId);
     await store.updateTurn(threadId, turnId, { status: "completed", completedAt: store.nowIso() });
@@ -1320,7 +1328,17 @@ export function continueThread(ctx: OperationContext, request: ContinueThreadReq
   // destination. Instead the manual request leaves the entry alone, waits
   // for it to settle, and retries through the normal path: it joins a manual
   // run if one now exists, else starts fresh and refuses a running source in
-  // reserveContinuation.
+  // reserveContinuation. Mirrored the other way, a non-manual request never
+  // joins a manual run either: joining would resolve with the manual
+  // destination while the caller records its own reserved id, stranding its
+  // work — the queue pass leaves the entry queued on THREAD_BUSY for a
+  // later pass instead.
+  if (ongoing && ongoing.manual && !manual) {
+    return Promise.reject(new CliError("THREAD_BUSY", `Thread ${request.threadId} is being continued in a new thread. Retry when it lands.`, {
+      exitCode: 4,
+      details: { threadId: request.threadId },
+    }));
+  }
   if (ongoing && (!manual || ongoing.manual)) return ongoing.run;
   if (ongoing) {
     const retry = (): Promise<ContinuedThread> => continueThread(ctx, request);
@@ -1378,9 +1396,12 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
     if (manual) {
-      // Refuse what a send would refuse: a running turn, or a stuck one no
+      // Refuse what a send would refuse: a turn hidden in an unreadable
+      // ledger line (it may be active), a running turn, or a stuck one no
       // build writes (it never settles on its own, so the destination would
       // start beside work that never ends).
+      const unreadable = hiddenTurnsProblem(store, live.id);
+      if (unreadable) throw unreadableTurnsError(live.id, unreadable);
       const running = liveTurn(await store.readTurns(live.id));
       if (running) {
         throw new CliError("THREAD_BUSY", `Thread ${live.id} has an active turn. Retry when idle.`, {
@@ -1554,10 +1575,12 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   } finally {
     // The handoff landed (or failed): the source takes work again. A later
     // send on the old thread is the user's own choice, as before. Untrack
-    // first — a racing admission still sees a live owner and blocks — then
-    // clear the record, which admission heals on its own if this write dies
-    // (a stall of at most CONTINUE_CLAIM_TTL_MS, never a wedge; our own dead
-    // claim heals immediately without waiting out the TTL).
+    // first — a racing admission in this process then heals our record
+    // instead of blocking on it (its owner is gone), while other owners
+    // still block until the TTL — then clear the record, which admission
+    // heals on its own if this write dies (a stall of at most
+    // CONTINUE_CLAIM_TTL_MS, never a wedge; our own dead claim heals
+    // immediately without waiting out the TTL).
     if (claimToken !== null) {
       untrackContinuation(claimToken);
       // Best effort by design: if this write dies, the record keeps a claim

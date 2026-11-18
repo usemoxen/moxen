@@ -1137,9 +1137,12 @@ A `modelSelection` with `provider`/`model` together is refused.
   delegated task is not offered the tool and is refused when it calls
   anyway: its long work is compacted in place, and its report — not a
   forked continuation — decides what runs next.
-- The same conditions as the palette action apply: a missing, deleted,
+- Only the agent's own continue refuses those: a missing, deleted,
   archived or settled thread is refused with a clear error, as is a thread
-  held by usage protection (its recovery runs first). A research run's
+  held by usage protection (its recovery runs first). The palette action
+  continues any idle thread that exists — archived, settled or usage-held —
+  refusing only a missing or deleted source (and a running one, above). A
+  research run's
   roles and lead are refused (`THREAD_CONTINUE_RESEARCH`). Unlike the
   palette action, a running source is not refused: the caller's own turn is
   necessarily open, so the destination waits instead (see below).

@@ -540,8 +540,17 @@ export class UsageProtection {
           const sent = await startTurn(ctx, { threadId: row.thread.id, prompt, usageControl: true, origin: "usage-protection" });
           await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping", turnId: sent.turn.id });
           busy.add(pause.provider);
-        } catch {
-          await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting", error: "Could not start wrap-up. Cancel recovery and inspect the thread before continuing." });
+        } catch (cause) {
+          // A live manual handoff owns the checkout, so its claim refuses the
+          // wrap-up turn. That is transient — retry on the next tick — not a
+          // broken thread, so restore the pending pause instead of parking it
+          // behind an error the later ticks then skip forever.
+          if (cause instanceof CliError && cause.code === "THREAD_BUSY") {
+            const { error: _dropped, ...retry } = pause;
+            await this.pause(ctx, row.thread.id, { ...retry, phase: "pending" });
+          } else {
+            await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting", error: "Could not start wrap-up. Cancel recovery and inspect the thread before continuing." });
+          }
         }
       }
       if (pause.phase !== "waiting" || pause.error) continue;

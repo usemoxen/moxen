@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import os from "node:os";
 import { settleRuns } from "../../testing/turns.js";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -7,7 +8,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, settleThread, updateThreadMeta } from "../../threads/threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
 import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
@@ -160,6 +161,50 @@ describe("usage protection", () => {
       await w.guard.tick();
       expect(w.prompts).toEqual([]);
       expect((await w.store.readThreadRecord(id))?.usagePause).toMatchObject({ forced: true, phase: "waiting" });
+    } finally { w.guard.close(); }
+  });
+
+  it("retries the wrap-up on the next tick when a live continue claim refuses it", async () => {
+    const w = await world();
+    const id = await w.make("wrap-up waits");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    await w.store.withThreadLock(id, async () => {
+      const current = (await w.store.readThreadRecord(id))!;
+      await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", windows: [], resetsAt: null, order: 1, phase: "pending", handoff: false }, updatedAt: w.store.nowIso() });
+    });
+    // A scheduled manual continue holds the source in its handoff: the claim
+    // is live, so the wrap-up turn is refused with THREAD_BUSY.
+    const token = w.store.newId();
+    trackContinuation(token);
+    try {
+      await w.store.withThreadLock(id, async () => {
+        const current = (await w.store.readThreadRecord(id))!;
+        await w.store.writeThreadRecord({ ...current, continueClaim: { token, pid: process.pid, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+      });
+      await w.guard.tick();
+      // Back to pending with no error — the next tick retries — not parked
+      // behind a fatal wrap-up error the later ticks would skip forever.
+      expect(await w.store.readThreadRecord(id)).toMatchObject({ usagePause: { phase: "pending" } });
+      expect((await w.store.readThreadRecord(id))?.usagePause?.error).toBeUndefined();
+      expect(openTurn(await w.store.readTurns(id))).toBeNull();
+    } finally {
+      untrackContinuation(token);
+      await w.store.withThreadLock(id, async () => {
+        const current = (await w.store.readThreadRecord(id))!;
+        if (current?.continueClaim) await w.store.writeThreadRecord({ ...current, continueClaim: null, updatedAt: w.store.nowIso() });
+      });
+    }
+    // Once the claim clears, the next tick starts the wrap-up.
+    await w.guard.tick();
+    const wrapping = (await w.store.readThreadRecord(id))?.usagePause;
+    expect(wrapping).toMatchObject({ phase: "wrapping" });
+    expect(wrapping?.turnId).toBe(openTurn(await w.store.readTurns(id))?.id);
+    try {
+      await interruptTurn(w.store, id, wrapping!.turnId!);
+      await flushTurnRunners();
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+      }
     } finally { w.guard.close(); }
   });
 
