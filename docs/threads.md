@@ -480,7 +480,13 @@ steers beside it. A manual continue needs an idle source: while one of its
 turns is running, the palette's Continue in a new thread row is disabled
 ("turn still running") and dispatching `thread.continue` anyway is refused
 with `THREAD_BUSY`, before any destination or continuation note is written —
-the two workers would start in the same checkout side by side. Queued or
+the two workers would start in the same checkout side by side. Once the
+reservation wins, the source is claimed until the handoff lands: no turn may
+start there in the meantime (a racing send, background wake-up or scheduled
+admission is refused with `THREAD_BUSY`, queued work simply waits), so the
+destination never runs beside a turn the race admitted. The claim clears
+when the handoff lands or fails — a later send on the old thread is the
+user's own choice — and heals itself if the handoff died with it. Queued or
 scheduled work is not a running turn, so an idle thread with schedules
 still continues; stopping the turn (or waiting for it to settle) and
 retrying goes through. A

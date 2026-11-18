@@ -2603,8 +2603,12 @@ export function App({
         },
       ],
     };
+    // The continue row follows the source's live session: a turn that starts
+    // while the palette is open disables it (the server would refuse), and
+    // one that settles re-enables it — so `sessionRunning` is a dep even
+    // though the row callbacks read it through the ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience, sessionRunning]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**

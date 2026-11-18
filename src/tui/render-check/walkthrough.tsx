@@ -17,7 +17,7 @@ import { runSidebarStability } from "./scenarios/sidebarStability.js";
 import { runPermissions } from "./scenarios/permissions.js";
 import { runDiffPanel } from "./scenarios/diffPanel.js";
 import { runCommandPalette } from "./scenarios/commandPalette.js";
-import { runContinueModal, runContinueModalBusy, runContinueModalLimited, runContinueModalRetry, runContinueModalSpanish } from "./scenarios/continueModal.js";
+import { runContinueModal, runContinueModalBusy, runContinueModalLimited, runContinueModalRetry, runContinueModalSpanish, runContinueModalStale } from "./scenarios/continueModal.js";
 import { runThreadSearch } from "./scenarios/threadSearch.js";
 import { runMessageActions } from "./scenarios/messageActions.js";
 import { runTimelineAndAnswers } from "./scenarios/timelineAndAnswers.js";
@@ -124,6 +124,7 @@ export async function runWalkthrough(): Promise<void> {
   await runContinueModalLimited();
   await runContinueModalRetry();
   await runContinueModalBusy();
+  await runContinueModalStale();
   await runContinueModalSpanish();
   // Independent render with its own deferred client (not part of the shared
   // walkthrough above): runs last so its extra renderer cannot perturb the

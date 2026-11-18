@@ -85,6 +85,36 @@ export function liveTurn(turns: StoredTurn[]): StoredTurn | null {
   return openTurn(turns) ?? turns.find((turn) => !isKnownTurnStatus(turn.status)) ?? null;
 }
 
+/**
+ * How long a continuation claim blocks admissions after its handoff stopped
+ * being provably alive: long enough to cover a slow provider session start,
+ * short enough that a crashed handoff never wedges the thread for long.
+ */
+export const CONTINUE_CLAIM_TTL_MS = 60_000;
+
+/**
+ * Whether a manual continuation in flight forbids starting a turn on this
+ * thread now. A claim from a live process on this host blocks; one whose
+ * owner is gone, or older than `CONTINUE_CLAIM_TTL_MS`, is dead and cleared
+ * here so a crashed handoff never wedges the thread (a reused pid cannot
+ * block past the TTL either). A claim from another host cannot be judged by
+ * pid, so only its age decides. Returns the thread as admission must see it
+ * (healed when it was dead), since the caller holds the lock and writes its
+ * own copy back afterwards. Caller must hold the thread lock.
+ */
+export async function continuationInFlight(store: ThreadStore, thread: StoredThread): Promise<{ blocked: boolean; thread: StoredThread }> {
+  const claim = thread.continueClaim;
+  if (!claim) return { blocked: false, thread };
+  const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
+  const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
+  if (alive && fresh) return { blocked: true, thread };
+  const current = await store.readThreadRecord(thread.id);
+  if (current?.continueClaim?.token !== claim.token) return { blocked: false, thread: current ?? thread };
+  const healed = { ...current, continueClaim: null, updatedAt: store.nowIso() };
+  await store.writeThreadRecord(healed);
+  return { blocked: false, thread: healed };
+}
+
 /** A turns ledger problem hiding rows of this thread, if one is reported. */
 function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
   const file = store.turnsFile(threadId);
@@ -506,6 +536,20 @@ export async function sendTurn(
     if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
     const status = heldQueue || usageHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    // A manual continuation in flight owns the checkout now: no turn may
+    // start beside its destination while it prepares. Queued and scheduled
+    // turns are not starting, so they pass; the handoff clears the claim
+    // when it lands, and a dead one heals here.
+    if (status === "running") {
+      const admission = await continuationInFlight(store, thread);
+      thread = admission.thread;
+      if (admission.blocked) {
+        throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
+          exitCode: 4,
+          details: { threadId },
+        });
+      }
+    }
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -655,6 +699,17 @@ export async function startBackgroundTurn(
         { details: { threadId } },
       );
     }
+    // A manual continuation in flight owns the checkout: a native wake-up
+    // waits for the handoff rather than starting beside it. The healed
+    // record is the one this turn is cut from, so a dead claim stays dead.
+    const admission = await continuationInFlight(store, thread);
+    const admitted = admission.thread;
+    if (admission.blocked) {
+      throw new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
+        exitCode: 4,
+        details: { threadId },
+      });
+    }
     const unreadable = hiddenTurnsProblem(store, threadId);
     if (unreadable) throw unreadableTurnsError(threadId, unreadable);
     if (live !== null) {
@@ -671,9 +726,9 @@ export async function startBackgroundTurn(
       owner: currentTurnOwner(),
       delivery: "background",
       messageId: store.newId(),
-      runtimeMode: thread.runtimeMode,
-      interactionMode: thread.interactionMode,
-      modelSelection: input.modelSelection ?? thread.modelSelection,
+      runtimeMode: admitted.runtimeMode,
+      interactionMode: admitted.interactionMode,
+      modelSelection: input.modelSelection ?? admitted.modelSelection,
       parentTurnId: null,
       error: null,
       usage: null,
@@ -690,7 +745,7 @@ export async function startBackgroundTurn(
       summary: "Woken by a background task",
       createdAt: now,
     });
-    await store.writeThreadRecord({ ...thread, updatedAt: now });
+    await store.writeThreadRecord({ ...admitted, updatedAt: now });
     store.emit(threadId, "turn-started");
     return turn;
   });
@@ -938,6 +993,10 @@ export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string)
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     if (openTurn(await store.readTurns(threadId))) return null;
+    // A manual continuation in flight owns the checkout: leave queued work
+    // queued. Admission retries once the handoff clears its claim.
+    const record = await store.readThreadRecord(threadId);
+    if (!record || (await continuationInFlight(store, record)).blocked) return null;
     await promoteQueuedLocked(store, threadId, now);
     return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
   });
@@ -1364,6 +1423,10 @@ export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: s
     const now = store.nowIso();
     const turns = await store.readTurns(threadId);
     if (openTurn(turns)) return null;
+    // A manual continuation in flight owns the checkout: a due turn waits
+    // for the handoff to clear its claim rather than starting beside it.
+    const record = await store.readThreadRecord(threadId);
+    if (!record || (await continuationInFlight(store, record)).blocked) return null;
     const due = turns.find(
       (turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : typeof turn.scheduledFor === "string") && !isHeldTurn(turn, Date.parse(now)),
     );

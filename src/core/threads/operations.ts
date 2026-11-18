@@ -19,6 +19,7 @@ import { removeProjectSkills } from "../skills/projectskills.js";
 import { sessionTtlFor, durationMs } from "./idle.js";
 import * as Effect from "effect/Effect";
 import { existsSync } from "node:fs";
+import os from "node:os";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -785,6 +786,10 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
       if (!entry.policy.held && entry.policy.continuation !== "same-thread") {
         try { await prepareQueuedHandoff(ctx, entry.threadId, entry.turnId, now); }
         catch (cause) {
+          // A manual handoff in flight on the source refuses the summary
+          // turn: leave the entry queued — a later pass prepares it, once
+          // the claim clears — instead of failing it for the user to re-add.
+          if (cause instanceof CliError && cause.code === "THREAD_BUSY" && (await ctx.store.readThreadRecord(entry.threadId))?.continueClaim) continue;
           await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
           ctx.store.emit(entry.threadId, "handoff-failed");
           continue;
@@ -847,6 +852,10 @@ async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, tur
     const exhausted = providerExhausted(summaryProvider, now);
     if (!handoff.summaryTurnId && !exhausted) {
       if (openTurn(await store.readTurns(threadId))) return;
+      // A manual handoff in flight owns the checkout: the summary turn
+      // waits for its claim to clear rather than starting beside it. The
+      // queue pass retries this entry once it does.
+      if ((await store.readThreadRecord(threadId))?.continueClaim) return;
       const sent = await sendTurn(store, threadId, {
         prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
         origin: "handoff-summary", usageControl: true,
@@ -1261,9 +1270,12 @@ const continuationRuns = new Map<string, Promise<ContinuedThread>>();
  *
  * A manual continue (the user's own action, not the server's recovery, a
  * queued handoff or an agent's) refuses a source with an active turn
- * (`THREAD_BUSY`): the two workers would start in the same checkout side by
- * side. Queued or scheduled work is not active, so an idle thread with
- * schedules still continues.
+ * (`THREAD_BUSY`), then claims the source until the handoff lands: while
+ * the claim stands, admission starts no turn there, so the destination
+ * never runs beside one. The claim clears when this returns (or fails) —
+ * a later send on the old thread is the user's own choice — and heals
+ * itself if the handoff died with it. Queued or scheduled work is not
+ * active, so an idle thread with schedules still continues.
  *
  * Concurrent calls on one source share a single destination (see
  * `continuationRuns`), and a retry after a crash rejoins the reserved
@@ -1302,19 +1314,24 @@ function isManualContinue(request: ContinueThreadRequest): boolean {
  * A manual continue refuses a running source inside the same lock, before
  * any note or destination exists: serialized with active-turn admission
  * (`sendTurn` takes this same lock), a turn starting now either lands first
- * and refuses this call, or lands after the reservation and runs on the old
- * thread by the user's own later choice. Queued work is not a running turn,
- * so an idle thread with schedules still continues.
+ * and refuses this call, or is refused by the claim below. Queued work is
+ * not a running turn, so an idle thread with schedules still continues.
+ *
+ * A manual continue also claims the source for the handoff: admission starts
+ * no turn here until the handoff lands and clears the claim (see
+ * `continueThreadInner`), so the destination never runs beside a turn the
+ * race admitted. Returns the destination with the claim token that clears it.
  */
-async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string): Promise<string> {
+async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string): Promise<{ destinationId: string; claimToken: string | null }> {
   const manual = isManualContinue(request);
   if (!manual) {
-    if (request.destinationThreadId) return request.destinationThreadId;
-    if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
+    if (request.destinationThreadId) return { destinationId: request.destinationThreadId, claimToken: null };
+    if (source.usagePause?.continuedThreadId) return { destinationId: source.usagePause.continuedThreadId, claimToken: null };
   }
   return await store.withThreadLock(source.id, async () => {
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
+    let claimToken: string | null = null;
     if (manual) {
       const running = openTurn(await store.readTurns(live.id));
       if (running) {
@@ -1323,11 +1340,21 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
           details: { threadId: live.id, turnId: running.id },
         });
       }
-      if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
-    } else if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
+      // Claim the source before any note or destination exists: from here
+      // until the handoff lands, admission starts no turn here (see
+      // `continuationInFlight`). The claim heals itself if this handoff
+      // dies with it, and the handoff clears it when it lands.
+      claimToken = store.newId();
+      await store.writeThreadRecord({
+        ...live,
+        continueClaim: { token: claimToken, pid: process.pid, host: os.hostname(), at: store.nowIso() },
+        updatedAt: store.nowIso(),
+      });
+      if (live.usagePause?.continuedThreadId) return { destinationId: live.usagePause.continuedThreadId, claimToken };
+    } else if (current?.usagePause?.continuedThreadId) return { destinationId: current.usagePause.continuedThreadId, claimToken: null };
     const notes = await store.readActivities(source.id);
     const prior = notes.find((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string");
-    if (prior) return prior.payload!.threadId as string;
+    if (prior) return { destinationId: prior.payload!.threadId as string, claimToken };
     const id = store.newId();
     await store.appendLedger(source.id, "activity", {
       id: store.newId(),
@@ -1346,7 +1373,7 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
       createdAt: store.nowIso(),
     });
     store.emit(source.id, "thread-continued");
-    return id;
+    return { destinationId: id, claimToken };
   });
 }
 
@@ -1465,7 +1492,39 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const carriedMode = request.interactionMode ?? source.interactionMode;
   const interactionMode = carriedMode === "review" ? "default" : carriedMode;
   const noteSummary = carriedMode === "review" ? `Continued in "${title}" (Review mode reset to Build: a one-off or delegate mode never stays on a thread)` : `Continued in "${title}"`;
-  const destinationId = await reserveContinuation(store, source, request, title, noteSummary);
+  const { destinationId, claimToken } = await reserveContinuation(store, source, request, title, noteSummary);
+  try {
+    return await continueThreadReserved(ctx, request, source, title, interactionMode, noteSummary, destinationId);
+  } finally {
+    // The handoff landed (or failed): the source takes work again. A later
+    // send on the old thread is the user's own choice, as before.
+    if (claimToken !== null) await clearContinuationClaim(store, source.id, claimToken).catch(() => undefined);
+  }
+}
+
+/**
+ * Release a manual handoff's admission claim, by token so a newer claim is
+ * never lifted. Best effort: admission heals a leftover claim on its own.
+ */
+async function clearContinuationClaim(store: ThreadStore, threadId: string, token: string): Promise<void> {
+  await store.withThreadLock(threadId, async () => {
+    const current = await store.readThreadRecord(threadId);
+    if (current?.continueClaim?.token === token) {
+      await store.writeThreadRecord({ ...current, continueClaim: null, updatedAt: store.nowIso() });
+    }
+  });
+}
+
+async function continueThreadReserved(
+  ctx: OperationContext,
+  request: ContinueThreadRequest,
+  source: StoredThread,
+  title: string,
+  interactionMode: InteractionMode,
+  noteSummary: string,
+  destinationId: string,
+): Promise<ContinuedThread> {
+  const { store } = ctx;
   const project = (await listStoredProjects(ctx.storeRoot)).find((candidate) => candidate.id === source.projectId);
   const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}) });
   const existing = await store.readThreadRecord(destinationId);

@@ -3,7 +3,7 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import { testRender } from "../testrender.js";
 
 import type { ClientApi } from "../../../server/api.js";
-import { App, client } from "../fixtures.js";
+import { App, client, emitLiveRef } from "../fixtures.js";
 import { USAGE_CONTINUE_GRACE_MS } from "../../../core/threads/views.js";
 import { applyLanguage } from "../../i18n/index.js";
 import { fail } from "../helpers.js";
@@ -511,6 +511,80 @@ export async function runContinueModalBusy(): Promise<void> {
     console.log(stayed);
     if (stayed.includes("enter continues")) fail("picking the disabled continue row opened the modal");
     if (commands.length !== 0) fail(`the disabled continue row dispatched ${commands.length} commands`);
+  } finally {
+    setup.renderer.destroy();
+  }
+}
+
+/**
+ * A turn that starts while the palette is open disables the continue row in
+ * place (and one that settles re-enables it): the rows follow the live
+ * session instead of the snapshot from when the palette opened. Picking the
+ * disabled row still opens nothing and dispatches nothing.
+ */
+export async function runContinueModalStale(): Promise<void> {
+  type Dispatch = Parameters<ClientApi["dispatch"]>[0];
+  const commands: Dispatch[] = [];
+  const isolated: ClientApi = {
+    ...client,
+    dispatch: ((command: Dispatch) => {
+      commands.push(command);
+      return client.dispatch(command);
+    }) as unknown as ClientApi["dispatch"],
+    getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+    subscribeThread: sessionThreads(client.subscribeThread, "idle"),
+  };
+  const sessionFrame = (status: "running" | "idle"): unknown => ({
+    kind: "event",
+    event: { type: "thread.session-set", payload: { session: { threadId: "t-live", status, lastError: null } } },
+  });
+  const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
+    width: 120,
+    height: 30,
+    exitOnCtrlC: false,
+  });
+  try {
+    await waitFor(setup, "the thread view did not settle", (frame) => frame.includes("Claude Opus 5"));
+    await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+    await setup.flush();
+    for (const char of "continu") {
+      await act(async () => setup.mockInput.pressKey(char));
+      await setup.flush();
+    }
+    await waitFor(setup, "the continue row did not start enabled", (frame) => frame.includes("Continue in a new thread") && frame.includes("fresh context"));
+    // A turn starts behind the open palette: the row flips to disabled.
+    await act(async () => emitLiveRef.current?.(sessionFrame("running")));
+    await setup.flush();
+    const busy = await waitFor(
+      setup,
+      "the continue row did not disable when the turn started",
+      (frame) => frame.includes("Continue in a new thread") && frame.includes("turn still running"),
+    );
+    console.log("--- continue palette (turn started behind it) ---");
+    console.log(busy);
+    const narrowed = busy.split("\n");
+    const row = narrowed.findIndex((line) => line.includes("Continue in a new thread"));
+    await act(async () => setup.mockMouse.click(narrowed[row]!.indexOf("Continue in a new thread") + 2, row));
+    await setup.flush();
+    if (setup.captureCharFrame().includes("enter continues")) fail("picking the disabled continue row opened the modal");
+    if (commands.length !== 0) fail(`the disabled continue row dispatched ${commands.length} commands`);
+    // The turn settles: the row re-enables and the modal opens again.
+    await act(async () => emitLiveRef.current?.(sessionFrame("idle")));
+    await setup.flush();
+    const idle = await waitFor(
+      setup,
+      "the continue row did not re-enable when the turn settled",
+      (frame) => frame.includes("Continue in a new thread") && frame.includes("fresh context"),
+    );
+    console.log("--- continue palette (turn settled behind it) ---");
+    console.log(idle);
+    const reopened = idle.split("\n");
+    const again = reopened.findIndex((line) => line.includes("Continue in a new thread"));
+    await act(async () => setup.mockMouse.click(reopened[again]!.indexOf("Continue in a new thread") + 2, again));
+    await waitFor(setup, "the continue modal did not open after the turn settled", (frame) => frame.includes("enter continues"));
+    await settle(setup);
+    console.log("--- continue modal (stale palette recovered) ---");
+    console.log(setup.captureCharFrame());
   } finally {
     setup.renderer.destroy();
   }

@@ -1,12 +1,13 @@
 import * as Effect from "effect/Effect";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
-import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, updateThreadMeta } from "../threads.js";
+import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, flushTaskNotifications, queueTaskNotification, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, flushTaskNotifications, queueTaskNotification, runDueScheduledTurn, runningTasksNote, type OperationContext } from "../operations.js";
 import { driverKindOfInstance } from "../../types.js";
 
 afterEach(() => {
@@ -172,6 +173,8 @@ describe("a limited thread continued in a new one", () => {
     const first = (await w.store.readTurns(continued.threadId))[0]!;
     // Held for the reset, not released: the first turn is the recovery entry.
     expect(first).toMatchObject({ status: "queued", scheduledFor: at });
+    // A scheduled destination still lands the handoff: the claim is gone.
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
     expect(destination.usagePause).toMatchObject({ provider: "codex", resetsAt, phase: "waiting", recoveryTurnId: first.id });
     // The limit marker travels along, so the new thread shows the block from the start.
     expect((await w.store.readActivities(continued.threadId)).find((activity) => activity.kind === "usage.limit")).toMatchObject({
@@ -427,6 +430,8 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     const continued = await continueThread(w.ctx, { threadId: source.id });
     expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
     expect(openTurn(await w.store.readTurns(continued.threadId))).not.toBeNull();
+    // The handoff landed: its claim is gone, so the old thread takes work again.
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
     await flushTurnRunners();
   });
 
@@ -446,41 +451,119 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     await interruptTurn(w.store, source.id, running.id);
   });
 
-  it("a send racing a continue leaves no partial reservation", async () => {
+  it("a send that lands first refuses the continue with no side effects", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const before = await w.store.listThreadIds();
+
+    // Admission won: the refusal lands before any note, destination or claim.
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+    await interruptTurn(w.store, source.id, running.id);
+  });
+
+  it("refuses admission while the handoff is in flight, then lets the old thread work again", async () => {
     const w = await world();
     const source = await w.make("solo");
     const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
     await completeTurn(w.store, source.id, done.id, { text: "Done for now." });
+    // A due scheduled turn: queued, so the source is idle and continuable.
+    const later = (await sendTurn(w.store, source.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() })).turn;
+    await w.store.withThreadLock(source.id, () => w.store.updateTurn(source.id, later.id, { scheduledFor: new Date(Date.now() - 60_000).toISOString() }));
 
-    // Serialized on the source lock: either the send lands first and the
-    // continue refuses, or the reservation lands first and both stand — but
-    // never a note without a destination, or two destinations.
-    const [sent, continued] = await Promise.all([
-      sendTurn(w.store, source.id, { prompt: "Racing send" }).then(
-        (value) => ({ status: "fulfilled" as const, value }),
-        (reason: unknown) => ({ status: "rejected" as const, reason }),
-      ),
-      continueThread(w.ctx, { threadId: source.id }).then(
-        (value) => ({ status: "fulfilled" as const, value }),
-        (reason: unknown) => ({ status: "rejected" as const, reason }),
-      ),
-    ]);
-    expect(sent.status).toBe("fulfilled");
-    const notes = (await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued");
-    if (continued.status === "rejected") {
-      expect(continued.reason).toMatchObject({ code: "THREAD_BUSY" });
-      expect(notes).toHaveLength(0);
-    } else {
-      expect(notes).toHaveLength(1);
-      expect(notes[0]!.payload?.threadId).toBe(continued.value.threadId);
-    }
-    for (const turn of await w.store.readTurns(source.id)) {
-      if (turn.status === "running") await interruptTurn(w.store, source.id, turn.id);
-    }
-    if (continued.status === "fulfilled") {
-      for (const turn of await w.store.readTurns(continued.value.threadId)) {
-        if (turn.status === "running") await interruptTurn(w.store, continued.value.threadId, turn.id);
+    // Hold the destination's session setup open: the handoff is in flight
+    // from the first setup call until the gate releases.
+    let releaseSetup!: () => void;
+    let enteredSetup!: () => void;
+    const setupGate = new Promise<void>((resolve) => { releaseSetup = resolve; });
+    const enteredGate = new Promise<void>((resolve) => { enteredSetup = resolve; });
+    const inner = w.ctx.driverFor;
+    const blockingCtx: OperationContext = {
+      ...w.ctx,
+      driverFor: (id) => {
+        const driver = inner(id);
+        if (id !== "codex") return driver;
+        // A copy with the prototype intact: spreading a class instance
+        // would drop its methods.
+        const blocking = Object.create(Object.getPrototypeOf(driver), Object.getOwnPropertyDescriptors(driver));
+        blocking.startSession = (input: Parameters<TurnDriver["startSession"]>[0]) => {
+          enteredSetup();
+          return Effect.flatMap(Effect.promise(() => setupGate), () => (driver.startSession as TurnDriver["startSession"])(input));
+        };
+        return blocking;
+      },
+    };
+    const continuing = continueThread(blockingCtx, { threadId: source.id });
+    await enteredGate;
+
+    // The continuation won: its claim stands, the destination exists, and
+    // nothing may start on the source — plain sends, background wake-ups
+    // and scheduled admission alike.
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toEqual(expect.any(String));
+    expect(openTurn(await w.store.readTurns(source.id))).toBeNull();
+    expect(await w.store.listThreadIds()).toHaveLength(2);
+    await expect(sendTurn(w.store, source.id, { prompt: "Racing send" })).rejects.toThrow("being continued");
+    await expect(
+      startBackgroundTurn(w.store, source.id, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } }),
+    ).rejects.toThrow("being continued");
+    expect(await w.store.readTurns(source.id)).toHaveLength(2);
+    expect(await runDueScheduledTurn(blockingCtx, source.id)).toBe(false);
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === later.id)?.status).toBe("queued");
+
+    // The handoff lands: the claim clears and the old thread takes work
+    // again — a fresh send starts, and once it settles the due turn the
+    // window held back is admitted.
+    releaseSetup();
+    const continued = await continuing;
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    const followUp = await sendTurn(w.store, source.id, { prompt: "After the handoff" });
+    expect(followUp.turn.status).toBe("running");
+    await interruptTurn(w.store, source.id, followUp.turn.id);
+    expect(await runDueScheduledTurn(blockingCtx, source.id)).toBe(true);
+    await flushTurnRunners();
+    for (const threadId of [source.id, continued.threadId]) {
+      for (const turn of await w.store.readTurns(threadId)) {
+        if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
       }
     }
+  });
+
+  it("heals a dead continuation claim instead of blocking sends", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const old = new Date(Date.now() - 3_600_000).toISOString();
+    // A stale claim from a handoff that died with its process (pid 1 is
+    // alive on this host, so this pins the age backstop, not liveness).
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: { token: "dead", pid: 1, host: os.hostname(), at: old }, updatedAt: w.store.nowIso() });
+    });
+    const sent = await sendTurn(w.store, source.id, { prompt: "Work" });
+    expect(sent.turn.status).toBe("running");
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    // A fresh claim from a dead process on this host heals the same way.
+    await interruptTurn(w.store, source.id, sent.turn.id);
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: { token: "dead", pid: 999_999_999, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+    });
+    const resumed = await sendTurn(w.store, source.id, { prompt: "Work again" });
+    expect(resumed.turn.status).toBe("running");
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    await interruptTurn(w.store, source.id, resumed.turn.id);
+  });
+
+  it("still blocks sends on a fresh claim its host cannot judge", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: { token: "remote", pid: 1, host: "another-machine", at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+    });
+    await expect(sendTurn(w.store, source.id, { prompt: "Work" })).rejects.toThrow("being continued");
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim?.token).toBe("remote");
   });
 });
