@@ -9,8 +9,8 @@
 use crate::{
     model::{Embeddings, HarnessRun, ManagedSkill, MemoryDraft, RemoteState, Snapshot, ThreadId},
     settings::{
-        self, FieldKind, ListFieldSchema, ListFieldValue, ListItem, SettingKind, SettingValue,
-        section_label,
+        self, DiscoveredModel, FieldKind, ListFieldSchema, ListFieldValue, ListItem, SettingKind,
+        SettingValue, section_label,
     },
     theme::{self, color},
     ui::{self, Control},
@@ -156,7 +156,32 @@ pub struct ProfileWizard {
     pub base_url: String,
     pub format_idx: usize,
     pub key_env: String,
-    pub models: String,
+}
+
+impl ProfileWizard {
+    fn advance(&mut self, text: String) -> Result<(), &'static str> {
+        match self.step {
+            0 if text.is_empty() => return Err("Type an id."),
+            0 => self.id = text.to_lowercase(),
+            1 if text.is_empty() => return Err("Type the server's address."),
+            1 => self.base_url = text,
+            2 => {}
+            3 => self.key_env = text,
+            _ => unreachable!("the models step saves the profile"),
+        }
+        self.step += 1;
+        Ok(())
+    }
+
+    fn discovery_request(&self) -> Option<(&str, &str, Option<String>)> {
+        (self.step == 4).then(|| {
+            (
+                self.base_url.as_str(),
+                PROFILE_FORMATS[self.format_idx],
+                (!self.key_env.is_empty()).then(|| self.key_env.clone()),
+            )
+        })
+    }
 }
 
 /// An MCP server being added: a name, then one line.
@@ -239,14 +264,24 @@ impl Workspace {
         }
     }
 
-    fn sync_settings(&mut self) {
+    fn sync_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(notice) = self.source.take_settings_notice() {
             self.settings_notice = Some((notice.text, notice.error));
         }
         if let Some(document) = self.source.take_profile_document() {
             self.settings_export = Some(document);
         }
-        if let Some(found) = self.source.take_discovered() {
+        if let Some(found) = self.source.take_discovered()
+            && self
+                .settings_profile_new
+                .as_ref()
+                .is_some_and(|wizard| wizard.step == 4)
+        {
+            self.settings_input.update(cx, |input, cx| {
+                if input.text().is_empty() {
+                    input.set_text(discovered_ids(&found), cx);
+                }
+            });
             self.settings_discovered = Some(found);
         }
     }
@@ -580,7 +615,7 @@ pub fn render(
     if !w.settings_open {
         return div().into_any_element();
     }
-    w.sync_settings();
+    w.sync_settings(cx);
     let snapshot = w.source.settings();
     let tabs = snapshot
         .as_ref()
@@ -1673,50 +1708,18 @@ impl Workspace {
             return;
         };
         match wizard.step {
-            0 => {
-                if text.is_empty() {
-                    self.settings_error = Some("Type an id.".into());
+            0..=3 => {
+                if let Err(message) = wizard.advance(text) {
+                    self.settings_error = Some(message.into());
                     return;
                 }
-                wizard.id = text.to_lowercase();
-                wizard.step = 1;
-            }
-            1 => {
-                if text.is_empty() {
-                    self.settings_error = Some("Type the server's address.".into());
-                    return;
+                if let Some((url, format, key)) = wizard.discovery_request() {
+                    self.settings_discovered = None;
+                    self.source.discover_models(url, format, key);
                 }
-                wizard.base_url = text.clone();
-                // Discover the server's models for the next step.
-                self.source
-                    .discover_models(&text, PROFILE_FORMATS[wizard.format_idx], None);
-                wizard.step = 2;
-            }
-            3 => {
-                wizard.key_env = text;
-                wizard.step = 4;
-                if let Some(found) = self.settings_discovered.clone()
-                    && found.error.is_none()
-                {
-                    wizard.models = found.models.join(", ");
-                }
-                self.settings_input.update(cx, |input, cx| {
-                    input.set_text(wizard.models.clone(), cx);
-                });
             }
             _ => {
-                if text.is_empty() {
-                    self.settings_error = Some("Type at least one model.".into());
-                    return;
-                }
-                wizard.models = text;
-                let models: Vec<String> = wizard
-                    .models
-                    .split([',', ' ', '\n'])
-                    .map(str::trim)
-                    .filter(|model| !model.is_empty())
-                    .map(str::to_string)
-                    .collect();
+                let models = wizard_models(&text, self.settings_discovered.as_ref());
                 match settings::profile_document(
                     &wizard.base_url,
                     PROFILE_FORMATS[wizard.format_idx],
@@ -1949,6 +1952,32 @@ fn memory_wizard_bar(w: &Workspace, wizard: &MemoryWizard, cx: &mut Context<Work
     bar.child(wizard_input_row("Create", "Create the memory", cx))
 }
 
+fn discovered_ids(found: &settings::Discovery) -> String {
+    found
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn wizard_models(text: &str, discovery: Option<&settings::Discovery>) -> Vec<DiscoveredModel> {
+    text.split([',', ' ', '\n'])
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| DiscoveredModel {
+            id: id.into(),
+            context_window: discovery.and_then(|found| {
+                found
+                    .models
+                    .iter()
+                    .find(|model| model.id == id)?
+                    .context_window
+            }),
+        })
+        .collect()
+}
+
 fn profile_wizard_bar(w: &Workspace, wizard: &ProfileWizard, cx: &mut Context<Workspace>) -> Div {
     let step = match wizard.step {
         0 => "Name the profile".to_string(),
@@ -1988,7 +2017,7 @@ fn profile_wizard_bar(w: &Workspace, wizard: &ProfileWizard, cx: &mut Context<Wo
         if let Some(found) = &w.settings_discovered {
             let hint = match &found.error {
                 Some(message) => format!("Discovery failed: {message}"),
-                None => format!("Discovered: {}", found.models.join(", ")),
+                None => format!("Discovered: {}", discovered_ids(found)),
             };
             bar = bar.child(sub_line(&hint));
         } else {
@@ -3049,5 +3078,49 @@ fn provider_index(id: &str) -> usize {
         "codex" => 1,
         "opencode" => 2,
         _ => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProfileWizard, settings, wizard_models};
+
+    #[test]
+    fn profile_wizard_reaches_key_before_discovering_models() {
+        let mut wizard = ProfileWizard::default();
+        for (step, input) in ["Office", "https://models.example", "", "MODELS_KEY"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(usize::from(wizard.step), step);
+            assert!(wizard.discovery_request().is_none());
+            if step == 2 {
+                wizard.format_idx = 1;
+            }
+            wizard.advance(input.into()).expect("valid step");
+        }
+        assert_eq!(wizard.step, 4);
+        assert_eq!(wizard.id, "office");
+        assert_eq!(
+            wizard.discovery_request(),
+            Some((
+                "https://models.example",
+                "responses",
+                Some("MODELS_KEY".into())
+            ))
+        );
+        let found = settings::Discovery::from_json(&serde_json::json!({
+            "ok": true, "models": [{"id": "large", "contextWindow": 131072}, {"id":"omitted"}],
+        }));
+        let models = wizard_models("large, manual", Some(&found));
+        let document =
+            settings::profile_document(&wizard.base_url, "responses", &wizard.key_env, &models)
+                .unwrap();
+        let document: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(document["apiKeyEnv"], "MODELS_KEY");
+        assert_eq!(
+            document["models"],
+            serde_json::json!([{"id":"large","contextWindow":131072},{"id":"manual"}])
+        );
     }
 }

@@ -727,7 +727,7 @@ pub fn profile_document(
     base_url: &str,
     api_format: &str,
     key_env: &str,
-    models: &[String],
+    models: &[DiscoveredModel],
 ) -> Result<String, String> {
     let base_url = base_url.trim();
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
@@ -751,12 +751,12 @@ pub fn profile_document(
         Value::Array(
             models
                 .iter()
-                .map(|id| {
-                    Value::Object(
-                        [("id".to_string(), Value::String(id.clone()))]
-                            .into_iter()
-                            .collect(),
-                    )
+                .map(|model| {
+                    let mut value = serde_json::json!({"id": model.id});
+                    if let Some(tokens) = model.context_window {
+                        value["contextWindow"] = tokens.into();
+                    }
+                    value
                 })
                 .collect(),
         ),
@@ -929,11 +929,18 @@ impl HarnessRun {
     }
 }
 
+/// A model id and the context size advertised by its server, if known.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoveredModel {
+    pub id: String,
+    pub context_window: Option<u64>,
+}
+
 /// A model discovery answer: the host's models, or why it failed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Discovery {
     pub host: Option<String>,
-    pub models: Vec<String>,
+    pub models: Vec<DiscoveredModel>,
     pub error: Option<String>,
 }
 
@@ -948,7 +955,14 @@ impl Discovery {
                     .map(|models| {
                         models
                             .iter()
-                            .filter_map(|model| text(model, "id"))
+                            .filter_map(|model| {
+                                Some(DiscoveredModel {
+                                    id: text(model, "id")?,
+                                    context_window: model
+                                        .get("contextWindow")
+                                        .and_then(Value::as_u64),
+                                })
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -1333,8 +1347,8 @@ pub fn provider_update_line(result: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Discovery, Embeddings, FieldKind, HarnessRun, ListFieldValue, MemoryList, MemorySearch,
-        RemoteState, SettingKind, SettingValue, Snapshot, UpdateState, display_field,
+        DiscoveredModel, Discovery, Embeddings, FieldKind, HarnessRun, ListFieldValue, MemoryList,
+        MemorySearch, RemoteState, SettingKind, SettingValue, Snapshot, UpdateState, display_field,
         display_value, mcp_document, normalize_field_value, normalize_setting_value,
         profile_document, provider_update_line, section_label, section_order,
     };
@@ -1474,19 +1488,18 @@ mod tests {
 
     #[test]
     fn add_documents_hold_ids_and_names_never_keys() {
-        let document = profile_document(
-            "https://models.example/v1",
-            "chat",
-            "MODELS_KEY",
-            &["large".to_string(), "small".to_string()],
-        )
-        .expect("profile");
+        let models = ["large", "small"].map(|id| DiscoveredModel {
+            id: id.into(),
+            context_window: None,
+        });
+        let document = profile_document("https://models.example/v1", "chat", "MODELS_KEY", &models)
+            .expect("profile");
         assert_eq!(
             document,
             r#"{"apiFormat":"chat","baseUrl":"https://models.example/v1","apiKeyEnv":"MODELS_KEY","models":[{"id":"large"},{"id":"small"}]}"#
         );
-        assert!(profile_document("models.example/v1", "chat", "", &["m".to_string()]).is_err());
-        assert!(profile_document("https://x", "soap", "", &["m".to_string()]).is_err());
+        assert!(profile_document("models.example/v1", "chat", "", &models).is_err());
+        assert!(profile_document("https://x", "soap", "", &models).is_err());
         assert!(profile_document("https://x", "chat", "", &[]).is_err());
         assert_eq!(
             mcp_document("https://mcp.example/sse").expect("http"),
@@ -1588,7 +1601,14 @@ mod tests {
             "ok": true, "host": "models.example",
             "models": [{"id": "large"}, {"id": "small"}],
         }));
-        assert_eq!(found.models, vec!["large".to_string(), "small".to_string()]);
+        assert_eq!(
+            found
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["large", "small"]
+        );
         let failed =
             Discovery::from_json(&json!({"ok": false, "host": null, "message": "No route."}));
         assert_eq!(failed.error.as_deref(), Some("No route."));

@@ -5048,10 +5048,7 @@ mod tests {
             discovered = source.take_discovered();
             discovered.is_some()
         });
-        assert_eq!(
-            discovered.expect("discovered").models,
-            vec!["large".to_string()]
-        );
+        assert_eq!(discovered.expect("discovered").models[0].id, "large");
         source.export_profile("office");
         expect(json!({"type":"harness.profile.export","profileId":"office"}));
         let mut document = None;

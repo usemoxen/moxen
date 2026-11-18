@@ -196,11 +196,10 @@ pub fn updates_fixture() -> UpdateState {
 }
 
 pub fn discovery_fixture() -> Discovery {
-    Discovery {
-        host: Some("localhost:8080".into()),
-        models: vec!["large".into(), "small".into()],
-        error: None,
-    }
+    Discovery::from_json(&json!({
+        "ok": true, "host": "localhost:8080",
+        "models": [{"id": "large", "contextWindow": 131072}, {"id": "small"}],
+    }))
 }
 
 /// Applies a `settings.set` key to the mock snapshot: a top-level scalar, one
