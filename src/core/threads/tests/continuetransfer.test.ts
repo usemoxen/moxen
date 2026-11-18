@@ -541,7 +541,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // immediate work.
     await runWorkQueue(w.ctx);
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.status).toBe("queued");
-    const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known, excludedTurnIds: claim!.claimed });
+    const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known, excludedTurnIds: [...claim!.claimed, ...claim!.restaged] });
     expect(doc).not.toContain("Late");
     expect(doc).not.toContain("Second");
     // Without this call's exclusion the same staged claim reads as ordinary
@@ -702,6 +702,208 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect(w.sent.filter((turn) => turn.threadId === destId)).toHaveLength(2);
+  });
+
+  it("migrate skips an unreadable destination snapshot without appending or marking", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const second = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
+    const destination = await w.make("dest");
+    await sendTurn(w.store, destination.id, { prompt: "Handoff" });
+
+    await stageQueuedMessages(w.ctx, source.id, destination.id);
+
+    // Fault injection: the destination turns read fails once, mid-migrate.
+    // Unknown is not empty: no entry may be appended, and the source row
+    // must stay staged rather than risk two runnable copies on recovery.
+    const readTurns = w.store.readTurns.bind(w.store);
+    let failed = false;
+    const spy = vi.spyOn(w.store, "readTurns").mockImplementation((threadId: string, options?: { reportTornTail?: boolean }) => {
+      if (threadId === destination.id && !failed) {
+        failed = true;
+        throw new Error("injected EIO");
+      }
+      return readTurns(threadId, options);
+    });
+    try {
+      await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(failed).toBe(true);
+    expect((await w.store.readTurns(destination.id))).toHaveLength(1);
+    expect((await w.store.readMessages(destination.id))).toHaveLength(1);
+    const staged = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(staged.handoff?.requestId).toBe(`transfer:${second.turn.id}`);
+    expect(staged.queue?.removed).toBe(true);
+
+    // Reads recovered: the retry appends exactly one entry and lands it.
+    await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    const entries = (await w.store.readTurns(destination.id)).filter((turn) => turn.queue?.requestId === `handoff:transfer:${second.turn.id}`);
+    expect(entries).toHaveLength(1);
+    expect((await w.store.readMessages(destination.id)).filter((message) => message.turnId === entries[0]!.id).map((message) => message.text)).toEqual(["Second"]);
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)).toMatchObject({ status: "interrupted", handoff: { landed: true } });
+  });
+
+  it("migrate does not repair into a torn messages tail, and completes exactly once after quarantine", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const second = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
+    const destination = await w.make("dest");
+    await sendTurn(w.store, destination.id, { prompt: "Handoff" });
+
+    await stageQueuedMessages(w.ctx, source.id, destination.id);
+    // Crash between the destination turn and message writes: a turn row
+    // with no message, then a torn tail as a crash mid-append leaves it.
+    const append = w.store.appendLedger.bind(w.store);
+    let injected = false;
+    const fault = vi.spyOn(w.store, "appendLedger").mockImplementation((threadId, name, row) => {
+      const text = (row as { text?: unknown }).text;
+      if (!injected && name === "messages" && threadId === destination.id && typeof text === "string" && !text.startsWith("# Continuing:")) {
+        injected = true;
+        throw new Error("injected ledger failure");
+      }
+      return append(threadId, name, row);
+    });
+    await expect(migrateQueuedMessages(w.ctx, source.id, destination.id)).rejects.toThrow("injected ledger failure");
+    fault.mockRestore();
+    expect(injected).toBe(true);
+    const partial = (await w.store.readTurns(destination.id)).find((turn) => turn.queue?.requestId === `handoff:transfer:${second.turn.id}`)!;
+    expect(partial).toBeDefined();
+    const messagesFile = w.store.messagesFile(destination.id);
+    const beforeTear = await readFile(messagesFile, "utf8");
+    await writeFile(messagesFile, `${beforeTear}truncated mid-append`, "utf8");
+
+    // The torn tail makes the snapshot unproven: no repair append (which
+    // would concatenate garbage), no landed mark — and the file is
+    // byte-identical afterwards.
+    await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    expect(await readFile(messagesFile, "utf8")).toBe(`${beforeTear}truncated mid-append`);
+    const stillStaged = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(stillStaged.handoff?.landed).toBeUndefined();
+    expect(stillStaged.queue?.removed).toBe(true);
+    expect((await w.store.readTurns(destination.id)).filter((turn) => turn.queue?.requestId === `handoff:transfer:${second.turn.id}`)).toHaveLength(1);
+
+    // Quarantining the bad line heals the ledger; the retry repairs the
+    // message in place — exactly one copy — and lands the move.
+    const problem = w.store.storeProblems().find((p) => p.kind === "ledger-line" && p.threadId === destination.id && p.file === messagesFile);
+    expect(problem).toBeDefined();
+    await w.store.quarantineProblem(problem!.id);
+    await migrateQueuedMessages(w.ctx, source.id, destination.id);
+    const messages = (await w.store.readMessages(destination.id)).filter((message) => message.turnId === partial.id);
+    expect(messages.map((message) => message.text)).toEqual(["Second"]);
+    expect(new Set(messages.map((message) => message.id)).size).toBe(1);
+    const landed = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(landed.handoff).toMatchObject({ requestId: `transfer:${second.turn.id}`, landed: true });
+  });
+
+  it("does not double-book a staged message when a retry follows an abort before the first turn", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    await sendTurn(w.store, source.id, { prompt: "Staged mover", queue: parseQueuePolicy({ conditions: [] }) });
+
+    // Fault injection: the handoff build fails once, after staging but
+    // before the destination is created — no first turn yet.
+    const readCheckpoints = w.store.readCheckpoints.bind(w.store);
+    let failed = false;
+    const spy = vi.spyOn(w.store, "readCheckpoints").mockImplementation((threadId: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("injected checkpoints failure");
+      }
+      return readCheckpoints(threadId);
+    });
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow("injected checkpoints failure");
+    spy.mockRestore();
+    expect(failed).toBe(true);
+
+    // The reservation survived the abort: the destination was reserved but
+    // never created, and the source row stays staged for it.
+    const destId = (await w.store.readActivities(source.id)).find((activity) => activity.kind === "thread.continued")?.payload?.threadId as string;
+    expect(destId).toEqual(expect.any(String));
+    expect(await w.store.readThreadRecord(destId)).toBeNull();
+    expect(await w.store.readTurns(destId)).toEqual([]);
+    const stagedId = (await w.store.readTurns(source.id)).find((turn) => turn.status === "queued")!.id;
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === stagedId)).toMatchObject({
+      status: "queued",
+      queue: { removed: true },
+      handoff: { destinationThreadId: destId },
+    });
+
+    // The retry rejoins the same reserved destination: the handoff names the
+    // move without assigning its text, and the migration moves it exactly once.
+    const again = await continueThread(w.ctx, { threadId: source.id });
+    expect(again.threadId).toBe(destId);
+    const destTurns = await w.store.readTurns(destId);
+    expect(destTurns).toHaveLength(2);
+    const handoffText = (await w.store.readMessages(destId)).find((message) => message.role === "user")!.text;
+    expect(handoffText).toContain("moved to the new thread's Work queue");
+    expect(handoffText).not.toContain("Staged mover");
+    expect(destTurns.filter((turn) => turn.queue?.requestId === `handoff:transfer:${stagedId}`)).toHaveLength(1);
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === stagedId)).toMatchObject({ status: "interrupted" });
+  });
+
+  it("completes a staged move the user reconfigured onto a model continuation, without double-running", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const second = await sendTurn(w.store, source.id, { prompt: "Model follower", queue: parseQueuePolicy({ conditions: [] }) });
+
+    // Abort after staging, as in the double-booking test: the reservation
+    // survives with no destination created yet.
+    const readCheckpoints = w.store.readCheckpoints.bind(w.store);
+    let failed = false;
+    const spy = vi.spyOn(w.store, "readCheckpoints").mockImplementation((threadId: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("injected checkpoints failure");
+      }
+      return readCheckpoints(threadId);
+    });
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow("injected checkpoints failure");
+    spy.mockRestore();
+    expect(failed).toBe(true);
+    const destId = (await w.store.readActivities(source.id)).find((activity) => activity.kind === "thread.continued")?.payload?.threadId as string;
+
+    // The user reconfigures the staged entry onto another continuation.
+    // The marker and the removed flag stay: the move still owns the text.
+    await editWorkQueue(w.ctx, source.id, second.turn.id, "edit", parseQueuePolicy({ conditions: [], continuation: "model" }));
+    const reconfigured = (await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)!;
+    expect(reconfigured.handoff?.requestId).toBe(`transfer:${second.turn.id}`);
+    expect(reconfigured.queue).toMatchObject({ removed: true, continuation: "model" });
+
+    // The retry rejoins the same destination, excludes the staged text from
+    // the handoff, and completes the move with the user's policy.
+    const again = await continueThread(w.ctx, { threadId: source.id });
+    expect(again.threadId).toBe(destId);
+    const handoffText = (await w.store.readMessages(destId)).find((message) => message.role === "user")!.text;
+    expect(handoffText).toContain("moved to the new thread's Work queue");
+    expect(handoffText).not.toContain("Model follower");
+    const moved = (await w.store.readTurns(destId)).filter((turn) => turn.queue?.requestId === `handoff:transfer:${second.turn.id}`);
+    expect(moved).toHaveLength(1);
+    expect(moved[0]!.queue?.continuation).toBe("model");
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === second.turn.id)).toMatchObject({ status: "interrupted", handoff: { landed: true } });
+
+    // The moved entry is preparable by the destination's own queue flow: a
+    // model summary is requested for it once the handoff settles.
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destId)).some((turn) => turn.queue?.summaryFor === moved[0]!.id)).toBe(true);
+    // And the source copy never ran: the text executes nowhere but the move.
+    expect(w.sent.filter((turn) => turn.threadId === source.id && turn.prompt === "Model follower")).toEqual([]);
+    for (const threadId of [source.id, destId]) {
+      for (const turn of await w.store.readTurns(threadId)) {
+        if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
+      }
+    }
   });
 
   it("arms moved schedules where the scheduler owns the process", async () => {
@@ -920,6 +1122,27 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.handoff?.requestId).toBe(`transfer:${staged.turn.id}`);
   });
 
+  it("refuses the edit when the destination turns ledger skips an unreadable row", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const staged = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
+    const destination = await w.make("dest");
+    await sendTurn(w.store, destination.id, { prompt: "Handoff" });
+
+    await stageQueuedMessages(w.ctx, source.id, destination.id);
+    // A torn tail on the destination turns ledger: the guard reads it with
+    // torn-tail reporting, so the skip is proven instead of silent — and an
+    // entry the skip could be hiding is unknown, not absent.
+    const file = w.store.turnsFile(destination.id);
+    const before = await readFile(file, "utf8");
+    await writeFile(file, `${before}truncated mid-append`, "utf8");
+    await expect(editWorkQueue(w.ctx, source.id, staged.turn.id, "hold")).rejects.toMatchObject({ code: "STORE_READ_FAILED" });
+    // Refused before any change: the claim is still staged.
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.handoff?.requestId).toBe(`transfer:${staged.turn.id}`);
+  });
+
   it("edits a moved entry with 16 client conditions without counting the internal wait", async () => {
     const w = await world();
     const source = await w.make("solo");
@@ -946,10 +1169,70 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(edited.queue?.conditions).toHaveLength(17);
     expect(edited.queue?.conditions.at(-1)).toEqual(internal);
 
+    // A wait the UI moved elsewhere is normalized back to the end, exactly
+    // once — the count still covers only the 16 client conditions.
+    await editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", { ...moved.queue!, conditions: [internal, ...clientConditions.slice(0, 15)] });
+    const normalized = (await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)!;
+    expect(normalized.queue?.conditions).toHaveLength(16);
+    expect(normalized.queue?.conditions.at(-1)).toEqual(internal);
+    expect(normalized.queue?.conditions.filter((c) => c.type === "entry" && c.threadId === continued.threadId)).toHaveLength(1);
+
+    // An omitted wait is reattached, exactly once.
+    await editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", { ...moved.queue!, conditions: clientConditions.slice(0, 15) });
+    const reattached = (await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)!;
+    expect(reattached.queue?.conditions).toHaveLength(16);
+    expect(reattached.queue?.conditions.at(-1)).toEqual(internal);
+
     // A 17th client condition still exceeds the cap, internal wait or not.
     const seventeenClients = [...clientConditions, { type: "at" as const, at: new Date(Date.now() + 99_999_999).toISOString() }];
     await expect(
       editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", { ...moved.queue!, conditions: [...seventeenClients, internal] }),
     ).rejects.toMatchObject({ code: "INVALID_QUEUE" });
+  });
+
+  it("hides the server wait from the projected policy and reattaches it on edit, preserving handoff ordering", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    // 16 satisfied client conditions (past `at`): the only block is the
+    // internal handoff wait.
+    const clients = Array.from({ length: 16 }, (_, index) => ({
+      type: "at" as const,
+      at: new Date(Date.now() - (index + 1) * 60_000).toISOString(),
+    }));
+    await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: clients }) });
+
+    // A scheduled continuation: the destination handoff runs at its time,
+    // and the moved entry waits on it first.
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
+    const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
+    const handoffId = (await w.store.readTurns(continued.threadId))[0]!.id;
+    const wait = { type: "entry", threadId: continued.threadId, turnId: handoffId };
+    expect(moved.queue?.conditions).toHaveLength(17);
+    expect(moved.queue?.conditions.at(-1)).toEqual(wait);
+
+    // The projected policy hides the server-owned wait: 16 conditions, none
+    // naming the handoff turn, so no client can remove it.
+    const entry = (await readWorkQueue(w.ctx)).find((item) => item.threadId === continued.threadId && item.turnId === moved.id)!;
+    expect(entry.policy.conditions).toHaveLength(16);
+    expect(entry.policy.conditions.some((condition) => condition.type === "entry" && condition.threadId === continued.threadId)).toBe(false);
+
+    // An edit echoing the projected policy (the wait omitted) passes the
+    // cap, and core reattaches the wait exactly once. The protocol gate
+    // itself is pinned from the server side (see transferqueue.test.ts).
+    await editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", entry.policy);
+    const edited = (await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)!;
+    expect(edited.queue?.conditions).toHaveLength(17);
+    expect(edited.queue?.conditions.at(-1)).toEqual(wait);
+    expect(edited.queue?.conditions.filter((condition) => condition.type === "entry")).toEqual([wait]);
+
+    // An admission attempt before the handoff time starts nothing: the
+    // reattached wait still orders the moved entry behind the handoff.
+    expect(await runDueScheduledTurn(w.ctx, continued.threadId)).toBe(false);
+    await runWorkQueue(w.ctx);
+    expect(openTurn(await w.store.readTurns(continued.threadId))).toBeNull();
+    expect((await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)?.status).toBe("queued");
   });
 });
