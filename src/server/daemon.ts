@@ -1,8 +1,8 @@
 /**
  * The detached server process: what a client's autostart runs (`./client.ts`).
- * Stdio is ignored, so a failure is reported through the exit code only; the
- * client that started us sees the endpoint stay silent and reports that instead.
+ * Autostart ignores stdio, but callers that capture it can read startup errors.
  */
+import { toCliError } from "../core/errors.js";
 import { closeOnSignals, runServer } from "./main.js";
 
 runServer().then(
@@ -10,5 +10,8 @@ runServer().then(
     closeOnSignals(handle);
     void handle.closed.then(() => process.exit(0));
   },
-  () => process.exit(1),
+  (cause: unknown) => {
+    const error = toCliError(cause);
+    process.stderr.write(`${error.message}\n`, () => process.exit(error.exitCode));
+  },
 );

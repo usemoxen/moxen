@@ -7,7 +7,7 @@ import { openClient } from "../client.js";
 import { desktopConnection } from "../desktop.js";
 import { DirectConnection } from "../connection.js";
 import { testHarness } from "../../core/testing/harness.js";
-import { defaultEndpoint, isNamedPipe, namedPipe } from "../transport/endpoint.js";
+import { defaultEndpoint, isNamedPipe, namedPipe, probe, validateEndpoint } from "../transport/endpoint.js";
 import { encode, PROTOCOL_VERSION } from "../transport/wire.js";
 
 it("keeps a paired name on stdio and forwards the same hello, query and subscription contract", async () => {
@@ -70,4 +70,33 @@ it("selects the real platform endpoint and ignores a blank override", () => {
   expect(endpoint).toBe(process.platform === "win32" ? namedPipe(`moxen-${user}`) : path.join(os.homedir(), ".moxen", "server.sock"));
   expect(isNamedPipe(endpoint)).toBe(process.platform === "win32");
   expect(isNamedPipe(namedPipe("moxen-A_B"))).toBe(true);
+});
+
+it.each([
+  ["darwin", 103],
+  ["freebsd", 103],
+  ["linux", 107],
+  ["android", 107],
+  ["sunos", 107],
+] as const)("rejects Unix socket paths over the %s byte limit", (platform, limit) => {
+  const atLimit = "a".repeat(limit - ".sock".length) + ".sock";
+  const overLimit = `a${atLimit}`;
+  const multibyte = `é${atLimit.slice(1)}`;
+  expect(() => validateEndpoint(atLimit, platform)).not.toThrow();
+  for (const endpoint of [overLimit, multibyte]) {
+    expect(() => validateEndpoint(endpoint, platform)).toThrow(
+      `Unix socket path "${endpoint}" is ${limit + 1} bytes; the limit is ${limit} bytes.`,
+    );
+  }
+});
+
+it("does not apply the Unix socket byte limit to Windows named pipes", () => {
+  const endpoint = namedPipe("a".repeat(120));
+  expect(() => validateEndpoint(endpoint, "win32")).not.toThrow();
+  expect(() => validateEndpoint(endpoint, "darwin")).not.toThrow();
+});
+
+it.skipIf(process.platform === "win32")("refuses an over-long socket path before connecting", async () => {
+  const endpoint = path.join(os.tmpdir(), "a".repeat(120), "server.sock");
+  await expect(probe(endpoint)).rejects.toMatchObject({ code: "SERVER_SOCKET_PATH_TOO_LONG" });
 });
