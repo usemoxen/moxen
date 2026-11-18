@@ -2616,6 +2616,30 @@ fn embeddings_row(_w: &Workspace, state: &Embeddings, cx: &mut Context<Workspace
         .when(state.busy, |s| s.child(sub_line("Working…")))
 }
 
+/// One entry in the skills list: a skill's row, optionally followed by
+/// the expanded skill's detail directly under its own row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkillListItem {
+    Row(usize),
+    Detail,
+}
+
+/// The order the skills manager renders: each skill's row, with the open
+/// skill's detail directly after its own row instead of after the last row.
+fn skill_list_order(
+    skills: &[ManagedSkill],
+    open: Option<&(String, String)>,
+) -> Vec<SkillListItem> {
+    let mut order = Vec::with_capacity(skills.len() * 2);
+    for (at, skill) in skills.iter().enumerate() {
+        order.push(SkillListItem::Row(at));
+        if open.is_some_and(|(source, folder)| source == &skill.source && folder == &skill.folder) {
+            order.push(SkillListItem::Detail);
+        }
+    }
+    order
+}
+
 /// Skills management: the user and project skills, their switches and text.
 fn skills_manager(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let mut out = div()
@@ -2636,11 +2660,17 @@ fn skills_manager(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                 if skills.is_empty() {
                     out = out.child(sub_line("No skills."));
                 }
-                for skill in skills {
-                    out = out.child(skill_row(w, skill, cx));
-                }
-                if let Some((source, folder)) = w.settings_skill.clone() {
-                    out = out.child(skill_detail(w, &source, &folder, skills, cx));
+                for item in skill_list_order(skills, w.settings_skill.as_ref()) {
+                    match item {
+                        SkillListItem::Row(at) => {
+                            out = out.child(skill_row(w, &skills[at], cx));
+                        }
+                        SkillListItem::Detail => {
+                            if let Some((source, folder)) = w.settings_skill.clone() {
+                                out = out.child(skill_detail(w, &source, &folder, skills, cx));
+                            }
+                        }
+                    }
                 }
                 out = out.child(
                     div().flex().flex_wrap().gap(px(8.)).pt(px(4.)).children(
@@ -3209,8 +3239,8 @@ fn provider_index(id: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProfileWizard, RAIL_GUTTER, RAIL_WIDTH, rail_tip_left, setting_label, settings,
-        wizard_models,
+        ProfileWizard, RAIL_GUTTER, RAIL_WIDTH, SkillListItem, rail_tip_left, setting_label,
+        settings, skill_list_order, wizard_models,
     };
 
     #[test]
@@ -3264,6 +3294,29 @@ mod tests {
         assert_eq!(
             document["models"],
             serde_json::json!([{"id":"large","contextWindow":131072},{"id":"manual"}])
+        );
+    }
+
+    #[test]
+    fn expanded_skill_detail_follows_its_own_row() {
+        use SkillListItem::{Detail, Row};
+
+        let (skills, _) = crate::mock_settings::skill_fixture();
+        assert_eq!(skill_list_order(&skills, None), vec![Row(0), Row(1)]);
+        assert_eq!(
+            skill_list_order(&skills, Some(&("agents".to_string(), "review".to_string()))),
+            vec![Row(0), Detail, Row(1)]
+        );
+        assert_eq!(
+            skill_list_order(&skills, Some(&("claude".to_string(), "docs".to_string()))),
+            vec![Row(0), Row(1), Detail]
+        );
+        assert_eq!(
+            skill_list_order(
+                &skills,
+                Some(&("agents".to_string(), "missing".to_string()))
+            ),
+            vec![Row(0), Row(1)]
         );
     }
 }
