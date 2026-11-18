@@ -572,15 +572,20 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === later.id)?.status).toBe("queued");
 
     // The handoff lands: the claim clears and the old thread takes work
-    // again — a fresh send starts, and once it settles the due turn the
-    // window held back is admitted.
+    // again — a fresh send starts, and once it settles there is nothing due
+    // left on the source. The due scheduled entry moved with the manual
+    // continue (ordinary pending work moves to the new thread's Work queue),
+    // so it waits on the destination's handoff turn instead.
     releaseSetup();
     const continued = await continuing;
     expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
     const followUp = await sendTurn(w.store, source.id, { prompt: "After the handoff" });
     expect(followUp.turn.status).toBe("running");
     await interruptTurn(w.store, source.id, followUp.turn.id);
-    expect(await runDueScheduledTurn(blockingCtx, source.id)).toBe(true);
+    expect(await runDueScheduledTurn(blockingCtx, source.id)).toBe(false);
+    const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${later.id}`);
+    expect(moved).toMatchObject({ status: "queued", scheduledFor: expect.any(String) });
+    expect(moved!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: continued.threadId, turnId: (await w.store.readTurns(continued.threadId))[0]!.id });
     await flushTurnRunners();
     for (const threadId of [source.id, continued.threadId]) {
       for (const turn of await w.store.readTurns(threadId)) {
