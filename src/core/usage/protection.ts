@@ -4,7 +4,7 @@ import { readStatus } from "../git/history.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCancelled, queueTaskPauseNotification, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
-import { interruptTurn, openTurn, sendTurn } from "../threads/threads.js";
+import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
@@ -540,8 +540,19 @@ export class UsageProtection {
           const sent = await startTurn(ctx, { threadId: row.thread.id, prompt, usageControl: true, origin: "usage-protection" });
           await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping", turnId: sent.turn.id });
           busy.add(pause.provider);
-        } catch {
-          await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting", error: "Could not start wrap-up. Cancel recovery and inspect the thread before continuing." });
+        } catch (cause) {
+          // A live manual handoff owns the checkout, so its claim refuses the
+          // wrap-up turn. That is transient — retry on the next tick — not a
+          // broken thread, so restore the pending pause instead of parking it
+          // behind an error the later ticks then skip forever. Only a handoff
+          // contention retries: any other failure keeps the visible recovery
+          // error.
+          if (isContinuationBusy(cause)) {
+            const { error: _dropped, ...retry } = pause;
+            await this.pause(ctx, row.thread.id, { ...retry, phase: "pending" });
+          } else {
+            await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting", error: "Could not start wrap-up. Cancel recovery and inspect the thread before continuing." });
+          }
         }
       }
       if (pause.phase !== "waiting" || pause.error) continue;

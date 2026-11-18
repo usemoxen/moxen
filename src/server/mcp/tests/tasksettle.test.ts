@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { testHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
 import { runProcess } from "../../../core/infra/process.js";
+import { completeTurn } from "../../../core/threads/threads.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
@@ -35,7 +36,14 @@ async function setup(options: TestHarnessOptions = {}) {
     const result = await callMoxenTool(connection, from, "task_settle", args);
     return { ...result, json: result.isError ? null : (JSON.parse(result.text) as Record<string, unknown>) };
   };
-  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, settle, stoppedSessions };
+  // MXN-372: a manual continue refuses a running source, so settle the
+  // source's own turn first; its tasks keep running.
+  const settleRunningTurns = async (threadId: string = orchestrator.threadId) => {
+    for (const turn of await store.readTurns(threadId)) {
+      if (turn.status === "running") await completeTurn(store, threadId, turn.id, { text: "Settled for the handoff." });
+    }
+  };
+  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, settle, settleRunningTurns, stoppedSessions };
 }
 
 /** The child's turn is done, so settling needs no `stop`. */
@@ -127,6 +135,7 @@ describe("task_settle", () => {
     const t = await setup({ leaveTurnsRunning: true });
     try {
       const taskId = await t.delegate();
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       expect((await t.settle(t.orchestrator, { taskId })).text).toContain("TASK_NOT_FOUND");
       const settled = await t.settle(continued.threadId, { taskId, stop: true });

@@ -29,7 +29,14 @@ async function setup(options: TestHarnessOptions = {}) {
     const result = await callMoxenTool(connection, from, "message_queue", args);
     return { ...result, json: result.isError ? null : (JSON.parse(result.text) as Record<string, unknown>) };
   };
-  return { harness, connection, store, served, orchestrator: orchestrator.threadId, delegate, queue };
+  // MXN-372: a manual continue refuses a running source, so settle the
+  // source's own turn first; its tasks keep running.
+  const settleRunningTurns = async (threadId: string = orchestrator.threadId) => {
+    for (const turn of await store.readTurns(threadId)) {
+      if (turn.status === "running") await completeTurn(store, threadId, turn.id, { text: "Settled for the handoff." });
+    }
+  };
+  return { harness, connection, store, served, orchestrator: orchestrator.threadId, delegate, queue, settleRunningTurns };
 }
 
 describe("message_queue: a thread queueing for itself", () => {
@@ -157,6 +164,7 @@ describe("message_queue: whose thread it is", () => {
       expect(await t.store.readTurns(taskId)).toHaveLength(before);
 
       expect((await t.queue(t.orchestrator, { message: "Carry on", threadId: taskId })).json).toMatchObject({ threadId: taskId, status: "queued", self: false });
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       expect((await t.queue(continued.threadId, { message: "Still mine", threadId: taskId })).json).toMatchObject({ threadId: taskId, self: false });
       expect((await t.queue(t.orchestrator, { message: "Old thread", threadId: taskId })).text).toContain("TASK_NOT_FOUND");

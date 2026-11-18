@@ -1871,6 +1871,8 @@ export function App({
    * once — the old provider's allowance is not its own. The draft stays
    * until the server accepts, so a rejection keeps the modal open with the
    * choice intact for retry instead of stranding the user in the picker.
+   * That covers a turn that started after the palette opened: the server
+   * refuses a running source (`THREAD_BUSY`), and the error names it.
    */
   const confirmContinueThread = (choice: ModelSelection) => {
     const draft = continueDraft;
@@ -2326,15 +2328,21 @@ export function App({
                 // thread. The modal offers the provider, model and effort,
                 // preselected to this thread's own. Held for the reset while
                 // a usage limit stands on the same provider. Nothing to hand
-                // over until the assistant has replied.
+                // over until the assistant has replied — and never beside a
+                // running turn: the server refuses that (`THREAD_BUSY`), so
+                // the row stays disabled with the same words the revert row
+                // uses, until the turn settles. A turn that starts after the
+                // palette opened is still refused by the server instead.
                 ...(lastAssistantMessage === null
                   ? { meta: entries.length === 0 ? t("app.no_turns_yet_c9d5") : t("app.no_reply_yet_f40d"), disabled: true, onPick: () => {} }
-                  : {
-                      meta: usageBanner.banner?.resetsAt ? t("app.after_the_reset_2abf") : t("app.fresh_context_a387"),
-                      onPick: () => {
-                        openContinueModal();
-                      },
-                    }),
+                  : sessionRunning
+                    ? { meta: t("app.turn_still_running_9163"), disabled: true, onPick: () => {} }
+                    : {
+                        meta: usageBanner.banner?.resetsAt ? t("app.after_the_reset_2abf") : t("app.fresh_context_a387"),
+                        onPick: () => {
+                          openContinueModal();
+                        },
+                      }),
               },
             ],
           },
@@ -2595,8 +2603,12 @@ export function App({
         },
       ],
     };
+    // The continue row follows the source's live session: a turn that starts
+    // while the palette is open disables it (the server would refuse), and
+    // one that settles re-enables it — so `sessionRunning` is a dep even
+    // though the row callbacks read it through the ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience]);
+  }, [picker, providers, providersError, settings.snapshot, effectiveModelSelection, effectiveRuntimeMode, permissionChoices, creating, deleteArmed, deleteSupported, revertArmed, answerDraft, background, threadSearch, remoteAccess.status, remoteAccess.servers, remoteAccess.devices, remoteAccess.revokeArmed, server, experience, sessionRunning]);
 
   /** Wider and taller than a picker: the task browser shows commands and live output. */
   /**
