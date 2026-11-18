@@ -1992,13 +1992,20 @@ fn read_context(shared: &Arc<Shared>, id: ThreadId) {
         if state.wire.is_none() || !fresh || !state.context_reads.insert(id) {
             None
         } else {
-            state.slots.get(id).map(|slot| slot.uuid.clone())
+            match state.slots.get(id).map(|slot| slot.uuid.clone()) {
+                Some(uuid) => Some(uuid),
+                // This call took the guard but has no thread to read:
+                // release it, so the next read still runs. A call that
+                // never took it (no wire, stale, or another read in
+                // flight) leaves the owner's guard alone.
+                None => {
+                    state.context_reads.remove(&id);
+                    None
+                }
+            }
         }
     };
     let Some(uuid) = uuid else {
-        shared.update(|state| {
-            state.context_reads.remove(&id);
-        });
         return;
     };
     let target = shared.clone();
@@ -2885,6 +2892,81 @@ mod tests {
         wait_for("the dropped job's stand-in", || {
             ran_read.load(Ordering::SeqCst)
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_context_read_waits_for_the_first() {
+        // One listed thread, so id 0 has a slot and a uuid to read.
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            revision: AtomicU64::new(0),
+        });
+        let dir = std::env::temp_dir().join(format!("moxen-context-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let (_commands, queries) = fake_server(path.clone());
+        let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
+        shared.update(|state| {
+            state.wire = Some(Arc::new(wire));
+            state.apply(&json!({
+                "projects": [{"id": "p", "title": "moxen"}],
+                "threads": [
+                    {"id": "t1", "projectId": "p", "title": "Fix it", "archivedAt": null},
+                ],
+            }));
+        });
+        // A read is already on the wire: a second call starts nothing and
+        // leaves the first read's guard alone, so the next tick does not
+        // duplicate the pair while it is still running.
+        shared.update(|state| {
+            state.context_reads.insert(0);
+        });
+        read_context(&shared, 0);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(state.context_reads.contains(&0));
+        }
+        assert!(
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|query| query["type"] != "thread.context")
+        );
+        // The first read's completion releases the guard; the next call then
+        // reads the pair and clears it again.
+        shared.update(|state| {
+            state.context_reads.remove(&0);
+        });
+        read_context(&shared, 0);
+        wait_for("the context pair", || {
+            shared
+                .state
+                .lock()
+                .expect("live state")
+                .contexts
+                .contains_key(&0)
+        });
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.context_reads.contains(&0));
+            assert!(
+                state.contexts[&0]
+                    .breakdown
+                    .as_ref()
+                    .is_some_and(|breakdown| !breakdown.categories.is_empty())
+            );
+        }
+        // An id this call took the guard for but with no slot to read
+        // releases it instead of leaking it: the guard is clear afterwards.
+        read_context(&shared, 7);
+        {
+            let state = shared.state.lock().expect("live state");
+            assert!(!state.context_reads.contains(&7));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
