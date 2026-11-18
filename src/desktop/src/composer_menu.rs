@@ -34,6 +34,10 @@ impl Improvement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
     pub invocation: String,
+    /// The provider's display name for the skill (`displayName` in the
+    /// `skills.list` answer), empty when the provider gives none. Ranked
+    /// alongside the name, like the TUI's `filterSkills`.
+    pub display_name: String,
     pub description: String,
 }
 
@@ -62,6 +66,11 @@ impl Inventory {
                 if !choices.iter().any(|choice| choice.invocation == invocation) {
                     choices.push(Choice {
                         invocation,
+                        display_name: if kind == "skills" {
+                            item["displayName"].as_str().unwrap_or("").into()
+                        } else {
+                            String::new()
+                        },
                         description: item["shortDescription"]
                             .as_str()
                             .or(item["description"].as_str())
@@ -104,6 +113,7 @@ pub fn choices(prefix: &str, inventory: Option<&Inventory>, busy: bool) -> Vec<C
         .filter(|_| !busy)
         .map(|(mode, label)| Choice {
             invocation: format!("/{mode}"),
+            display_name: String::new(),
             description: format!("Use {label} for one prompt"),
         });
     let mut choices: Vec<Choice> = built_in.collect();
@@ -145,17 +155,20 @@ pub fn choices(prefix: &str, inventory: Option<&Inventory>, busy: bool) -> Vec<C
 
 /// Where a query sits for the `/` picker: a name that starts with it, then one
 /// that contains it, then a description that does — the TUI's `filterSkills`
-/// order, so the most likely pick reads first. `None` matches nothing.
+/// order, so the most likely pick reads first. The name and the provider's
+/// display name rank together, so `/spread` finds the `xlsx` skill the TUI
+/// lists as "Spreadsheets". `None` matches nothing.
 fn rank_choice(choice: &Choice, query: &str) -> Option<usize> {
     let name = choice
         .invocation
         .strip_prefix(['/', '$'])
         .unwrap_or(&choice.invocation)
         .to_lowercase();
-    if name.starts_with(query) {
+    let display = choice.display_name.to_lowercase();
+    if name.starts_with(query) || display.starts_with(query) {
         return Some(0);
     }
-    if name.contains(query) {
+    if name.contains(query) || display.contains(query) {
         return Some(1);
     }
     if choice.description.to_lowercase().contains(query) {
@@ -260,6 +273,28 @@ mod tests {
         assert_eq!(names("/layout"), ["/layout", "/relayout", "/design"]);
         assert_eq!(names("/LAY"), ["/layout", "/relayout", "/design"]);
         assert!(names("/zzz").is_empty());
+    }
+
+    #[test]
+    fn slash_picker_matches_a_skill_through_its_display_name() {
+        let inventory = Inventory::decode(&json!({
+            "trigger":"/",
+            "skills":[
+              {"name":"xlsx","enabled":true,"userInvocable":true,"displayName":"Spreadsheets"},
+              {"name":"pdf","enabled":true,"userInvocable":true}
+            ],
+            "commands":[]
+        }))
+        .unwrap();
+        let names = |prefix| {
+            choices(prefix, Some(&inventory), true)
+                .into_iter()
+                .map(|choice| choice.invocation)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("/spread"), ["/xlsx"]);
+        assert_eq!(names("/SPREAD"), ["/xlsx"]);
+        assert_eq!(names("/pdf"), ["/pdf"]);
     }
 
     #[test]
