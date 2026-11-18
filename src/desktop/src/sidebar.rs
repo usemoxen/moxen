@@ -1,5 +1,6 @@
 use crate::ui::{self, Control};
 use crate::{
+    model::{Thread, ThreadId},
     theme::{self, color},
     workspace::Workspace,
 };
@@ -7,10 +8,9 @@ use gpui::{prelude::*, *};
 actions!(sidebar, [PreviousThread, NextThread]);
 
 /// A sidebar row (`.row` in the mockup): 30pt, 13.5px Next, meta in Mono.
-fn row(id: impl Into<ElementId>, tooltip: impl Into<SharedString>) -> Stateful<Div> {
+fn row(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
-        .control(tooltip)
         .h(px(theme::ROW))
         .flex_shrink_0()
         .px(px(10.))
@@ -30,18 +30,55 @@ fn meta(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Two letters for a project's badge: the initials of its first two words.
+/// Two letters for a project's badge: the initials of its first two words,
+/// or for a one-word name the TUI's chip (`projectBadge`).
 fn badge(project: &str) -> String {
-    project
+    let words: Vec<char> = project
         .split(['-', '_', ' '])
         .filter_map(|word| word.chars().next())
         .take(2)
-        .collect::<String>()
-        .to_uppercase()
+        .collect();
+    if words.len() == 2 {
+        words.into_iter().collect::<String>().to_uppercase()
+    } else {
+        crate::live::project_badge(project)
+    }
+}
+
+/// The threads the sidebar lists, in order: grouped or flat, without settled
+/// ones while that section is closed, and in "This project" only the
+/// selected thread's project.
+pub fn visible(w: &Workspace, threads: &[Thread]) -> Vec<ThreadId> {
+    let project = threads.get(w.selected).map(|t| t.project.as_str());
+    w.source
+        .order(w.group != 0)
+        .into_iter()
+        .filter(|&i| {
+            let t = &threads[i];
+            w.source
+                .sidebar_section(i)
+                .is_some_and(|settled| !settled || w.settled_open)
+                && (w.group != 2 || Some(t.project.as_str()) == project)
+        })
+        .collect()
+}
+
+/// Moves the selection `step` rows through what the sidebar lists.
+fn step(w: &mut Workspace, step: isize, cx: &mut Context<Workspace>) {
+    let threads = w.source.list_threads();
+    let listed = visible(w, &threads);
+    if listed.is_empty() {
+        return;
+    }
+    let at = listed.iter().position(|&i| i == w.selected).unwrap_or(0) as isize;
+    if let Some(&next) = listed.get((at + step).clamp(0, listed.len() as isize - 1) as usize) {
+        w.select(next, cx);
+    }
 }
 
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let threads = w.source.list_threads();
+    let listed = w.source.order(false);
     let mut rows = div()
         .id("thread-scroll")
         .flex_1()
@@ -51,16 +88,17 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .pt(px(4.))
         .pb(px(12.))
         .flex()
-        .flex_col();
+        .flex_col()
+        .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
+            // Scrolling moves the rows the tip names by its window Y, so a
+            // kept tip would point at another thread's title.
+            this.clear_thread_tip();
+            cx.notify();
+        }));
     let mut projects: Vec<&str> = vec![];
     let mut nested: Option<Div> = None;
-    for (i, t) in threads.iter().enumerate() {
-        if t.settled && !w.settled_open {
-            continue;
-        }
-        if w.group == 2 && t.project != threads[w.selected].project {
-            continue;
-        }
+    for i in visible(w, &threads) {
+        let t = &threads[i];
         if t.depth == 0
             && let Some(group) = nested.take()
         {
@@ -70,9 +108,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             let first = projects.is_empty();
             let label = ["label-2", "label-6", "label-4", "label-3"][projects.len() % 4];
             projects.push(&t.project);
-            let count = threads
+            let count = listed
                 .iter()
-                .filter(|o| o.project == t.project && o.depth == 0 && !o.settled)
+                .filter(|&&i| {
+                    threads[i].project == t.project
+                        && threads[i].depth == 0
+                        && w.source.sidebar_section(i) == Some(false)
+                })
                 .count();
             rows = rows.child(
                 div()
@@ -107,7 +149,39 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
             );
         }
         let selected = w.selected == i;
-        let thread_row = row(("thread", i), t.title.clone())
+        let menu_open =
+            w.thread_popup.is_some() || w.dropdown == Some(crate::workspace::Dropdown::Thread);
+        // A click selects the row, which drops its tip; only a truncated
+        // title earns one at all.
+        let hoverable = row_tip(
+            &t.title,
+            title_truncated(window, &t.title, &t.activity, t.depth),
+            selected,
+            menu_open,
+        )
+        .is_some();
+        let thread_row = row(("thread", i)).plain_control();
+        let thread_row = if hoverable {
+            thread_row
+                .on_hover(cx.listener(move |this, hovering, _, cx| {
+                    if !hovering && this.thread_tip.is_some_and(|(id, _)| id == i) {
+                        this.thread_tip = None;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                    let at = Some((i, f32::from(event.position.y)));
+                    if this.thread_tip != at {
+                        this.thread_tip = at;
+                        let threads = this.source.list_threads();
+                        this.thread_tip_order = visible(this, &threads);
+                        cx.notify();
+                    }
+                }))
+        } else {
+            thread_row
+        };
+        let thread_row = thread_row
             .when(t.depth > 0, |s| {
                 s.h(px(26.)).text_size(px(12.5)).text_color(color("ink-2"))
             })
@@ -130,6 +204,12 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     .child(t.title.clone()),
             )
             .child(meta(t.activity.clone()))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_thread_menu(i, event.position, None, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |this, _, window, cx| {
                 window.focus(&this.sidebar_focus, cx);
                 this.select(i, cx);
@@ -165,15 +245,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .bg(color("ground"))
         .border_r_1()
         .border_color(color("rule"))
-        .on_action(cx.listener(|this, _: &PreviousThread, _, cx| {
-            this.select(this.selected.saturating_sub(1), cx)
-        }))
-        .on_action(cx.listener(|this, _: &NextThread, _, cx| {
-            this.select(
-                (this.selected + 1).min(this.source.list_threads().len() - 1),
-                cx,
-            )
-        }))
+        .on_action(cx.listener(|this, _: &PreviousThread, _, cx| step(this, -1, cx)))
+        .on_action(cx.listener(|this, _: &NextThread, _, cx| step(this, 1, cx)))
         .child(
             div()
                 .pt(px(12.))
@@ -224,13 +297,16 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .child(
                             div()
                                 .id("new-thread")
-                                .inert("New thread is unavailable in this preview")
+                                .control("New thread in this project")
                                 .size(px(30.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .rounded(px(6.))
-                                .child(ui::icon("square-pen", "ink-2")),
+                                .child(ui::icon("square-pen", "ink-2"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.new_thread(window, cx)),
+                                ),
                         ),
                 )
                 .child(ui::segmented(
@@ -252,7 +328,8 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .flex_col()
                 .text_color(color("ink-2"))
                 .child(
-                    row("settled-toggle", "Show settled threads")
+                    row("settled-toggle")
+                        .control("Show settled threads")
                         .child(
                             div()
                                 .size(px(14.))
@@ -270,19 +347,145 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         )
                         .child(div().flex_1().child("Settled"))
                         .child(meta(
-                            threads.iter().filter(|t| t.settled).count().to_string(),
+                            listed
+                                .iter()
+                                .filter(|&&i| {
+                                    w.source.sidebar_section(i) == Some(true)
+                                        && threads[i].depth == 0
+                                })
+                                .count()
+                                .to_string(),
                         ))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settled_open = !this.settled_open;
                             cx.notify();
                         })),
                 )
+                .when(!w.source.archived().is_empty(), |s| {
+                    s.child(
+                        row("archived-toggle")
+                            .control("Show archived threads")
+                            .child(ui::icon("clock", "ink-2"))
+                            .child(div().flex_1().child("Archived"))
+                            .child(meta(w.source.archived().len().to_string()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_thread_form(
+                                    crate::thread_actions::Form::Archived,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                })
                 .child(
-                    row("settings", "Settings are unavailable in this preview")
+                    row("settings")
+                        .control("Settings are unavailable in this preview")
                         .cursor(CursorStyle::Arrow)
                         .child(ui::icon("settings", "ink-2"))
                         .child(div().flex_1().child("Settings"))
                         .child(ui::kbd("⌘,")),
                 ),
         )
+}
+
+/// The activity stamp's width in a thread row, shaped in Mono 11.5 the same
+/// way the title is shaped. A `chars().count()` estimate lands a couple of
+/// pixels off either way, which tips rows that fit and misses rows that
+/// are cut off.
+fn activity_width(window: &Window, activity: &str) -> f32 {
+    let mut style = window.text_style();
+    style.font_family = theme::MONO.into();
+    let run = style.to_run(activity.len());
+    f32::from(
+        window
+            .text_system()
+            .shape_line(activity.into(), px(11.5), &[run], None)
+            .width(),
+    )
+}
+
+/// Whether the row's title overflows the truncated label it is drawn in, so
+/// hovering the row earns the full title beside it. The label is the sidebar
+/// minus its chrome, the state glyph, the gaps and the activity stamp (plus
+/// the subthread indent); the title is measured with the window's text
+/// system at the row's size.
+fn title_truncated(window: &Window, title: &str, activity: &str, depth: usize) -> bool {
+    let size = if depth > 0 { 12.5 } else { 13.5 };
+    // The row draws the title in the interface font and the stamp in Mono:
+    // shape both in those families, or the comparison drifts ~10px from
+    // what `.truncate()` lays out. `window.text_style()` is the window
+    // default, not the row's style, so set the families explicitly.
+    let mut title_style = window.text_style();
+    title_style.font_family = theme::FONT.into();
+    let title_run = title_style.to_run(title.len());
+    let width = f32::from(
+        window
+            .text_system()
+            .shape_line(title.into(), px(size), &[title_run], None)
+            .width(),
+    );
+    let indent = if depth > 0 { 24. } else { 0. };
+    width > theme::SIDEBAR - 16. - 20. - 14. - 16. - indent - activity_width(window, activity) - 1.
+}
+
+/// Whether the sidebar row shows its full title beside it: never for the
+/// selected row (a click would leave the tip lingering over the rows
+/// below), while a menu is open, or when the title fits its label — only a
+/// truncated title needs the full text.
+fn row_tip(title: &str, truncated: bool, selected: bool, menu_open: bool) -> Option<&str> {
+    if truncated && !selected && !menu_open {
+        Some(title)
+    } else {
+        None
+    }
+}
+
+/// Keeps the sidebar row tip only while the listed rows are the ones it was
+/// taken against (`order` in `sync_threads`). A delete, collapse, regroup or
+/// reorder moves the rows, so the stored window Y would point at another
+/// thread's title.
+pub fn retain_tip(
+    tip: Option<(ThreadId, f32)>,
+    listed: &[ThreadId],
+    now: &[ThreadId],
+) -> Option<(ThreadId, f32)> {
+    match tip {
+        Some(kept) if listed == now => Some(kept),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{retain_tip, row_tip};
+
+    #[test]
+    fn the_tip_shows_a_truncated_title_and_nothing_else() {
+        assert_eq!(
+            row_tip("a very long thread title", true, false, false),
+            Some("a very long thread title")
+        );
+        assert_eq!(row_tip("short", false, false, false), None);
+    }
+
+    #[test]
+    fn selecting_the_row_or_opening_a_menu_drops_the_tip() {
+        assert_eq!(row_tip("a very long thread title", true, true, false), None);
+        assert_eq!(row_tip("a very long thread title", true, false, true), None);
+    }
+
+    #[test]
+    fn the_tip_clears_whenever_the_listed_rows_change() {
+        let tip = Some((3, 240.));
+        let listed = vec![0, 1, 2, 3];
+        assert_eq!(retain_tip(tip, &listed, &listed), tip);
+        // A reorder moves the rows under the stored Y.
+        assert_eq!(retain_tip(tip, &listed, &[0, 2, 1, 3]), None);
+        // A delete drops the hovered row's place; a collapse or regroup
+        // lists fewer rows; a new thread lists more.
+        assert_eq!(retain_tip(tip, &listed, &[0, 1, 2]), None);
+        assert_eq!(retain_tip(tip, &listed, &[0, 1]), None);
+        assert_eq!(retain_tip(tip, &listed, &[0, 1, 2, 3, 4]), None);
+        assert_eq!(retain_tip(None, &listed, &listed), None);
+    }
 }

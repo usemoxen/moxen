@@ -55,6 +55,8 @@ pub fn state(status: crate::model::Status) -> AnyElement {
 pub trait Control: Sized {
     /// An interactive control: hover and press fills, a focus ring, a tooltip.
     fn control(self, tooltip: impl Into<SharedString>) -> Self;
+    /// An interactive control whose visible label needs no tooltip.
+    fn plain_control(self) -> Self;
     /// A control whose tooltip carries its keyboard shortcut as a key cap.
     fn shortcut(self, tooltip: impl Into<SharedString>, key: &'static str) -> Self;
     /// A text-only control (tabs, disclosures): hover brightens the text
@@ -62,19 +64,12 @@ pub trait Control: Sized {
     fn quiet(self) -> Self;
     /// Unavailable right now: dimmed, with a tooltip saying why.
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self;
-    /// Shown at full strength but not wired in this preview.
-    fn inert(self, tooltip: impl Into<SharedString>) -> Self;
 }
 impl Control for Stateful<Div> {
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         self.opacity(0.45)
             .cursor(CursorStyle::Arrow)
-            .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
-    }
-    fn inert(self, tooltip: impl Into<SharedString>) -> Self {
-        let text = tooltip.into();
-        self.cursor(CursorStyle::Arrow)
             .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
     }
     fn quiet(self) -> Self {
@@ -87,6 +82,9 @@ impl Control for Stateful<Div> {
     fn control(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         interactive(self).tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone(), None)).into())
+    }
+    fn plain_control(self) -> Self {
+        interactive(self)
     }
     fn shortcut(self, tooltip: impl Into<SharedString>, key: &'static str) -> Self {
         let text = tooltip.into();
@@ -152,7 +150,7 @@ pub fn kbd(key: &'static str) -> Div {
 }
 
 /// A small uppercase section label (`mono-caps`).
-pub fn caps(label: &'static str) -> Div {
+pub fn caps(label: &str) -> Div {
     div()
         .type_scale("mono-caps")
         .text_color(color("ink-2"))
@@ -170,6 +168,21 @@ pub fn segmented(
     cx: &mut Context<Workspace>,
     set: fn(&mut Workspace, usize),
 ) -> Div {
+    let labels: Vec<SharedString> = options.iter().map(|l| (*l).into()).collect();
+    segments(id.into(), &labels, selected, pad, cx, move |this, i, _| {
+        set(this, i)
+    })
+}
+
+/// `segmented` for options only known at run time.
+pub fn segments(
+    id: SharedString,
+    options: &[SharedString],
+    selected: usize,
+    pad: f32,
+    cx: &mut Context<Workspace>,
+    set: impl Fn(&mut Workspace, usize, &mut Context<Workspace>) + Clone + 'static,
+) -> Div {
     div()
         .flex()
         .p(px(3.))
@@ -178,9 +191,10 @@ pub fn segmented(
         .bg(color("sunk"))
         .children(options.iter().enumerate().map(|(i, label)| {
             let on = selected == i;
+            let set = set.clone();
             div()
-                .id((id, i))
-                .control(*label)
+                .id(ElementId::NamedInteger(id.clone(), i as u64))
+                .control(label.clone())
                 .flex()
                 .items_center()
                 .h(px(24.))
@@ -199,9 +213,9 @@ pub fn segmented(
                         spread_radius: px(1.),
                     }])
                 })
-                .child(*label)
+                .child(label.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    set(this, i);
+                    set(this, i, cx);
                     cx.notify();
                 }))
         }))

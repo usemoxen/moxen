@@ -14,6 +14,10 @@ pub struct Step {
     pub name: String,
     pub summary: String,
     pub output: String,
+    /// The right-hand column: time taken, lines read or lines changed.
+    pub meta: String,
+    pub failed: bool,
+    pub running: bool,
     pub id: usize,
     pub index: usize,
     /// How far the row itself has appeared, 0 to 1 (the fold opening).
@@ -27,29 +31,30 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
         name,
         summary,
         output,
+        meta,
+        failed,
+        running,
         id,
         index,
         shown,
         open,
     } = step;
-    let (icon, verb, token, meta) = match name.as_str() {
-        "thought" => ("asterisk", "Thought", "ink-2", "6s"),
-        "command" => ("dollar-sign", "Ran", "tool-command", "3.4s"),
-        "edit" => ("pencil", "Edited", "tool-edit", "+5 −1"),
-        _ => ("file", "Read", "tool-read", "551 lines"),
+    let (icon, verb, token) = match name.as_str() {
+        "thought" => ("asterisk", "Thought", "ink-2"),
+        "command" => ("dollar-sign", "Ran", "tool-command"),
+        "edit" => ("pencil", "Edited", "tool-edit"),
+        "search" => ("search", "Searched", "tool-read"),
+        "tool" => ("wrench", "Used", "ink-2"),
+        "error" => ("x", "Error", "broken"),
+        _ => ("file", "Read", "tool-read"),
+    };
+    let token = if failed { "broken" } else { token };
+    let verb = if running && name == "thought" {
+        "Thinking"
+    } else {
+        verb
     };
     let thought = name == "thought";
-    let meta = if name == "read" {
-        output
-            .lines()
-            .next()
-            .unwrap_or(meta)
-            .split(" · ")
-            .next()
-            .unwrap_or(meta)
-    } else {
-        meta
-    };
     let mut highlights = vec![];
     if name == "command" {
         highlights.push((
@@ -72,7 +77,11 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
         }
     }
     let target = StyledText::new(summary.clone()).with_highlights(highlights);
-    let meta = meta.to_string();
+    let meta: SharedString = if running {
+        "running".into()
+    } else {
+        meta.into()
+    };
     div()
         .flex()
         .flex_col()
@@ -128,7 +137,13 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                         .flex_shrink_0()
                         .font_family(theme::MONO)
                         .text_size(px(12.))
-                        .text_color(color("ink-2"))
+                        .text_color(color(if failed {
+                            "broken"
+                        } else if running {
+                            "live"
+                        } else {
+                            "ink-2"
+                        }))
                         .child(meta),
                 )
                 .on_click(move |_, _, cx| {

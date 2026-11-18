@@ -15,6 +15,7 @@ const MARK_SCALE: f32 = MARK_H / 2.84;
 
 pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = &w.source.list_threads()[w.selected];
+    let checklist = w.source.inspector(w.selected);
     let head = |at: f32| (at + 0.42) * MARK_SCALE;
     div()
         .h(px(44.))
@@ -48,7 +49,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                                 .size_full()
                                 .text_color(color("ink")),
                         )
-                        .when(t.status == Status::Running, |s| {
+                        .when(t.status == Status::Running && !w.creating, |s| {
                             s.child(
                                 div()
                                     .absolute()
@@ -66,7 +67,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .text_color(color("ink-2"))
-                        .child(t.project.clone()),
+                        .child(w.new_project_title().unwrap_or_else(|| t.project.clone())),
                 )
                 .child(
                     div()
@@ -82,7 +83,11 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .text_size(px(14.))
                         .line_height(px(18.))
                         .font_weight(FontWeight::BOLD)
-                        .child(t.title.clone()),
+                        .child(if w.creating {
+                            "New thread".to_string()
+                        } else {
+                            t.title.clone()
+                        }),
                 ),
         )
         .child(div().flex_1())
@@ -105,67 +110,78 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                     t.status.label().to_string()
                 }),
         )
-        .child(
-            div()
-                .relative()
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .id("tasks-toggle")
-                        .track_focus(&w.tips.tasks)
-                        .shortcut("Show or hide tasks", "⌃T")
-                        .flex_shrink_0()
-                        .h(px(28.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .rounded(px(6.))
-                        .when(w.inspector_open && w.tasks_open, |s| s.bg(color("sunk")))
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(color("ink-2"))
-                        .child("Tasks")
-                        .child(div().text_color(color("ink")).child("3/6"))
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(ToggleTasks), cx);
-                        })),
-                )
-                .children(ui::focus_tip(
-                    &w.tips.tasks,
-                    window,
-                    "Show or hide tasks",
-                    "⌃T",
-                    ui::Tip::BelowRight,
-                )),
-        )
-        .child(
-            div()
-                .relative()
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .id("inspector-toggle")
-                        .track_focus(&w.tips.inspector)
-                        .shortcut("Inspector", "⌘I")
-                        .flex_shrink_0()
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .child(ui::icon("panel-right", "ink-2"))
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(ToggleInspector), cx);
-                        })),
-                )
-                .children(ui::focus_tip(
-                    &w.tips.inspector,
-                    window,
-                    "Inspector",
-                    "⌘I",
-                    ui::Tip::BelowRight,
-                )),
-        )
+        .when(!w.creating, |s| {
+            s.child(crate::thread_view::actions_chip(w, cx))
+        })
+        .when(!w.creating && !checklist.tasks.is_empty(), |s| {
+            s.child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .id("tasks-toggle")
+                            .track_focus(&w.tips.tasks)
+                            .shortcut("Show or hide tasks", "⌃T")
+                            .flex_shrink_0()
+                            .h(px(28.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(6.))
+                            .when(w.inspector_open && w.tasks_open, |s| s.bg(color("sunk")))
+                            .font_family(theme::MONO)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color("ink-2"))
+                            .child("Tasks")
+                            .child(div().text_color(color("ink")).child(format!(
+                                "{}/{}",
+                                crate::work::completed(&checklist.tasks),
+                                checklist.tasks.len()
+                            )))
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(Box::new(ToggleTasks), cx);
+                            })),
+                    )
+                    .children(ui::focus_tip(
+                        &w.tips.tasks,
+                        window,
+                        "Show or hide tasks",
+                        "⌃T",
+                        ui::Tip::BelowRight,
+                    )),
+            )
+        })
+        .when(!w.creating, |s| {
+            s.child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .id("inspector-toggle")
+                            .track_focus(&w.tips.inspector)
+                            .shortcut("Inspector", "⌘I")
+                            .flex_shrink_0()
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .child(ui::icon("panel-right", "ink-2"))
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(Box::new(ToggleInspector), cx);
+                            })),
+                    )
+                    .children(ui::focus_tip(
+                        &w.tips.inspector,
+                        window,
+                        "Inspector",
+                        "⌘I",
+                        ui::Tip::BelowRight,
+                    )),
+            )
+        })
 }
