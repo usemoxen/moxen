@@ -26,11 +26,14 @@ Keep this file under 200 lines and 10,000 characters.
 - For visual changes, use the render harness and inspect the result to verify
   how it looks.
 - Desktop UI uses the design system in `usemoxen/design-system`, a private repo.
-  The Desktop work copies its public files (tokens, components, logos) to
+  Only its public files (tokens, bundle, logos) are copied to
   `src/desktop/design-system/`, pinned to a commit and updated by a sync
   script, never by hand or as a submodule. Use its tokens and components, not
-  hand-copied values. Agent's desktop rules are in `docs/agent-desktop.md` in
-  that repo, and how it should look is in `mockups/agent-desktop/`.
+  hand-copied values. Its docs, component READMEs and mockups are private:
+  never commit them. The sync script fetches them for local reading into the
+  git-ignored `src/desktop/design-system/.private/` (Agent's desktop rules are
+  `.private/docs/agent-desktop.md`, how it should look is
+  `.private/mockups/agent-desktop/`).
 - If you change behavior a doc describes, update the doc.
 
 ## Cross-platform
