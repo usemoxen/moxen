@@ -138,8 +138,15 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   // A manual continue pins the projection to its claim: turns accepted after
   // the claim belong only to the source, so neither history nor an
   // immediate task here, whether still queued or already promoted.
-  const known = options.knownTurnIds ? new Set(options.knownTurnIds) : null;
-  const turns = known ? allTurns.filter((turn) => known.has(turn.id)) : allTurns;
+  const knownTurns = options.knownTurnIds ? new Set(options.knownTurnIds) : null;
+  const turns = knownTurns ? allTurns.filter((turn) => knownTurns.has(turn.id)) : allTurns;
+  // Turn-scoped rows follow the same boundary; thread-level rows (a null
+  // turn) stay. Checklists and file stats name their turn, so a late plan or
+  // checkpoint drops out while pre-claim ones remain.
+  const scopedActivities = activities.filter((activity) => activity.turnId == null || !knownTurns || knownTurns.has(activity.turnId));
+  const scopedCheckpoints = knownTurns
+    ? checkpoints.filter((checkpoint) => checkpoint.turnId == null || knownTurns.has(checkpoint.turnId))
+    : checkpoints;
 
   // A turn has reached the agent once it produced something. One that is
   // queued, or was promoted to `running` by a settle but never ran (the
@@ -169,17 +176,17 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();
-  for (const checkpoint of checkpoints) {
+  for (const checkpoint of scopedCheckpoints) {
     for (const file of checkpoint.files ?? []) {
-      const known = files.get(file.path) ?? { additions: 0, deletions: 0 };
-      files.set(file.path, { additions: known.additions + file.additions, deletions: known.deletions + file.deletions });
+      const stat = files.get(file.path) ?? { additions: 0, deletions: 0 };
+      files.set(file.path, { additions: stat.additions + file.additions, deletions: stat.deletions + file.deletions });
     }
   }
 
   const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin);
   const firstPrompt = userPrompts[0]?.text.trim() ?? null;
   const lastPrompt = userPrompts.at(-1)?.text.trim() ?? null;
-  const plan = openPlan(activities);
+  const plan = openPlan(scopedActivities);
   const stopped = stoppedBecause(blocks.at(-1), activities);
   // Only a last turn that ran to completion, with nothing queued, nothing
   // moved, and no open checklist step, may be a finished task.
@@ -223,7 +230,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     }
   }
   const images = messages
-    .filter((message) => !known || known.has(message.turnId))
+    .filter((message) => !knownTurns || knownTurns.has(message.turnId))
     .flatMap((message) => message.attachments ?? [])
     .filter((attachment) => attachment.type === "image");
   if (images.length > 0) {

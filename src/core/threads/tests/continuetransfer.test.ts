@@ -56,15 +56,51 @@ async function world() {
   return { ...harness, ctx, sent, make };
 }
 
+async function storePlan(
+  w: Awaited<ReturnType<typeof world>>,
+  threadId: string,
+  turnId: string,
+  step: string,
+): Promise<void> {
+  await w.store.appendLedger(threadId, "activity", {
+    id: w.store.newId(),
+    threadId,
+    turnId,
+    kind: "turn.plan.updated",
+    summary: step,
+    payload: { plan: [{ step, status: "inProgress" }] },
+    createdAt: w.store.nowIso(),
+  });
+}
+
+async function storeCheckpoint(
+  w: Awaited<ReturnType<typeof world>>,
+  threadId: string,
+  turnId: string,
+  path: string,
+): Promise<void> {
+  await w.store.appendLedger(threadId, "checkpoints", {
+    id: w.store.newId(),
+    threadId,
+    turnId,
+    status: "available",
+    ref: "new",
+    baseRef: "old",
+    files: [{ path, additions: 3, deletions: 1 }],
+    createdAt: w.store.nowIso(),
+  });
+}
+
 describe("a manual continue moves pending messages to the new thread's work queue", () => {
   it("moves ordinary queued messages as entries, in order, leaving no runnable copy on the source", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "First" });
-    const secondSent = await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const secondSent = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
     const thirdSent = await sendTurn(w.store, source.id, {
       prompt: "Third on another model",
-      delivery: "queue",
+      queue: parseQueuePolicy({ conditions: [] }),
       modelSelection: { instanceId: "codex", model: "other-model" },
     });
     const sentBefore = w.sent.length;
@@ -89,11 +125,9 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(second!.queue!.requestId).toBe(`handoff:transfer:${secondSent.turn.id}`);
     expect(third!.queue!.requestId).toBe(`handoff:transfer:${thirdSent.turn.id}`);
     // The handoff names the move but does not assign the moved messages as this turn's work.
-    // (The still-running "First" turn keeps today's treatment: it stays on the
-    // source, and the document lists it as never sent.)
     const handoffText = destMessages.find((message) => message.id === handoff!.messageId)!.text;
     expect(handoffText).toContain("moved to the new thread's Work queue");
-    expect(handoffText).toContain("1. First");
+    expect(handoffText).toContain("First");
     expect(handoffText).not.toContain("Second");
     expect(handoffText).not.toContain("Third on another model");
 
@@ -124,6 +158,27 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(prompts[1]).toContain("Second");
     expect(prompts[2]).toContain("Third on another model");
     expect(w.sent.slice(sentBefore).every((turn) => turn.threadId === destination.id)).toBe(true);
+  });
+
+  it("does not move anything from a busy source: its queued messages stay and run there", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    const second = await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const third = await sendTurn(w.store, source.id, { prompt: "Third", delivery: "queue" });
+
+    // A running turn owns its queue: the continue opens at once, as before,
+    // but stages nothing — the transfer is an idle-source move only.
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+
+    expect(await w.store.readTurns(continued.threadId)).toHaveLength(1);
+    expect((await w.store.readTurns(source.id)).filter((turn) => turn.status === "queued")).toHaveLength(2);
+    expect((await w.store.readTurns(source.id)).some((turn) => turn.handoff !== undefined)).toBe(false);
+
+    // The queued messages run on the source once the running turn settles.
+    await completeTurn(w.store, source.id, running.id, { text: "Done." });
+    expect(openTurn(await w.store.readTurns(source.id))?.id).toBe(second.turn.id);
+    expect((await w.store.readMessages(source.id)).some((message) => message.text === "Third")).toBe(true);
   });
 
   it("keeps a scheduled message's time and still runs the handoff first", async () => {
@@ -166,15 +221,24 @@ describe("a manual continue moves pending messages to the new thread's work queu
   it("moves a held entry held, and leaves removed and usage entries on the source", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "First" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
     const held = await sendTurn(w.store, source.id, {
       prompt: "Held draft",
       queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
     });
     const removed = await sendTurn(w.store, source.id, { prompt: "Dropped draft", queue: parseQueuePolicy({ conditions: [] }) });
     await editWorkQueue(w.ctx, source.id, removed.turn.id, "remove");
-    await sendTurn(w.store, source.id, { prompt: "Usage will resume", origin: "usage-continue", delivery: "queue" });
-    const agent = await queueAgentMessage(w.ctx, source.id, { message: "Agent follow-up" });
+    await sendTurn(w.store, source.id, {
+      prompt: "Usage will resume",
+      origin: "usage-continue",
+      queue: parseQueuePolicy({ conditions: [] }),
+      delivery: "queue",
+    });
+    const agent = await queueAgentMessage(w.ctx, source.id, {
+      message: "Agent follow-up",
+      conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }],
+    });
     expect(agent.status).toBe("queued");
 
     const continued = await continueThread(w.ctx, { threadId: source.id });
@@ -193,12 +257,12 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(agentMessage.origin).toBe("agent-message");
 
     const sourceTurns = await w.store.readTurns(source.id);
+    const sourceMessages = await w.store.readMessages(source.id);
     // The removed draft and the usage entry were not moved.
     expect(sourceTurns.find((turn) => turn.id === removed.turn.id)).toMatchObject({ status: "interrupted" });
     expect(sourceTurns.find((turn) => turn.id === removed.turn.id)?.handoff).toBeUndefined();
-    const usage = sourceTurns.find((turn) => turn.status === "queued" && (turn.queue === undefined || turn.queue.removed !== true));
-    expect(usage).toBeDefined();
-    expect((await w.store.readMessages(source.id)).find((message) => message.id === usage!.messageId)?.origin).toBe("usage-continue");
+    const usageMessage = sourceMessages.find((message) => message.origin === "usage-continue")!;
+    expect(sourceTurns.find((turn) => turn.id === usageMessage.turnId)).toMatchObject({ status: "queued" });
     // The held draft left the source exactly once.
     expect(sourceTurns.find((turn) => turn.id === held.turn.id)).toMatchObject({ status: "interrupted", queue: { removed: true } });
   });
@@ -281,21 +345,47 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // still waits; the message names the condition's own thread, as before.
     expect(blocked).toEqual(["Waiting for solo"]);
 
-    // Once the moved entry settles, the watcher is released without any rewrite.
-    await interruptTurn(w.store, continued.threadId, moved.id);
-    const refreshed = [
-      { thread: (await w.store.readThreadRecord(watcher.id))!, turns: await w.store.readTurns(watcher.id) },
-      { thread: (await w.store.readThreadRecord(source.id))!, turns: await w.store.readTurns(source.id) },
-      { thread: (await w.store.readThreadRecord(continued.threadId))!, turns: await w.store.readTurns(continued.threadId) },
+    // A retry — even across a reopened store — rejoins the same destination
+    // without stripping the marker: the watcher stays blocked while the
+    // moved entry is still queued ahead of it.
+    const reopened = await openThreadStore(w.root);
+    const restarted: OperationContext = { ...w.ctx, store: reopened };
+    const rejoined = await continueThread(restarted, { threadId: source.id });
+    expect(rejoined.threadId).toBe(continued.threadId);
+    expect((await reopened.readTurns(continued.threadId)).filter((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))).toHaveLength(1);
+    expect((await reopened.readTurns(source.id)).find((turn) => turn.id === entry.turn.id)?.handoff?.requestId).toBe(`transfer:${entry.turn.id}`);
+    const reRows = [
+      { thread: (await reopened.readThreadRecord(watcher.id))!, turns: await reopened.readTurns(watcher.id) },
+      { thread: (await reopened.readThreadRecord(source.id))!, turns: await reopened.readTurns(source.id) },
+      { thread: (await reopened.readThreadRecord(continued.threadId))!, turns: await reopened.readTurns(continued.threadId) },
     ];
-    expect(queueAdmission(refreshed[0]!, refreshed[0]!.turns.find((turn) => turn.id === waiting.turn.id)!, refreshed, w.ctx.config, now).blocked).toEqual([]);
+    expect(
+      queueAdmission(reRows[0]!, reRows[0]!.turns.find((turn) => turn.id === waiting.turn.id)!, reRows, w.ctx.config, now).blocked,
+    ).toEqual(["Waiting for solo"]);
+
+    // Once the moved entry settles, a further continue releases the marker
+    // and the waiter follows it out without any rewrite.
+    await interruptTurn(reopened, continued.threadId, moved.id);
+    const settled = await continueThread(restarted, { threadId: source.id });
+    expect(settled.threadId).toBe(continued.threadId);
+    expect((await reopened.readTurns(continued.threadId))).toHaveLength(2);
+    expect((await reopened.readTurns(source.id)).find((turn) => turn.id === entry.turn.id)?.handoff).toBeUndefined();
+    const released = [
+      { thread: (await reopened.readThreadRecord(watcher.id))!, turns: await reopened.readTurns(watcher.id) },
+      { thread: (await reopened.readThreadRecord(source.id))!, turns: await reopened.readTurns(source.id) },
+      { thread: (await reopened.readThreadRecord(continued.threadId))!, turns: await reopened.readTurns(continued.threadId) },
+    ];
+    expect(
+      queueAdmission(released[0]!, released[0]!.turns.find((turn) => turn.id === waiting.turn.id)!, released, w.ctx.config, now).blocked,
+    ).toEqual([]);
   });
 
   it("rejoins the same destination on retry and after reopening the store, without duplicating entries", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "First" });
-    await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
 
     const first = await continueThread(w.ctx, { threadId: source.id });
     const destTurnsAfterFirst = await w.store.readTurns(first.threadId);
@@ -359,14 +449,18 @@ describe("a manual continue moves pending messages to the new thread's work queu
   it("draws one boundary: sends after the claim stay on the source, claimed turns cannot be admitted", async () => {
     const w = await world();
     const source = await w.make("solo");
-    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
-    const staged = await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const staged = await sendTurn(w.store, source.id, {
+      prompt: "Second",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
     const destination = await w.make("dest");
     const handoff = await sendTurn(w.store, destination.id, { prompt: "Handoff" });
 
     // The claim, exactly as continueThreadInner takes it.
     const claim = await stageQueuedMessages(w.ctx, source.id, destination.id);
-    expect(claim.claimed).toEqual([staged.turn.id]);
+    expect(claim?.claimed).toEqual([staged.turn.id]);
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)).toMatchObject({
       status: "queued",
       queue: { removed: true },
@@ -374,7 +468,10 @@ describe("a manual continue moves pending messages to the new thread's work queu
 
     // A send landing after the claim belongs only to the source: still
     // queued and runnable there, never in the destination snapshot.
-    const late = await sendTurn(w.store, source.id, { prompt: "Late", delivery: "queue" });
+    const late = await sendTurn(w.store, source.id, {
+      prompt: "Late",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
     expect(late.turn.status).toBe("queued");
 
     // Admission cannot take the claimed turn, and the handoff projects
@@ -382,7 +479,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // history nor immediate work.
     await runWorkQueue(w.ctx);
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.status).toBe("queued");
-    const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim.known });
+    const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known });
     expect(doc).not.toContain("Late");
     expect(doc).not.toContain("Second");
 
@@ -394,23 +491,29 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)).toMatchObject({ status: "interrupted" });
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === late.turn.id)?.status).toBe("queued");
 
-    // The late send still runs on the source once it is free: settling the
-    // running turn promotes it past the staged row, which admission skips.
-    await completeTurn(w.store, source.id, running.id, { text: "Done." });
-    expect(openTurn(await w.store.readTurns(source.id))?.id).toBe(late.turn.id);
+    // The late send still runs on the source once released: the staged row,
+    // already moved, never runs there again.
+    await editWorkQueue(w.ctx, source.id, late.turn.id, "release");
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([source.id]);
+    expect(w.sent[0]!.prompt).toContain("Late");
   });
 
   it("keeps a post-claim send off the destination through the real continue path", async () => {
     const w = await world();
     const source = await w.make("solo");
-    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
-    await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await storePlan(w, source.id, done.id, "Early step");
+    await storeCheckpoint(w, source.id, done.id, "early.ts");
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
 
     // Deterministic barrier: stage emits queue-changed on the source when it
-    // claims, so the late send injected on the next source turn-ledger read
-    // lands strictly between the claim and the handoff projection (the
-    // claim's own re-reads happen before the emit). Later reads pass through.
-    const readTurns = w.store.readTurns.bind(w.store);
+    // claims, so the late send injected on the next source thread-record
+    // read lands strictly between the claim and every handoff projection
+    // read. Later reads pass through.
+    const readRecord = w.store.readThreadRecord.bind(w.store);
     const emit = w.store.emit.bind(w.store);
     let armed = false;
     let injected = false;
@@ -418,13 +521,15 @@ describe("a manual continue moves pending messages to the new thread's work queu
       if (threadId === source.id && reason === "queue-changed") armed = true;
       return emit(threadId, reason);
     });
-    const spy = vi.spyOn(w.store, "readTurns").mockImplementation(async (threadId: string) => {
+    const spy = vi.spyOn(w.store, "readThreadRecord").mockImplementation(async (threadId: string) => {
       if (threadId === source.id && armed) {
         armed = false;
-        await sendTurn(w.store, source.id, { prompt: "Late", delivery: "queue" });
+        const late = await sendTurn(w.store, source.id, { prompt: "Late", queue: parseQueuePolicy({ conditions: [] }) });
+        await storePlan(w, source.id, late.turn.id, "Late plan");
+        await storeCheckpoint(w, source.id, late.turn.id, "late.ts");
         injected = true;
       }
-      return readTurns(threadId);
+      return readRecord(threadId);
     });
     let continued;
     try {
@@ -435,9 +540,9 @@ describe("a manual continue moves pending messages to the new thread's work queu
     }
     expect(injected).toBe(true);
 
-    // The pre-claim message moved; the late prompt is nowhere on the
-    // destination — neither the handoff nor any other turn — while the moved
-    // message stays out of the handoff's immediate work.
+    // The pre-claim message moved; the late prompt, plan and checkpoint are
+    // nowhere on the destination — neither the handoff nor any other turn —
+    // while the moved message stays out of the handoff's immediate work.
     const destTurns = await w.store.readTurns(continued.threadId);
     expect(destTurns).toHaveLength(2);
     const destMessages = await w.store.readMessages(continued.threadId);
@@ -445,20 +550,27 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const handoffText = destMessages.find((message) => message.role === "user")!.text;
     expect(handoffText).toContain("moved to the new thread's Work queue");
     expect(handoffText).not.toContain("Second");
+    expect(handoffText).toContain("Early step");
+    expect(handoffText).toContain("early.ts");
+    expect(handoffText).not.toContain("Late plan");
+    expect(handoffText).not.toContain("late.ts");
 
     // The late send stays queued and runnable only on the source.
     const late = (await w.store.readTurns(source.id)).find((turn) => turn.status === "queued")!;
     expect((await w.store.readMessages(source.id)).find((message) => message.id === late.messageId)?.text).toBe("Late");
     expect(destTurns.some((turn) => turn.messageId === late.messageId)).toBe(false);
-    await completeTurn(w.store, source.id, running.id, { text: "Done." });
-    expect(openTurn(await w.store.readTurns(source.id))?.id).toBe(late.id);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([continued.threadId, source.id]);
+    expect(w.sent.at(-1)!.prompt).toBe("Late");
   });
 
   it("repairs a crash between destination turn and message writes, without dispatching or duplicating", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "First" });
-    await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
 
     // Fault injection: the first non-handoff destination message write fails.
     const append = w.store.appendLedger.bind(w.store);
@@ -530,8 +642,9 @@ describe("a manual continue moves pending messages to the new thread's work queu
   it("takes back a staged turn the user removed, and its partial destination entry", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "First" });
-    const staged = await sendTurn(w.store, source.id, { prompt: "Second", delivery: "queue" });
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const staged = await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: [] }) });
     const destination = await w.make("dest");
     await sendTurn(w.store, destination.id, { prompt: "Handoff" });
 
