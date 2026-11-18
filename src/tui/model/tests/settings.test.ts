@@ -320,14 +320,15 @@ describe("a provider's own tools and web preference on its page", () => {
   });
 
   it("keeps a stored Claude Agent entry off without offering it back", () => {
-    // `Agent` left the catalogue when Moxen started blocking it always: a
-    // stored entry still counts as off and round-trips, but has no row.
-    const settings = describeSettings(normalizeConfig({ providers: { claude: { disabledNativeTools: "Agent,WebSearch" } } }));
+    // Both subagent names left the catalogue when Moxen started blocking them
+    // always: stored entries still count as off and round-trip, but have no row.
+    const settings = describeSettings(normalizeConfig({ providers: { claude: { disabledNativeTools: "Agent,Task,WebSearch" } } }));
     const claude = settings.find((entry) => entry.descriptor.key === "providers.claude.disabledNativeTools")!.descriptor;
-    const control = settingControl(claude, "Agent,WebSearch", settings, null);
+    const control = settingControl(claude, "Agent,Task,WebSearch", settings, null);
     expect(control.kind === "tools" && control.tools.map((tool) => tool.name)).not.toContain("Agent");
-    expect(control.kind === "tools" && control.excluded).toEqual(["Agent", "WebSearch"]);
-    expect(settingValueLabel(claude, "Agent,WebSearch", control)).toBe("2 off");
+    expect(control.kind === "tools" && control.tools.map((tool) => tool.name)).not.toContain("Task");
+    expect(control.kind === "tools" && control.excluded).toEqual(["Agent", "Task", "WebSearch"]);
+    expect(settingValueLabel(claude, "Agent,Task,WebSearch", control)).toBe("3 off");
   });
 
   it("greys each web order out until a tool it could rank is available to the provider, and says what it covers", () => {

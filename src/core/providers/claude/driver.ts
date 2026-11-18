@@ -2608,14 +2608,16 @@ function summarizeToolInput(input: unknown): string {
 /**
  * Claude Code's own plan mode, never offered in Moxen's sessions: Moxen has no
  * plan mode (MXN-136), and a mode the model could enter would leave it unable to
- * change anything. Its native subagent tool (`Agent`) is never offered either:
- * fan out through Moxen's `delegate` instead, which Moxen tracks. None is the
- * user's to switch on, so `CLAUDE_NATIVE_TOOLS` (the Settings list of tools
- * that can be switched off) must not list them. (`Task` needs no entry: it is
- * only the legacy alias of `Agent`, renamed in Claude Code 2.1.63, well below
- * the floor `CLAUDE_CODE_MIN_VERSION` holds.)
+ * change anything. Its native subagent tool is never offered either: fan out
+ * through Moxen's `delegate` instead, which Moxen tracks. Both of its names are
+ * denied: the tool appears as `Agent` in `tool_use` blocks but as `Task` in the
+ * `system:init` tools list (and in `tool_use` blocks before Claude Code 2.1.63),
+ * so only denying one leaves the other usable. Both are bare exact names, so
+ * the checklist tools (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`) are
+ * unaffected. None is the user's to switch on, so `CLAUDE_NATIVE_TOOLS` (the
+ * Settings list of tools that can be switched off) must not list them.
  */
-export const ALWAYS_DISALLOWED_TOOLS: readonly string[] = ["EnterPlanMode", "ExitPlanMode", "Agent"];
+export const ALWAYS_DISALLOWED_TOOLS: readonly string[] = ["EnterPlanMode", "ExitPlanMode", "Agent", "Task"];
 
 const CHECKLIST_TOOLS: readonly string[] = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
 

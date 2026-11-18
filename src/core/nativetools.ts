@@ -8,9 +8,10 @@
  *
  * What is left out on purpose: the tools Moxen's own settings already own
  * (the to-do list's `todos`, plan mode's enter and exit), Claude Code's native
- * subagent tool (`Agent`, blocked in every Moxen-started session so there is
- * nothing to switch), and OpenCode's session, worktree and browser utilities,
- * which ask for no permission and so have nothing to deny.
+ * subagent tool (both names, `Agent` and `Task`, blocked in every
+ * Moxen-started session so there is nothing to switch), and OpenCode's session,
+ * worktree and browser utilities, which ask for no permission and so have
+ * nothing to deny.
  */
 import { CliError } from "./errors.js";
 

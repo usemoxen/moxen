@@ -6,8 +6,8 @@
  * Launch-arg permission flags fold into the mode rather than passing
  * through. `AskUserQuestion` always surfaces. Claude Code's plan mode is
  * not used: a launch argument asking for it is ignored, and its tools are
- * never offered; neither is its native subagent tool (`Agent`)
- * (`ALWAYS_DISALLOWED_TOOLS` in `./driver.ts`).
+ * never offered; neither is its native subagent tool, under both of its
+ * names (`Agent` and `Task`) (`ALWAYS_DISALLOWED_TOOLS` in `./driver.ts`).
  */
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 

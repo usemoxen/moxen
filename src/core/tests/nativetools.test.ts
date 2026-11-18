@@ -15,10 +15,12 @@ describe("built-in tools off by default", () => {
   });
 
   it("leaves Claude's always-blocked subagent tool out of the settings catalogue", () => {
-    // `Agent` is blocked in every Moxen-started session, so the settings page
-    // must not offer it back; the rest of its group stays switchable.
+    // Both subagent names are blocked in every Moxen-started session, so the
+    // settings page must offer neither back; the rest of the group stays switchable.
+    // (The checklist tools are not in the catalogue either: the `todos` setting owns them.)
     const names = CLAUDE_NATIVE_TOOLS.map((tool) => tool.name);
     expect(names).not.toContain("Agent");
+    expect(names).not.toContain("Task");
     expect(names).toEqual(expect.arrayContaining(["SendMessage", "Skill"]));
   });
 });
