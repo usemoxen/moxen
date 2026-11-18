@@ -1,6 +1,5 @@
 //! The mock server's settings answers: a representative slice of the real
-//! table (`ui.theme`, `remote.enabled`, one Harness profile, one MCP server,
-//! memory switches) plus small memory, skill, remote and update fixtures.
+//! table plus small memory, skill, remote and update fixtures.
 //! Keys and field paths are the server's own; the window renders whatever
 //! this holds, never a list of its own.
 
@@ -12,27 +11,92 @@ use serde_json::{Value, json};
 
 /// A slice of the real settings table, as `settings.read` answers it.
 pub fn snapshot_fixture() -> Snapshot {
-    Snapshot::from_json(&json!({
-        "path": "/home/demo/.moxen/config.json",
-        "exists": true,
-        "settings": [
-            {"descriptor": {"key": "ui.theme", "label": "Theme", "description": "The look of the app.",
-                "section": "interface", "group": "Looks",
-                "kind": {"type": "enum", "choices": [
-                    {"value": "auto", "label": "Auto"},
-                    {"value": "dark", "label": "Dark"},
-                    {"value": "light", "label": "Light"}]}},
-             "value": "dark", "explicit": true,
-             "effective": {"value": "dark", "label": "Dark"}},
-            {"descriptor": {"key": "ui.usageRefreshSeconds", "label": "Usage refresh", "description": "How often usage is re-read, in seconds.",
-                "section": "interface", "group": "Looks",
-                "kind": {"type": "integer", "min": 5, "max": 600, "unit": "s"}},
-             "value": 30, "explicit": false,
-             "effective": {"value": 30, "label": "30s", "origin": "the default"}},
-            {"descriptor": {"key": "remote.enabled", "label": "Remote access", "description": "Reach this machine's server from another one.",
-                "section": "general",
-                "kind": {"type": "boolean"}},
+    let mut settings = json!([
+            {"descriptor": {"key": "projectPolicy", "label": "Unknown folders",
+                "description": "What happens when a prompt names a folder that is not a project yet.",
+                "section": "general", "kind": {"type": "enum", "choices": [
+                    {"value": "create", "label": "Create the project"},
+                    {"value": "existing", "label": "Require an existing project"}]}},
+             "value": "create", "explicit": false},
+            {"descriptor": {"key": "workspaceMode", "label": "Workspace root",
+                "description": "Whether a project's root is the enclosing git repository or the folder itself.",
+                "section": "general", "kind": {"type": "enum", "choices": [
+                    {"value": "repo", "label": "Repository root"},
+                    {"value": "folder", "label": "The folder itself"}]}},
+             "value": "repo", "explicit": false},
+            {"descriptor": {"key": "updates.checkLatest", "label": "Check for newer versions",
+                "description": "Check the npm registry for newer provider releases when Settings opens.",
+                "section": "general", "kind": {"type": "boolean"}},
+             "value": true, "explicit": false},
+            {"descriptor": {"key": "model", "label": "Model",
+                "description": "The model a new thread on the default provider starts with.",
+                "section": "defaults", "kind": {"type": "string", "placeholder": "the provider's own default", "source": "model"}},
+             "explicit": false},
+            {"descriptor": {"key": "sessionTtl", "label": "Idle session lifetime",
+                "description": "How long a provider session stays warm with nothing happening on it.",
+                "section": "sessions", "kind": {"type": "duration", "presets": ["2m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "8h", "24h"]}},
+             "value": "1h", "explicit": false},
+            {"descriptor": {"key": "usageContinuation", "label": "After usage wrap-up",
+                "description": "Continue in the original thread or hand off to a fresh thread.",
+                "section": "sessions", "kind": {"type": "enum", "choices": [
+                    {"value": "same-thread", "label": "Same thread"}, {"value": "handoff", "label": "New thread"}]}},
+             "value": "same-thread", "explicit": false},
+            {"descriptor": {"key": "longThreads.handoffAt", "label": "Hand off at",
+                "description": "Where a thread is handed off: a share of the model's window or a size.",
+                "section": "long-threads", "kind": {"type": "line", "presets": ["40%", "50%", "60%", "70%", "80%", "90%", "8K", "16K", "24K", "32K", "64K", "128K", "256K", "512K", "1M"]}},
+             "explicit": false, "effective": {"value": "50%", "label": "50% of the window"}},
+            {"descriptor": {"key": "instructions", "label": "Extra instructions",
+                "description": "Appended to every provider session's system prompt.",
+                "section": "agent", "kind": {"type": "string", "placeholder": "Appended to every session", "multiline": true}},
+             "explicit": false},
+            {"descriptor": {"key": "branchPruneDays", "label": "Delete finished worktree branches after",
+                "description": "Days after a thread is archived or deleted before its merged branch is deleted. 0 keeps every branch.",
+                "section": "git", "kind": {"type": "integer", "min": 0, "max": 365, "unit": "d"}},
+             "value": 14, "explicit": false},
+            {"descriptor": {"key": "git.autoFetch", "label": "Fetch before listing",
+                "description": "Run git fetch before reading history, so remote branches are current.",
+                "section": "git", "kind": {"type": "boolean"}},
              "value": false, "explicit": false},
+            {"descriptor": {"key": "providers.claude.binaryPath", "label": "Claude executable",
+                "description": "The Claude binary to spawn.", "section": "provider:claude",
+                "group": "Setup", "kind": {"type": "string", "placeholder": "claude"}},
+             "value": "claude", "explicit": false},
+            {"descriptor": {"key": "providers.codex.binaryPath", "label": "Executable",
+                "description": "The Codex executable to run.", "section": "provider:codex",
+                "group": "Runtime", "kind": {"type": "string"}},
+             "value": "codex", "explicit": false},
+            {"descriptor": {"key": "providers.opencode.moxenPrompt", "label": "Moxen's system prompt",
+                "description": "Replace the base system prompt OpenCode picks with Moxen's.",
+                "section": "provider:opencode", "group": "Prompt", "kind": {"type": "boolean"}},
+             "value": true, "explicit": false},
+            {"descriptor": {"key": "providers.harness.slots", "label": "Requests at once",
+                "description": "How many requests a model server takes at the same time, for profiles that do not say.",
+                "section": "provider:harness", "group": "Sessions",
+                "kind": {"type": "integer", "min": 1, "max": 64}},
+             "explicit": false, "effective": {"label": "No limit"}},
+    ]);
+    let mut additional = json!([
+            {"descriptor": {"key": "ui.theme", "label": "Theme", "description": "The colours of the interface.",
+                "section": "interface",
+                "kind": {"type": "enum", "choices": [
+                    {"value": "moxen", "label": "Moxen"},
+                    {"value": "catppuccin-latte", "label": "Catppuccin Latte"},
+                    {"value": "catppuccin-frappe", "label": "Catppuccin Frappé"},
+                    {"value": "catppuccin-macchiato", "label": "Catppuccin Macchiato"},
+                    {"value": "catppuccin-mocha", "label": "Catppuccin Mocha"},
+                    {"value": "dracula", "label": "Dracula"},
+                    {"value": "nord", "label": "Nord"},
+                    {"value": "gruvbox", "label": "Gruvbox"},
+                    {"value": "tokyo-night", "label": "Tokyo Night"}]}},
+             "value": "moxen", "explicit": false},
+            {"descriptor": {"key": "ui.usageRefreshSeconds", "label": "Usage refresh", "description": "How often plan usage windows are re-read.",
+                "section": "interface",
+                "kind": {"type": "integer", "min": 5, "max": 3600, "unit": "s"}},
+             "value": 20, "explicit": false},
+            {"descriptor": {"key": "remote.enabled", "label": "Remote access", "description": "Reach this machine's server from another one.",
+                "section": "general", "group": "Remote access",
+                "kind": {"type": "boolean"}},
+             "value": true, "explicit": true},
             {"descriptor": {"key": "memory", "label": "Memory", "description": "Moxen keeps per-project and global memories.",
                 "section": "memory",
                 "kind": {"type": "boolean"}},
@@ -49,7 +113,7 @@ pub fn snapshot_fixture() -> Snapshot {
                     {"path": "baseUrl", "label": "Base URL", "description": "The server's address.", "group": "Endpoint", "kind": {"type": "string", "placeholder": "http://localhost:8080"}},
                     {"path": "apiKey", "label": "API key", "description": "Typed once and kept in the OS keychain; never on screen.", "group": "Endpoint", "kind": {"type": "secret"}},
                     {"path": "apiKeyEnv", "label": "API key variable", "description": "The NAME of an environment variable that holds the key.", "group": "Endpoint", "kind": {"type": "string", "placeholder": "MY_API_KEY"}},
-                    {"path": "slots", "label": "Requests at once", "description": "Requests this server runs at the same time.", "group": "Endpoint", "kind": {"type": "integer"}}]}},
+                    {"path": "slots", "label": "Requests at once", "description": "Requests this server runs at the same time.", "group": "Endpoint", "kind": {"type": "integer", "min": 1}}]}},
              "value": "", "explicit": true,
              "items": [{
                  "id": "office", "title": "office", "summary": "chat · http://localhost:8080",
@@ -89,7 +153,19 @@ pub fn snapshot_fixture() -> Snapshot {
                  "resolved": [
                      {"label": "Claude Code", "value": "Gets it", "origin": "the tab"},
                      {"label": "OpenCode", "value": "Gets it", "origin": "the tab"}]}]},
-        ],
+    ]);
+    settings
+        .as_array_mut()
+        .expect("mock settings array")
+        .append(
+            additional
+                .as_array_mut()
+                .expect("extra mock settings array"),
+        );
+    Snapshot::from_json(&json!({
+        "path": "/home/demo/.moxen/config.json",
+        "exists": true,
+        "settings": settings,
     }))
     .expect("mock settings fixture")
 }
@@ -315,4 +391,47 @@ pub fn duplicate_item(snapshot: &mut Snapshot, key: &str, id: &str, new_id: &str
     copy.title = new_id.into();
     view.items.push(copy);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_fixture;
+    use crate::settings::SettingKind;
+
+    #[test]
+    fn mock_settings_offer_representative_rows_from_the_server_sections() {
+        let snapshot = snapshot_fixture();
+        for (section, key) in [
+            ("general", "projectPolicy"),
+            ("defaults", "model"),
+            ("sessions", "sessionTtl"),
+            ("agent", "instructions"),
+            ("git", "branchPruneDays"),
+            ("provider:claude", "providers.claude.binaryPath"),
+            ("provider:codex", "providers.codex.binaryPath"),
+            ("provider:opencode", "providers.opencode.moxenPrompt"),
+            ("provider:harness", "providers.harness.slots"),
+        ] {
+            assert_eq!(snapshot.find(key).unwrap().section, section);
+        }
+        assert!(matches!(
+            snapshot.find("git.autoFetch").unwrap().kind,
+            SettingKind::Boolean
+        ));
+        assert!(matches!(
+            snapshot.find("branchPruneDays").unwrap().kind,
+            SettingKind::Integer {
+                min: 0.,
+                max: 365.,
+                ..
+            }
+        ));
+        assert!(matches!(
+            snapshot.find("instructions").unwrap().kind,
+            SettingKind::Text {
+                multiline: true,
+                ..
+            }
+        ));
+    }
 }
