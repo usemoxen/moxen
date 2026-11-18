@@ -1052,19 +1052,18 @@ impl ServerSource {
             }
         };
         let is_side_question = name == "thread.side-question";
-        if !self
-            .shared
-            .update(|state| state.reserve_action(id, is_side_question))
-        {
+        let epoch = self.shared.update(|state| {
+            state
+                .reserve_action(id, is_side_question)
+                .then_some(state.wire_epoch)
+        });
+        let Some(epoch) = epoch else {
             return;
-        }
+        };
         background_result(&self.shared, move |wire, shared| {
             let result = wire.and_then(|wire| wire.dispatch(name, fields));
             shared.update(|state| {
-                state.actions.remove(&id);
-                if is_side_question {
-                    state.asking_side_question = false;
-                }
+                release_action(state, epoch, id, is_side_question);
                 let Ok(result) = &result else {
                     return;
                 };
@@ -1194,6 +1193,43 @@ fn end_session(state: &mut State) {
         state.settings_write = Some(Err(not_connected().message));
     }
     state.harness_run = None;
+    // In-flight answers, actions and side questions belong to the dropped
+    // connection: the next snapshot decides what is still open, so a request
+    // answered before the drop is answerable again after the reconnect.
+    state.answered.clear();
+    state.actions.clear();
+    state.asking_side_question = false;
+}
+
+/// A failed answer's grace re-check: a request that is still open comes back
+/// so it can be answered again. A disconnect in between already released the
+/// answer (see `end_session`), so a stale refusal touches neither a
+/// post-reconnect answer nor the problems.
+fn reopen_refused(state: &mut State, epoch: u64, id: ThreadId, request: &str) -> bool {
+    if state.wire_epoch != epoch {
+        return false;
+    }
+    let open = state.waiting.get(&id).is_some_and(|waiting| {
+        waiting.permissions.iter().any(|p| p.request == request)
+            || waiting.asks.iter().any(|a| a.request == request)
+    });
+    if open {
+        state.answered.remove(request);
+    }
+    open
+}
+
+/// Releases a thread action's reservation. A disconnect in between already
+/// released it (see `end_session`), so a stale completion must not clear a
+/// post-reconnect reservation.
+fn release_action(state: &mut State, epoch: u64, id: ThreadId, side_question: bool) {
+    if state.wire_epoch != epoch {
+        return;
+    }
+    state.actions.remove(&id);
+    if side_question {
+        state.asking_side_question = false;
+    }
 }
 
 /// Reads the providers, models and efforts (`getConfig`) on its own thread.
@@ -2867,8 +2903,9 @@ impl ServerSource {
         fill(&mut body);
         let shared = self.shared.clone();
         let request = request.to_string();
-        shared.update(|state| {
+        let epoch = shared.update(|state| {
             state.answered.insert(request.clone());
+            state.wire_epoch
         });
         background(&self.shared, move |wire| {
             let Err(error) = wire.dispatch(command, body) else {
@@ -2876,16 +2913,10 @@ impl ServerSource {
             };
             std::thread::sleep(REFUSAL_GRACE);
             let mut state = shared.state.lock().expect("live state");
-            let open = state.waiting.get(&id).is_some_and(|waiting| {
-                waiting.permissions.iter().any(|p| p.request == request)
-                    || waiting.asks.iter().any(|a| a.request == request)
-            });
-            if open {
-                state.answered.remove(&request);
-                Err(problem(&error, None))
-            } else {
-                Ok(())
+            if !reopen_refused(&mut state, epoch, id, &request) {
+                return Ok(());
             }
+            Err(problem(&error, None))
         });
     }
     fn uuid_of(&self, id: ThreadId) -> Option<String> {
@@ -5060,6 +5091,111 @@ mod tests {
             source.take_settings_write(),
             Some(Err(not_connected().message))
         );
+    }
+
+    #[test]
+    fn a_disconnect_releases_in_flight_answers_actions_and_side_questions() {
+        let mut state = State::default();
+        state.answered.insert("ask1".into());
+        state.actions.insert(0);
+        state.asking_side_question = true;
+        end_session(&mut state);
+        assert!(state.answered.is_empty());
+        assert!(state.actions.is_empty());
+        assert!(!state.asking_side_question);
+    }
+
+    #[test]
+    fn a_stale_refusal_or_completion_does_not_touch_a_reconnect() {
+        let mut state = State {
+            waiting: HashMap::from([(
+                0,
+                Waiting {
+                    permissions: vec![Permission {
+                        request: "perm1".into(),
+                        tool: "Bash".into(),
+                        classification: None,
+                        detail: None,
+                        description: None,
+                    }],
+                    asks: vec![],
+                },
+            )]),
+            ..Default::default()
+        };
+        // The answer and the action go out on this connection.
+        let epoch = state.wire_epoch;
+        state.answered.insert("perm1".into());
+        assert!(state.reserve_action(0, true));
+        // The connection drops with the request still open and returns; the
+        // person answers (and re-dispatches) again on the new connection.
+        end_session(&mut state);
+        assert!(state.answered.is_empty());
+        state.wire_epoch += 1;
+        state.answered.insert("perm1".into());
+        assert!(state.reserve_action(0, true));
+        // The dropped connection's late refusal and completion must touch
+        // neither the new answer nor the new reservation.
+        assert!(!reopen_refused(&mut state, epoch, 0, "perm1"));
+        release_action(&mut state, epoch, 0, true);
+        assert!(state.answered.contains("perm1"));
+        assert!(state.actions.contains(&0));
+        assert!(state.asking_side_question);
+        // The new connection's own completion still releases.
+        let epoch = state.wire_epoch;
+        assert!(reopen_refused(&mut state, epoch, 0, "perm1"));
+        release_action(&mut state, epoch, 0, true);
+        assert!(!state.answered.contains("perm1"));
+        assert!(!state.actions.contains(&0));
+        assert!(!state.asking_side_question);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_before_a_disconnect_is_answerable_after_the_reconnect() {
+        let (mut source, dir) = connect_settings_test("reply-reconnect");
+        source.shared.update(|state| {
+            state.apply(&json!({
+                "projects": [{"id": "p", "title": "moxen", "workspaceRoot": "/fake/project"}],
+                "threads": [{"id": "t1", "projectId": "p", "title": "Fix",
+                    "session": {"status": "running"},
+                    "modelSelection": {"instanceId": "claude", "model": "opus"}}],
+            }));
+            state.waiting.insert(
+                0,
+                Waiting {
+                    permissions: vec![Permission {
+                        request: "perm1".into(),
+                        tool: "Bash".into(),
+                        classification: Some("command-execution".into()),
+                        detail: Some("cargo test".into()),
+                        description: None,
+                    }],
+                    asks: vec![],
+                },
+            );
+        });
+        source.decide(0, "perm1", Decision::Allow);
+        assert!(source.permission(0).is_none());
+        // The connection drops with the request still open and returns.
+        source.shared.update(end_session);
+        let (wire, _) =
+            Wire::connect(dir.join("s.sock").to_str().expect("socket path")).expect("reconnect");
+        source.shared.update(|state| {
+            state.wire_epoch += 1;
+            state.wire = Some(Arc::new(wire));
+        });
+        // Still open, and answerable again.
+        assert_eq!(
+            source.permission(0).map(|ask| ask.request),
+            Some("perm1".into())
+        );
+        source.decide(0, "perm1", Decision::Allow);
+        assert!(source.permission(0).is_none());
+        // The re-answer reaches the server and no stale refusal surfaces.
+        std::thread::sleep(REFUSAL_GRACE + Duration::from_millis(200));
+        assert!(source.take_problem().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
