@@ -477,9 +477,11 @@ transfer still reaches the old thread — the task's next report, and
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its
-turns is running, the palette's Continue in a new thread row is disabled
-("turn still running") and dispatching `thread.continue` anyway is refused
-with `THREAD_BUSY`, before any destination or continuation note is written —
+turns is running, or hides in an unreadable ledger line, the palette's
+Continue in a new thread row is disabled ("turn still running") and
+dispatching `thread.continue` anyway is refused — `THREAD_BUSY` for the
+running turn, `TURNS_LEDGER_CORRUPT` for the unreadable line — before any
+destination or continuation note is written —
 the two workers would start in the same checkout side by side. Once the
 reservation wins, the source is claimed until the handoff lands: no turn may
 start there in the meantime (a racing send, background wake-up or scheduled

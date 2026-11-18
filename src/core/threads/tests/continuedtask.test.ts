@@ -906,9 +906,8 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
     const before = await w.store.listThreadIds();
     // Replace the running turn's row — the last line — with a torn tail: no
-    // trailing newline. The first sight only notes it as pending, so read
-    // once to persist it; the reservation's read is then the confirming
-    // second sight and fails closed.
+    // trailing newline. The reservation's admission read reports it at once
+    // and fails closed.
     const file = w.store.turnsFile(source.id);
     const rows = (await readFile(file, "utf8")).split("\n").filter((line) => line.trim().length > 0);
     const index = rows.findIndex((line) => line.includes(running.id));
