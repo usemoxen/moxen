@@ -354,14 +354,24 @@ describe("a thread continued in a new one", () => {
     expect(calls.stopped).not.toContain(continued.threadId);
   });
 
-  it("stops the background tasks it can name, and keeps the session, while a turn is still open on it", async () => {
+  it("refuses while a turn is still open on it, stopping or creating nothing", async () => {
     const w = await world();
     const old = await w.make("old");
-    await sendTurn(w.store, old.id, { prompt: "Work" });
+    const running = (await sendTurn(w.store, old.id, { prompt: "Work" })).turn;
     const calls = watch(w, ["watcher"]);
-    await continueThread(w.ctx, { threadId: old.id });
-    expect(calls.taskStops).toEqual([`${old.id}:watcher`]);
+    const before = await w.store.listThreadIds();
+    // MXN-372: a manual continue beside an active turn would start a second
+    // worker in the same checkout, so the server refuses before touching it.
+    await expect(continueThread(w.ctx, { threadId: old.id })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    expect(calls.taskStops).toEqual([]);
     expect(calls.stopped).toEqual([]);
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readActivities(old.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+    // The same call goes through once the turn settles.
+    await completeTurn(w.store, old.id, running.id, { text: "Done." });
+    const continued = await continueThread(w.ctx, { threadId: old.id });
+    expect(calls.stopped).toEqual([old.id]);
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(old.id);
   });
 
   it("ends the orchestrator's session but not a running child's, which moves to the new thread", async () => {
@@ -377,5 +387,100 @@ describe("a thread continued in a new one", () => {
     const continued = await continueThread(w.ctx, { threadId: parent.id });
     expect(calls.stopped).toEqual([parent.id]);
     expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(continued.threadId);
+  });
+});
+
+describe("a manual continue with an active turn (MXN-372)", () => {
+  it("refuses a running parent and a running delegated child, each naming its own turn", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const parentRunning = (await sendTurn(w.store, parent.id, { prompt: "Plan" })).turn;
+    const childRunning = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    const before = await w.store.listThreadIds();
+
+    await expect(continueThread(w.ctx, { threadId: parent.id })).rejects.toThrow("has an active turn");
+    await expect(continueThread(w.ctx, { threadId: child.id })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    expect(await w.store.listThreadIds()).toEqual(before);
+    for (const id of [parent.id, child.id]) {
+      expect((await w.store.readActivities(id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+    }
+
+    // Each goes through once its own turn settles; the other thread's turn does not matter.
+    await completeTurn(w.store, parent.id, parentRunning.id, { text: "Delegated." });
+    const continued = await continueThread(w.ctx, { threadId: parent.id });
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(parent.id);
+    await completeTurn(w.store, child.id, childRunning.id, { text: "Done." });
+    await flushTurnRunners();
+  });
+
+  it("still continues an idle thread with scheduled work", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const first = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "Done for now." });
+    // Queued for later is not running: an idle thread with schedules still continues.
+    await sendTurn(w.store, source.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
+    expect(openTurn(await w.store.readTurns(continued.threadId))).not.toBeNull();
+    await flushTurnRunners();
+  });
+
+  it("two overlapping continues on a running source both refuse, creating nothing", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const before = await w.store.listThreadIds();
+
+    // One shared run, rejected before any reservation: both callers see the
+    // refusal and neither leaves a destination or a note behind.
+    const outcomes = await Promise.allSettled([continueThread(w.ctx, { threadId: source.id }), continueThread(w.ctx, { threadId: source.id })]);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+    for (const outcome of outcomes) expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: "THREAD_BUSY" });
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+    await interruptTurn(w.store, source.id, running.id);
+  });
+
+  it("a send racing a continue leaves no partial reservation", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done for now." });
+
+    // Serialized on the source lock: either the send lands first and the
+    // continue refuses, or the reservation lands first and both stand — but
+    // never a note without a destination, or two destinations.
+    const [sent, continued] = await Promise.all([
+      sendTurn(w.store, source.id, { prompt: "Racing send" }).then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      ),
+      continueThread(w.ctx, { threadId: source.id }).then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      ),
+    ]);
+    expect(sent.status).toBe("fulfilled");
+    const notes = (await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued");
+    if (continued.status === "rejected") {
+      expect(continued.reason).toMatchObject({ code: "THREAD_BUSY" });
+      expect(notes).toHaveLength(0);
+    } else {
+      expect(notes).toHaveLength(1);
+      expect(notes[0]!.payload?.threadId).toBe(continued.value.threadId);
+    }
+    for (const turn of await w.store.readTurns(source.id)) {
+      if (turn.status === "running") await interruptTurn(w.store, source.id, turn.id);
+    }
+    if (continued.status === "fulfilled") {
+      for (const turn of await w.store.readTurns(continued.value.threadId)) {
+        if (turn.status === "running") await interruptTurn(w.store, continued.value.threadId, turn.id);
+      }
+    }
   });
 });

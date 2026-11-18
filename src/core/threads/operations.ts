@@ -1259,6 +1259,12 @@ const continuationRuns = new Map<string, Promise<ContinuedThread>>();
  * handoff document built from the old thread's ledger. The old thread is
  * left as it is, with a note pointing at its continuation.
  *
+ * A manual continue (the user's own action, not the server's recovery, a
+ * queued handoff or an agent's) refuses a source with an active turn
+ * (`THREAD_BUSY`): the two workers would start in the same checkout side by
+ * side. Queued or scheduled work is not active, so an idle thread with
+ * schedules still continues.
+ *
  * Concurrent calls on one source share a single destination (see
  * `continuationRuns`), and a retry after a crash rejoins the reserved
  * destination instead of creating another (`reserveContinuation`).
@@ -1274,19 +1280,51 @@ export function continueThread(ctx: OperationContext, request: ContinueThreadReq
 }
 
 /**
+ * Whether this request is the user's own Continue action (the palette row,
+ * the modal behind it, `threads continue`): neither the server's own
+ * recovery nor a queued handoff's, nor an agent's. Only those refuse a
+ * running source: the automatic paths run after a settle, and the queued
+ * and agent paths carry their own ordering (an entry condition on the
+ * source, a thread condition on it).
+ */
+function isManualContinue(request: ContinueThreadRequest): boolean {
+  return request.automatic !== true && request.byAgent !== true && request.destinationThreadId === undefined;
+}
+
+/**
  * Pick the destination before creating it, persisting a new id on the
  * source under its thread lock. An explicit id (a queued handoff's) is
  * its own reservation; otherwise a usage-recovery reservation wins, then
  * a note an earlier call left, then a fresh id recorded now — so a second
  * overlapping call, or a retry after a crash between reservation and
  * creation, finds the same destination instead of creating another.
+ *
+ * A manual continue refuses a running source inside the same lock, before
+ * any note or destination exists: serialized with active-turn admission
+ * (`sendTurn` takes this same lock), a turn starting now either lands first
+ * and refuses this call, or lands after the reservation and runs on the old
+ * thread by the user's own later choice. Queued work is not a running turn,
+ * so an idle thread with schedules still continues.
  */
 async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string): Promise<string> {
-  if (request.destinationThreadId) return request.destinationThreadId;
-  if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
+  const manual = isManualContinue(request);
+  if (!manual) {
+    if (request.destinationThreadId) return request.destinationThreadId;
+    if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
+  }
   return await store.withThreadLock(source.id, async () => {
     const current = await store.readThreadRecord(source.id);
-    if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
+    const live = current ?? source;
+    if (manual) {
+      const running = openTurn(await store.readTurns(live.id));
+      if (running) {
+        throw new CliError("THREAD_BUSY", `Thread ${live.id} has an active turn. Retry when idle.`, {
+          exitCode: 4,
+          details: { threadId: live.id, turnId: running.id },
+        });
+      }
+      if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
+    } else if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
     const notes = await store.readActivities(source.id);
     const prior = notes.find((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string");
     if (prior) return prior.payload!.threadId as string;

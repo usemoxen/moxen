@@ -92,6 +92,30 @@ function rowWith(setup: TestRendererSetup, ...texts: string[]): { x: number; y: 
   return { x, y };
 }
 
+/**
+ * Report the open thread's session with another status on live frames. The
+ * fixture's open thread is running, which now disables the palette's
+ * continue row — so the modal scenarios idle it instead (queued or scheduled
+ * work may still stand; only a running turn disables the row), while the
+ * busy-row scenario forces running on the thread the app actually opens.
+ */
+function sessionThreads(subscribe: ClientApi["subscribeThread"], status: "running" | "idle"): ClientApi["subscribeThread"] {
+  return ((threadId: string, options: object, onItem: (item: unknown) => void, onError?: (cause: unknown) => void) =>
+    (subscribe as (...args: unknown[]) => () => void)(threadId, options, (item: unknown) => {
+      if (typeof item === "object" && item !== null && (item as { kind?: unknown }).kind === "snapshot") {
+        const frame = item as { snapshot?: { thread?: Record<string, unknown> } };
+        if (frame.snapshot?.thread) {
+          (onItem as (frame: unknown) => void)({
+            ...(item as Record<string, unknown>),
+            snapshot: { ...frame.snapshot, thread: { ...frame.snapshot.thread, session: { threadId, status, lastError: null } } },
+          });
+          return;
+        }
+      }
+      (onItem as (frame: unknown) => void)(item);
+    }, onError)) as unknown as ClientApi["subscribeThread"];
+}
+
 async function openContinueFromPalette(setup: TestRendererSetup): Promise<void> {
   await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
   await setup.flush();
@@ -130,6 +154,7 @@ export async function runContinueModal(): Promise<void> {
       return client.dispatch(command);
     }) as unknown as ClientApi["dispatch"],
     getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+    subscribeThread: sessionThreads(client.subscribeThread, "idle"),
   };
   const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
     width: 120,
@@ -235,6 +260,7 @@ export async function runContinueModalSpanish(): Promise<void> {
   const isolated: ClientApi = {
     ...client,
     getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+    subscribeThread: sessionThreads(client.subscribeThread, "idle"),
   };
   const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" ui={{ language: "es-ES" }} />, {
     width: 120,
@@ -351,7 +377,7 @@ export async function runContinueModalLimited(): Promise<void> {
       return client.dispatch(command);
     }) as unknown as ClientApi["dispatch"],
     getConfig: (() => Promise.resolve(limitedCatalog())) as unknown as ClientApi["getConfig"],
-    subscribeThread: limitedThreads(resetsAt),
+    subscribeThread: sessionThreads(limitedThreads(resetsAt), "idle"),
   };
   const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
     width: 120,
@@ -437,6 +463,60 @@ export async function runContinueModalLimited(): Promise<void> {
 }
 
 /**
+ * While the open thread's turn runs, the palette's continue row is disabled
+ * with the same words as the revert row, and picking it opens nothing: the
+ * server would refuse it (`THREAD_BUSY`). A turn that starts after the
+ * palette opened is refused the same way instead (see
+ * `runContinueModalRetry`).
+ */
+export async function runContinueModalBusy(): Promise<void> {
+  type Dispatch = Parameters<ClientApi["dispatch"]>[0];
+  const commands: Dispatch[] = [];
+  const isolated: ClientApi = {
+    ...client,
+    dispatch: ((command: Dispatch) => {
+      commands.push(command);
+      return client.dispatch(command);
+    }) as unknown as ClientApi["dispatch"],
+    getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+    // Whatever the app opens, its turn is running: the row must read busy.
+    subscribeThread: sessionThreads(client.subscribeThread, "running"),
+  };
+  const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
+    width: 120,
+    height: 30,
+    exitOnCtrlC: false,
+  });
+  try {
+    await waitFor(setup, "the thread view did not settle", (frame) => frame.includes("Claude Opus 5"));
+    await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+    await setup.flush();
+    for (const char of "continu") {
+      await act(async () => setup.mockInput.pressKey(char));
+      await setup.flush();
+    }
+    const palette = await waitFor(
+      setup,
+      "the palette did not narrow to the disabled continue row",
+      (frame) => frame.includes("Continue in a new thread") && frame.includes("turn still running"),
+    );
+    console.log("--- continue palette (turn running) ---");
+    console.log(palette);
+    const narrowed = palette.split("\n");
+    const row = narrowed.findIndex((line) => line.includes("Continue in a new thread"));
+    await act(async () => setup.mockMouse.click(narrowed[row]!.indexOf("Continue in a new thread") + 2, row));
+    await setup.flush();
+    const stayed = setup.captureCharFrame();
+    console.log("--- continue palette (picked while running) ---");
+    console.log(stayed);
+    if (stayed.includes("enter continues")) fail("picking the disabled continue row opened the modal");
+    if (commands.length !== 0) fail(`the disabled continue row dispatched ${commands.length} commands`);
+  } finally {
+    setup.renderer.destroy();
+  }
+}
+
+/**
  * A rejected continue keeps the modal open: the draft stays intact for
  * retry instead of dropping the user into the model picker.
  */
@@ -456,6 +536,7 @@ export async function runContinueModalRetry(): Promise<void> {
       return client.dispatch(command);
     }) as unknown as ClientApi["dispatch"],
     getConfig: (() => Promise.resolve(catalog())) as unknown as ClientApi["getConfig"],
+    subscribeThread: sessionThreads(client.subscribeThread, "idle"),
   };
   const setup = await testRender(<App client={isolated} onQuit={() => {}} launchView="thread" />, {
     width: 120,

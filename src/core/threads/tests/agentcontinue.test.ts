@@ -214,7 +214,8 @@ describe("continueOwnThread: consecutive agent continuations", () => {
   it("refuses a thread held by usage protection, and leaves the palette path alone", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "Work" });
+    const started = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, started.id, { text: "Held." });
     await w.store.withThreadLock(source.id, async () => {
       const current = await w.store.readThreadRecord(source.id);
       if (current) await w.store.writeThreadRecord({ ...current, usagePause: { provider: "codex", phase: "waiting", resetsAt: null, order: 1, handoff: false } });
@@ -361,14 +362,28 @@ describe("continueOwnThread: mid-turn ordering", () => {
     expect(openTurn(await w.store.readTurns(continued.threadId))).not.toBeNull();
   });
 
-  it("still starts the new thread at once on the palette path, with a turn running", async () => {
+  it("refuses the palette path with a turn running, with no changes or new thread", async () => {
     const w = await world();
     const source = await w.make("solo");
-    await sendTurn(w.store, source.id, { prompt: "Work" });
+    const running = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    const before = await w.store.listThreadIds();
 
+    // The user-facing path now refuses instead of starting beside the turn.
+    const failure = await codeOf(() => continueThread(w.ctx, { threadId: source.id }));
+    expect(failure).toBe("THREAD_BUSY");
+    try {
+      await continueThread(w.ctx, { threadId: source.id });
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(CliError);
+      expect((cause as CliError).message).toContain("active turn");
+    }
+    expect(await w.store.listThreadIds()).toEqual(before);
+    expect((await w.store.readActivities(source.id)).filter((activity) => activity.kind === "thread.continued")).toHaveLength(0);
+
+    // Once the turn settles the same call goes through.
+    await interruptTurn(w.store, source.id, running.id);
     const continued = await continueThread(w.ctx, { threadId: source.id });
-    // The user-facing path is unchanged: the destination starts immediately.
-    expect(openTurn(await w.store.readTurns(continued.threadId))).not.toBeNull();
+    expect((await w.store.readThreadRecord(continued.threadId))?.continuedFrom).toBe(source.id);
     await settleRuns();
   });
 });
