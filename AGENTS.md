@@ -8,6 +8,8 @@ Keep this file under 200 lines and 10,000 characters.
 
 ## How to work
 
+- Rules shared by every Moxen repo are in `AGENTS.base.md` in the private
+  `usemoxen/home` repo (`~/moxen/home`). This file adds Moxen's own.
 - Check `git status` first. The tree may hold someone else's changes; don't
   revert, stash or commit what you didn't change.
 - Respect the layering: core, then the server boundary, then the clients. New
