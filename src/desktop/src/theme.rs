@@ -38,26 +38,66 @@ static TOKENS: LazyLock<serde_json::Value> = LazyLock::new(|| {
 // default, aliases and tokens without a palette counterpart still come
 // from the pinned design system.
 type Scheme = HashMap<&'static str, Hsla>;
+
+/// The scheme header of one palette block (`  name: {`, quotes optional):
+/// trimmed before matching, so a reindent or a new quoting style cannot
+/// silently drop a scheme.
+fn scheme_name(line: &'static str) -> Option<&'static str> {
+    let name = line
+        .trim()
+        .strip_suffix('{')?
+        .trim_end()
+        .strip_suffix(':')?;
+    let name = name.trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(name.trim_matches('"'))
+}
+
+/// One palette role (`    role: "#rrggbb",`): anything else on the line —
+/// the `label`, the interface above the palettes — is not a color.
+fn scheme_role(line: &'static str) -> Option<(&'static str, &'static str)> {
+    let line = line.trim().strip_suffix(',')?;
+    let (role, value) = line.split_once(':')?;
+    let role = role.trim();
+    let hex = value
+        .trim()
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .strip_prefix('#')?;
+    if role.is_empty() || role.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((role, hex))
+}
+
+/// A palette hex: exactly six hex digits. A malformed one fails the test
+/// suite (see `every_tui_palette_color_is_six_hex_digits`) instead of
+/// panicking on first paint, and names the offender here too.
+fn scheme_color(scheme: &str, role: &str, hex: &str) -> Hsla {
+    let valid = hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid {
+        panic!("TUI palette color is not six hex digits: {scheme} {role} #{hex}");
+    }
+    rgb(u32::from_str_radix(hex, 16).expect("TUI palette color")).into()
+}
+
 static SCHEMES: LazyLock<HashMap<&'static str, Scheme>> = LazyLock::new(|| {
     let mut schemes = HashMap::new();
     let mut name = None;
     for line in include_str!("../../tui/themes.ts").lines() {
-        if let Some(header) = line
-            .strip_prefix("  ")
-            .and_then(|line| line.strip_suffix(": {"))
-        {
-            name = Some(header.trim_matches('"'));
-        } else if line.starts_with("  },") {
+        if let Some(header) = scheme_name(line) {
+            name = Some(header);
+        } else if line.trim().starts_with('}') {
             name = None;
-        } else if let Some(name) = name
-            && let Some((role, hex)) = line.trim().split_once(": \"#")
-            && let Some(hex) = hex.strip_suffix("\",")
+        } else if let Some(scheme) = name
+            && let Some((role, hex)) = scheme_role(line)
         {
-            let color = rgb(u32::from_str_radix(hex, 16).expect("TUI palette color")).into();
             schemes
-                .entry(name)
+                .entry(scheme)
                 .or_insert_with(HashMap::new)
-                .insert(role, color);
+                .insert(role, scheme_color(scheme, role, hex));
         }
     }
     schemes
@@ -225,6 +265,60 @@ pub fn float_shadow() -> Vec<gpui::BoxShadow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_schemes_match_the_tui_theme_keys() {
+        // The keys the TUI declares, read with nothing but the block syntax:
+        // if the palette parser above ever skips a scheme, this names it.
+        let mut keys = include_str!("../../tui/themes.ts")
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_suffix('{')
+                    .and_then(|line| line.trim_end().strip_suffix(':'))
+                    .map(|name| name.trim().trim_matches('"').to_string())
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        let mut parsed = SCHEMES
+            .keys()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        parsed.sort();
+        assert_eq!(parsed, keys);
+    }
+
+    #[test]
+    fn every_tui_palette_color_is_six_hex_digits() {
+        // Every `"#…"` literal in the TUI palette file, independent of the
+        // parser above: a malformed hex fails here, not on first paint. The
+        // count must match the parsed roles, so a silently skipped line
+        // fails loudly too.
+        let mut colors = 0;
+        for (index, line) in include_str!("../../tui/themes.ts").lines().enumerate() {
+            let mut rest = line;
+            while let Some(start) = rest.find("\"#") {
+                rest = &rest[start + 1..];
+                let end = rest.find('"').expect("TUI palette color closes its quote");
+                let hex = &rest[1..end];
+                assert!(
+                    hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "TUI palette color is not six hex digits (line {}): #{hex}",
+                    index + 1,
+                );
+                colors += 1;
+                rest = &rest[end + 1..];
+            }
+        }
+        assert!(colors > 0);
+        assert_eq!(colors, SCHEMES.values().map(HashMap::len).sum::<usize>());
+    }
+
+    #[test]
+    #[should_panic(expected = "TUI palette color is not six hex digits: test accent #zzzzzz")]
+    fn a_malformed_hex_names_the_scheme_and_role() {
+        scheme_color("test", "accent", "zzzzzz");
+    }
 
     #[test]
     fn known_schemes_use_the_design_system_and_unknown_ones_use_moxen() {
