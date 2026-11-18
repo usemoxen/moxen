@@ -1927,14 +1927,21 @@ async function markTransferMoved(
 }
 
 /**
- * Unstage transfer claims whose destination entry never landed, so a later
- * continue reads them as ordinary source work instead of a move that already
- * happened. Only entries with no destination entry at all are touched: a
- * whole, live destination entry keeps its marker so cross-thread dependents
- * keep following it to the new thread. Runs on every non-manual continue,
- * which never runs the migration itself — without this, a crash between
- * staging and destination creation would leave the source rows removed and
- * hidden forever.
+ * Unstage transfer claims whose destination entry provably never landed, so a
+ * later continue reads them as ordinary source work instead of a move that
+ * already happened. Only entries with no destination entry at all are
+ * touched: a whole, live destination entry keeps its marker so cross-thread
+ * dependents keep following it to the new thread. Runs on every non-manual
+ * continue, which never runs the migration itself — without this, a crash
+ * between staging and destination creation would leave the source rows
+ * removed and hidden forever.
+ *
+ * Absence must be proven on a complete snapshot. A failed destination read
+ * is unknown, not empty — and a skipped destination row could be the entry
+ * itself — so either leaves that destination's markers staged rather than
+ * risking two runnable copies once reads recover. A clean empty read (the
+ * destination was never created) still unstages, so actual abandoned claims
+ * keep recovering.
  *
  * Takes only the source thread lock, never the queue-admission lock: the
  * queue-handoff preparation path reaches here holding the admission lock
@@ -1950,14 +1957,31 @@ export async function reconcileAbandonedTransferClaims(ctx: OperationContext, so
     const turns = await store.readTurns(sourceId);
     const marked = turns.filter((turn) => isTransferredTurn(turn));
     if (marked.length === 0) return;
-    const byDest = new Map<string, StoredTurn[]>();
+    const proven = new Map<string, StoredTurn[]>();
+    const unproven = new Set<string>();
     const unstage = new Set<string>();
     for (const turn of marked) {
       const destinationId = turn.handoff!.destinationThreadId;
-      let existing = byDest.get(destinationId);
+      if (unproven.has(destinationId)) continue;
+      let existing = proven.get(destinationId);
       if (!existing) {
-        existing = await store.readTurns(destinationId).catch(() => [] as StoredTurn[]);
-        byDest.set(destinationId, existing);
+        let reads: StoredTurn[];
+        try {
+          // Report a torn tail at once: the admission read cannot proceed
+          // on an unreadable snapshot, and this decision cannot either.
+          reads = await store.readTurns(destinationId, { reportTornTail: true });
+        } catch {
+          // Unknown, not empty: leave this destination's markers staged.
+          unproven.add(destinationId);
+          continue;
+        }
+        if (hiddenTurnsProblem(store, destinationId)) {
+          // A skipped destination row could be the entry itself.
+          unproven.add(destinationId);
+          continue;
+        }
+        existing = reads;
+        proven.set(destinationId, existing);
       }
       if (existing.some((candidate) => candidate.queue?.requestId === transferDestinationRequestId(turn.id))) continue;
       unstage.add(turn.id);
