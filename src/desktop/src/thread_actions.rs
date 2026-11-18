@@ -807,6 +807,19 @@ impl Workspace {
                     self.close_project_action(window, cx);
                     return;
                 }
+                // Duplicate titles would rename the wrong project from the
+                // sidebar: refuse locally with the server's message, inline.
+                if self
+                    .source
+                    .projects()
+                    .iter()
+                    .any(|project| project.id != id && project.title == title)
+                {
+                    self.problem =
+                        Some(format!("A project already exists with title \"{title}\"."));
+                    cx.notify();
+                    return;
+                }
                 self.source.rename_project(&id, title);
                 self.close_project_action(window, cx);
             }
@@ -914,7 +927,16 @@ pub fn project_form(
                 .child(detail),
         );
     if let ProjectForm::Rename(_) = form {
-        panel = panel.child(w.action_input.clone()).child(
+        panel = panel.child(w.action_input.clone());
+        if let Some(problem) = w.problem.clone() {
+            panel = panel.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(color("broken"))
+                    .child(problem),
+            );
+        }
+        panel = panel.child(
             crate::thread_view::menu_row("confirm-project-action", "Save name".into(), false)
                 .on_click(cx.listener(|this, _, window, cx| {
                     let text = this.action_input.read(cx).text().to_string();

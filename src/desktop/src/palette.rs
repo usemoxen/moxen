@@ -259,6 +259,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         Row::Pick(label, meta, choice) => {
                             let status = match &choice {
                                 Pick::Thread(_, status) => Some(*status),
+                                Pick::Found(id) => {
+                                    w.source.list_threads().get(*id).map(|t| t.status)
+                                }
                                 _ => None,
                             };
                             div()

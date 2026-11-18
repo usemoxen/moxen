@@ -49,16 +49,20 @@ fn badge(project: &str) -> String {
 /// ones while that section is closed, and in "This project" only the
 /// selected thread's project.
 pub fn visible(w: &Workspace, threads: &[Thread]) -> Vec<ThreadId> {
-    let project = threads.get(w.selected).map(|t| t.project.as_str());
+    let project = w
+        .source
+        .project_id(w.selected)
+        .or_else(|| threads.get(w.selected).map(|t| t.project.clone()));
     w.source
         .order(w.group != 0)
         .into_iter()
         .filter(|&i| {
             let t = &threads[i];
+            let pid = w.source.project_id(i).unwrap_or_else(|| t.project.clone());
             w.source
                 .sidebar_section(i)
                 .is_some_and(|settled| !settled || w.settled_open)
-                && (w.group != 2 || Some(t.project.as_str()) == project)
+                && (w.group != 2 || Some(pid) == project)
         })
         .collect()
 }
@@ -89,7 +93,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         .pb(px(12.))
         .flex()
         .flex_col();
-    let mut projects: Vec<&str> = vec![];
+    let mut projects: Vec<String> = vec![];
     let mut nested: Option<Div> = None;
     for i in visible(w, &threads) {
         let t = &threads[i];
@@ -98,17 +102,29 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
         {
             rows = rows.child(group);
         }
-        let title = t.project.clone();
-        if w.group != 0 && !projects.contains(&t.project.as_str()) {
+        // Group headers carry the project id: titles repeat for two checkouts
+        // with the same basename, so resolving by title would hit the wrong one.
+        let pid = w.source.project_id(i).unwrap_or_else(|| t.project.clone());
+        let title = w
+            .source
+            .projects()
+            .into_iter()
+            .find(|project| project.id == pid)
+            .map(|project| project.title)
+            .unwrap_or_else(|| t.project.clone());
+        if w.group != 0 && !projects.contains(&pid) {
             let first = projects.is_empty();
             let label = ["label-2", "label-6", "label-4", "label-3"][projects.len() % 4];
-            projects.push(&t.project);
+            projects.push(pid.clone());
             let count = listed
                 .iter()
-                .filter(|&&i| {
-                    threads[i].project == t.project
-                        && threads[i].depth == 0
-                        && w.source.sidebar_section(i) == Some(false)
+                .filter(|&&j| {
+                    w.source
+                        .project_id(j)
+                        .unwrap_or_else(|| threads[j].project.clone())
+                        == pid
+                        && threads[j].depth == 0
+                        && w.source.sidebar_section(j) == Some(false)
                 })
                 .count();
             rows = rows.child(
@@ -130,7 +146,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .line_height(px(10.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color("on-ink"))
-                            .child(badge(&t.project)),
+                            .child(badge(&title)),
                     )
                     .child(
                         div()
@@ -138,20 +154,13 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                             .text_size(px(13.))
                             .line_height(px(13.))
                             .font_weight(FontWeight::BOLD)
-                            .child(t.project.clone()),
+                            .child(title.clone()),
                     )
                     .child(meta(count.to_string()))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            let project = this
-                                .source
-                                .projects()
-                                .into_iter()
-                                .find(|project| project.title == title);
-                            if let Some(project) = project {
-                                this.open_project_menu(&project.id, event.position, window, cx);
-                            }
+                            this.open_project_menu(&pid, event.position, window, cx);
                         }),
                     ),
             );
