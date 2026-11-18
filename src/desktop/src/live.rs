@@ -412,6 +412,10 @@ struct State {
     contexts: HashMap<ThreadId, Arc<ContextData>>,
     /// Threads with a context read on the wire.
     context_reads: HashSet<ThreadId>,
+    /// When each thread's context was last read: reads ride a slow timer, as
+    /// the TUI's Context tab does, so the status line stays fresh without
+    /// polling the provider every tick.
+    context_at: HashMap<ThreadId, Instant>,
     /// The account's plan usage, and when it was read.
     limits: Option<Arc<LimitsData>>,
     limits_at: Option<Instant>,
@@ -1975,12 +1979,17 @@ fn read_tree(wire: &Wire, uuid: &str, root: Option<String>) -> Result<Patch, Str
 }
 
 /// Reads the thread's live context breakdown and its last recorded reading.
-/// A failed pair keeps the last answer and names the failure, so the Context
-/// tab reads "no data" rather than 0%.
+/// Re-reads at most every few seconds, as the TUI's Context tab does. A failed
+/// pair keeps the last answer and names the failure, so the Context tab
+/// reads "no data" rather than 0%.
 fn read_context(shared: &Arc<Shared>, id: ThreadId) {
     let uuid = {
         let mut state = shared.state.lock().expect("live state");
-        if state.wire.is_none() || !state.context_reads.insert(id) {
+        let fresh = state
+            .context_at
+            .get(&id)
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(5));
+        if state.wire.is_none() || !fresh || !state.context_reads.insert(id) {
             None
         } else {
             state.slots.get(id).map(|slot| slot.uuid.clone())
@@ -1999,6 +2008,7 @@ fn read_context(shared: &Arc<Shared>, id: ThreadId) {
         let reading = wire.query("thread.context-reading", json!({ "threadId": uuid }));
         target.update(|state| {
             state.context_reads.remove(&id);
+            state.context_at.insert(id, Instant::now());
             let previous = state.contexts.get(&id).cloned();
             let error = match (&breakdown, &reading) {
                 (Err(error), _) | (_, Err(error)) => Some(error.message.clone()),
@@ -3173,6 +3183,18 @@ mod tests {
         let hold = source.hold(0).expect("hold");
         assert!(!hold.forced);
         assert_eq!(hold.waiting, 1);
+        // A re-read inside the throttle window sends nothing new.
+        source.read_context(0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|query| query["type"] == "thread.context")
+                .count(),
+            1
+        );
 
         // The account's plan usage, with its reset times; the instance reads
         // its own account, then its driver's.

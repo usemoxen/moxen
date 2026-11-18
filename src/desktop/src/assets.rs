@@ -16,7 +16,6 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../icons/chevron-right.svg"),
     ),
     ("circle", include_bytes!("../icons/circle.svg")),
-    ("circle-dot", include_bytes!("../icons/circle-dot.svg")),
     ("circle-gauge", include_bytes!("../icons/circle-gauge.svg")),
     ("copy", include_bytes!("../icons/copy.svg")),
     ("dollar-sign", include_bytes!("../icons/dollar-sign.svg")),

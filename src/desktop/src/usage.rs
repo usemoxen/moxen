@@ -478,9 +478,13 @@ pub(crate) fn estimate_breakdown(usage: &SnapshotUsage, thread: &Value) -> Break
         }
     }
     // Each call writes a row as it starts and again as it ends, so the
-    // newest row per id stands for the call.
+    // newest row per id stands for the call. Subagent rows are the
+    // provider's own ledger of its subagents, not context.
     let mut calls: HashMap<&str, &Value> = HashMap::new();
     for activity in thread["activities"].as_array().into_iter().flatten() {
+        if text(activity, &["kind"]) == Some("subagent") {
+            continue;
+        }
         let Some(payload) = activity.get("payload") else {
             continue;
         };
@@ -1657,6 +1661,9 @@ mod tests {
             "activities": [
                 {"payload": {"toolCallId": "c9", "data": {"tool": "mcp__linear__list_issues"}}},
                 {"payload": {"toolCallId": "r1", "itemType": "reasoning", "text": "hmm"}},
+                // A subagent row carries a toolCallId but is the provider's
+                // own ledger, not context: its payload must not count.
+                {"kind": "subagent", "payload": {"toolCallId": "s1", "data": {"tool": "Huge"}, "text": "nope"}},
             ],
         });
         let breakdown = super::estimate_breakdown(&usage, &thread);

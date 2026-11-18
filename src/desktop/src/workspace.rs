@@ -96,6 +96,9 @@ pub struct Workspace {
     pub stats_open: bool,
     pub stats_tab: crate::stats::StatsTab,
     pub stats_range: crate::stats::StatsRange,
+    /// The sidebar Stats row is hovered: its tip shows to the right of the
+    /// row instead of a window tooltip over the label.
+    pub stats_tip: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl Workspace {
@@ -307,6 +310,7 @@ impl Workspace {
             stats_open: false,
             stats_tab: crate::stats::StatsTab::default(),
             stats_range: crate::stats::StatsRange::default(),
+            stats_tip: false,
             model_focus: cx.focus_handle(),
             group: 1,
             tab: 1,
@@ -619,16 +623,15 @@ impl Workspace {
         }
     }
     /// Re-reads usage while it is on screen: the account's limits and
-    /// protection on their timers, the open thread's context with its tab, and
-    /// the stats range the overlay shows but has not read yet. Reads are cheap
-    /// snapshots; each guards its own in-flight round.
+    /// protection on their timers, and the open thread's context on the TUI's
+    /// timer — the status line shows it whether or not the Context tab does.
     pub fn refresh_usage(&mut self) {
         if self.source.preview() {
             return;
         }
         self.source.read_limits();
         self.source.read_protection();
-        if self.inspector_open && !self.creating && self.tab == 2 {
+        if !self.creating {
             self.source.read_context(self.selected);
         }
         if self.stats_open && self.source.stats(self.stats_range).is_none() {
@@ -954,6 +957,31 @@ impl Render for Workspace {
                 s.child(crate::palette::render(self, cx))
             })
             .when(self.stats_open, |s| s.child(crate::stats::render(self, cx)))
+            .when(self.stats_tip, |s| {
+                // To the right of the sidebar's Stats row: a window tooltip
+                // here would flip up over the label, since the footer sits
+                // at the window's edge. The footer is padding 8 with three
+                // 30px rows; Stats is second.
+                let top = f32::from(window.viewport_size().height) - 106. + 38.;
+                s.child(
+                    div()
+                        .absolute()
+                        .left(px(theme::SIDEBAR + 8.))
+                        .top(px(top.max(0.)))
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(theme::px_token("radius", "radius-sm")))
+                        .bg(color("raised"))
+                        .shadow(theme::float_shadow())
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(color("ink"))
+                        .child("Usage stats"),
+                )
+            })
             .into_any_element()
     }
 }

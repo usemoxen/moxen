@@ -838,13 +838,18 @@ fn month_name(month: u32) -> &'static str {
 }
 
 /// The activity heatmap: one column a week, Monday first, graded in quarters
-/// of the range's busiest day; active days before the range stay grey. A week
-/// is two 12px cells and a gap, like the TUI's two cells a week, so the count
-/// comes off the content width as its does.
+/// of the range's busiest day; active days before the range stay grey. Weeks
+/// are fixed-width columns and filled cells are drawn squares: the bundled
+/// fonts carry no block glyphs, and text-measured cells overflowed the pane
+/// and clipped the newest weeks away. A week is exactly two 12px cells at
+/// this face's measured 0.632em advance, so the month labels sit over their
+/// columns.
 fn heatmap_view(data: &StatsData, today: &str) -> impl IntoElement {
+    /// One 12px cell at the face's measured advance.
+    const CELL: f32 = 12. * 0.632;
+    const WEEK: f32 = CELL * 2.;
     const CONTENT: f32 = 528.;
-    const WEEK: f32 = 16.4;
-    let weeks = ((CONTENT - 16.) / WEEK).floor().clamp(4., 53.) as usize;
+    let weeks = ((CONTENT - WEEK) / WEEK).floor().clamp(4., 53.) as usize;
     let map = heatmap(&data.daily, today, weeks, data.range);
     let header: String = {
         let mut cells = vec![" ".to_string(); 2 + weeks * 2];
@@ -878,29 +883,67 @@ fn heatmap_view(data: &StatsData, today: &str) -> impl IntoElement {
             div()
                 .flex()
                 .items_center()
-                .gap(px(2.))
                 .child(
                     div()
-                        .w(px(14.))
+                        .w(px(WEEK))
                         .font_family(theme::MONO)
                         .text_size(px(12.))
                         .text_color(color("ink-2"))
                         .child(ROWS[weekday].to_string()),
                 )
                 .children(row.iter().map(|cell| {
-                    let (token, glyph) = match cell {
-                        None => ("sunk", "  "),
-                        Some(cell) if cell.muted => ("ink-2", "■ "),
-                        Some(cell) if cell.level == 0 => ("rule", "· "),
-                        Some(_) => ("live", "■ "),
-                    };
                     div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .text_color(color(token))
-                        .child(glyph.to_string())
+                        .w(px(WEEK))
+                        .h(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(match cell {
+                            None => div().into_any_element(),
+                            Some(cell) if cell.muted => div()
+                                .size(px(10.))
+                                .rounded(px(2.))
+                                .bg(color("ink-2"))
+                                .into_any_element(),
+                            Some(cell) if cell.level == 0 => div()
+                                .font_family(theme::MONO)
+                                .text_size(px(12.))
+                                .text_color(color("rule"))
+                                .child("·".to_string())
+                                .into_any_element(),
+                            Some(cell) => div()
+                                .size(px(10.))
+                                .rounded(px(2.))
+                                .bg(color("live"))
+                                .opacity(match cell.level {
+                                    1 => 0.35,
+                                    2 => 0.55,
+                                    3 => 0.8,
+                                    _ => 1.,
+                                })
+                                .into_any_element(),
+                        })
                 }))
         }))
+}
+
+/// Whole days from the first active day to now, like the TUI's chart: local
+/// midnights, rounded, the day itself included, at least a week
+/// (`statsmodal.tsx:182`).
+pub(crate) fn all_time_span(first_day: &str, now_ms: i64) -> usize {
+    use chrono::{Local, NaiveDate, TimeZone};
+    let first_ms = (|| {
+        let day = NaiveDate::parse_from_str(first_day, "%Y-%m-%d").ok()?;
+        let midnight = day.and_hms_opt(0, 0, 0)?;
+        Local
+            .from_local_datetime(&midnight)
+            .single()
+            .map(|dt| dt.timestamp_millis())
+    })()
+    .or_else(|| crate::live::parse_iso_ms(&format!("{first_day}T00:00:00Z")));
+    first_ms
+        .map(|first| (((now_ms - first) as f64 / 86_400_000.).round() as i64 + 1).max(7) as usize)
+        .unwrap_or(7)
 }
 
 fn models(data: &StatsData) -> impl IntoElement {
@@ -912,19 +955,7 @@ fn models(data: &StatsData) -> impl IntoElement {
         StatsRange::All => data
             .daily
             .first()
-            .and_then(|first| {
-                // Local midnights, rounded, as the TUI's chart does: the span
-                // is whole days from the first active day to now.
-                use chrono::{Local, NaiveDate, TimeZone};
-                let day = NaiveDate::parse_from_str(first.day.as_str(), "%Y-%m-%d").ok()?;
-                let midnight = day.and_hms_opt(0, 0, 0)?;
-                let first_ms = Local
-                    .from_local_datetime(&midnight)
-                    .single()
-                    .map(|dt| dt.timestamp_millis())?;
-                let days = ((crate::live::now_ms() - first_ms) as f64 / 86_400_000.).round() as i64;
-                Some(days.max(7) as usize + 1)
-            })
+            .map(|first| all_time_span(&first.day, crate::live::now_ms()))
             .unwrap_or(7),
     };
     let plot = 48usize;
@@ -1239,6 +1270,58 @@ mod tests {
             range_start_day(StatsRange::Month30, "2026-08-04").as_deref(),
             Some("2026-07-06")
         );
+    }
+
+    #[test]
+    fn active_days_land_filled_in_the_right_column_and_row() {
+        // The mock fixture's three active days, on the real grid: the last
+        // 31 weeks ending Wednesday 2026-11-18, all time. Nov 12/13/14 are
+        // the Thursday–Saturday of the next-to-last week.
+        let daily = ["2026-11-12", "2026-11-13", "2026-11-14"]
+            .into_iter()
+            .map(|day| super::DayStats {
+                day: day.to_string(),
+                tokens: 100,
+                by_model: Default::default(),
+                by_provider: Default::default(),
+            })
+            .collect::<Vec<_>>();
+        let map = heatmap(&daily, "2026-11-18", 31, StatsRange::All);
+        assert_eq!(map.rows.len(), 7);
+        assert!(map.rows.iter().all(|row| row.len() == 31));
+        // Monday-first rows: Thursday is row 3, Friday 4, Saturday 5; the
+        // next-to-last column is week 29.
+        for (weekday, day) in [(3, "2026-11-12"), (4, "2026-11-13"), (5, "2026-11-14")] {
+            let cell = map.rows[weekday][29].as_ref().expect("active day");
+            assert_eq!(cell.day, day);
+            assert!(cell.level > 0, "day with activity is filled");
+            assert!(!cell.muted);
+        }
+        // The Sunday of that week stayed empty, and days past today are blank.
+        assert_eq!(map.rows[6][29].as_ref().map(|cell| cell.level), Some(0));
+        assert!(map.rows[6][30].is_none());
+        assert_eq!(
+            map.rows[2][30].as_ref().map(|cell| cell.day.as_str()),
+            Some("2026-11-18")
+        );
+    }
+
+    #[test]
+    fn all_time_span_counts_the_first_day() {
+        use chrono::{Local, NaiveDate, TimeZone};
+        let midnight = |day: &str| {
+            let date = NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("day");
+            Local
+                .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight"))
+                .single()
+                .expect("local midnight")
+                .timestamp_millis()
+        };
+        let now = midnight("2026-08-04");
+        // Ten days back, plus the first day itself; never less than a week.
+        assert_eq!(super::all_time_span("2026-07-25", now), 11);
+        assert_eq!(super::all_time_span("2026-08-04", now), 7);
+        assert_eq!(super::all_time_span("not a day", now), 7);
     }
 
     #[test]
