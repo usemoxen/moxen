@@ -711,7 +711,12 @@ impl SideAnswer {
     }
 }
 
-pub const SIDE_QUESTION_PENDING: &str = "A side question is still being answered";
+/// A side question asked while one is still being answered, in the TUI's
+/// words. This is a function (not a constant) so the render edge reads the
+/// current language.
+pub fn side_question_pending() -> &'static str {
+    crate::language::message("app.a_side_question_is_70ee")
+}
 
 #[derive(Clone, Debug)]
 pub enum ThreadAction {

@@ -88,7 +88,11 @@ pub fn render() -> impl IntoElement {
                         .gap(px(10.))
                         .text_size(px(13.))
                         .child(div().size(px(8.)).rounded(px(2.)).bg(color(token)))
-                        .child(div().flex_1().child(label))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(crate::language::tr(label).into_owned()),
+                        )
                         .child(mono(value))
                 })),
         )
@@ -97,7 +101,7 @@ pub fn render() -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(ui::caps("Plan usage"))
+                .child(ui::caps(crate::language::message("side.plan_usage_48f7")))
                 .children(
                     [("5-hour", 0.36, "36%"), ("Weekly", 0.43, "43%")]
                         .into_iter()
@@ -108,7 +112,11 @@ pub fn render() -> impl IntoElement {
                                 .gap(px(10.))
                                 .font_family(theme::MONO)
                                 .text_size(px(12.))
-                                .child(div().w(px(64.)).child(name))
+                                .child(
+                                    div()
+                                        .w(px(64.))
+                                        .child(crate::language::tr(name).into_owned()),
+                                )
                                 .child(
                                     div()
                                         .flex_1()

@@ -758,7 +758,7 @@ impl Workspace {
     /// known, a readable form of the slug until then.
     pub fn model_label(&self, selection: Option<&Selection>) -> (String, &'static str) {
         let Some(selection) = selection else {
-            return ("Default model".into(), "ink");
+            return (crate::language::tr("Default model").into_owned(), "ink");
         };
         let catalog = self.catalog();
         let name = catalog

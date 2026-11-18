@@ -413,11 +413,15 @@ impl Request {
         })
     }
 
-    /// The review's outcome as the TUI words it.
+    /// The review's outcome in the TUI's words. The inline status line keeps
+    /// the catalog's casing, as the round-3 review/checks words do.
     pub fn review_label(&self) -> Option<(&'static str, Tone)> {
         match self.review.as_deref()? {
-            "APPROVED" => Some(("Approved", Tone::Passed)),
-            "CHANGES_REQUESTED" => Some(("Changes requested", Tone::Failed)),
+            "APPROVED" => Some((crate::language::message("git.approved_787d"), Tone::Passed)),
+            "CHANGES_REQUESTED" => Some((
+                crate::language::message("git.changes_requested_51ca"),
+                Tone::Failed,
+            )),
             "REVIEW_REQUIRED" => Some((
                 crate::language::message("git.review_required_d01e"),
                 Tone::Pending,
@@ -737,36 +741,37 @@ pub enum Patch {
 
 // -- words --------------------------------------------------------------------
 
-/// "3 minutes ago", "yesterday", "2 months ago": how GitHub words an age.
+/// "3 minutes ago", "1 week ago", "2 months ago": how the TUI words an age
+/// (`ago.*`), so the commit rows read the same in both clients.
 pub fn ago(iso: &str, now_ms: i64) -> String {
+    use crate::language::plural;
     let Some(at) = parse_iso_ms(iso) else {
         return String::new();
     };
     let seconds = ((now_ms - at) / 1000).max(0);
-    let unit = |n: i64, name: &str| format!("{n} {name}{} ago", if n == 1 { "" } else { "s" });
     if seconds < 60 {
-        return "just now".into();
+        return crate::language::message("ago.now").into();
     }
     let minutes = seconds / 60;
     if minutes < 60 {
-        return unit(minutes, "minute");
+        return plural("ago.minute.one", "ago.minute.other", minutes as usize);
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return unit(hours, "hour");
+        return plural("ago.hour.one", "ago.hour.other", hours as usize);
     }
     let days = hours / 24;
-    if days == 1 {
-        return "yesterday".into();
+    if days < 7 {
+        return plural("ago.day.one", "ago.day.other", days as usize);
     }
     if days < 30 {
-        return unit(days, "day");
+        return plural("ago.week.one", "ago.week.other", (days / 7) as usize);
     }
     let months = days / 30;
     if months < 12 {
-        return unit(months, "month");
+        return plural("ago.month.one", "ago.month.other", months as usize);
     }
-    unit(days / 365, "year")
+    plural("ago.year.one", "ago.year.other", (days / 365) as usize)
 }
 
 /// The instructions an agent gets to open the request, word for word what the
@@ -980,7 +985,7 @@ mod tests {
         assert!(status.conflicting);
         assert_eq!(
             status.request.review_label().unwrap().0,
-            "Changes requested"
+            "changes requested"
         );
         // No rollup: the named runs are counted.
         assert_eq!(status.checks().unwrap().glance().unwrap().1, "1/2");
@@ -1051,14 +1056,16 @@ mod tests {
     }
 
     #[test]
-    fn ages_read_like_github() {
+    fn ages_read_like_the_tui() {
         let now = parse_iso_ms("2026-11-17T12:00:00Z").unwrap();
         let at = |iso: &str| ago(iso, now);
         assert_eq!(at("2026-11-17T11:59:30Z"), "just now");
         assert_eq!(at("2026-11-17T11:59:00Z"), "1 minute ago");
         assert_eq!(at("2026-11-17T09:00:00Z"), "3 hours ago");
-        assert_eq!(at("2026-11-16T09:00:00Z"), "yesterday");
-        assert_eq!(at("2026-11-07T12:00:00Z"), "10 days ago");
+        // The TUI has no "yesterday": one day reads "1 day ago", and weeks
+        // cover 7 to 29 days.
+        assert_eq!(at("2026-11-16T09:00:00Z"), "1 day ago");
+        assert_eq!(at("2026-11-07T12:00:00Z"), "1 week ago");
         assert_eq!(at("2026-08-17T12:00:00Z"), "3 months ago");
         assert_eq!(at("not a date"), "");
     }

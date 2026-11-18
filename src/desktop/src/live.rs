@@ -18,8 +18,8 @@ use crate::{
         Answer, Ask, CatalogState, Connection, Decision, Delivery, Embeddings, HarnessRun,
         ManagedSkill, MemoryDraft, MemoryEntry, MemoryList, MemorySearch, MergeStrategy, Message,
         NewRequest, NewThread, Permission, Problem, Project, QueueEdit, Queued, RemoteState, Reply,
-        SIDE_QUESTION_PENDING, Selection, SettingsNotice, SideAnswer, Snapshot, Status, Thread,
-        ThreadAction, ThreadId, ThreadSource, UpdateState,
+        Selection, SettingsNotice, SideAnswer, Snapshot, Status, Thread, ThreadAction, ThreadId,
+        ThreadSource, UpdateState,
     },
     pending,
     settings::{self, Discovery},
@@ -595,7 +595,7 @@ impl State {
     fn reserve_action(&mut self, id: ThreadId, is_side_question: bool) -> bool {
         if is_side_question && self.asking_side_question {
             self.problems.push_back(Problem {
-                message: SIDE_QUESTION_PENDING.into(),
+                message: crate::model::side_question_pending().into(),
                 unsent: None,
             });
             return false;
@@ -4224,7 +4224,7 @@ mod tests {
         assert!(!state.reserve_action(1, true));
         assert_eq!(
             state.problems.pop_front().unwrap().message,
-            SIDE_QUESTION_PENDING
+            crate::model::side_question_pending()
         );
         assert!(state.reserve_action(1, false));
     }

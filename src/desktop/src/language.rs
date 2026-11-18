@@ -134,28 +134,43 @@ pub fn show_fewer_branches() -> String {
         .to_string()
 }
 
-/// The sidebar's age column in the TUI's words. The model writes compact
-/// tokens (`relative_age`: `now`, `45s`, `12m`, `3h`, `4d`); `now` is
-/// `time.now` ("ahora"), and minute/hour tokens use the TUI's duration forms
-/// (`time.minutes`, `time.hours`), which read the same in both languages.
-/// Seconds and days have no TUI form, so they stay as the model wrote them.
+/// A GUI word: buttons, chips, tabs and headings start with a capital letter
+/// in both languages, while the TUI catalog keeps its own casing ("hold",
+/// "retener"). Capitalizing the first character is a no-op for strings that
+/// already start capital, for counts ("2 en marcha") and for glyph-led
+/// strings ("■ stop", "+5 más"), so it is safe at every render edge it wraps.
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// One `{count}` thing in the TUI's words: the `.one` key for a single item,
+/// `.other` past it (git files, ago units, run summaries).
+pub fn plural(one: &'static str, other: &'static str, count: usize) -> String {
+    let count = count.to_string();
+    fill(
+        if count == "1" { one } else { other },
+        &[("{count}", count.as_str())],
+    )
+}
+
+/// An action that opens outside the window: the TUI's word without its
+/// terminal `↗` (the desktop buttons show no external-link glyph) and the
+/// terminal padding trimmed, capitalized as a GUI button. English is
+/// unaffected ("Open"); Spanish reads "Abrir".
+pub fn open_label(key: &'static str) -> String {
+    let text = message(key).trim_start().trim_end_matches('↗').trim_end();
+    capitalized(text)
+}
+
+/// The sidebar's age column, rendered raw like the TUI sidebar renders it:
+/// the model writes compact tokens (`relative_age`: `0s`, `45s`, `12m`,
+/// `3h`, `4d`), and the TUI shows them untranslated in both languages, so
+/// the desktop does the same — no translation, no spacing.
 pub fn age(raw: &str) -> String {
-    if !spanish() {
-        return raw.to_string();
-    }
-    if raw == "now" {
-        return message("time.now").to_string();
-    }
-    let token = |suffix: char, key: &'static str, name: &str| {
-        raw.strip_suffix(suffix)
-            .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-            .map(|number| fill(key, &[(name, number)]))
-    };
-    if let Some(text) =
-        token('m', "time.minutes", "{m}").or_else(|| token('h', "time.hours", "{h}"))
-    {
-        return text;
-    }
     raw.to_string()
 }
 
@@ -179,6 +194,17 @@ pub fn tr(text: &str) -> Cow<'_, str> {
     Cow::Borrowed(text)
 }
 
+/// A settings value that names no user data: `Default`, `On`, `Off` and the
+/// stored-secret placeholder. Names, paths and numbers draw as-is, so a
+/// profile or model that happens to share a word with the catalog is never
+/// translated by accident.
+pub fn setting_value(text: &str) -> Cow<'_, str> {
+    match text {
+        "Default" | "On" | "Off" | "Saved in the keychain" => tr(text),
+        _ => Cow::Borrowed(text),
+    }
+}
+
 /// The desktop's own words: what its fixed labels say in Spanish. Every one
 /// is pinned by `doctor_labels_have_spanish_strings` and
 /// `desktop_words_win_over_the_reverse_catalog` below.
@@ -192,6 +218,7 @@ fn desktop_word(text: &str) -> Option<&'static str> {
         "Jump to thread or action" => "Ir a un hilo o acción",
         "New thread in this project" => "Nuevo hilo en este proyecto",
         "Show settled threads" => "Mostrar hilos cerrados",
+        "Show archived threads" => "Mostrar hilos archivados",
         "Search threads and actions" => "Buscar hilos y acciones",
         "What should the agent do?" => "¿Qué debe hacer el agente?",
         "Steer the agent…" => "Orienta al agente…",
@@ -212,6 +239,8 @@ fn desktop_word(text: &str) -> Option<&'static str> {
         // so these are the desktop's own words.
         "Store" => "Almacén",
         "Authentication" => "Autenticación",
+        "Updates" => "Actualizaciones",
+        "Close" => "Cerrar",
         _ => return None,
     })
 }
@@ -376,12 +405,12 @@ mod tests {
             .track(),
             "in sync"
         );
-        // The sidebar ages: now and the TUI's minute/hour forms; seconds and
-        // days have no TUI form and stay as the model wrote them.
-        assert_eq!(age("now"), "ahora");
-        assert_eq!(age("5m"), "5 min");
-        assert_eq!(age("2h"), "2 h");
+        // The sidebar ages render raw like the TUI sidebar does: compact
+        // tokens (`relativeAge`) in both languages, never translated.
+        assert_eq!(age("0s"), "0s");
         assert_eq!(age("45s"), "45s");
+        assert_eq!(age("5m"), "5m");
+        assert_eq!(age("2h"), "2h");
         assert_eq!(age("3d"), "3d");
         apply(Some("en"), None);
         assert_eq!(RequestState::Open.label(), "Open");
@@ -402,9 +431,146 @@ mod tests {
             "open the failing run ↗"
         );
         // English keeps the sidebar's compact tokens, as the TUI does.
-        assert_eq!(age("now"), "now");
+        assert_eq!(age("0s"), "0s");
         assert_eq!(age("5m"), "5m");
         assert_eq!(age("2h"), "2h");
+    }
+
+    #[test]
+    fn spanish_sweep_routes_settings_live_and_chrome() {
+        // The settings, live-notice and chrome strings the MXN-345 Spanish
+        // sweep routes through the TUI's own wording. The TUI numbers its
+        // terminal permission rows, so the render edge drops the prefix the
+        // same way `ask.rs` does (the desktop numbers its own rows).
+        let strip = |text: &str| {
+            text.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
+                .to_string()
+        };
+        apply(Some("es-ES"), None);
+        assert_eq!(strip(message("perm.1_yes_d834")), "Sí");
+        assert_eq!(
+            strip(&fill("perm.yesAlways", &[("{tool}", "Bash")])),
+            "Sí, y no volver a preguntar por Bash"
+        );
+        assert_eq!(message("continue.start"), "Continuar");
+        assert_eq!(message("continue.cancel"), "Cancelar");
+        assert_eq!(
+            message("app.a_side_question_is_70ee"),
+            "Todavía se está respondiendo otra pregunta aparte"
+        );
+        assert_eq!(
+            crate::model::side_question_pending(),
+            "Todavía se está respondiendo otra pregunta aparte"
+        );
+        // Settings values name no user data, so only the sentinels translate
+        // and anything else draws as-is.
+        assert_eq!(setting_value("Default"), "Por defecto");
+        assert_eq!(setting_value("On"), "Activado");
+        assert_eq!(setting_value("Off"), "Desactivado");
+        assert_eq!(
+            setting_value("Saved in the keychain"),
+            "Guardada en el llavero"
+        );
+        assert_eq!(setting_value("opus"), "opus");
+        assert_eq!(setting_value("Auto"), "Auto");
+        assert_eq!(message("settings.inForce"), "Lo que vale ahora");
+        assert_eq!(message("mem.empty"), "Aún no hay memorias.");
+        assert_eq!(message("guide.saving"), "Guardando…");
+        assert_eq!(message("guide.back"), "Atrás");
+        assert_eq!(
+            message("remote.turn_remote_access_off_bbaa"),
+            "Desactivar el acceso remoto"
+        );
+        assert_eq!(
+            message("remote.turn_remote_access_on_7134"),
+            "Activar el acceso remoto"
+        );
+        // Work and git chrome added after the round-3 review.
+        assert_eq!(message("subagent.word"), "subagente");
+        assert_eq!(message("bgm.prompt_45d7"), "Prompt");
+        assert_eq!(message("timeline.plan"), "Plan");
+        assert_eq!(message("task.running"), "en marcha");
+        assert_eq!(message("run.phase.finished"), "Terminada");
+        assert_eq!(message("bgm.monitors_8c22"), "Monitors");
+        assert_eq!(
+            message("bgm.nothing_running_in_the_f068"),
+            "No hay nada corriendo en segundo plano."
+        );
+        assert_eq!(
+            capitalized(message("bgm.no_output_yet_b7d2")),
+            "Todavía no hay salida"
+        );
+        assert_eq!(message("git.show_fewer_faab").trim_start(), "Mostrar menos");
+        assert_eq!(
+            fill("git.runsMore", &[("{count}", "3")]).trim_start(),
+            "+3 más"
+        );
+        assert_eq!(message("side.plan_usage_48f7"), "Uso del plan");
+        assert_eq!(
+            message("app.no_matching_models_74d5"),
+            "Ningún modelo coincide."
+        );
+        assert_eq!(message("forge.titleField"), "Título");
+        assert_eq!(message("timeline.thinking"), "Pensando…");
+        assert_eq!(message("git.detachedWord"), "HEAD suelto");
+        assert_eq!(message("git.no_remote_b921"), "sin remoto");
+        // Desktop chrome with no TUI key keeps the desktop's own words.
+        assert_eq!(tr("Remote access"), "Acceso remoto");
+        assert_eq!(tr("Updates"), "Actualizaciones");
+        assert_eq!(tr("Close"), "Cerrar");
+        assert_eq!(tr("Show archived threads"), "Mostrar hilos archivados");
+        assert_eq!(tr("New thread"), "Hilo nuevo");
+        assert_eq!(tr("Providers"), "Proveedores");
+        assert_eq!(tr("Output"), "Salida");
+        assert_eq!(tr("Save"), "Guardar");
+        assert_eq!(tr("Full access"), "Acceso total");
+        assert_eq!(tr("Auto"), "Automático");
+        assert_eq!(tr("Tasks"), "Tareas");
+        assert_eq!(tr("Turns"), "Turnos");
+        assert_eq!(tr("Checks"), "Comprobaciones");
+        assert_eq!(tr("Files"), "Archivos");
+        assert_eq!(tr("Settled"), "Cerrados");
+        assert_eq!(tr("Background"), "Segundo plano");
+        assert_eq!(tr("Project"), "Proyecto");
+        apply(Some("en"), None);
+        assert_eq!(strip(message("perm.1_yes_d834")), "Yes");
+        assert_eq!(
+            strip(&fill("perm.yesAlways", &[("{tool}", "Bash")])),
+            "Yes, and don't ask again for Bash"
+        );
+        assert_eq!(message("continue.start"), "Continue");
+        assert_eq!(
+            crate::model::side_question_pending(),
+            "A side question is still being answered"
+        );
+        assert_eq!(setting_value("Default"), "Default");
+        assert_eq!(setting_value("opus"), "opus");
+        assert_eq!(message("settings.inForce"), "In force");
+        assert_eq!(tr("Updates"), "Updates");
+        assert_eq!(tr("Close"), "Close");
+        assert_eq!(tr("Show archived threads"), "Show archived threads");
+        assert_eq!(tr("Remote access"), "Remote access");
+        assert_eq!(message("bgm.no_output_yet_b7d2"), "no output yet");
+    }
+
+    #[test]
+    fn gui_words_capitalize_in_both_languages() {
+        // Buttons, chips and badges start capital on the desktop; the TUI
+        // catalog keeps terminal casing, so the render edge capitalizes it.
+        // `open_label` also drops the TUI's terminal `↗`.
+        apply(Some("es-ES"), None);
+        assert_eq!(capitalized(message("queue.action.hold")), "Retener");
+        assert_eq!(open_label("git.open_7d26"), "Abrir");
+        assert_eq!(plural("git.files.one", "git.files.other", 1), "1 archivo");
+        assert_eq!(plural("git.files.one", "git.files.other", 2), "2 archivos");
+        assert_eq!(capitalized(message("picker.defaultBadge")), "Por defecto");
+        assert_eq!(capitalized(message("run.state.working")), "Trabajando");
+        apply(Some("en"), None);
+        assert_eq!(capitalized(message("queue.action.hold")), "Hold");
+        assert_eq!(open_label("git.open_7d26"), "Open");
+        assert_eq!(plural("git.files.one", "git.files.other", 2), "2 files");
+        assert_eq!(capitalized(message("picker.defaultBadge")), "Default");
+        assert_eq!(capitalized(message("run.state.working")), "Working");
     }
 
     #[test]

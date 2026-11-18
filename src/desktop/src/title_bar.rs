@@ -89,7 +89,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                         .line_height(px(18.))
                         .font_weight(FontWeight::BOLD)
                         .child(if w.creating {
-                            "New thread".to_string()
+                            crate::language::message("palette.newThread").into()
                         } else {
                             t.title.clone()
                         }),

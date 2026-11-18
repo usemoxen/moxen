@@ -308,7 +308,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .text_color(color("ink-2"))
                 .child(
                     row("settled-toggle")
-                        .control("Show settled threads")
+                        .control(crate::language::tr("Show settled threads").into_owned())
                         .child(
                             div()
                                 .size(px(14.))
@@ -347,7 +347,7 @@ pub fn render(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> im
                 .when(!w.source.archived().is_empty(), |s| {
                     s.child(
                         row("archived-toggle")
-                            .control("Show archived threads")
+                            .control(crate::language::tr("Show archived threads").into_owned())
                             .child(ui::icon("clock", "ink-2"))
                             .child(
                                 div()

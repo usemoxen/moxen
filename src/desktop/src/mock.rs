@@ -127,7 +127,7 @@ impl MockSource {
                 "Make model selection keyboard accessible",
                 "moxen-agent",
                 Status::Idle,
-                "now",
+                "0s",
                 0,
                 false,
             ),
@@ -642,7 +642,7 @@ impl ThreadSource for MockSource {
                 .project
                 .unwrap_or_else(|| crate::language::message("guide.noProjectChoice").into()),
             status: Status::Idle,
-            activity: "now".into(),
+            activity: "0s".into(),
             depth: 0,
             settled: false,
             model: selection.model.clone(),
@@ -842,7 +842,7 @@ impl ThreadSource for MockSource {
         }
         self.threads[id].status = Status::Running;
         self.threads[id].started_at = Some(Instant::now());
-        self.threads[id].activity = "now".into();
+        self.threads[id].activity = "0s".into();
         let message = self.user_message(prompt);
         self.messages[id].push(message);
         let message = self.messages[id].len();

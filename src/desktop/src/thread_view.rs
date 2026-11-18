@@ -32,38 +32,49 @@ pub fn run_of(messages: &[Message], index: usize) -> (usize, usize) {
     (start, end - start)
 }
 
-/// "Ran 3 commands, read 3 files, edited 1 file": the folded run's summary.
+/// "Ran 3 commands, read 3 files, updated 1 file": the folded run's summary
+/// in the TUI's words (`summary.*`), the first part capitalized as the TUI
+/// does. The desktop's tool buckets map to the TUI's: edits read as updates
+/// (the TUI's own fallback for file changes), code searches as `grep`, and
+/// thoughts fall into the default `step` bucket, as unknown tools do.
 pub fn run_summary(messages: &[Message]) -> String {
+    use crate::language::plural;
     let count = |kind: &str| {
         messages
             .iter()
             .filter(|m| matches!(m, Message::Tool { name, .. } if name == kind))
             .count()
     };
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = vec![];
-    let (ran, read, edited) = (count("command"), count("read"), count("edit"));
-    let (searched, used) = (count("search"), count("tool"));
+    let ran = count("command");
     if ran > 0 {
-        parts.push(format!("ran {}", plural(ran, "command", "commands")));
+        parts.push(plural("summary.command.one", "summary.command.other", ran));
     }
+    let read = count("read");
     if read > 0 {
-        parts.push(format!("read {}", plural(read, "file", "files")));
+        parts.push(plural("summary.read.one", "summary.read.other", read));
     }
+    let searched = count("search");
     if searched > 0 {
-        parts.push(format!("searched {}", plural(searched, "time", "times")));
+        parts.push(plural("summary.grep.one", "summary.grep.other", searched));
     }
+    let edited = count("edit");
     if edited > 0 {
-        parts.push(format!("edited {}", plural(edited, "file", "files")));
+        parts.push(plural(
+            "summary.file_updated.one",
+            "summary.file_updated.other",
+            edited,
+        ));
     }
+    let used = count("tool");
     if used > 0 {
-        parts.push(format!("used {}", plural(used, "tool", "tools")));
+        parts.push(plural("summary.tool.one", "summary.tool.other", used));
     }
     if parts.is_empty() {
-        parts.push(format!(
-            "thought {}",
-            plural(count("thought"), "time", "times")
+        parts.push(plural(
+            "summary.step.one",
+            "summary.step.other",
+            count("thought"),
         ));
     }
     let mut text = parts.join(", ");
@@ -284,9 +295,13 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                             ))
                                             .child(div().font_weight(FontWeight::SEMIBOLD).child(
                                                 if implemented {
-                                                    "Plan implemented"
+                                                    crate::language::message(
+                                                        "timeline.planImplemented",
+                                                    )
                                                 } else {
-                                                    "Plan proposed"
+                                                    crate::language::message(
+                                                        "timeline.planProposed",
+                                                    )
                                                 },
                                             ))
                                             .child(
@@ -611,7 +626,7 @@ fn card(
                     "Access",
                     match access_of(w, thread).as_str() {
                         "" => "Default access".to_string(),
-                        mode => mode_label(&RUNTIME_MODES, mode),
+                        mode => crate::language::tr(&mode_label(&RUNTIME_MODES, mode)).into_owned(),
                     },
                     running,
                     cx,
@@ -872,11 +887,11 @@ fn improve_control(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .text_color(color("ink-2"))
         .child(ui::icon("asterisk", "ink-2"))
         .child(if w.improving {
-            "Improving…"
+            crate::language::capitalized(crate::language::message("composer.improving"))
         } else if undo {
-            "Undo improvement"
+            crate::language::capitalized(crate::language::message("composer.undoImprove"))
         } else {
-            "Improve draft"
+            "Improve draft".to_owned()
         });
     if w.improving
         || composer.text().trim().is_empty()
@@ -934,7 +949,10 @@ fn draft_assets(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
             let composer = composer.clone();
             let remove = div()
                 .id(("remove-attachment", index))
-                .control(format!("Remove {name}"))
+                .control(format!(
+                    "{} {name}",
+                    crate::language::message("le.chip.remove")
+                ))
                 .size(px(22.))
                 .flex_shrink_0()
                 .flex()
@@ -1064,7 +1082,7 @@ fn slash_menu(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
                         .text_size(px(11.5))
                         .text_color(color("ink-2"))
                         .child(if count == 0 {
-                            "No matching commands".to_owned()
+                            crate::language::message("app.no_matching_commands_fad4").into()
                         } else if count > 6 {
                             format!(
                                 "Commands and skills · {} of {count} · ↑ ↓ to browse",
@@ -1360,7 +1378,9 @@ fn menu_chip(
 fn project_chip(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let projects = w.source.projects();
     let current = w.new_project_id();
-    let label = w.new_project_title().unwrap_or_else(|| "Project".into());
+    let label = w
+        .new_project_title()
+        .unwrap_or_else(|| crate::language::tr("Project").into_owned());
     let mut items: Vec<(String, bool)> = projects
         .iter()
         .map(|p| (p.title.clone(), Some(&p.id) == current.as_ref()))
@@ -1463,7 +1483,7 @@ fn problem(message: String, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .id("dismiss-problem")
-                .control("Dismiss")
+                .control(crate::language::message("action.dismiss"))
                 .size(px(22.))
                 .flex()
                 .items_center()
@@ -1481,7 +1501,7 @@ fn problem(message: String, cx: &mut Context<Workspace>) -> impl IntoElement {
 /// held, moved, taken back to edit, removed, or sent at once.
 fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
     const SHOWN: usize = 3;
-    let chip = |id: &'static str, at: usize, tooltip: &'static str, label: &'static str| {
+    let chip = |id: &'static str, at: usize, tooltip: &'static str, label: &str| {
         div()
             .id((id, at))
             .control(tooltip)
@@ -1494,7 +1514,7 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(color("ink-2"))
-            .child(label)
+            .child(crate::language::capitalized(label))
     };
     div()
         .flex()
@@ -1566,7 +1586,7 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
                         "queue-hold",
                         at,
                         "Let it run when its turn comes",
-                        "Release",
+                        crate::language::message("queue.action.release"),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit_queued(&hold, QueueEdit::Release, cx)
@@ -1645,7 +1665,7 @@ fn status_line(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let overview = git.overview.as_ref().filter(|o| o.is_repository);
     let branch = overview
         .and_then(|o| o.checked_out())
-        .unwrap_or("detached")
+        .unwrap_or(crate::language::message("git.detached_1594"))
         .to_string();
     let changed = overview
         .and_then(|o| o.status.as_ref())
@@ -1724,7 +1744,7 @@ mod tests {
         use crate::model::ThreadSource;
         assert_eq!(
             super::run_summary(&source.messages(0)),
-            "Ran 3 commands, read 3 files, edited 1 file"
+            "Ran 3 commands, read 3 files, updated 1 file"
         );
     }
     #[test]

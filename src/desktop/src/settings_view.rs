@@ -326,8 +326,14 @@ impl Workspace {
                 )
             })
             .collect();
-        tabs.push(("remote".into(), "Remote access".into()));
-        tabs.push(("updates".into(), "Updates".into()));
+        tabs.push((
+            "remote".into(),
+            crate::language::tr("Remote access").into_owned(),
+        ));
+        tabs.push((
+            "updates".into(),
+            crate::language::tr("Updates").into_owned(),
+        ));
         tabs
     }
 
@@ -971,7 +977,11 @@ fn error_row(message: &str, w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                 })),
         )
         .when(w.source.settings_saving().is_some(), |s| {
-            s.child(div().text_color(color("ink-2")).child("Saving…"))
+            s.child(
+                div()
+                    .text_color(color("ink-2"))
+                    .child(crate::language::message("guide.saving")),
+            )
         })
 }
 
@@ -1020,7 +1030,7 @@ fn setting_row(
         | SettingKind::Duration
         | SettingKind::Line
         | SettingKind::Other(_) => {
-            let label = settings::display_value(view);
+            let label = crate::language::setting_value(&settings::display_value(view)).into_owned();
             div()
                 .id(format!("settings-edit-{key}"))
                 .control(format!("Edit {}", view.label))
@@ -1093,7 +1103,7 @@ fn list_block(
         let label = if count == 0 {
             format!("Show {noun}s")
         } else {
-            format!("{} — {count}", view.label)
+            format!("{} — {count}", crate::language::tr(&view.label))
         };
         return div()
             .id(format!("settings-entries-{key}"))
@@ -1316,7 +1326,8 @@ fn entry_detail(
         if schema.group != group {
             group = schema.group.clone();
             if !group.is_empty() {
-                out = out.child(div().pt(px(6.)).child(ui::caps(&group)));
+                let heading = crate::language::tr(&group).into_owned();
+                out = out.child(div().pt(px(6.)).child(ui::caps(&heading)));
             }
         }
         out = out.child(field_row(w, view, schema, field, item, cx));
@@ -1325,7 +1336,11 @@ fn entry_detail(
         }
     }
     if !item.resolved.is_empty() {
-        out = out.child(div().pt(px(6.)).child(ui::caps("In force")));
+        out = out.child(
+            div()
+                .pt(px(6.))
+                .child(ui::caps(crate::language::message("settings.inForce"))),
+        );
         for row in &item.resolved {
             out = out.child(
                 div()
@@ -1337,13 +1352,13 @@ fn entry_detail(
                             .w(px(120.))
                             .flex_shrink_0()
                             .text_color(color("ink-2"))
-                            .child(row.label.clone()),
+                            .child(crate::language::tr(&row.label).into_owned()),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(format!("{} — {}", row.value, row.origin)),
-                    ),
+                    .child(div().flex_1().child(format!(
+                        "{} — {}",
+                        crate::language::tr(&row.value).into_owned(),
+                        crate::language::tr(&row.origin).into_owned()
+                    ))),
             );
         }
     }
@@ -1383,14 +1398,15 @@ fn field_row(
     let title = schema.label.clone();
     let control: AnyElement = match &schema.kind {
         FieldKind::Enum(_) | FieldKind::Boolean | FieldKind::Effort => {
-            let label = settings::display_field(field, Some(schema));
+            let shown = settings::display_field(field, Some(schema));
+            let label = crate::language::setting_value(&shown);
             div()
                 .id(format!("settings-field-cycle-{key}-{id}-{path}"))
-                .control(format!("Change {}", schema.label))
+                .control(format!("Change {}", crate::language::tr(&schema.label)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(div().text_color(color("live")).child(label))
+                .child(div().text_color(color("live")).child(label.into_owned()))
                 .child(ui::icon("chevron-right", "ink-2"))
                 .on_click(cx.listener(move |this, _, _, cx| this.cycle_field(&key, &id, &path, cx)))
                 .into_any_element()
@@ -1401,9 +1417,14 @@ fn field_row(
             .into_any_element(),
         _ => {
             let label = settings::display_field(field, Some(schema));
+            let shown = if matches!(field.value, SettingValue::Unset) {
+                crate::language::setting_value(&label).into_owned()
+            } else {
+                label
+            };
             div()
                 .id(format!("settings-field-edit-{key}-{id}-{path}"))
-                .control(format!("Edit {}", schema.label))
+                .control(format!("Edit {}", crate::language::tr(&schema.label)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -1412,7 +1433,7 @@ fn field_row(
                         .font_family(theme::MONO)
                         .text_size(px(12.5))
                         .text_color(color("ink-2"))
-                        .child(label),
+                        .child(shown),
                 )
                 .child(ui::icon("pencil", "ink-2"))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1430,7 +1451,11 @@ fn field_row(
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(div().flex_1().child(schema.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(crate::language::tr(&schema.label).into_owned()),
+                )
                 .child(control),
         )
         .child(
@@ -1438,15 +1463,16 @@ fn field_row(
                 .text_color(color("ink-2"))
                 .text_size(px(12.5))
                 .line_height(px(16.))
-                .child(schema.description.clone()),
+                .child(crate::language::tr(&schema.description).into_owned()),
         )
         .when_some(field.effective.clone(), |s, effective| {
             s.child(sub_line(&format!(
                 "Default: {}{}",
-                effective.label,
-                effective
-                    .origin
-                    .map_or(String::new(), |origin| format!(", {origin}"))
+                crate::language::tr(&effective.label).into_owned(),
+                effective.origin.map_or(String::new(), |origin| format!(
+                    ", {}",
+                    crate::language::tr(&origin).into_owned()
+                ))
             )))
         })
 }
@@ -1929,11 +1955,18 @@ fn form_bar(w: &Workspace, form: &SettingsForm, cx: &mut Context<Workspace>) -> 
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(form.title()));
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(crate::language::tr(&form.title()).into_owned()),
+        );
     if let SettingsForm::Field { previous, .. } = form
         && !previous.is_empty()
     {
-        bar = bar.child(sub_line(&format!("Saved now: {previous}")));
+        bar = bar.child(sub_line(&format!(
+            "Saved now: {}",
+            crate::language::setting_value(previous)
+        )));
     }
     if form.secret() {
         bar = bar.child(sub_line("Characters are hidden while typing."));
@@ -2367,7 +2400,7 @@ fn memory_manager(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             }
             Ok(list) => {
                 if list.memories.is_empty() {
-                    out = out.child(sub_line("No memories yet."));
+                    out = out.child(sub_line(crate::language::message("mem.empty")));
                 }
                 for entry in &list.memories {
                     out = out.child(memory_row(
@@ -2630,7 +2663,12 @@ fn embeddings_row(_w: &Workspace, state: &Embeddings, cx: &mut Context<Workspace
                     }),
                 )),
         )
-        .when(state.busy, |s| s.child(sub_line("Working…")))
+        .when(state.busy, |s| {
+            s.child(sub_line(&format!(
+                "{}…",
+                crate::language::capitalized(crate::language::message("run.state.working"))
+            )))
+        })
 }
 
 /// Skills management: the user and project skills, their switches and text.
@@ -2730,7 +2768,11 @@ fn skill_row(w: &Workspace, skill: &ManagedSkill, cx: &mut Context<Workspace>) -
                             "Switch the skill on"
                         })
                         .text_color(color(if enabled { "live" } else { "ink-2" }))
-                        .child(if enabled { "On" } else { "Off" })
+                        .child(if enabled {
+                            crate::language::setting_value("On").into_owned()
+                        } else {
+                            crate::language::setting_value("Off").into_owned()
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.source.set_skill_enabled(
                                 this.settings_thread(),
@@ -2797,7 +2839,8 @@ fn skill_detail(
         return out.child(sub_line("Reading…"));
     };
     out = out.child(sub_line(&format!(
-        "Providers: {}",
+        "{}: {}",
+        crate::language::tr("Providers"),
         providers_line(&skill.providers)
     )));
     out = out.child(div().flex().flex_wrap().gap(px(8.)).children(
@@ -2982,23 +3025,23 @@ fn remote_status_row(w: &Workspace, state: &RemoteState, cx: &mut Context<Worksp
                         div()
                             .flex_1()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Remote access"),
+                            .child(crate::language::tr("Remote access").into_owned()),
                     )
                     .child(
                         div()
                             .id("settings-remote-toggle")
                             .control(if enabled {
-                                "Turn remote access off"
+                                crate::language::message("remote.turn_remote_access_off_bbaa")
                             } else {
-                                "Turn remote access on"
+                                crate::language::message("remote.turn_remote_access_on_7134")
                             })
                             .text_color(color(if enabled { "live" } else { "ink-2" }))
                             .child(if saving {
-                                "Saving…"
+                                crate::language::message("guide.saving").to_owned()
                             } else if enabled {
-                                "On"
+                                crate::language::setting_value("On").into_owned()
                             } else {
-                                "Off"
+                                crate::language::setting_value("Off").into_owned()
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.source.set_setting(
@@ -3141,7 +3184,11 @@ fn updates_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                     this.open_experience(crate::experience::Panel::Update, window, cx);
                 }),
             )));
-            out = out.child(div().pt(px(10.)).child(ui::caps("Providers")));
+            out = out.child(
+                div()
+                    .pt(px(10.))
+                    .child(ui::caps(&crate::language::tr("Providers"))),
+            );
             for provider in &state.providers {
                 out = out.child(provider_row(w, provider, cx));
             }

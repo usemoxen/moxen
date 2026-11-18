@@ -170,7 +170,7 @@ pub fn segmented(
 ) -> Div {
     let labels: Vec<SharedString> = options
         .iter()
-        .map(|l| crate::language::tr(l).into_owned().into())
+        .map(|l| crate::language::capitalized(&crate::language::tr(l)).into())
         .collect();
     segments(id.into(), &labels, selected, pad, cx, move |this, i, _| {
         set(this, i)

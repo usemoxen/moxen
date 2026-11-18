@@ -132,8 +132,8 @@ impl Workspace {
         self.git_ui.form = Some(form);
         self.git_ui.input.update(cx, |input, cx| {
             input.placeholder = match form {
-                Form::Create { .. } => "Title",
-                Form::Comment { .. } => "Comment",
+                Form::Create { .. } => crate::language::message("forge.titleField"),
+                Form::Comment { .. } => crate::language::message("forge.commentField"),
             };
             input.set_text(String::new(), cx)
         });
@@ -250,14 +250,16 @@ fn note(text: impl Into<SharedString>, token: &str) -> Div {
         .child(text.into())
 }
 
-/// A text-only action: it brightens on hover.
+/// A text-only action: it brightens on hover. The label reads capitalized in
+/// both languages (buttons start capital on the desktop); the TUI's terminal
+/// `↗` never reaches it, since the desktop shows no external-link glyph.
 fn action(id: impl Into<ElementId>, label: &str, tone: &str) -> Stateful<Div> {
     div()
         .id(id)
         .quiet()
         .text_size(px(13.))
         .text_color(color(tone))
-        .child(label.to_string())
+        .child(crate::language::capitalized(label))
 }
 
 fn dot() -> Div {
@@ -405,9 +407,16 @@ fn runs_list(runs: &[Run], all: bool, cx: &mut Context<Workspace>) -> Div {
                     action(
                         "runs-more",
                         &if all {
-                            "Show fewer".to_string()
+                            crate::language::message("git.show_fewer_faab")
+                                .trim_start()
+                                .to_string()
                         } else {
-                            format!("+{} more", sorted.len() - RUNS_SHOWN)
+                            crate::language::fill(
+                                "git.runsMore",
+                                &[("{count}", &(sorted.len() - RUNS_SHOWN).to_string())],
+                            )
+                            .trim_start()
+                            .to_string()
                         },
                         "ink-2",
                     )
@@ -432,7 +441,7 @@ pub fn footer(w: &Workspace) -> Option<Div> {
         .as_ref()
         .and_then(|forge| forge.slug.clone())
         .or_else(|| overview.root.clone())
-        .unwrap_or_else(|| "No remote".into());
+        .unwrap_or_else(|| crate::language::message("git.no_remote_b921").into());
     let status = overview.status.as_ref().map(|s| s.line());
     Some(
         div()
@@ -453,14 +462,15 @@ pub fn footer(w: &Workspace) -> Option<Div> {
                     .flex()
                     .gap(px(6.))
                     .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(color("ink"))
-                            .child(overview.checked_out().unwrap_or("detached").to_string()),
+                        div().min_w_0().truncate().text_color(color("ink")).child(
+                            overview
+                                .checked_out()
+                                .unwrap_or(crate::language::message("git.detached_1594"))
+                                .to_string(),
+                        ),
                     )
                     .when_some(status, |s, status| {
-                        let clean = status == "clean";
+                        let clean = status == crate::language::message("git.clean");
                         s.child(
                             div()
                                 .flex_shrink_0()
@@ -485,7 +495,7 @@ fn form_box(w: &Workspace, git: &Git) -> Option<Div> {
             "↵ open it on the forge · esc cancel",
         ),
         Form::Comment { number } => (
-            format!("Comment on #{number}"),
+            crate::language::fill("forge.commentOn", &[("#{n}", &number.to_string())]),
             "↵ post the comment · esc cancel",
         ),
     };
@@ -578,8 +588,14 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                         .child(div().text_color(color(tone_token(tone))).child(label))
                 })
                 .when(status.conflicting, |s| {
-                    s.child(dot())
-                        .child(div().text_color(color("broken")).child("conflicts"))
+                    s.child(dot()).child(
+                        div().text_color(color("broken")).child(
+                            crate::language::message("git.conflicts_4ddb")
+                                .trim_start()
+                                .trim_start_matches('·')
+                                .trim_start(),
+                        ),
+                    )
                 })
                 .when_some(request.target.clone(), |s, target| {
                     s.child(
@@ -609,8 +625,12 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                                     .text_size(px(12.))
                                     .text_color(color("ink-2"))
                                     .child(format!(
-                                        "· {files} file{}",
-                                        if files == 1 { "" } else { "s" }
+                                        "· {}",
+                                        crate::language::plural(
+                                            "git.files.one",
+                                            "git.files.other",
+                                            files as usize
+                                        )
                                     )),
                             )
                         }),
@@ -621,7 +641,7 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
             None => div()
                 .text_size(px(12.5))
                 .text_color(color("ink-2"))
-                .child("No CI checks"),
+                .child(crate::language::message("git.no_ci_checks_d1bd")),
             Some((checks, (tone, _))) => div()
                 .flex()
                 .flex_col()
@@ -635,12 +655,18 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                         .child(
                             div().text_size(px(12.5)).text_color(color("ink-2")).child(
                                 match tone {
-                                    Tone::Passed => "checks passed",
+                                    Tone::Passed => {
+                                        crate::language::message("git.checks_passed_f617")
+                                            .trim_start()
+                                    }
                                     Tone::Failed => {
                                         crate::language::message("git.checks_some_failing_590a")
                                             .trim_start()
                                     }
-                                    Tone::Pending => "some checks running",
+                                    Tone::Pending => {
+                                        crate::language::message("git.checks_some_running_35da")
+                                            .trim_start()
+                                    }
                                 },
                             ),
                         ),
@@ -661,8 +687,12 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                 .gap(px(8.))
                 .when_some(url, |s, url| {
                     s.child(
-                        action("request-open", "Open", "ink-2")
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                        action(
+                            "request-open",
+                            &crate::language::open_label("git.open_7d26"),
+                            "ink-2",
+                        )
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
                     .child(dot())
                 })
@@ -688,30 +718,44 @@ fn request_card(w: &Workspace, status: &RequestStatus, cx: &mut Context<Workspac
                     .children(if armed {
                         vec![
                             merge_action(number, MergeStrategy::Squash, "Squash", busy, cx),
-                            merge_action(number, MergeStrategy::Merge, "Merge commit", busy, cx),
-                            action("merge-cancel", "Cancel", "ink-2")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.git_ui.merging = None;
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
+                            merge_action(
+                                number,
+                                MergeStrategy::Merge,
+                                crate::language::message("git.merge_commit_3ec7"),
+                                busy,
+                                cx,
+                            ),
+                            action(
+                                "merge-cancel",
+                                crate::language::message("continue.cancel"),
+                                "ink-2",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_ui.merging = None;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
                         ]
                     } else if busy || request.state == git::RequestState::Draft {
                         vec![
                             div()
                                 .text_size(px(13.))
                                 .opacity(0.45)
-                                .child("Merge")
+                                .child(crate::language::message("git.merge"))
                                 .into_any_element(),
                         ]
                     } else {
                         vec![
-                            action("request-merge", "Merge", "ink-2")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.git_ui.merging = Some(number);
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
+                            action(
+                                "request-merge",
+                                crate::language::message("git.merge"),
+                                "ink-2",
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.git_ui.merging = Some(number);
+                                cx.notify();
+                            }))
+                            .into_any_element(),
                         ]
                     })
                 }),
@@ -730,7 +774,7 @@ fn merge_action(
         return div()
             .text_size(px(13.))
             .opacity(0.45)
-            .child(label)
+            .child(crate::language::capitalized(label))
             .into_any_element();
     }
     action(label, label, "held")
@@ -822,9 +866,9 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         return tab.child(
             note(
                 if git.loading_git {
-                    "Reading git…"
+                    crate::language::message("git.reading_git_3e06")
                 } else {
-                    "No git information."
+                    crate::language::message("git.no_git_information_c6c1")
                 },
                 "ink-2",
             )
@@ -832,8 +876,13 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         );
     };
     if !overview.is_repository {
-        return tab
-            .child(note("This thread's folder is not a git repository.", "ink-2").pt(px(10.)));
+        return tab.child(
+            note(
+                crate::language::message("git.this_threads_folder_is_a276"),
+                "ink-2",
+            )
+            .pt(px(10.)),
+        );
     }
     let kind = git.forge.as_ref().and_then(|f| f.kind);
     let noun = ForgeKind::short(kind);
@@ -842,9 +891,9 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     // The request
     tab = tab.child(heading(
         if kind == Some(ForgeKind::GitLab) {
-            "Merge request"
+            crate::language::message("git.merge_request_55bc")
         } else {
-            "Pull request"
+            crate::language::message("git.pull_request_7354")
         },
         checked_out.clone().unwrap_or_default(),
     ));
@@ -852,17 +901,23 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     match (&git.forge, &git.status) {
         (None, _) | (Some(Forge { kind: None, .. }), _) => {
             let why = match &git.forge {
-                _ if git.loading_forge => "Checking…".to_string(),
-                Some(forge) => forge
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "No forge for this checkout.".into()),
-                None => "No forge for this checkout.".into(),
+                _ if git.loading_forge => {
+                    crate::language::message("settings.update.checking").into()
+                }
+                Some(forge) => forge.reason.clone().unwrap_or_else(|| {
+                    crate::language::message("git.no_forge_for_this_92ba").into()
+                }),
+                None => crate::language::message("git.no_forge_for_this_92ba").into(),
             };
             tab = tab.child(note(why, "ink-2"));
         }
         (_, Some(status)) => tab = tab.child(request_card(w, status, cx)),
-        (_, None) if git.loading_forge => tab = tab.child(note("Reading…", "ink-2")),
+        (_, None) if git.loading_forge => {
+            tab = tab.child(note(
+                crate::language::message("git.reading_f65c").trim_start(),
+                "ink-2",
+            ))
+        }
         (_, None) => tab = tab.child(no_request(w, &git, noun, checked_out.as_deref(), cx)),
     }
     // Others
@@ -1003,14 +1058,16 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     // History
     tab = tab.child(heading(
         "Commits",
-        shown_branch.unwrap_or_else(|| "detached".into()),
+        shown_branch
+            .clone()
+            .unwrap_or_else(|| crate::language::message("git.detachedWord").into()),
     ));
     if overview.commits.is_empty() {
         tab = tab.child(note(
             if git.loading_git {
-                "Reading…"
+                crate::language::message("git.reading_f65c").trim_start()
             } else {
-                "No commits."
+                crate::language::message("git.no_commits_1e4d").trim_start()
             },
             "ink-2",
         ));
@@ -1032,7 +1089,9 @@ pub fn git_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                     action(
                         "commits-more",
                         &if w.git_ui.more_commits {
-                            "Show fewer commits".to_string()
+                            crate::language::message("git.show_fewer_commits_cf89")
+                                .trim_start()
+                                .to_string()
                         } else {
                             crate::language::fill(
                                 "git.showMoreCommits",
@@ -1125,7 +1184,9 @@ fn no_request(
                 .child(
                     div()
                         .font_family(theme::MONO)
-                        .child(base.clone().unwrap_or_else(|| "the default branch".into())),
+                        .child(base.clone().unwrap_or_else(|| {
+                            crate::language::message("git.the_default_branch_390e").into()
+                        })),
                 )
                 .when(choices.len() > 1, |s| {
                     s.child(ui::icon(
@@ -1300,9 +1361,9 @@ pub fn commit_tab(w: &Workspace, commit: &OpenCommit, cx: &mut Context<Workspace
     let Some(detail) = &commit.detail else {
         return div().px(px(16.)).py(px(16.)).child(note(
             if commit.loading {
-                "Reading the commit…"
+                crate::language::message("git.reading_the_commit_c819").trim_start()
             } else {
-                "Git could not read this commit."
+                crate::language::message("git.git_could_not_read_7045").trim_start()
             },
             "ink-2",
         ));
@@ -1389,7 +1450,7 @@ fn commit_body(
     if let Some(runs) = commit.runs.as_ref().filter(|runs| !runs.is_empty()) {
         view = view
             .child(heading(
-                "Checks",
+                &crate::language::tr("Checks"),
                 Checks::tally(runs)
                     .glance()
                     .map(|(_, text)| text)
@@ -1400,7 +1461,7 @@ fn commit_body(
                 div().px(px(16.)).pt(px(4.)).child(
                     action(
                         "failing-run",
-                        crate::language::message("git.open_the_failing_run_733c").trim_start(),
+                        &crate::language::open_label("git.open_the_failing_run_733c"),
                         "ink-2",
                     )
                     .on_click(move |_, _, cx| cx.open_url(&url)),
@@ -1415,7 +1476,7 @@ fn commit_body(
             .pt(px(14.))
             .px(px(16.))
             .pb(px(8.))
-            .child(ui::caps("Files").flex_1())
+            .child(ui::caps(&crate::language::tr("Files")).flex_1())
             .child(
                 div()
                     .flex()
@@ -1428,7 +1489,10 @@ fn commit_body(
             ),
     );
     if detail.files.is_empty() {
-        return view.child(note("No changes to show.", "ink-2"));
+        return view.child(note(
+            crate::language::message("git.no_changes_to_show_a8c4").trim_start(),
+            "ink-2",
+        ));
     }
     let scope = format!("commit-{}", detail.sha);
     view.children(detail.files.iter().enumerate().map(|(i, file)| {
@@ -1566,7 +1630,10 @@ pub fn diff_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                 .text_size(px(11.5)),
             );
     }
-    tab = tab.child(heading("Turns", turns.len().to_string()));
+    tab = tab.child(heading(
+        &crate::language::tr("Turns"),
+        turns.len().to_string(),
+    ));
     if turns.is_empty() {
         return tab.child(note("No turn has changed files yet.", "ink-2"));
     }
@@ -1577,11 +1644,12 @@ pub fn diff_tab(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         tab = tab.child(pick_row(
             "pick-turn",
             i,
-            format!("Turn {}", turn.turn),
+            crate::language::fill("diff.turn", &[("{n}", &turn.turn.to_string())])
+                .trim_start()
+                .to_string(),
             format!(
-                "{} file{} +{added} −{removed}",
-                turn.files.len(),
-                if turn.files.len() == 1 { "" } else { "s" }
+                "{} +{added} −{removed}",
+                crate::language::plural("git.files.one", "git.files.other", turn.files.len())
             ),
             is_open,
             this,
