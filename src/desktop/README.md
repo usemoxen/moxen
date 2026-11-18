@@ -86,8 +86,11 @@ timers; the thread's own hold and recorded totals come off its snapshot.
   else the one the project's newest thread runs on (the server's default with
   none). The access and mode chips of an open,
   idle thread change it (`thread.runtime-mode.set`, `thread.interaction-mode.set`).
-  Not done: scheduled sends and queue conditions, starting the
-  first thread of an account with none, and the run-size question of `/research`.
+  A thread in Research or Orchestrate mode, or with `/research` typed, is
+  asked for its run size (below). A research first prompt names its own
+  thread id, so the question arrives instead of parking.
+  Not done: scheduled sends and queue conditions, and starting the
+  first thread of an account with none.
 - A thread that waits on the person shows a panel in the composer's place, as
   the TUI's answer and permission panels do (`ask.rs`, `pending.rs`). Both are
   read from the thread snapshot's activities (`permission.requested` /
@@ -199,6 +202,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features render-harness -- -D warnings
 cargo fmt --check
 cargo test
+cargo test --features render-harness
 ```
 
 GPUI and gpui_platform remain pinned to Zed
@@ -245,9 +249,38 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   inspector's Tasks header toggles its pinned tasks. Drag the inspector's left
   edge to resize it; it never takes the turn below 480pt.
 - Cmd+K, Ctrl+P, or the search field opens the thread and action palette.
-  Type to filter and press Enter to pick the first match. Right-click a
+  Type to filter and press Enter to pick the first match; Enter on an empty
+  query does nothing. With text typed the
+  store is searched (`threads.search`, the TUI picker's Active/Settled
+  sections and `where: snippet (+N)` rows); an empty query lists actions and
+  threads by title as before. Right-click a
   sidebar row to act on it, or use the header's Actions menu. Shift+F10
   opens the selected thread's menu; F2 opens Rename.
+- Projects are managed where they are listed: right-click a project header in
+  the grouped sidebar, or search for one in the palette, to rename it
+  (`project.rename`, a new server command beside `project.create`) or remove
+  it (`project.remove`: a soft delete, its threads stay grouped under
+  "Unknown project"). Both ask first for removal and take a name for rename,
+  as the thread dialogs do.
+- Research mode (`research.rs`, `research_view.rs`, the TUI's words and
+  rules): the focused thread opts in while it can start a run
+  (`subscribeShell`'s `researchProposals`, dropped on unfocus, error and
+  reconnect), and the run-size question shows above the composer: researchers
+  as dots, critics as a choice of two, one finalizer, each role's model, the
+  thread count and its providers. Start answers with the picked size, "One
+  researcher instead" (or Esc) runs one, Enter in the composer starts too,
+  and the palette answers with the proposal's size. The answer carries the
+  TUI's payload (`research.proposal.answer`, size plus the proposal's own
+  models). A send the server parks shows "Run size still to choose — the next
+  send asks for it." above the composer, clearing like the TUI's toast.
+  A lead's run replaces its transcript: the roster with one glyph per agent
+  and the researcher, critic and finalizer columns with their live transcripts
+  (`research.run` plus each role's thread subscription, refreshed while shown;
+  narrow panes show the focused column under a switcher). Keys: arrows walk
+  the roster, Tab changes column, Enter opens the agent in full, Esc goes
+  back. An open agent shows its transcript with "← back to the run"; the
+  lead opens the same way ("Lead thread" back). The mock fixtures hold a run
+  in review on Recover partial frame headers.
 - Settling a thread also settles its tasks. If the family has running or
   queued work, confirm before stopping it. Unsettle wakes the family.
   Snoozed threads stay visible and can be unsnoozed early. Archiving removes
@@ -388,6 +421,11 @@ data. `mock.rs` owns the fixtures and `live.rs` the real server's threads.
 - `workspace.rs`: selection, per-thread UI state, subscriptions and timers.
 - `title_bar.rs`, `sidebar.rs`, `inspector.rs`: window regions and controls.
 - `thread_view.rs`: reading column and composer shell.
+- `palette.rs`: thread and action palette with full-text search sections.
+- `thread_actions.rs`: thread menus and forms, and project rename/removal.
+- `research_view.rs`: run-size question, run view, role transcripts, back bar
+  and the parked-question notice; `research.rs` holds their decoding and the
+  TUI's picker and roster rules, `search.rs` the `threads.search` decoding.
 - `steps.rs`: compact tool/thought rows, syntax colours and expanded output.
 - `model_picker.rs`: model and effort popover.
 - `catalog.rs`: the providers, models and efforts `getConfig` reports, and the

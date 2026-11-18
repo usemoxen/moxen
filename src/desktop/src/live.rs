@@ -18,10 +18,12 @@ use crate::{
         Embeddings, HarnessRun, Hold, LimitsData, ManagedSkill, MemoryDraft, MemoryEntry,
         MemoryList, MemorySearch, MergeStrategy, Message, NewRequest, NewThread, Permission,
         Problem, Project, ProtectionData, QueueEdit, QueueMove, Queued, RemoteState, Reply,
-        SIDE_QUESTION_PENDING, Selection, SettingsNotice, SideAnswer, Snapshot, SnapshotUsage,
-        StatsRange, StatsState, Status, Thread, ThreadAction, ThreadId, ThreadSource, UpdateState,
+        ResearchProposal, ResearchSize, RunSummary, SIDE_QUESTION_PENDING, SearchResults,
+        SearchState, Selection, SettingsNotice, SideAnswer, Snapshot, SnapshotUsage, StatsRange,
+        StatsState, Status, Thread, ThreadAction, ThreadId, ThreadSource, UpdateState,
     },
     pending,
+    research::{self, RoleRow},
     settings::{self, Discovery},
     stats::StatsData,
     transcript::{self, Row},
@@ -598,6 +600,44 @@ struct State {
     remote: Option<Arc<Result<RemoteState, String>>>,
     /// The providers' newest versions and Moxen's own update check, once read.
     updates: Option<Arc<Result<UpdateState, String>>>,
+    /// What the last thread search answered, while the palette shows it.
+    search: SearchState,
+    /// The latest search asked for: an older answer never replaces a newer one.
+    search_seq: u64,
+    /// Threads the server may ask this window for a run size
+    /// (`subscribeShell`'s `researchProposals`): the focused thread's id.
+    research_opt_in: Vec<String>,
+    /// A new thread's id, until the shell lists it: the server is asked for
+    /// its run size before the thread opens, as the TUI's new-thread opt-in.
+    research_hold: Option<(String, Instant)>,
+    /// Counts research subscription loops, so replacing one ends the old one.
+    research_token: u64,
+    /// The opt-in and connection a research loop belongs to.
+    research_watching: Option<(Vec<String>, u64)>,
+    /// The run-size questions waiting, by thread id on the wire.
+    research_proposals: HashMap<String, ResearchProposal>,
+    /// A send parked the run-size question (`researchSizePending`): the next
+    /// send asks for it.
+    research_pending: bool,
+    /// The runs the shell lists, as sent: leads and their role threads.
+    research_runs: Vec<Value>,
+    /// Each lead's run, once read: none while unread, `None` when it leads none.
+    runs: HashMap<ThreadId, Option<Arc<RunSummary>>>,
+    /// Leads with a run read in flight.
+    run_reads: HashSet<ThreadId>,
+    /// When each lead's run was last read, for the view's refresh.
+    run_requested: HashMap<ThreadId, Instant>,
+    /// One role thread's transcript, once read, by its id on the wire.
+    role_messages: HashMap<String, Option<Arc<Vec<Message>>>>,
+    /// Role threads with a live subscription, while the run view shows them:
+    /// one per visible role thread, with deltas, like the TUI's
+    /// `useRoleTranscript`. Empty when the run view is hidden.
+    role_watching: HashSet<String>,
+    /// Counts role subscription loops, so replacing the set ends the old ones.
+    role_watch_token: u64,
+    /// Each watched role's rows, by its id on the wire: snapshots replace
+    /// them, deltas extend them until the watcher ends.
+    role_rows: HashMap<String, Vec<crate::transcript::Row>>,
 }
 impl State {
     fn composer_directory(&self, target: &Destination) -> Option<&str> {
@@ -763,6 +803,18 @@ impl State {
             .collect();
         self.restoring
             .retain(|uuid| self.archived.iter().any(|(id, _)| uuid == id));
+        self.research_runs = snapshot["researchRuns"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // A new thread the shell lists now answers through its own opt-in.
+        if self
+            .research_hold
+            .as_ref()
+            .is_some_and(|(uuid, _)| self.ids.contains_key(uuid))
+        {
+            self.research_hold = None;
+        }
         self.arranged = arrange(&entries);
         self.projects = projects_of(snapshot, &entries);
         if let Some(uuid) = &self.opening
@@ -830,6 +882,11 @@ fn projects_of(snapshot: &Value, entries: &[Entry]) -> Vec<Project> {
         .collect();
     projects.sort_by_key(|p| (std::cmp::Reverse(newest(&p.id)), p.title.to_lowercase()));
     projects
+}
+
+/// Whether the thread leads a research run the shell lists.
+fn leads_run(runs: &[Value], lead_uuid: &str) -> bool {
+    runs.iter().any(|run| run["leadThreadId"] == lead_uuid)
 }
 
 /// The messages waiting in a thread (`queuedMessages` in
@@ -1150,16 +1207,27 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
     let (wire, _hello) = Wire::connect(endpoint)?;
     let wire = Arc::new(wire);
     load_catalog(shared, &wire);
-    let subscription = wire.subscribe_shell()?;
+    let subscription = wire.subscribe_shell(&[])?;
     shared.update(|state| {
         state.wire_epoch += 1;
         state.wire = Some(wire.clone());
         state.work.clear();
         state.work_reads.clear();
         state.settings_reads.clear();
+        state.run_reads.clear();
+        state.role_watch_token += 1;
+        state.role_watching.clear();
+        state.role_rows.clear();
+        state.role_messages.clear();
+        // A proposal answered before this connection is gone: the server
+        // answered it or dropped it, so it is never shown again.
+        state.research_proposals.clear();
+        state.research_token += 1;
+        state.research_watching = None;
     });
     // A thread opened before the connection existed starts being followed now.
     follow(shared);
+    research_follow(shared);
     let ended = (|| {
         for frame in subscription.frames.iter() {
             let frame = frame?;
@@ -1169,6 +1237,7 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
                     state.connection = Some(Connection::Live);
                 });
                 follow(shared);
+                research_follow(shared);
             }
         }
         Ok(())
@@ -1179,8 +1248,16 @@ fn session(endpoint: &str, shared: &Arc<Shared>) -> Result<(), WireError> {
 
 fn end_session(state: &mut State) {
     state.wire = None;
-    // Ends the open thread's watcher.
+    // Ends the thread, research and role watchers, whose answers belong to this connection.
     state.watch += 1;
+    state.research_token += 1;
+    state.research_watching = None;
+    state.research_proposals.clear();
+    state.run_reads.clear();
+    state.role_watch_token += 1;
+    state.role_watching.clear();
+    state.role_rows.clear();
+    state.role_messages.clear();
     state.settings_reads.clear();
     if state.settings_pending.take().is_some() {
         state.settings_write = Some(Err(not_connected().message));
@@ -1238,6 +1315,102 @@ fn follow(shared: &Arc<Shared>) {
     let _ = std::thread::Builder::new()
         .name("moxen-thread".into())
         .spawn(move || watch(&shared, &wire, id, &uuid, token));
+}
+
+/// How long a new thread's run-size opt-in lives: long enough for the thread
+/// to open and its own opt-in to take over, but bounded, so a start that
+/// never settles cannot hold a responder forever (the TUI's
+/// `NEW_THREAD_OPT_IN_MS`).
+const RESEARCH_HOLD: Duration = Duration::from_secs(10);
+
+/// Which threads the server may ask for a run size: the focused one, if it
+/// can start one, and a new thread until the shell lists it.
+fn research_desired(state: &mut State) -> Vec<String> {
+    if let Some((_, at)) = &state.research_hold
+        && at.elapsed() > RESEARCH_HOLD
+    {
+        state.research_hold = None;
+    }
+    let mut desired = state.research_opt_in.clone();
+    if let Some((uuid, _)) = &state.research_hold
+        && !desired.contains(uuid)
+    {
+        desired.push(uuid.clone());
+    }
+    desired
+}
+
+/// Starts the research loop for the threads that can start a run, ending any
+/// loop for another set (or an earlier connection). Does nothing while no
+/// thread opts in or there is no connection.
+fn research_follow(shared: &Arc<Shared>) {
+    let (wire, desired, epoch, token) = {
+        let mut state = shared.state.lock().expect("live state");
+        let desired = research_desired(&mut state);
+        let Some(wire) = state.wire.clone() else {
+            return;
+        };
+        if desired.is_empty() {
+            state.research_watching = None;
+            state.research_token += 1;
+            state.research_proposals.clear();
+            return;
+        }
+        if state.research_watching == Some((desired.clone(), state.wire_epoch)) {
+            return;
+        }
+        state.research_token += 1;
+        let token = state.research_token;
+        state.research_watching = Some((desired.clone(), state.wire_epoch));
+        (wire, desired, state.wire_epoch, token)
+    };
+    let shared = shared.clone();
+    let _ = std::thread::Builder::new()
+        .name("moxen-research".into())
+        .spawn(move || watch_research(&shared, &wire, &desired, epoch, token));
+}
+
+/// One research subscription: its snapshots carry the run-size questions for
+/// the opted-in threads. Ends when another set takes over or the connection
+/// does, which drops the subscription.
+fn watch_research(shared: &Arc<Shared>, wire: &Wire, opt_in: &[String], epoch: u64, token: u64) {
+    let Ok(subscription) = wire.subscribe_shell(opt_in) else {
+        return;
+    };
+    loop {
+        if shared.state.lock().expect("live state").research_token != token {
+            return;
+        }
+        let frame = match subscription.frames.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        };
+        if frame["kind"] != "snapshot" {
+            continue;
+        }
+        shared.update(|state| {
+            if state.research_token != token || state.wire_epoch != epoch {
+                return;
+            }
+            let live: Vec<ResearchProposal> = frame["snapshot"]["researchProposals"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(ResearchProposal::decode)
+                .collect();
+            for proposal in &live {
+                state
+                    .research_proposals
+                    .insert(proposal.id.clone(), proposal.clone());
+            }
+            let live: std::collections::HashSet<&str> =
+                live.iter().map(|proposal| proposal.id.as_str()).collect();
+            state.research_proposals.retain(|id, proposal| {
+                opt_in.contains(&proposal.thread_id) && live.contains(id.as_str())
+            });
+        });
+    }
 }
 
 /// One thread's subscription: a snapshot replaces its rows, and live text
@@ -1352,6 +1525,17 @@ fn watch(shared: &Arc<Shared>, wire: &Wire, id: ThreadId, uuid: &str, token: u64
             entry.messages = None;
         });
     }
+}
+
+/// What a `threads.search` answer becomes: its rows, or an error when the
+/// answer cannot be read (never idle, so a broken answer does not look like
+/// no search).
+fn decode_search(query: &str, found: &serde_json::Value) -> SearchState {
+    SearchResults::decode(query, found)
+        .map(SearchState::Done)
+        .unwrap_or(SearchState::Error(
+            "The server's search answer was not understood.".into(),
+        ))
 }
 
 impl ThreadSource for ServerSource {
@@ -1615,6 +1799,15 @@ impl ThreadSource for ServerSource {
             assets,
             once: None,
         })
+    }
+    fn thread_at_uuid(&self, uuid: &str) -> Option<ThreadId> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .ids
+            .get(uuid)
+            .cloned()
     }
     fn edit_queued(&mut self, id: ThreadId, key: &str, edit: QueueEdit) {
         let Some((uuid, steps)) = ({
@@ -2026,11 +2219,17 @@ impl ThreadSource for ServerSource {
         } else if let Some(mode) = &prompt.once {
             command["interactionMode"] = mode.clone().into();
         }
-        background_result(&self.shared, move |wire, _| {
+        background_result(&self.shared, move |wire, shared| {
             let wire = wire.map_err(|error| problem(&error, Some((Some(id), prompt.clone()))))?;
-            wire.dispatch("thread.turn.start", command)
-                .map(|_| ())
-                .map_err(|error| problem(&error, Some((Some(id), prompt))))
+            let answer = wire
+                .dispatch("thread.turn.start", command)
+                .map_err(|error| problem(&error, Some((Some(id), prompt))))?;
+            // The server parked the run-size question: the next send asks
+            // for it, as the TUI's toast says.
+            if answer["researchSizePending"] == true {
+                shared.update(|state| state.research_pending = true);
+            }
+            Ok(())
         });
         None
     }
@@ -2174,6 +2373,18 @@ impl ThreadSource for ServerSource {
         let state = self.shared.state.lock().expect("live state");
         state.projects.clone()
     }
+    fn wire_epoch(&self) -> u64 {
+        self.shared.state.lock().expect("live state").wire_epoch
+    }
+    fn project_id(&self, id: ThreadId) -> Option<String> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .slots
+            .get(id)
+            .map(|slot| slot.project_id.clone())
+    }
     fn catalog(&self) -> CatalogState {
         match &self.shared.state.lock().expect("live state").catalog {
             None => CatalogState::Loading,
@@ -2242,8 +2453,27 @@ impl ThreadSource for ServerSource {
             let state = self.shared.state.lock().expect("live state");
             project_selection(&state, &draft.project)
         });
-        let shared = self.shared.clone();
-        background_result(&self.shared, move |wire, _| {
+        // A research first prompt is answered, not parked: the thread opts in
+        // before its first send, as the TUI's new-thread opt-in does.
+        let research = draft.interaction_mode == "research"
+            || draft.prompt.once.as_deref() == Some("research");
+        let created_id = research.then(|| {
+            format!(
+                "desktop-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|time| time.as_nanos())
+                    .unwrap_or_default(),
+            )
+        });
+        if let Some(uuid) = &created_id {
+            let uuid = uuid.clone();
+            self.shared
+                .update(|state| state.research_hold = Some((uuid, Instant::now())));
+            research_follow(&self.shared);
+        }
+        background_result(&self.shared, move |wire, shared| {
             let unsent = || Some((None, draft.prompt.clone()));
             let wire = wire.map_err(|error| problem(&error, unsent()))?;
             let message = draft.prompt.wire();
@@ -2260,6 +2490,9 @@ impl ThreadSource for ServerSource {
                 "title": title,
                 "interactionMode": draft.interaction_mode,
             });
+            if let Some(uuid) = &created_id {
+                create["threadId"] = uuid.clone().into();
+            }
             if let Some(selection) = &selection {
                 create["modelSelection"] = selection.clone();
             }
@@ -2279,8 +2512,12 @@ impl ThreadSource for ServerSource {
             if let Some(selection) = selection {
                 start["modelSelection"] = selection;
             }
-            wire.dispatch("thread.turn.start", start)
+            let answer = wire
+                .dispatch("thread.turn.start", start)
                 .map_err(|error| problem(&error, unsent()))?;
+            if answer["researchSizePending"] == true {
+                shared.update(|state| state.research_pending = true);
+            }
             shared.update(|state| {
                 if let Some(id) = state.ids.get(&uuid) {
                     state.opened = Some(*id);
@@ -2301,6 +2538,163 @@ impl ThreadSource for ServerSource {
             shared.update(|state| state.added = Some(id));
             Ok(())
         });
+    }
+    fn search_threads(&mut self, query: &str) {
+        let query = query.trim().to_string();
+        let (seq, epoch) = {
+            let mut state = self.shared.state.lock().expect("live state");
+            state.search_seq += 1;
+            let seq = state.search_seq;
+            if query.is_empty() {
+                state.search = SearchState::Idle;
+                return;
+            }
+            state.search = SearchState::Loading(query.clone());
+            (seq, state.wire_epoch)
+        };
+        let target = self.shared.clone();
+        let Some(wire) = self.shared.state.lock().expect("live state").wire.clone() else {
+            self.shared.update(|state| {
+                if state.search_seq == seq {
+                    state.search = SearchState::Error("Not connected to the Moxen server.".into());
+                }
+            });
+            return;
+        };
+        std::thread::Builder::new()
+            .name("moxen-search".into())
+            .spawn(move || {
+                // The TUI waits for a pause in typing; the window only asks
+                // once the query holds still (the redraw loop calls back).
+                let answer = wire.query("threads.search", json!({ "query": query }));
+                target.update(|state| {
+                    // An older answer never replaces a newer one's, and an
+                    // answer from before a reconnect is dropped.
+                    if state.search_seq != seq || state.wire_epoch != epoch {
+                        return;
+                    }
+                    state.search = match answer {
+                        Ok(found) => decode_search(&query, &found),
+                        Err(error) => SearchState::Error(error.message),
+                    };
+                });
+            })
+            .ok();
+    }
+    fn search_state(&self) -> SearchState {
+        self.shared.state.lock().expect("live state").search.clone()
+    }
+    fn rename_project(&mut self, id: &str, title: String) {
+        let id = id.to_string();
+        background(&self.shared, move |wire| {
+            wire.dispatch("project.rename", json!({ "projectId": id, "title": title }))
+                .map_err(|error| problem(&error, None))?;
+            Ok(())
+        });
+    }
+    fn remove_project(&mut self, id: &str) {
+        let id = id.to_string();
+        background(&self.shared, move |wire| {
+            wire.dispatch("project.remove", json!({ "projectId": id }))
+                .map_err(|error| problem(&error, None))?;
+            Ok(())
+        });
+    }
+    fn watch_research(&mut self, thread: Option<ThreadId>) {
+        let uuid = thread.and_then(|id| {
+            self.shared
+                .state
+                .lock()
+                .expect("live state")
+                .slots
+                .get(id)
+                .map(|slot| slot.uuid.clone())
+        });
+        self.shared.update(|state| {
+            state.research_opt_in = uuid.clone().into_iter().collect();
+            state
+                .research_proposals
+                .retain(|_, proposal| Some(&proposal.thread_id) == uuid.as_ref());
+        });
+        research_follow(&self.shared);
+    }
+    fn proposal(&self, id: ThreadId) -> Option<ResearchProposal> {
+        let state = self.shared.state.lock().expect("live state");
+        let uuid = state.slots.get(id)?.uuid.clone();
+        state
+            .research_proposals
+            .values()
+            .find(|proposal| proposal.thread_id == uuid)
+            .cloned()
+    }
+    fn answer_proposal(&mut self, id: ThreadId, proposal: &str, size: Option<ResearchSize>) {
+        let plan = {
+            let mut state = self.shared.state.lock().expect("live state");
+            if state.slots.get(id).is_none() {
+                return;
+            }
+            let Some(known) = state.research_proposals.remove(proposal) else {
+                return;
+            };
+            let mut command = json!({ "proposalId": proposal });
+            if let Some(size) = size {
+                command["choice"] = "start".into();
+                command["plan"] = known.answer_plan(size);
+            } else {
+                command["choice"] = "single".into();
+            }
+            command
+        };
+        background(&self.shared, move |wire| {
+            // The question disappears at once; a refusal comes back as a problem.
+            wire.dispatch("research.proposal.answer", plan)
+                .map_err(|error| problem(&error, None))?;
+            Ok(())
+        });
+    }
+    fn read_run(&mut self, id: ThreadId) {
+        read_run(&self.shared, id);
+    }
+    fn watch_roles(&mut self, threads: Vec<String>) {
+        watch_roles(&self.shared, threads);
+    }
+    fn leads_run(&self, id: ThreadId) -> bool {
+        let state = self.shared.state.lock().expect("live state");
+        let Some(uuid) = state.slots.get(id).map(|slot| slot.uuid.clone()) else {
+            return false;
+        };
+        leads_run(&state.research_runs, &uuid)
+    }
+    fn run_summary(&self, id: ThreadId) -> Option<RunSummary> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .runs
+            .get(&id)
+            .cloned()
+            .flatten()
+            .map(|summary| summary.as_ref().clone())
+    }
+    fn role_messages(&self, thread: &str) -> Option<Arc<Vec<Message>>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .role_messages
+            .get(thread)
+            .cloned()
+            .flatten()
+    }
+    fn take_research_pending(&mut self) -> bool {
+        std::mem::take(
+            &mut self
+                .shared
+                .state
+                .lock()
+                .expect("live state")
+                .research_pending,
+        )
     }
     fn set_modes(&mut self, id: ThreadId, runtime: &str, interaction: &str) {
         let (uuid, runtime_changed, interaction_changed) = {
@@ -2947,6 +3341,213 @@ fn read_work(shared: &Arc<Shared>, id: ThreadId, read: Read) {
         // Back to unasked: the inspector asks again while the view shows.
         dropped.update(|state| {
             state.work_reads.remove(&drop_key);
+        });
+    }
+}
+
+/// How often the open run and its role transcripts are read again while the
+/// run view shows them.
+const RUN_REFRESH: Duration = Duration::from_millis(1500);
+
+/// Reads one lead's research run (`research.run`), projected the way the
+/// TUI's run view reads the shell's. A newer read, an error or a reconnect
+/// drops the answer; releases its in-flight guard either way.
+fn read_run(shared: &Arc<Shared>, id: ThreadId) {
+    let (uuid, title, epoch) = {
+        let mut state = shared.state.lock().expect("live state");
+        let Some(slot) = state.slots.get(id) else {
+            return;
+        };
+        let found = (slot.uuid.clone(), slot.thread.title.clone());
+        if state.wire.is_none() || !state.run_reads.insert(id) {
+            return;
+        }
+        let fresh = state
+            .run_requested
+            .get(&id)
+            .is_some_and(|at| at.elapsed() < RUN_REFRESH);
+        if fresh && state.runs.contains_key(&id) {
+            state.run_reads.remove(&id);
+            return;
+        }
+        state.run_requested.insert(id, Instant::now());
+        (found.0, found.1, state.wire_epoch)
+    };
+    let target = shared.clone();
+    if !with_wire(shared, move |wire| {
+        let answer = wire.query("research.run", json!({ "threadId": uuid }));
+        target.update(|state| {
+            if state.wire_epoch != epoch {
+                return;
+            }
+            state.run_reads.remove(&id);
+            if state.wire.is_none() {
+                return;
+            }
+            let summary = answer.ok().and_then(|run| {
+                if run.is_null() {
+                    return None;
+                }
+                let titles: HashMap<String, String> = state
+                    .slots
+                    .iter()
+                    .map(|slot| (slot.uuid.clone(), slot.thread.title.clone()))
+                    .collect();
+                let roles: Vec<RoleRow> = run["roles"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|role| {
+                        Some(RoleRow {
+                            thread_id: text(role, &["threadId"])?.to_string(),
+                            role: match text(role, &["role"])? {
+                                "researcher" => "researcher",
+                                "critic" => "critic",
+                                "finalizer" => "finalizer",
+                                _ => return None,
+                            },
+                            question: text(role, &["question"]).unwrap_or_default().to_string(),
+                            session: text(role, &["thread", "session", "status"])
+                                .unwrap_or_default()
+                                .to_string(),
+                            turn: text(role, &["thread", "latestTurn", "state"])
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                    })
+                    .collect();
+                let lead = text(&run, &["lead", "title"]).unwrap_or(&title).to_string();
+                research::summarize_run(&run, &lead, roles, &|uuid| titles.get(uuid).cloned())
+            });
+            state.runs.insert(id, summary.map(Arc::new));
+        });
+    }) {
+        shared.update(|state| {
+            if state.wire_epoch == epoch {
+                state.run_reads.remove(&id);
+                state.run_requested.remove(&id);
+            }
+        });
+    }
+}
+
+/// Holds one subscription per visible role thread while the run view shows
+/// it, with deltas, like the TUI's `useRoleTranscript`. Replaces the set when
+/// it changes; empty releases them all.
+fn watch_roles(shared: &Arc<Shared>, threads: Vec<String>) {
+    let desired: std::collections::HashSet<String> = threads.into_iter().collect();
+    let (spawn, token, epoch) = {
+        let mut state = shared.state.lock().expect("live state");
+        if state.role_watching == desired {
+            return;
+        }
+        let token = state.role_watch_token;
+        let epoch = state.wire_epoch;
+        let fresh: Vec<String> = desired.difference(&state.role_watching).cloned().collect();
+        state.role_watching = desired;
+        // Leaving the view drops the cached transcripts, so a later run does
+        // not show a previous one's rows while it reads.
+        let watching = state.role_watching.clone();
+        state.role_rows.retain(|uuid, _| watching.contains(uuid));
+        state
+            .role_messages
+            .retain(|uuid, _| watching.contains(uuid));
+        (fresh, token, epoch)
+    };
+    let Some(wire) = shared.state.lock().expect("live state").wire.clone() else {
+        return;
+    };
+    for uuid in spawn {
+        let shared = shared.clone();
+        let wire = wire.clone();
+        let _ = std::thread::Builder::new()
+            .name("moxen-role".into())
+            .spawn(move || watch_role(&shared, &wire, &uuid, token, epoch));
+    }
+}
+
+/// One role thread's live transcript: its subscription's snapshots replace
+/// its rows, and deltas extend them until another set takes over, the thread
+/// leaves the view, or the connection does.
+fn watch_role(shared: &Arc<Shared>, wire: &Wire, uuid: &str, token: u64, epoch: u64) {
+    let Ok(subscription) = wire.subscribe_thread(uuid) else {
+        return;
+    };
+    loop {
+        if shared.state.lock().expect("live state").role_watch_token != token {
+            return;
+        }
+        if shared.state.lock().expect("live state").wire_epoch != epoch {
+            return;
+        }
+        if !shared
+            .state
+            .lock()
+            .expect("live state")
+            .role_watching
+            .contains(uuid)
+        {
+            return;
+        }
+        let frame = match subscription.frames.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        };
+        let known = match frame["kind"].as_str() {
+            Some("snapshot") => true,
+            Some("event") => matches!(
+                frame["event"]["type"].as_str(),
+                Some("thread.message-sent" | "thread.reasoning-delta")
+            ),
+            _ => false,
+        };
+        if !known {
+            continue;
+        }
+        shared.update(|state| {
+            if state.role_watch_token != token || state.wire_epoch != epoch {
+                return;
+            }
+            if !state.role_watching.contains(uuid) {
+                return;
+            }
+            if frame["kind"] == "snapshot" {
+                let rows = transcript::project(&frame["snapshot"]["thread"]);
+                state.role_messages.insert(
+                    uuid.to_string(),
+                    Some(Arc::new(
+                        rows.iter().map(|row| row.message.clone()).collect(),
+                    )),
+                );
+                state.role_rows.insert(uuid.to_string(), rows);
+            } else {
+                let payload = &frame["event"]["payload"];
+                let rows = state.role_rows.entry(uuid.to_string()).or_default();
+                if frame["event"]["type"] == "thread.message-sent" {
+                    let message = &payload["message"];
+                    if text(message, &["role"]) == Some("assistant") {
+                        transcript::append(
+                            rows,
+                            text(message, &["id"]).unwrap_or_default(),
+                            text(message, &["text"]).unwrap_or_default(),
+                            transcript::created_ms(message),
+                        );
+                    }
+                } else {
+                    transcript::append_thought(
+                        rows,
+                        text(payload, &["toolCallId"]).unwrap_or_default(),
+                        text(payload, &["text"]).unwrap_or_default(),
+                    );
+                }
+                state.role_messages.insert(
+                    uuid.to_string(),
+                    Some(Arc::new(
+                        rows.iter().map(|row| row.message.clone()).collect(),
+                    )),
+                );
+            }
         });
     }
 }
@@ -4571,14 +5172,14 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn fake_server(path: std::path::PathBuf) -> (Recorded, Recorded) {
+    fn fake_server(path: std::path::PathBuf) -> FakeServer {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
         let listener = UnixListener::bind(&path).expect("bind");
-        let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
-        let seen = commands.clone();
-        let queries = Arc::new(Mutex::new(Vec::<Value>::new()));
-        let seen_queries = queries.clone();
+        let server = FakeServer::default();
+        let seen = server.commands.clone();
+        let subscriptions = server.subscriptions.clone();
+        let seen_queries = server.queries.clone();
         let remote_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -4586,6 +5187,7 @@ mod tests {
                 let seen = seen.clone();
                 let seen_queries = seen_queries.clone();
                 let remote_enabled = remote_enabled.clone();
+                let subscriptions = subscriptions.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -4597,10 +5199,26 @@ mod tests {
                             "hello" => json!({"protocol": 1, "server": "moxen", "pid": 1,
                                 "build": "b", "buildDisplay": "B", "restartRequired": false}),
                             "subscribeShell" | "subscribeThread" => {
-                                let item = if message["method"] == "subscribeShell" {
-                                    json!({"kind": "snapshot", "snapshot": {
+                                subscriptions.lock().unwrap().push(
+                                    json!({message["method"].as_str().unwrap_or_default(): params}),
+                                );
+                                let research = params["researchProposals"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>();
+                                let research_runs = json!([{
+                                    "leadThreadId": "t1", "state": "running",
+                                    "size": {"researchers": 1, "critics": 1},
+                                    "createdAt": "2026-11-16T10:00:00Z",
+                                    "updatedAt": "2026-11-16T10:01:00Z",
+                                    "roles": [{"threadId": "role-1", "role": "researcher", "question": "Survey"}],
+                                }]);
+                                let mut snapshot = json!({
                                         "projects": [{"id": "p", "title": "moxen", "workspaceRoot": "/fake/project"}],
                                         "archivedThreads": [{"id": "archived", "title": "Archived work"}],
+                                        "researchRuns": research_runs,
                                         "threads": [{"id": "t1", "projectId": "p", "title": "Fix",
                                             "session": {"status": "running"},
                                             "modelSelection": {"instanceId": "claude", "model": "opus"}},
@@ -4609,7 +5227,34 @@ mod tests {
                                              "delegationNotifies": true,
                                              "modelSelection": {"instanceId": "claude", "model": "opus"}},
                                             {"id": "archived", "projectId": "p", "parentThreadId": "t1",
-                                             "archivedAt": "2026-11-16T10:00:00Z"}]}})
+                                             "archivedAt": "2026-11-16T10:00:00Z"}]});
+                                if research.contains(&"t1") {
+                                    snapshot["researchProposals"] = json!([{
+                                        "id": "proposal-1", "threadId": "t1",
+                                        "task": "Survey the picker",
+                                        "target": "user-thread",
+                                        "plan": {"size": {"researchers": 2, "critics": 1},
+                                            "models": {"researcher": {"provider": "claude", "model": "opus",
+                                                "thinkingEffort": "medium"}}},
+                                        "leadModel": {"instanceId": "claude", "model": "opus"},
+                                        "expiresAt": null,
+                                    }]);
+                                }
+                                let item = if message["method"] == "subscribeShell" {
+                                    json!({"kind": "snapshot", "snapshot": snapshot})
+                                } else if params["threadId"] == "role-1" {
+                                    json!({"kind": "snapshot", "snapshot": {"thread": {
+                                        "id": "role-1", "projectId": "p", "title": "Survey",
+                                        "session": {"status": "running"},
+                                        "modelSelection": {"instanceId": "claude", "model": "opus"},
+                                        "messages": [
+                                            {"id": "m1", "role": "user", "text": "Survey the area",
+                                             "createdAt": "2026-11-16T10:00:00Z"},
+                                            {"id": "m2", "role": "assistant", "text": "Found the listener",
+                                             "createdAt": "2026-11-16T10:01:00Z"},
+                                        ],
+                                        "activities": [],
+                                    }}})
                                 } else {
                                     assert_eq!(params, &json!({"threadId": "t1"}));
                                     json!({"kind": "snapshot", "snapshot": {"thread": waiting_thread()}})
@@ -4648,6 +5293,51 @@ mod tests {
                                     Some("skills.list") => {
                                         seen.lock().unwrap().push(params.clone());
                                         json!({"trigger": "/", "skills": [{"name": "design-review", "enabled": true, "userInvocable": true}],"commands":[]})
+                                    }
+                                    Some("threads.search") if params["query"] == "doomed" => {
+                                        writeln!(writer, "{}", json!({"id": id, "error": {
+                                            "code": "SEARCH_FAILED", "message": "The store could not be read."
+                                        }})).unwrap();
+                                        continue;
+                                    }
+                                    Some("threads.search") => {
+                                        seen.lock().unwrap().push(params.clone());
+                                        if params["query"] == "slow" {
+                                            std::thread::sleep(Duration::from_millis(300));
+                                        }
+                                        let query = params["query"].as_str().unwrap_or_default();
+                                        json!({"query": query, "total": 1, "threads": [{
+                                            "threadId": "t1", "projectId": "p", "title": "Fix",
+                                            "status": "active", "updatedAt": "2026-11-16T10:00:00Z",
+                                            "hitCount": 2,
+                                            "hits": [
+                                                {"kind": "message", "snippet": "the encoder stalls",
+                                                 "source": "user", "turnId": null, "at": null},
+                                                {"kind": "title", "snippet": "Fix",
+                                                 "source": null, "turnId": null, "at": null},
+                                            ],
+                                        }]})
+                                    }
+                                    Some("research.run") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type": "research.run", "threadId": "t1"})
+                                        );
+                                        json!({
+                                            "leadThreadId": "t1", "state": "running",
+                                            "size": {"researchers": 1, "critics": 1},
+                                            "createdAt": "2026-11-16T10:00:00Z",
+                                            "updatedAt": "2026-11-16T10:01:00Z",
+                                            "lead": {"id": "t1", "title": "Fix"},
+                                            "roles": [{
+                                                "threadId": "role-1", "role": "researcher",
+                                                "question": "Survey",
+                                                "thread": {"id": "role-1",
+                                                    "session": {"status": "running"},
+                                                    "latestTurn": {"state": "running"}},
+                                                "task": {"status": "running"},
+                                            }],
+                                        })
                                     }
                                     Some("attachment.read" | "image.read") => {
                                         seen.lock().unwrap().push(params.clone());
@@ -4895,6 +5585,11 @@ mod tests {
                                         }})).unwrap();
                                         continue;
                                     }
+                                    Some("thread.turn.start")
+                                        if params["message"]["text"] == "park size" =>
+                                    {
+                                        json!({"accepted": true, "threadId": "new-thread", "researchSizePending": true})
+                                    }
                                     Some("thread.turn.start" | "thread.turn.interrupt") => {
                                         json!({"accepted": true, "threadId": "new-thread"})
                                     }
@@ -4906,6 +5601,38 @@ mod tests {
                                             "code": "INVALID_CONFIG", "message": "Refused by the settings server."
                                         }})).unwrap();
                                         continue;
+                                    }
+                                    Some("project.create") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type": "project.create", "workspaceRoot": "/fake/project"})
+                                        );
+                                        json!({"projectId": "p", "created": true})
+                                    }
+                                    Some("project.rename") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type": "project.rename", "projectId": "p", "title": "Renamed"})
+                                        );
+                                        json!({"projectId": "p", "title": "Renamed"})
+                                    }
+                                    Some("project.remove") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type": "project.remove", "projectId": "p"})
+                                        );
+                                        json!({"projectId": "p"})
+                                    }
+                                    Some("research.proposal.answer") => {
+                                        assert_eq!(
+                                            params,
+                                            &json!({"type": "research.proposal.answer",
+                                                "proposalId": "proposal-1", "choice": "start",
+                                                "plan": {"size": {"researchers": 2, "critics": 1},
+                                                    "models": {"researcher": {"provider": "claude",
+                                                        "model": "opus", "thinkingEffort": "medium"}}}})
+                                        );
+                                        json!({"accepted": true})
                                     }
                                     Some("settings.set" | "settings.duplicate") => {
                                         if params["key"] == "remote.enabled" {
@@ -4994,7 +5721,17 @@ mod tests {
                 });
             }
         });
-        (commands, queries)
+        server
+    }
+
+    /// What the fake server saw: commands and queries in order, and every
+    /// subscription's exact params.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct FakeServer {
+        commands: Recorded,
+        queries: Recorded,
+        subscriptions: Recorded,
     }
 
     #[cfg(unix)]
@@ -5053,7 +5790,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let (_commands, _queries) = fake_server(path.clone());
+        let _server = fake_server(path.clone());
         let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
         shared.state.lock().expect("live state").wire = Some(Arc::new(wire));
         let ran_read = Arc::new(AtomicBool::new(false));
@@ -5093,7 +5830,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let (_commands, queries) = fake_server(path.clone());
+        let queries = fake_server(path.clone()).queries;
         let (wire, _hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
         shared.update(|state| {
             state.wire = Some(Arc::new(wire));
@@ -5336,7 +6073,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let (commands, queries) = fake_server(path.clone());
+        let server = fake_server(path.clone());
+        let commands = server.commands.clone();
+        let queries = server.queries.clone();
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the thread list", || !source.list_threads().is_empty());
         source.focus(0);
@@ -6402,7 +7141,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let (_commands, queries) = fake_server(path.clone());
+        let queries = fake_server(path.clone()).queries;
         let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
         wait_for("the parent and child threads", || source.children(0) == [1]);
         source.focus(0);
@@ -6490,5 +7229,234 @@ mod tests {
         assert!(matches!(source.work(0, &output).as_deref(),
             Some(Ok(View::Output(Some(text)))) if text == "running\ndone"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Threads each live test connects through get their own socket, so their
+    /// commands never mix.
+    #[cfg(unix)]
+    fn live_source(name: &str) -> (ServerSource, FakeServer, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("moxen-live-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let server = fake_server(path.clone());
+        let mut source = ServerSource::connect(path.to_string_lossy().into_owned());
+        wait_for("the thread list", || !source.list_threads().is_empty());
+        source.focus(0);
+        (source, server, dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_queries_the_store_and_older_answers_lose() {
+        let (mut source, server, dir) = live_source("search");
+        let commands = server.commands.clone();
+        source.search_threads("encoder");
+        wait_for("the search answer", || {
+            matches!(source.search_state(), SearchState::Done(_))
+        });
+        let SearchState::Done(found) = source.search_state() else {
+            panic!("a search answer was expected");
+        };
+        assert_eq!(found.query, "encoder");
+        assert_eq!(found.total, 1);
+        assert_eq!(found.threads[0].uuid, "t1");
+        assert_eq!(found.threads[0].title, "Fix");
+        assert!(!found.threads[0].settled);
+        assert_eq!(found.threads[0].hits.len(), 2);
+        // The exact payload the palette sends.
+        let sent: Vec<Value> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|message| message["type"] == "threads.search")
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent,
+            [serde_json::json!({"type": "threads.search", "query": "encoder"})]
+        );
+
+        // An empty query clears the answer without asking.
+        source.search_threads("   ");
+        assert!(matches!(source.search_state(), SearchState::Idle));
+
+        // A slow answer never replaces a newer one, and a failed search
+        // releases its guard: the next query still asks.
+        source.search_threads("slow");
+        source.search_threads("fast");
+        wait_for(
+            "the fast answer",
+            || matches!(&source.search_state(), SearchState::Done(found) if found.query == "fast"),
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            matches!(&source.search_state(), SearchState::Done(found) if found.query == "fast")
+        );
+        source.search_threads("doomed");
+        wait_for("the search error", || {
+            matches!(source.search_state(), SearchState::Error(_))
+        });
+        source.search_threads("encoder");
+        wait_for(
+            "the recovered answer",
+            || matches!(&source.search_state(), SearchState::Done(found) if found.query == "encoder"),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projects_add_rename_and_remove_through_the_servers_commands() {
+        let (mut source, server, dir) = live_source("projects");
+        let commands = server.commands.clone();
+        source.add_project("/fake/project".into());
+        wait_for("the project", || {
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message["type"] == "project.create")
+        });
+        source.rename_project("p", "Renamed".into());
+        wait_for("the rename", || {
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message["type"] == "project.rename")
+        });
+        source.remove_project("p");
+        wait_for("the removal", || {
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message["type"] == "project.remove")
+        });
+        let sent: Vec<Value> = commands.lock().unwrap().clone();
+        assert!(sent.contains(&serde_json::json!(
+            {"type": "project.rename", "projectId": "p", "title": "Renamed"})));
+        assert!(sent.contains(&serde_json::json!(
+            {"type": "project.remove", "projectId": "p"})));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn research_proposals_answers_runs_and_role_transcripts_come_from_the_server() {
+        let (mut source, server, dir) = live_source("research");
+        let commands = server.commands.clone();
+        // Nothing is asked for until the thread can start a run.
+        assert!(source.proposal(0).is_none());
+        source.watch_research(Some(0));
+        wait_for("the proposal", || source.proposal(0).is_some());
+        let proposal = source.proposal(0).expect("proposal");
+        assert_eq!(proposal.id, "proposal-1");
+        assert_eq!(proposal.size.researchers, 2);
+        assert_eq!(proposal.size.critics, 1);
+        assert_eq!(
+            proposal.role_model(crate::research::ResearchRole::Researcher),
+            Some(&crate::research::RoleModel {
+                provider: "claude".into(),
+                model: "opus".into(),
+                effort: Some("medium".into()),
+            })
+        );
+        // The opt-in the subscription carries names the thread.
+        wait_for("the research opt-in", || {
+            server.subscriptions.lock().unwrap().iter().any(|message| {
+                message["subscribeShell"]["researchProposals"] == serde_json::json!(["t1"])
+            })
+        });
+
+        // Answering starts the run with the proposal's size and models.
+        source.answer_proposal(0, "proposal-1", Some(proposal.size));
+        wait_for("the answer", || {
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message["type"] == "research.proposal.answer")
+        });
+        assert!(source.proposal(0).is_none());
+        let answered: Vec<Value> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|message| message["type"] == "research.proposal.answer")
+            .cloned()
+            .collect();
+        assert_eq!(
+            answered,
+            [serde_json::json!({"type": "research.proposal.answer",
+                "proposalId": "proposal-1", "choice": "start",
+                "plan": {"size": {"researchers": 2, "critics": 1},
+                    "models": {"researcher": {"provider": "claude", "model": "opus",
+                        "thinkingEffort": "medium"}}}})]
+        );
+
+        // The run view reads the run, then holds one subscription per visible
+        // role thread while it shows it.
+        source.read_run(0);
+        wait_for("the run summary", || source.run_summary(0).is_some());
+        let summary = source.run_summary(0).expect("run");
+        assert_eq!(summary.lead_thread_id, "t1");
+        assert_eq!(summary.title, "Fix");
+        assert_eq!(summary.phase(), crate::research::RunPhase::Researching);
+        assert_eq!(summary.agents[0].len(), 1);
+        assert_eq!(summary.agents[0][0].thread_id.as_deref(), Some("role-1"));
+        assert_eq!(
+            summary.agents[0][0].state,
+            crate::research::AgentState::Working
+        );
+        source.watch_roles(vec!["role-1".to_string()]);
+        wait_for("the role transcript", || {
+            source.role_messages("role-1").is_some()
+        });
+        let rows = source.role_messages("role-1").expect("role transcript");
+        assert!(
+            matches!(&rows[1], Message::Assistant { text, .. } if text == "Found the listener")
+        );
+
+        // A parked run-size question surfaces once, like the TUI's toast.
+        source.send_message(0, "park size".into(), Delivery::Steer);
+        wait_for("the parked question", || source.take_research_pending());
+        assert!(!source.take_research_pending());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_threads_hold_their_opt_in_until_listed() {
+        let runs = serde_json::json!([{
+            "leadThreadId": "t1",
+            "roles": [{"threadId": "role-1", "role": "researcher", "question": "Survey"}],
+        }]);
+        let runs = runs.as_array().cloned().unwrap_or_default();
+        assert!(leads_run(&runs, "t1"));
+        assert!(!leads_run(&runs, "other"));
+
+        let mut state = State {
+            research_opt_in: vec!["t1".into()],
+            ..State::default()
+        };
+        assert_eq!(research_desired(&mut state), vec!["t1".to_string()]);
+        // An expired hold drops out of the desired set; a fresh one joins it.
+        state.research_hold = Some(("new".into(), Instant::now() - RESEARCH_HOLD * 2));
+        assert_eq!(research_desired(&mut state), vec!["t1".to_string()]);
+        assert!(state.research_hold.is_none());
+        state.research_hold = Some(("new".into(), Instant::now()));
+        assert_eq!(
+            research_desired(&mut state),
+            vec!["t1".to_string(), "new".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_broken_search_answer_is_an_error_not_idle() {
+        // A decode failure must surface as an error: idle would leave the
+        // palette showing the stale error or empty result.
+        let broken = decode_search("encoder", &serde_json::json!({"threads": "oops"}));
+        assert!(matches!(broken, SearchState::Error(_)));
     }
 }

@@ -325,9 +325,14 @@ impl Wire {
     }
 
     /// Opens the shell subscription. Frames (and a final error) arrive on the
-    /// receiver, which ends when the connection does.
-    pub fn subscribe_shell(&self) -> Result<Subscription, WireError> {
-        self.subscribe("subscribeShell", json!({}))
+    /// receiver, which ends when the connection does. Threads in `research`
+    /// opt in to answering their run-size question through it.
+    pub fn subscribe_shell(&self, research: &[String]) -> Result<Subscription, WireError> {
+        let mut params = json!({});
+        if !research.is_empty() {
+            params["researchProposals"] = research.to_vec().into();
+        }
+        self.subscribe("subscribeShell", params)
     }
 
     /// Opens one thread's subscription.
@@ -539,7 +544,7 @@ mod tests {
         });
         let (wire, hello) = Wire::connect(path.to_str().expect("utf8")).expect("connect");
         assert_eq!(hello.build, "build-1");
-        let subscription = wire.subscribe_shell().expect("subscribe");
+        let subscription = wire.subscribe_shell(&[]).expect("subscribe");
         let frame = subscription
             .frames
             .recv_timeout(Duration::from_secs(5))

@@ -6,8 +6,8 @@ use crate::{
     live::ServerSource,
     mock::MockSource,
     model::{
-        CatalogState, Delivery, Discovery, INTERACTION_MODES, NewThread, QueueEdit, RUNTIME_MODES,
-        Reply, Selection, Status, ThreadId, ThreadSource,
+        CatalogState, Delivery, Discovery, INTERACTION_MODES, NewThread, PickerState, QueueEdit,
+        RUNTIME_MODES, Reply, ResearchRole, Selection, Status, ThreadId, ThreadSource,
     },
     theme::{self, color},
     thread_actions,
@@ -89,10 +89,41 @@ pub struct Workspace {
     pub search: Entity<Composer>,
     pub thread_popup: Option<thread_actions::Popup>,
     pub thread_form: Option<thread_actions::Form>,
+    pub project_popup: Option<thread_actions::ProjectPopup>,
+    pub project_form: Option<thread_actions::ProjectForm>,
     pub action_model: Option<Selection>,
     pub action_input: Entity<Composer>,
     pub thread_action_focus: FocusHandle,
     focus_new_draft: bool,
+    /// A notice above the composer, until it is dismissed. The parked
+    /// run-size question clears itself, like the TUI's toast.
+    pub notice: Option<String>,
+    pub notice_at: Option<Instant>,
+    /// The thread searched for, and when the palette's text last changed: the
+    /// search goes out once the query holds still.
+    searched: String,
+    search_at: Option<(Instant, String)>,
+    /// The connection the palette's query was last sent on: a reconnect
+    /// re-issues it, so the palette never keeps a stale error or empty result.
+    search_epoch: u64,
+    /// The run-size proposal the window already focused, by thread: focusing
+    /// once when it first appears (like the TUI focuses its picker), not on
+    /// every redraw.
+    pub proposal_seen: Option<(ThreadId, String)>,
+    /// The threads the server may ask this window for a run size, last sent.
+    research_watching: Option<ThreadId>,
+    /// The lead thread opened in full: its transcript shows, not its run.
+    pub lead_full: Option<ThreadId>,
+    /// A role agent opened in full: its lead and its roster reference.
+    pub role_full: Option<(ThreadId, ResearchRole, usize)>,
+    /// The run view's columns: the role keys act on and the agent each role
+    /// shows, by lead thread.
+    pub run_role: HashMap<ThreadId, ResearchRole>,
+    pub run_picks: HashMap<(ThreadId, ResearchRole), usize>,
+    /// Role transcript tool rows opened in the run view, by lead, role and agent.
+    pub run_expanded: HashSet<(ThreadId, ResearchRole, usize)>,
+    /// The size picker's state, by thread: the proposal it answers and its state.
+    pub picker: HashMap<ThreadId, (String, PickerState)>,
     /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
     pub fold_toggled: HashSet<(ThreadId, usize)>,
     pub unfolded_at: HashMap<(ThreadId, usize), Instant>,
@@ -161,6 +192,15 @@ impl Workspace {
         } else {
             Box::new(ServerSource::connect(crate::wire::default_endpoint()))
         };
+        Self::with_source(source, demo, window, cx)
+    }
+
+    fn with_source(
+        source: Box<dyn ThreadSource>,
+        demo: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut subscriptions = vec![];
         let new_composer = cx.new(|cx| {
             let mut c = Composer::new(cx);
@@ -235,6 +275,11 @@ impl Workspace {
             window,
             |this, _, e: &Submitted, window, cx| {
                 if this.palette_open {
+                    // Enter on an empty query does nothing: it must not
+                    // activate the first row.
+                    if e.0.trim().is_empty() {
+                        return;
+                    }
                     crate::palette::pick_first(this, &e.0, window, cx);
                 } else {
                     this.search
@@ -256,7 +301,11 @@ impl Workspace {
             &action_input,
             window,
             |this, _, e: &Submitted, window, cx| {
-                this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
+                if this.project_form.is_some() {
+                    this.submit_project_action(thread_actions::Submission::Text(&e.0), window, cx);
+                } else {
+                    this.submit_thread_action(thread_actions::Submission::Text(&e.0), window, cx);
+                }
             },
         ));
         let settings_input = cx.new(|cx| {
@@ -326,6 +375,10 @@ impl Workspace {
                         {
                             cx.notify();
                         }
+                        // A search goes out once the palette's query holds
+                        // still, like the TUI's picker waits for a pause.
+                        this.sync_search(cx);
+                        this.sync_research(cx);
                     })
                     .is_err()
                 {
@@ -431,6 +484,21 @@ impl Workspace {
             search,
             thread_popup: None,
             thread_form: None,
+            project_popup: None,
+            project_form: None,
+            notice: None,
+            notice_at: None,
+            searched: String::new(),
+            search_at: None,
+            search_epoch: 0,
+            proposal_seen: None,
+            research_watching: None,
+            lead_full: None,
+            role_full: None,
+            run_role: HashMap::new(),
+            run_picks: HashMap::new(),
+            run_expanded: HashSet::new(),
+            picker: HashMap::new(),
             action_model: None,
             action_input,
             thread_action_focus: cx.focus_handle(),
@@ -659,6 +727,163 @@ impl Workspace {
                 }
             }
         }
+        // The server parked the run-size question: the next send asks for it.
+        // The notice clears itself, as the TUI's toast does after 2.5s.
+        if self.source.take_research_pending() {
+            self.notice = Some("Run size still to choose — the next send asks for it.".into());
+            self.notice_at = Some(Instant::now());
+        }
+        if self
+            .notice_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_millis(2500))
+        {
+            self.notice = None;
+            self.notice_at = None;
+        }
+    }
+    /// How long the palette's query holds still before the store is searched.
+    const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
+    /// Sends the palette's query once it holds still, like the TUI's picker
+    /// waits for a pause in typing.
+    fn sync_search(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.source.wire_epoch();
+        if epoch != self.search_epoch {
+            // A reconnect drops the last answer: ask again for what the
+            // palette still shows, instead of keeping a stale error or empty
+            // result until the query changes.
+            self.search_epoch = epoch;
+            self.searched = String::new();
+            self.search_at = None;
+        }
+        if !self.palette_open {
+            self.searched = String::new();
+            self.search_at = None;
+            return;
+        }
+        let query = self.search.read(cx).text().to_string();
+        if query.trim().is_empty() {
+            self.searched = String::new();
+            self.search_at = None;
+            self.source.search_threads("");
+            return;
+        }
+        if query == self.searched {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .search_at
+            .as_ref()
+            .is_none_or(|(_, pending)| pending != &query)
+        {
+            self.search_at = Some((now, query));
+            return;
+        }
+        if self
+            .search_at
+            .as_ref()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= Self::SEARCH_DEBOUNCE)
+        {
+            self.searched = query.clone();
+            self.search_at = None;
+            self.source.search_threads(&query);
+            cx.notify();
+        }
+    }
+    /// The thread the server may ask this window for a run size: the focused
+    /// thread while it can start one (Research mode is on, `/research` is
+    /// typed, or the thread orchestrates), none otherwise.
+    fn research_target(&self, cx: &mut Context<Self>) -> Option<ThreadId> {
+        if self.creating || self.composers.len() <= self.selected {
+            return None;
+        }
+        let thread = self.source.list_threads().get(self.selected)?.clone();
+        let composer = self.composers[self.selected].read(cx);
+        let drafted = composer_menu::mode_command(composer.text())
+            .is_some_and(|(mode, _)| mode == "research");
+        let research = thread.interaction_mode == "research"
+            || thread.interaction_mode == "orchestrate"
+            || composer.once.as_deref() == Some("research")
+            || drafted;
+        research.then_some(self.selected)
+    }
+    /// Keeps the run-size opt-in on the focused thread and the run view's
+    /// reads going while it shows.
+    fn sync_research(&mut self, cx: &mut Context<Self>) {
+        let target = self.research_target(cx);
+        if target != self.research_watching {
+            self.research_watching = target;
+            self.source.watch_research(target);
+        }
+        if !self.creating && self.source.leads_run(self.selected) {
+            self.source.read_run(self.selected);
+        }
+        // One subscription per visible role thread while the run view shows
+        // it, with deltas; released when leaving the view, switching threads
+        // or disconnecting (the live source ends them).
+        let visible = self.visible_role_threads();
+        self.source.watch_roles(visible);
+    }
+
+    /// The role threads the run view shows now, by their id on the wire.
+    fn visible_role_threads(&self) -> Vec<String> {
+        if self.creating {
+            return vec![];
+        }
+        if let Some((lead, role, agent)) = self.role_full {
+            return self
+                .source
+                .run_summary(lead)
+                .and_then(|summary| summary.agents[role as usize].get(agent)?.thread_id.clone())
+                .into_iter()
+                .collect();
+        }
+        if !self.show_run_view() {
+            return vec![];
+        }
+        let Some(summary) = self.source.run_summary(self.selected) else {
+            return vec![];
+        };
+        crate::model::ROLES
+            .into_iter()
+            .filter_map(|role| {
+                let at = self
+                    .run_shown(self.selected, role)
+                    .min(summary.agents[role as usize].len().saturating_sub(1));
+                summary.agents[role as usize].get(at)?.thread_id.clone()
+            })
+            .collect()
+    }
+    /// The lead's run view replaces its transcript: the shell lists it
+    /// leading a run and the run is read, and it is not opened in full.
+    pub fn show_run_view(&self) -> bool {
+        !self.creating
+            && self.role_full.is_none()
+            && self.lead_full != Some(self.selected)
+            && self.source.leads_run(self.selected)
+            && self.source.run_summary(self.selected).is_some()
+    }
+    /// The lead a role thread (or a lead opened in full) goes back to.
+    pub fn run_back_to(&self) -> Option<ThreadId> {
+        if self.show_run_view() {
+            return None;
+        }
+        if let Some((lead, _, _)) = self.role_full {
+            return Some(lead);
+        }
+        if self.lead_full == Some(self.selected) {
+            return Some(self.selected);
+        }
+        None
+    }
+    /// Leaves the full transcript for the run view.
+    pub fn back_to_run(&mut self, cx: &mut Context<Self>) {
+        if self.run_back_to().is_none() {
+            return;
+        }
+        self.lead_full = None;
+        self.role_full = None;
+        cx.notify();
     }
     /// The project a new thread starts in: the one picked, else the open
     /// thread's, else the newest.
@@ -668,16 +893,13 @@ impl Workspace {
             .clone()
             .filter(|id| projects.iter().any(|p| &p.id == id))
             .or_else(|| {
-                let open = self
-                    .source
-                    .list_threads()
-                    .get(self.selected)?
-                    .project
-                    .clone();
-                projects
-                    .iter()
-                    .find(|p| p.title == open)
-                    .map(|p| p.id.clone())
+                let pid = self.source.project_id(self.selected).or_else(|| {
+                    self.source
+                        .list_threads()
+                        .get(self.selected)
+                        .map(|thread| thread.project.clone())
+                })?;
+                projects.iter().any(|p| p.id == pid).then_some(pid)
             })
             .or_else(|| projects.first().map(|p| p.id.clone()))
     }
@@ -775,6 +997,9 @@ impl Workspace {
         cx.notify();
     }
     fn start_thread(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.trim().is_empty() && self.new_composer.read(cx).assets.is_empty() {
+            return;
+        }
         let Some(project) = self.new_project_id() else {
             self.problem = Some("There is no project to start a thread in.".into());
             self.new_composer.update(cx, |c, cx| c.set_text(text, cx));
@@ -1156,6 +1381,8 @@ impl Workspace {
         self.selected = id;
         self.creating = false;
         self.dropdown = None;
+        self.lead_full = None;
+        self.role_full = None;
         // A click selects the row, which drops its tip: the full title
         // would otherwise stay where it opened, over the rows below.
         self.clear_thread_tip();
@@ -1173,7 +1400,7 @@ impl Workspace {
         cx.notify();
     }
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread_form.is_some() {
+        if self.thread_form.is_some() || self.project_form.is_some() {
             return;
         }
         self.thread_popup = None;
@@ -1233,6 +1460,26 @@ impl Workspace {
         cx.notify();
     }
     fn send(&mut self, id: ThreadId, text: String, delivery: Delivery, cx: &mut Context<Self>) {
+        // The run-size question waits: Enter starts the run with the picked
+        // size, as the TUI's modal does. The typed draft stays in the
+        // composer: answering is not a send.
+        if !self.creating && self.source.proposal(id).is_some() {
+            if !text.is_empty() {
+                self.composers[id].update(cx, |c, cx| c.set_text(text, cx));
+            }
+            self.answer_size(id, cx);
+            return;
+        }
+        // An empty Enter with nothing waiting sends nothing: the composer
+        // already cleared its (empty) draft to get here.
+        if text.trim().is_empty()
+            && self
+                .composers
+                .get(id)
+                .is_none_or(|composer| composer.read(cx).assets.is_empty())
+        {
+            return;
+        }
         let busy = self
             .source
             .list_threads()
@@ -1478,6 +1725,14 @@ impl Render for Workspace {
                         this.close_settings_over(window, cx);
                     } else if this.thread_form.is_some() || this.thread_popup.is_some() {
                         this.close_thread_action(window, cx);
+                    } else if this.project_form.is_some() || this.project_popup.is_some() {
+                        this.close_project_action(window, cx);
+                    } else if this.role_full.is_some() || this.lead_full.is_some() {
+                        this.back_to_run(cx);
+                    } else if !this.creating && this.source.proposal(this.selected).is_some() {
+                        // The run-size question waits: Esc runs one researcher
+                        // instead, as the TUI's modal does.
+                        this.answer_single(this.selected, cx);
                     } else if this.custom_open {
                         this.close_custom(window, cx);
                     } else if this.git_ui.form.is_some() {
@@ -1597,6 +1852,14 @@ impl Render for Workspace {
             .when_some(self.thread_form.as_ref(), |s, form| {
                 s.child(crate::thread_actions::form(self, form, window, cx))
             })
+            .when_some(self.project_popup.as_ref(), |s, popup| {
+                s.child(crate::thread_actions::project_popup(
+                    self, popup, window, cx,
+                ))
+            })
+            .when_some(self.project_form.as_ref(), |s, form| {
+                s.child(crate::thread_actions::project_form(self, form, window, cx))
+            })
             .when(self.settings_open, |s| {
                 s.child(crate::settings_view::render(self, window, cx))
             })
@@ -1667,5 +1930,103 @@ impl Render for Workspace {
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(all(test, feature = "render-harness"))]
+mod tests {
+    use super::{MockSource, Workspace};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn mock_workspace(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.update(crate::composer::bind_keys);
+        let source = MockSource::new().with_project_title("moxen-chat", "a  b");
+        cx.add_window_view(|window, cx| Workspace::with_source(Box::new(source), false, window, cx))
+    }
+
+    #[gpui::test]
+    fn enter_on_an_empty_palette_does_not_activate_a_row(cx: &mut TestAppContext) {
+        let (workspace, cx) = mock_workspace(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.open_palette(window, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.palette_open);
+            assert!(w.thread_form.is_none());
+            assert!(w.project_form.is_none());
+        });
+
+        cx.update(|_, cx| {
+            workspace.read(cx).search.clone().update(cx, |search, cx| {
+                search.set_text("Rename thread".into(), cx);
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| assert!(workspace.read(cx).thread_form.is_some()));
+    }
+
+    #[gpui::test]
+    fn duplicate_project_rename_keeps_the_normalized_name_and_retry_clears_the_error(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, cx) = mock_workspace(cx);
+        #[cfg(debug_assertions)]
+        {
+            cx.update(|_, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.problem = Some("An earlier error".into());
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("composer-problem").is_some());
+        }
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.pick_project_action("moxen-agent", true, window, cx)
+            });
+            workspace
+                .read(cx)
+                .action_input
+                .clone()
+                .update(cx, |input, cx| {
+                    input.set_text("  a   b  ".into(), cx);
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.project_form.is_some());
+            assert_eq!(w.action_input.read(cx).text(), "a b");
+            assert_eq!(
+                w.problem.as_deref(),
+                Some("A project already exists with title \"a b\".")
+            );
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("composer-problem").is_none());
+
+        cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .action_input
+                .clone()
+                .update(cx, |input, cx| {
+                    input.set_text("Unique project".into(), cx);
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            let w = workspace.read(cx);
+            assert!(w.project_form.is_none());
+            assert!(w.problem.is_none());
+            assert!(w.source.projects().iter().any(|project| {
+                project.id == "moxen-agent" && project.title == "Unique project"
+            }));
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("composer-problem").is_none());
     }
 }

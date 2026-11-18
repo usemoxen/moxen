@@ -154,11 +154,13 @@ impl Workspace {
         let Some(form) = self.git_ui.form else {
             return;
         };
-        self.close_form(window, cx);
-        let text = text.trim();
-        if text.is_empty() {
+        // An empty Enter is not a send: leave the form open, as before empty
+        // submits reached this path.
+        if text.trim().is_empty() {
             return;
         }
+        self.close_form(window, cx);
+        let text = text.trim();
         let id = self.selected;
         match form {
             Form::Create { draft } => {

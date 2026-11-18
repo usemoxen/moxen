@@ -188,21 +188,37 @@ impl Workspace {
 
     /// Starts a fresh draft when the request shown changes, takes focus for
     /// the panel when one opens and gives it back to the composer when it goes.
+    /// The run-size proposal takes the same focus when it first appears for
+    /// the selected thread, as the TUI focuses its picker.
     pub fn sync_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
         let open = self.request_open();
-        if open.as_deref().unwrap_or("") == self.draft.request {
-            return;
+        if open.as_deref().unwrap_or("") != self.draft.request {
+            let had = !self.draft.request.is_empty();
+            self.draft = Draft::new(open.clone().unwrap_or_default());
+            self.custom_open = false;
+            if open.is_some() {
+                cx.defer_in(window, |this, window, cx| window.focus(&this.ask_focus, cx));
+            } else if had {
+                cx.defer_in(window, |this, window, cx| {
+                    let composer = this.active_composer().read(cx).focus.clone();
+                    window.focus(&composer, cx)
+                });
+            }
         }
-        let had = !self.draft.request.is_empty();
-        self.draft = Draft::new(open.clone().unwrap_or_default());
-        self.custom_open = false;
-        if open.is_some() {
-            cx.defer_in(window, |this, window, cx| window.focus(&this.ask_focus, cx));
-        } else if had {
-            cx.defer_in(window, |this, window, cx| {
-                let composer = this.active_composer().read(cx).focus.clone();
-                window.focus(&composer, cx)
-            });
+        let current = (!self.creating)
+            .then(|| self.source.proposal(self.selected))
+            .flatten()
+            .map(|proposal| (self.selected, proposal.id.clone()));
+        if current != self.proposal_seen {
+            self.proposal_seen = current.clone();
+            if current.is_some() {
+                cx.defer_in(window, |this, window, cx| window.focus(&this.ask_focus, cx));
+            } else if self.request_open().is_none() {
+                cx.defer_in(window, |this, window, cx| {
+                    let composer = this.active_composer().read(cx).focus.clone();
+                    window.focus(&composer, cx)
+                });
+            }
         }
     }
 
@@ -251,6 +267,11 @@ impl Workspace {
 
     /// The written answer to the question shown.
     pub fn submit_custom(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // An empty Enter is not an answer: leave the field open, as before
+        // empty submits reached this path.
+        if text.trim().is_empty() {
+            return;
+        }
         self.custom_open = false;
         window.focus(&self.ask_focus, cx);
         let Some(ask) = self.source.ask(self.selected) else {
