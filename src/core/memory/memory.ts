@@ -23,6 +23,7 @@ import path from "node:path";
 
 import { CliError } from "../errors.js";
 import { writeAtomic } from "../infra/atomic.js";
+import { untrustedContext } from "../untrusted.js";
 
 export const MEMORY_SCOPES = ["project", "global"] as const;
 export type MemoryScope = (typeof MEMORY_SCOPES)[number];
@@ -397,6 +398,47 @@ export async function memoryIndexText(location: MemoryLocation): Promise<string 
   const parts: string[] = [];
   if (global.length > 0) parts.push(`Global memory (about the user, for every project):\n${cappedIndex(global)}`);
   if (project.length > 0) parts.push(`Project memory (this codebase and its work):\n${cappedIndex(project)}`);
+  return parts.length === 0 ? null : parts.join("\n\n");
+}
+
+/**
+ * A note is data: it may not open or close the untrusted wrapper, or open a
+ * block that belongs to Moxen's own protocol.
+ */
+function asData(text: string): string {
+  return text.replace(/<(\/?)(untrusted_context|moxen-[a-z-]+|task-notification)\b/giu, "&lt;$1$2");
+}
+
+/** The `main` memory of one scope, read in full; null when that scope has none. Never falls back to the other scope. */
+async function mainMemory(location: MemoryLocation, scope: MemoryScope): Promise<Memory | null> {
+  if (scope === "project" && (location.projectId === null || location.projectId.trim() === "")) return null;
+  try {
+    return await readMemory(location, "main", scope);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a session sees of memory at the start of a conversation: the ordinary
+ * `main` memory of the global scope and of the current project, each in full
+ * and independently (a missing one is omitted, never filled from the other),
+ * then the same bounded index `memory_read` returns.
+ *
+ * Notes are untrusted context: they were written by earlier sessions and may
+ * be stale or wrong, and the text itself may try to imitate Moxen's protocol.
+ * Empty when there is nothing to show.
+ */
+export async function memoryStartupText(location: MemoryLocation): Promise<string | null> {
+  const [global, project, index] = await Promise.all([
+    mainMemory(location, "global"),
+    mainMemory(location, "project"),
+    memoryIndexText(location),
+  ]);
+  const parts: string[] = [];
+  if (global !== null) parts.push(`### Global main memory (about the user, for every project)\n\n${untrustedContext(asData(global.body), "moxen:memory:global:main")}`);
+  if (project !== null) parts.push(`### Project main memory (this codebase and its work)\n\n${untrustedContext(asData(project.body), "moxen:memory:project:main")}`);
+  if (index !== null) parts.push(`### Memory index\n\n${untrustedContext(asData(index), "moxen:memory:index")}`);
   return parts.length === 0 ? null : parts.join("\n\n");
 }
 

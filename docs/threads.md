@@ -784,7 +784,9 @@ so a change on Claude's side does not change it.
   `<store>/memory/projects/<projectId>/`. One file per memory, with
   `name`, `description` and `type` (`user`, `feedback`, `project`,
   `reference`) frontmatter, and `MEMORY.md`, the index, which Moxen writes
-  itself on every save and delete.
+  itself on every save and delete. `main` is an ordinary memory: a scope
+  holds its durable essentials in `main.md`, read and edited like any other.
+  A scope without one has none; nothing stands in for it.
 - **Tools:** `memory_read` (no name: the index as it is now),
   `memory_search`, `memory_save`, `memory_edit`, `memory_append` and
   `memory_delete` on the `moxen` MCP server. The model picks the scope.
@@ -798,10 +800,22 @@ so a change on Claude's side does not change it.
   open is shown rather than silently overwritten. Viewing works with memory
   off, and says so; saving, editing and deleting are refused while it is off,
   in the manager, the CLI and on the server.
-- **Reading:** the index is not shipped in the runtime instructions: it can
-  reach 200 lines / 25 KB, and `memory_read` with no name returns it as it is
-  now, so the rules point there instead of duplicating it. A memory itself is
-  read on demand, and the agent decides which ones the work touches.
+- **Reading:** a conversation starts with the `main` memory of each scope it
+  can see, in full: global, and for a thread with a project, that project's
+  own. A missing note is left out; the project's is never taken from the
+  global scope or another project. Then comes the bounded index
+  `memory_read` returns: 200 lines / 25 KB per scope, with a note saying what
+  was left out. Both are wrapped as untrusted context, because earlier
+  sessions wrote them: they are data, may be out of date, and cannot pass for
+  Moxen's own instructions or message blocks.
+- **Startup snapshot:** the notes and index are a conversation's opening
+  context, not live guidance. Memory changed while a conversation lives is not
+  pushed into it, and a resumed conversation keeps the system prompt it began
+  with, so the provider's cached prefix stays intact. `memory_read` with no
+  name is the live index and reading a memory by name is current. A change to
+  the memory gate (off, or back on) sends an instruction update without
+  memory content; a new conversation picks up the current notes and index and
+  pays their cost once.
 - **Searching:** `memory_search` searches names, descriptions and bodies in
   the current project and global memory, including entries omitted from the
   capped index. An optional `scope` restricts it to `project` or `global`.
@@ -858,8 +872,12 @@ so a change on Claude's side does not change it.
   by terminating the model process. Filesystem reads and keyword matching are
   outside that inference deadline.
 - **Rules:** always on while memory is (`MEMORY_GUIDANCE` in
-  `threads/instructions.ts`): what to save, what to skip, which scope.
-  Lessons from a session are saved on the agent's own initiative.
+  `threads/instructions.ts`): what to save, what to skip, which scope, to read
+  both available main notes, and to keep the main memory to durable,
+  high-signal essentials rather than a log. Lessons from a session are saved
+  on the agent's own initiative. A delegated task gets the read-only rules
+  (`MEMORY_READ_ONLY_GUIDANCE`): it reads both notes and cannot change
+  memory.
 - **Claude Code:** its auto memory is off in Moxen's sessions
   (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in the process Moxen starts), so
   there is one memory, not two. The user's own `claude` keeps its memory.

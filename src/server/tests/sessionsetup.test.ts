@@ -437,36 +437,54 @@ describe("Research and Orchestrate modes", () => {
 });
 
 describe("Moxen memory", () => {
-  it("keeps the memory index out of the prompt, and points the rules at memory_read for it", async () => {
+  it("starts a conversation with both main notes and the bounded index, then leaves the snapshot alone", async () => {
     const prompts: string[] = [];
     const starts: Array<Record<string, unknown>> = [];
     const harness = await testHarness({ onStartSession: (input) => starts.push(input), onSendTurn: (input) => prompts.push(input.prompt) });
     const open = () => new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => ({ ...harness.config }) });
     const first = open();
     try {
+      const seed = await first.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "seed", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      await first.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Global essentials", memoryType: "user", body: "Global: use bun, never npm.", scope: "global" });
+      await first.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Project essentials", memoryType: "project", body: "Project: run bun run check.", scope: "project" });
+      await first.dispatch({ type: "memory.save", threadId: seed.threadId, name: "bun-tests", description: "Tests run with bun", memoryType: "feedback", body: "Use bun test.", scope: "project" });
+
       const created = await first.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
       const id = created.threadId;
-      // Memory on: its rules say where the index lives, and none of it is shipped in the prompt.
-      expect(String(starts[0]?.instructions)).toContain("You have a persistent memory");
-      expect(String(starts[0]?.instructions)).toContain("memory_read with no name returns the index");
-      expect(starts[0]?.moxenMemory).toBe(true);
+      const instructions = String(starts.find((start) => start.threadId === id)?.instructions);
+      expect(instructions).toContain("You have a persistent memory");
+      expect(instructions).toContain("Global: use bun, never npm.");
+      expect(instructions).toContain("Project: run bun run check.");
+      expect(instructions).toContain("- [bun-tests](bun-tests.md) — Tests run with bun");
+      // Each note is its scope's own, and is framed as data.
+      expect(instructions).toContain('<untrusted_context source="moxen:memory:global:main">');
+      expect(instructions).toContain('<untrusted_context source="moxen:memory:project:main">');
+      expect(instructions.indexOf("Global: use bun, never npm.")).toBeLessThan(instructions.indexOf("Project: run bun run check."));
+      expect(instructions.indexOf("Project: run bun run check.")).toBeLessThan(instructions.indexOf("### Memory index"));
+      // The live index is still where memory_read finds it.
+      expect(instructions).toContain("memory_read with no name returns the index");
 
-      await first.dispatch({ type: "memory.save", threadId: id, name: "bun-tests", description: "Tests run with bun", memoryType: "feedback", body: "Use bun test.", scope: "project" });
+      // Edits and new memories while it lives: the cached prompt is untouched, and no update rides along.
+      await first.dispatch({ type: "memory.edit", threadId: id, name: "main", scope: "project", oldText: "run bun run check", newText: "run the full check" });
+      await first.dispatch({ type: "memory.save", threadId: id, name: "later", description: "A later lesson", memoryType: "feedback", body: "A later body.", scope: "project" });
       await first.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "two" }, wait: true });
-      // The cached prompt is not rewritten, and no update rides along: the agent saved it, so it knows.
-      expect(prompts[1]).toBe("two");
+      expect(prompts.at(-1)).toBe("two");
+      // The note is still readable in full, and the index is current, even though the prompt copy is not.
+      expect(await first.query({ type: "memory.read", threadId: id, name: "main", scope: "project" })).toMatchObject({ body: "Project: run the full check." });
+      expect((await first.query({ type: "memory.list", threadId: id })).index).toContain("[later]");
       await first.close();
 
-      // A resume (a new process) starts the very same prompt, and a new thread gets no index either:
-      // memory_read is the one place it is read, so it cannot go stale behind a cached prompt.
+      // A resume starts with the prompt it began with: the old snapshot, and nothing re-sent.
       const second = open();
       try {
         await second.dispatch({ type: "thread.turn.start", threadId: id, message: { text: "three" }, wait: true });
-        expect(starts[1]?.instructions).toBe(starts[0]?.instructions);
-        const other = await second.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "fresh", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-        const fresh = String(starts.find((input) => input.threadId === other.threadId)?.instructions);
-        expect(fresh).not.toContain("bun-tests");
-        expect(fresh).not.toContain("# Memory index");
+        expect(starts.filter((start) => start.threadId === id).at(-1)?.instructions).toBe(instructions);
+        expect(prompts.at(-1)).toBe("three");
+        // A new conversation gets the notes and index as they are now.
+        const fresh = await second.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "fresh", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+        const freshInstructions = String(starts.find((start) => start.threadId === fresh.threadId)?.instructions);
+        expect(freshInstructions).toContain("Project: run the full check.");
+        expect(freshInstructions).toContain("[later]");
       } finally {
         await second.close();
       }
@@ -475,13 +493,98 @@ describe("Moxen memory", () => {
     }
   });
 
-  it.each(["project", "provider"])("is off for a %s that opts out: no tools, no rules, Claude Code's memory left alone", async (source) => {
-    const { harness, connection, startOf } = await connected(source === "provider" ? { providers: { claude: { memory: false } } } : {});
+  it("never re-exposes memory in an update after the gate turns off", async () => {
+    const prompts: string[] = [];
+    const harness = await testHarness({ onStartSession: () => undefined, onSendTurn: (input) => prompts.push(input.prompt) });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => ({ ...harness.config }) });
     try {
+      const seed = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "seed", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      await connection.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Global essentials", memoryType: "user", body: "Global secret.", scope: "global" });
+      await connection.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Project essentials", memoryType: "project", body: "Project secret.", scope: "project" });
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+
+      // The project opts out while the conversation lives: the change is announced, without a word of memory in it.
+      await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ memory: false }));
+      await connection.dispatch({ type: "thread.turn.start", threadId: created.threadId, message: { text: "two" }, wait: true });
+      expect(prompts.at(-1)).toContain("<moxen-instructions-update>");
+      expect(prompts.at(-1)).not.toContain("Global secret.");
+      expect(prompts.at(-1)).not.toContain("Project secret.");
+      expect(prompts.at(-1)).not.toContain("persistent memory");
+
+      // Turning it back on says so too, and still sends no memory content: that belongs to a new conversation.
+      await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({}));
+      await connection.dispatch({ type: "thread.turn.start", threadId: created.threadId, message: { text: "three" }, wait: true });
+      expect(prompts.at(-1)).toContain("<moxen-instructions-update>");
+      expect(prompts.at(-1)).toContain("You have a persistent memory");
+      expect(prompts.at(-1)).not.toContain("Global secret.");
+      expect(prompts.at(-1)).not.toContain("Project secret.");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps each project's main note to that project, and adds nothing from another scope when it is missing", async () => {
+    const starts: Array<Record<string, unknown>> = [];
+    const harness = await testHarness({ onStartSession: (input) => starts.push(input) });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => ({ ...harness.config }) });
+    try {
+      const firstProject = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
+      const first = (await connection.dispatch({ type: "thread.create", projectId: firstProject.project.id })).threadId;
+      await connection.dispatch({ type: "memory.save", threadId: first, name: "main", description: "First project", memoryType: "project", body: "Only the first project.", scope: "project" });
+      await connection.dispatch({ type: "memory.save", threadId: first, name: "main", description: "Global", memoryType: "user", body: "Every project.", scope: "global" });
+
+      const other = path.join(harness.root, "project-b");
+      await mkdir(other, { recursive: true });
+      const secondProject = await connection.dispatch({ type: "project.ensure", cwd: other });
+      const second = (await connection.dispatch({ type: "thread.create", projectId: secondProject.project.id })).threadId;
+      await connection.dispatch({ type: "thread.turn.start", threadId: second, message: { text: "go" }, wait: true });
+      const text = String(starts.find((start) => start.threadId === second)?.instructions);
+      expect(text).toContain("Every project.");
+      expect(text).toContain("### Global main memory");
+      expect(text).not.toContain("Only the first project.");
+      // No project main of its own: the heading is omitted, and the global note is not passed off as the project's.
+      expect(text).not.toContain("### Project main memory");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("gives a delegated task both notes but no way to change them", async () => {
+    const { harness, connection, startOf } = await connected();
+    try {
+      const parent = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Parent", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      await connection.dispatch({ type: "memory.save", threadId: parent.threadId, name: "main", description: "Global", memoryType: "user", body: "Global essentials.", scope: "global" });
+      await connection.dispatch({ type: "memory.save", threadId: parent.threadId, name: "main", description: "Project", memoryType: "project", body: "Project essentials.", scope: "project" });
+      const delegated = await connection.dispatch({ type: "thread.delegate", parentThreadId: parent.threadId, task: "Sub task", isolation: "shared" });
+      const instructions = String(startOf(delegated.child.id)?.instructions);
+      expect(instructions).toContain("Global essentials.");
+      expect(instructions).toContain("Project essentials.");
+      expect(instructions).toContain("You can read Moxen's persistent memory");
+      expect(instructions).toContain("read both main memories");
+      expect(instructions).not.toContain("Curate the main memory");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it.each(["project", "provider"])("is off for a %s that opts out: no tools, no rules and no snapshot", async (source) => {
+    const starts: Array<Record<string, unknown>> = [];
+    const harness = await testHarness({ onStartSession: (input) => starts.push(input) });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, ...(source === "provider" ? { providers: { claude: { memory: false } } } : {}) }),
+    });
+    try {
+      const seed = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "seed", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      await connection.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Global", memoryType: "user", body: "Global secret.", scope: "global" });
+      await connection.dispatch({ type: "memory.save", threadId: seed.threadId, name: "main", description: "Project", memoryType: "project", body: "Project secret.", scope: "project" });
       if (source === "project") await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify({ memory: false }));
       const done = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "Hi", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
-      const start = startOf(done.threadId)!;
+      const start = starts.find((input) => input.threadId === done.threadId)!;
       expect(String(start.instructions)).not.toContain("persistent memory");
+      expect(String(start.instructions)).not.toContain("Global secret.");
+      expect(String(start.instructions)).not.toContain("Project secret.");
       expect(start.moxenMemory).toBeUndefined();
       const moxen = (start.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }>).find((server) => server.name === "moxen");
       expect(moxen?.tools?.some((tool) => tool.name.startsWith("memory_"))).toBe(false);
