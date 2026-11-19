@@ -395,6 +395,13 @@ export interface StoredDelegation {
    * settles, and on rows written before it existed.
    */
   readonly review?: { readonly verdict: ReviewVerdict | null; readonly report: string | null };
+  /**
+   * The turn an explicit cancel stopped, when one was live. Its own settle
+   * lands after the `cancelled` mark is written, so the mark must outlive it;
+   * a turn started afterwards clears the mark as fresh work. Absent on rows
+   * cancelled while idle, and on rows written before it existed.
+   */
+  readonly cancelledTurnId?: string;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

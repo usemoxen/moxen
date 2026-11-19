@@ -577,6 +577,42 @@ describe("cancelling a delegated task's automatic continue", () => {
     await interruptTurn(w.store, child.id, followUp.turn.id);
   });
 
+  it("keeps the cancel when the interrupted turn's own settle lands after it", async () => {
+    const w = await world({}, { leaveTurnsRunning: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    expect(running.turn.status).toBe("running");
+    const cancelled = await cancelTask(w.ctx, parent.id, child.id);
+    expect(cancelled.interruptRequested).toBe(true);
+    // The cancel wrote its mark first; the turn it interrupted settles after.
+    await running.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("cancelled");
+  });
+
+  it("clears a cancelled mark when a later turn settles, not the one it stopped", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // The mark an explicit cancel leaves names the turn it stopped.
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Work" })).turn;
+    await interruptTurn(w.store, child.id, stopped.id);
+    const row = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === child.id)!;
+    await w.store.updateDelegation(row.id, { status: "cancelled", cancelledTurnId: stopped.id });
+
+    const resumed = await startTurn(w.ctx, { threadId: child.id, prompt: "Go on." });
+    await resumed.run;
+    await flushTurnRunners();
+    expect((await w.store.readDelegations()).find((candidate) => candidate.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
   it("clears the mark when fresh work settles, reading the new outcome", async () => {
     const w = await world({ autoContinueAtUsageLimit: true });
     const parent = await w.make("orchestrator");

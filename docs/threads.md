@@ -1057,6 +1057,9 @@ thread and worktree are kept either way. Each task's outcome
 entry's `error` rather than a failed call, so it never stops the others. A
 repeated id stops once, in order. When the parent itself is missing, the
 call fails as the single form does instead of reporting one error per id.
+A task it stopped keeps reading `cancelled` once the interrupted turn
+settles; only fresh work on the task (`task_send` with `wake: true`, say)
+replaces the mark with the new outcome.
 
 ### Settling a delegated task (`task_settle`)
 
