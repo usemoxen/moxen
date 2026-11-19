@@ -99,6 +99,16 @@ export interface StoredThread {
   /** The thread this one continued (`thread.continue`): its finished tasks are still this thread's to reach. */
   readonly continuedFrom?: string;
   /**
+   * Set from the moment this thread is created for a handoff until that
+   * handoff's adoption write lands (its tasks re-pointed here and its waiting
+   * notices moved): the thread is still receiving its predecessor's work.
+   * Written with the reservation so a crash mid-handoff is durable, and read
+   * by every continuation reservation so the thread cannot hand its
+   * predecessor's tasks on before it owns them. Cleared once that adoption
+   * commits; a later continue of this thread is its own, as before.
+   */
+  readonly adoptingFrom?: string | null;
+  /**
    * A manual continuation in flight on this thread (`reserveContinuation`):
    * while present, admission starts no turn here, so the new worker never
    * runs beside one. Set and cleared under the thread lock around the
@@ -415,6 +425,8 @@ export interface CreateThreadInput {
   readonly researchRun?: StoredResearchRun;
   readonly researchRole?: StoredThread["researchRole"];
   readonly continuedFrom?: string;
+  /** Set on a destination created for a handoff; cleared once its adoption commits (see `StoredThread.adoptingFrom`). */
+  readonly adoptingFrom?: string;
 }
 
 export type SendIfBusy = "reject" | "inject";

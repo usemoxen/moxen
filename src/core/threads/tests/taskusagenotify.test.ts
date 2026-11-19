@@ -2,26 +2,30 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, completeTurn, failTurn, sendTurn, openTurn, interruptTurn, settleThread } from "../threads.js";
+import { createThread, completeTurn, failTurn, sendTurn, openTurn, interruptTurn, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { driverKindOfInstance } from "../../types.js";
 import {
   cancelAutoContinue,
   cancelTask,
+  continueOwnThread,
   continueThread,
   describeTask,
   editWorkQueue,
   flushTaskNotifications,
   noteAutoContinueCancelled,
   queueTaskNotification,
+  recoverPendingAdoptions,
   recoverTaskNotifications,
+  runWorkQueue,
   scheduleUsageContinue,
   sendTaskMessage,
   startTurn,
   taskNotificationOf,
   type OperationContext,
 } from "../operations.js";
+import { parseQueuePolicy } from "../queue.js";
 import { taskNotificationText } from "../notify.js";
 import { UsageProtection } from "../../usage/protection.js";
 
@@ -95,6 +99,14 @@ async function notificationsIn(w: Awaited<ReturnType<typeof world>>, threadId: s
 
 async function batchesOf(w: Awaited<ReturnType<typeof world>>): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, unknown>;
+}
+
+/** The thread a source continued: the destination a handoff created. */
+async function destinationOf(w: Awaited<ReturnType<typeof world>>, sourceId: string): Promise<string | null> {
+  for (const id of await w.store.listThreadIds()) {
+    if ((await w.store.readThreadRecord(id))?.continuedFrom === sourceId) return id;
+  }
+  return null;
 }
 
 describe("a delegated task that pauses for usage", () => {
@@ -1042,6 +1054,218 @@ describe("a task notification across a continued parent", () => {
     }
     expect(destinationId).not.toBe("");
     expect(await notificationsIn(w, destinationId)).toHaveLength(1);
+  });
+});
+
+describe("a handoff that has not adopted its source's tasks yet", () => {
+  /** Open the destination's first turn, if any, so a manual continue of it is admitted. */
+  async function finishTurns(w: Awaited<ReturnType<typeof world>>, threadId: string): Promise<void> {
+    await flushTurnRunners();
+    for (const turn of await w.store.readTurns(threadId)) {
+      if (turn.status === "running") await completeTurn(w.store, threadId, turn.id, { text: "Done." }).catch(() => undefined);
+    }
+  }
+
+  /** Gate the adoption write so the destination exists and is still receiving. */
+  function gateAdoption(w: Awaited<ReturnType<typeof world>>): { release: () => void; spy: () => void } {
+    const adopt = w.store.updateDelegations.bind(w.store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let blocked = false;
+    const spy = vi.spyOn(w.store, "updateDelegations").mockImplementation(async (patches) => {
+      if (!blocked && patches.some((patch) => patch.patch.parentThreadId !== undefined)) {
+        blocked = true;
+        await gate;
+      }
+      return adopt(patches);
+    });
+    return { release, spy: () => spy.mockRestore() };
+  }
+
+  it("refuses a handoff naming its destination while the source is still receiving one", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const adoption = gateAdoption(w);
+
+    const handoff = continueThread(w.ctx, { threadId: source.id });
+    let destinationId = "";
+    let failure: unknown = null;
+    try {
+      await vi.waitFor(async () => {
+        destinationId = (await destinationOf(w, source.id)) ?? "";
+        if (!destinationId) throw new Error("handoff destination not created yet");
+      }, { timeout: 2_000, interval: 10 });
+      // A queued stored handoff supplies its own destination id; the incoming
+      // adoption check must still refuse before that reservation is honoured.
+      const explicit = w.store.newId();
+      const refused = await continueThread(w.ctx, { threadId: destinationId, destinationThreadId: explicit }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(isContinuationBusy(refused)).toBe(true);
+      expect(await w.store.readThreadRecord(explicit)).toBeNull();
+    } catch (cause) {
+      failure = cause;
+    } finally {
+      adoption.release();
+    }
+    await handoff;
+    adoption.spy();
+    await flushTurnRunners();
+    for (const id of [source.id, destinationId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
+    if (failure) throw failure;
+  });
+
+  it("leaves a queued handoff waiting while its own thread is still receiving one", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const adoption = gateAdoption(w);
+    const handoff = continueThread(w.ctx, { threadId: source.id });
+    let destinationId = "";
+    let failure: unknown = null;
+    try {
+      await vi.waitFor(async () => {
+        destinationId = (await destinationOf(w, source.id)) ?? "";
+        if (!destinationId) throw new Error("handoff destination not created yet");
+      }, { timeout: 2_000, interval: 10 });
+      // The new thread already has a stored handoff of its own waiting. It
+      // must not prepare it by taking its predecessor's task along.
+      const queued = (await sendTurn(w.store, destinationId, {
+        prompt: "Hand off again",
+        queue: parseQueuePolicy({ conditions: [], continuation: "stored" }),
+      })).turn;
+      await runWorkQueue(w.ctx);
+      const entry = (await w.store.readTurns(destinationId)).find((turn) => turn.id === queued.id)!;
+      expect(entry.status).toBe("queued");
+      expect((await w.store.readActivities(destinationId)).filter((activity) => activity.kind === "handoff.prepared")).toHaveLength(0);
+      // Still the source's task, not the thread that has not taken it over.
+      expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.parentThreadId).toBe(source.id);
+    } catch (cause) {
+      failure = cause;
+    } finally {
+      adoption.release();
+    }
+    await handoff;
+    adoption.spy();
+    await flushTurnRunners();
+    for (const id of [source.id, destinationId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
+    if (failure) throw failure;
+  });
+
+  it("keeps an interrupted adoption durable, refuses the next handoff, and finishes it at startup", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const adopt = w.store.updateDelegations.bind(w.store);
+    const failing = vi.spyOn(w.store, "updateDelegations").mockRejectedValueOnce(Object.assign(new Error("injected EIO"), { code: "EIO" }));
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow(/injected EIO/);
+    failing.mockRestore();
+    const destinationId = await destinationOf(w, source.id);
+    expect(destinationId).not.toBeNull();
+    // The crash is durable: the destination says it is still receiving.
+    expect((await w.store.readThreadRecord(destinationId!))?.adoptingFrom).toBe(source.id);
+
+    // Neither a direct continue nor the queue may move the task on first.
+    const failure = await continueThread(w.ctx, { threadId: destinationId! }).then(() => null, (error: unknown) => error);
+    expect(isContinuationBusy(failure)).toBe(true);
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.parentThreadId).toBe(source.id);
+
+    // A restart finishes the handoff it inherited.
+    await recoverPendingAdoptions(w.ctx);
+    expect((await w.store.readThreadRecord(destinationId!))?.adoptingFrom ?? null).toBeNull();
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.parentThreadId).toBe(destinationId);
+    expect((await w.store.readTurns(destinationId!)).length).toBeGreaterThan(0);
+    await finishTurns(w, destinationId!);
+
+    // With the adoption behind it, the thread may continue on its own.
+    const next = await continueThread(w.ctx, { threadId: destinationId! });
+    expect((await w.store.readThreadRecord(next.threadId))?.continuedFrom).toBe(destinationId);
+    await flushTurnRunners();
+    for (const id of [source.id, destinationId!, next.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
+  });
+
+  it("clears a receiving marker left behind once the adoption is behind it", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    await finishTurns(w, continued.threadId);
+    // The clear write died with the handoff: the tasks are already this
+    // thread's and nothing is left on the source to adopt.
+    await w.store.withThreadLock(continued.threadId, async () => {
+      const current = (await w.store.readThreadRecord(continued.threadId))!;
+      await w.store.writeThreadRecord({ ...current, adoptingFrom: source.id });
+    });
+    const next = await continueThread(w.ctx, { threadId: continued.threadId });
+    expect(next.threadId).not.toBe(continued.threadId);
+    expect((await w.store.readThreadRecord(continued.threadId))?.adoptingFrom ?? null).toBeNull();
+    await flushTurnRunners();
+    for (const id of [source.id, continued.threadId, next.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
+  });
+
+  it("does not report an idempotent agent retry as done before the handoff finished", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const childTurn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
+    const sourceTurn = (await sendTurn(w.store, source.id, { prompt: "Orchestrate" })).turn;
+    await completeTurn(w.store, source.id, sourceTurn.id, { text: "Continue it." });
+    // The notice the handoff must carry, written durably and left alone by a
+    // flush timer, so the only write that can fail is the move itself.
+    await writeFile(path.join(w.root, "task-notification-batches.json"), `${JSON.stringify({ [source.id]: [{ child: child.id }] })}\n`);
+
+    batchIo.failNextBatchWrites = 1;
+    const failed = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done.", idempotencyKey: "k1" }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failed).not.toBeNull();
+    batchIo.failNextBatchWrites = 0;
+    const destinationId = await destinationOf(w, source.id);
+    expect(destinationId).not.toBeNull();
+    // The notice never moved and the destination has no first turn: the first
+    // call did not finish, whatever the reservation says.
+    expect((await batchesOf(w))[source.id]).toEqual([{ child: child.id }]);
+    expect(await w.store.readTurns(destinationId!)).toHaveLength(0);
+
+    // The same key must resume the handoff, not answer "already done".
+    const retried = await continueOwnThread(w.ctx, { threadId: source.id, summary: "Half done.", idempotencyKey: "k1" });
+    expect(retried.threadId).toBe(destinationId);
+    expect(retried.note).toBeUndefined();
+    expect((await w.store.readTurns(destinationId!)).length).toBeGreaterThan(0);
+    expect((await batchesOf(w))[source.id]).toBeUndefined();
+    await flushTurnRunners();
+    for (const id of [source.id, destinationId!]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
   });
 });
 
