@@ -142,6 +142,33 @@ export async function runSidePanelTabs(): Promise<void> {
     fail("heaviest tool bars do not end on the same column");
   }
 
+  // With no subagents the section is not drawn at all: Moxen blocks Claude's
+  // native Agent tool, so an empty section would advertise a tool it turns off.
+  function NoSubagentsHarness() {
+    const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+    return (
+      <box style={{ width: 60, height: 12, flexDirection: "column" }}>
+        <SidePanelFrame width={60} focused scrollRef={scrollRef} onFocus={() => {}}>
+          <AgentsTab
+            threads={[{ threadId: "child-1", title: "Audit the routes", status: "active", model: "GPT-5.5", startedAt: null, outcome: "completed" }]}
+            subagents={[]}
+            now={now}
+            onOpen={() => {}}
+          />
+        </SidePanelFrame>
+      </box>
+    );
+  }
+  const emptySetup = await testRender(<NoSubagentsHarness />, { width: 62, height: 14, exitOnCtrlC: false });
+  await emptySetup.flush();
+  const emptyAgents = emptySetup.captureCharFrame();
+  console.log("--- side panel: agents tab, no subagents ---");
+  console.log(emptyAgents);
+  if (!emptyAgents.includes("Audit the routes")) fail("agents tab without subagents is missing its delegated thread");
+  for (const absent of ["Subagents in this thread", "Agent tool"]) {
+    if (emptyAgents.includes(absent)) fail(`agents tab without subagents still shows "${absent}"`);
+  }
+
   // A delegated thread's tab is Info: the task, who asked, where the work is.
   const infoOpened: string[] = [];
   function InfoHarness() {
