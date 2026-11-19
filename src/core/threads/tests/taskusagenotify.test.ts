@@ -789,6 +789,75 @@ describe("a task notification across a continued parent", () => {
     await flushTurnRunners();
     expect(await notificationsIn(w, continued.threadId)).toHaveLength(1);
   });
+
+  it("delivers once when the destination flushes as a waiting batch moves", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const destination = await w.make("continuation");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+
+    await hold(w, source.id, "codex");
+    await queueTaskNotification(w.ctx, source.id, child.id);
+
+    // The handoff moves the waiting notice; a flush that reaches the
+    // destination just before the handoff's own enqueue must not leave the
+    // notice queued a second time.
+    const locked = w.store.withThreadLock.bind(w.store);
+    let flushed = false;
+    const spy = vi.spyOn(w.store, "withThreadLock").mockImplementation(async (threadId, run) => {
+      if (!flushed && threadId === `\0task-notification:${destination.id}`) {
+        flushed = true;
+        await flushTaskNotifications(w.ctx, destination.id);
+      }
+      return locked(threadId, run);
+    });
+    try {
+      await continueThread(w.ctx, { threadId: source.id, destinationThreadId: destination.id });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(flushed).toBe(true);
+    await flushTaskNotifications(w.ctx, destination.id);
+    await flushTurnRunners();
+
+    const delivered = await notificationsIn(w, destination.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+    expect(await notificationsIn(w, source.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
+  it("keeps the old timer for notices that stay on the old parent", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    const orphan = await w.make("orphan notice");
+    await delegateNotifying(w, source.id, child.id);
+    for (const thread of [child, orphan]) {
+      const turn = (await sendTurn(w.store, thread.id, { prompt: "Build it" })).turn;
+      await completeTurn(w.store, thread.id, turn.id, { text: "Done." });
+    }
+
+    // One batch: the child moves with the handoff, the orphan has no live row
+    // and stays. Only the moved entry may leave; the kept one keeps its timer.
+    await queueTaskNotification(w.ctx, source.id, child.id);
+    await queueTaskNotification(w.ctx, source.id, orphan.id);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+
+    await vi.waitFor(async () => {
+      expect(await notificationsIn(w, source.id)).toHaveLength(1);
+      expect(await batchesOf(w)).toEqual({});
+    }, { timeout: 3_000, interval: 25 });
+    await flushTurnRunners();
+    const kept = await notificationsIn(w, source.id);
+    expect(kept[0]).toContain(orphan.id);
+    const moved = await notificationsIn(w, continued.threadId);
+    expect(moved).toHaveLength(1);
+    expect(moved[0]).toContain(child.id);
+  });
 });
 
 describe("a settle queued behind a pause", () => {  it("delivers one message with the settle report, not the stale pause", async () => {

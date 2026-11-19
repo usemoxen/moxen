@@ -3430,6 +3430,13 @@ async function liveDelegationParent(ctx: OperationContext, childThreadId: string
   return rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined)?.parentThreadId;
 }
 
+/** Arm a parent's batch flush; the durable file, not the timer, is what survives a restart. */
+function armTaskNotificationFlush(ctx: OperationContext, parentThreadId: string, entries: PendingTaskNotification[]): void {
+  const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+  timer.unref?.();
+  pendingNotifications.set(parentThreadId, { timer, entries });
+}
+
 /**
  * Batch a task notice for the thread that owns the task now; held or spent
  * parents keep it durably until they can receive it. A completion callback
@@ -3469,9 +3476,7 @@ async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: st
       await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
         batches[target] = unionTaskEntries(batches[target] ?? [], entries);
       });
-      const timer = setTimeout(() => void flushTaskNotifications(ctx, target).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
-      timer.unref?.();
-      pendingNotifications.set(target, { timer, entries });
+      armTaskNotificationFlush(ctx, target, entries);
       return null;
     });
     if (rerouted === null) return;
@@ -3495,14 +3500,9 @@ async function moveTaskNotifications(ctx: OperationContext, sourceId: string): P
   const live = new Map(
     rows.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.parentThreadId] as const),
   );
-  const moved = new Map<string, PendingTaskNotification[]>();
   const keepHere = (entry: PendingTaskNotification): boolean => {
     const target = live.get(entry.child);
     return target === undefined || target === sourceId;
-  };
-  const take = (entry: PendingTaskNotification): void => {
-    const target = live.get(entry.child)!;
-    moved.set(target, [...(moved.get(target) ?? []), entry]);
   };
   await ctx.store.withThreadLock(`\0task-notification:${sourceId}`, async () => {
     const pending = pendingNotifications.get(sourceId);
@@ -3510,26 +3510,27 @@ async function moveTaskNotifications(ctx: OperationContext, sourceId: string): P
       clearTimeout(pending.timer);
       pendingNotifications.delete(sourceId);
     }
-    for (const entry of pending?.entries ?? []) if (!keepHere(entry)) take(entry);
-    // The durable copy moves under the same lock, so a concurrent report or
-    // flush sees the batch before or after the handoff, never in both places.
+    const memory = pending?.entries ?? [];
+    const stored = (await readTaskNotificationBatches(ctx.storeRoot))[sourceId] ?? [];
+    // Copy to the live parent before forgetting the source copy. A flush that
+    // reaches the destination as the handoff lands may already be reading its
+    // batch; re-enqueueing after that would deliver the same notice twice.
+    const carried = unionTaskEntries(
+      memory.filter((entry) => !keepHere(entry)),
+      stored.filter((entry) => !keepHere(entry)),
+    );
+    for (const entry of carried) await enqueueTaskNotification(ctx, live.get(entry.child)!, entry);
+    let remaining: PendingTaskNotification[] = [];
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      const stored = batches[sourceId] ?? [];
-      const keep: PendingTaskNotification[] = [];
-      for (const entry of stored) {
-        if (keepHere(entry)) keep.push(entry);
-        else take(entry);
-      }
-      if (keep.length > 0) batches[sourceId] = keep;
+      remaining = (batches[sourceId] ?? []).filter(keepHere);
+      if (remaining.length > 0) batches[sourceId] = remaining;
       else delete batches[sourceId];
-      for (const [target, entries] of moved) {
-        batches[target] = unionTaskEntries(batches[target] ?? [], entries);
-      }
     });
+    // The notices that stay keep their flush timer: only the moved entries
+    // left the batch, and a kept one must not wait for a restart.
+    const still = unionTaskEntries(memory.filter(keepHere), remaining);
+    if (still.length > 0) armTaskNotificationFlush(ctx, sourceId, still);
   });
-  for (const [target, entries] of moved) {
-    for (const entry of unionTaskEntries(entries, [])) await enqueueTaskNotification(ctx, target, entry);
-  }
 }
 
 /**
