@@ -45,18 +45,19 @@ import type {
  * `startedAt` is set whenever a queued turn is promoted; a turn that ran at
  * once started at its `createdAt`, and a queued turn that reached a terminal
  * status (completed or failed) ran even if an old row did not record when.
- * The exception is an entry carrying a handoff record: the queue pass leaves
- * this thread by preparing one, and settles the row (completed, or failed
- * preparing) without a start. Preparation writes that record first, and it
- * survives an edit, unlike the queue policy's `continuation` (an entry edited
- * back to `same-thread` still never ran). The record and
- * `prepareQueuedHandoff` arrived together in 644a414d, before the 2026-11-06
- * baseline, so every row preparation ever settled carries it.
- * `startedAt` still wins: an entry restored here and then run is a turn.
+ * The exception is an entry the queue pass leaves this thread by preparing a
+ * handoff: it settles the row (completed, or failed preparing) without a
+ * start. A row that reserved a handoff carries that record — written before
+ * any work that can fail, kept across an edit (unlike the queue policy's
+ * `continuation`), and present since 644a414d, before the 2026-11-06 baseline.
+ * A failure before the reservation is marked by the terminal `failed` write
+ * itself (`handoffFailed`). `startedAt` still wins: an entry restored here and
+ * then run is a turn. A preflight failure written by a build before that mark
+ * existed is indistinguishable from a legacy run and keeps the fallback.
  */
 function turnRan(turn: StoredTurn): boolean {
   if (turn.status === "queued") return false;
-  if (turn.startedAt === undefined && turn.handoff !== undefined) return false;
+  if (turn.startedAt === undefined && (turn.handoff !== undefined || turn.handoffFailed === true)) return false;
   return !(turn.status === "interrupted" && turn.startedAt === undefined && turn.delivery === "queued");
 }
 

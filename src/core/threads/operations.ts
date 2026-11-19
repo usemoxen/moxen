@@ -803,7 +803,7 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
           // have cleared, and either re-read misclassifies a genuine
           // handoff failure as contention or vice versa.
           if (isContinuationBusy(cause)) continue;
-          await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
+          await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
           ctx.store.emit(entry.threadId, "handoff-failed");
           continue;
         }
