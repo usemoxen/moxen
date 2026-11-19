@@ -294,6 +294,66 @@ describe.skipIf(!underBun)("row round trip", () => {
     expect(db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM delegations WHERE id = ?").all("dup")).toEqual([{ count: 2 }]);
   });
 
+  it("keeps two turn rows with the same id in append order", () => {
+    const db = storeWithThreads();
+    const first = { ...completedTurn(), id: "dup-turn", messageId: "msg-a" };
+    const second = { ...completedTurn(), id: "dup-turn", messageId: "msg-b" };
+    insertRow(db, INSERT_TURN, encodeTurn(first));
+    insertRow(db, INSERT_TURN, encodeTurn(second));
+
+    const rows = db.query<TurnRow, [string, string]>("SELECT * FROM turns WHERE thread_id = ? AND id = ? ORDER BY seq").all(first.threadId, first.id);
+    expect(rows.map((row) => decodeTurn(row))).toEqual([first, second]);
+    expect(db.query<{ count: number }, [string, string]>("SELECT count(*) AS count FROM turns WHERE thread_id = ? AND id = ?").all(first.threadId, first.id)).toEqual([
+      { count: 2 },
+    ]);
+  });
+
+  it("keeps two message rows with the same id and different bodies in append order", () => {
+    const db = storeWithThreads();
+    const first = { ...sparseMessage(), id: "dup-message", text: "note" };
+    const second = { ...sparseMessage(), id: "dup-message", text: "different note" };
+    insertRow(db, INSERT_MESSAGE, encodeMessage(first));
+    insertRow(db, INSERT_MESSAGE, encodeMessage(second));
+
+    const rows = db.query<MessageRow, [string, string]>("SELECT * FROM messages WHERE thread_id = ? AND id = ? ORDER BY seq").all(first.threadId, first.id);
+    const decoded = rows.map((row) => decodeMessage(row));
+    expect(decoded).toEqual([first, second]);
+    expect(db.query<{ count: number }, [string, string]>("SELECT count(*) AS count FROM messages WHERE thread_id = ? AND id = ?").all(first.threadId, first.id)).toEqual([
+      { count: 2 },
+    ]);
+    // The JSONL reader returns both rows, and a consumer joining by id
+    // (`messages.find`) resolves the first in append order.
+    expect(decoded.find((message) => message.id === first.id)?.text).toBe("note");
+  });
+
+  it("keeps two activity rows with the same id in append order", () => {
+    const db = storeWithThreads();
+    const first = { ...activityWithoutPayload(), id: "dup-activity", summary: "first" };
+    const second = { ...activityWithoutPayload(), id: "dup-activity", summary: "second" };
+    insertRow(db, INSERT_ACTIVITY, encodeActivity(first));
+    insertRow(db, INSERT_ACTIVITY, encodeActivity(second));
+
+    const rows = db.query<ActivityRow, [string, string]>("SELECT * FROM activities WHERE thread_id = ? AND id = ? ORDER BY seq").all(first.threadId, first.id);
+    expect(rows.map((row) => decodeActivity(row))).toEqual([first, second]);
+    expect(db.query<{ count: number }, [string, string]>("SELECT count(*) AS count FROM activities WHERE thread_id = ? AND id = ?").all(first.threadId, first.id)).toEqual([
+      { count: 2 },
+    ]);
+  });
+
+  it("keeps two checkpoint rows with the same id in append order", () => {
+    const db = storeWithThreads();
+    const first = { ...sparseCheckpoint(), id: "dup-checkpoint", turnId: "turn-a" };
+    const second = { ...sparseCheckpoint(), id: "dup-checkpoint", turnId: "turn-b" };
+    insertRow(db, INSERT_CHECKPOINT, encodeCheckpoint(first));
+    insertRow(db, INSERT_CHECKPOINT, encodeCheckpoint(second));
+
+    const rows = db.query<CheckpointRow, [string, string]>("SELECT * FROM checkpoints WHERE thread_id = ? AND id = ? ORDER BY seq").all(first.threadId, first.id);
+    expect(rows.map((row) => decodeCheckpoint(row))).toEqual([first, second]);
+    expect(db.query<{ count: number }, [string, string]>("SELECT count(*) AS count FROM checkpoints WHERE thread_id = ? AND id = ?").all(first.threadId, first.id)).toEqual([
+      { count: 2 },
+    ]);
+  });
+
   it("keeps a custom project id and provider message ids exact through the legacy writers", async () => {
     const root = temporaryRoot("legacy-ids");
     const legacy = await openThreadStore(root);

@@ -81,12 +81,19 @@ transaction; for an existing WAL store keep that transaction open while the
 writable handle is opened and checked again under `BEGIN IMMEDIATE`; then apply
 the pragmas and migrate.
 
-What a refusal guarantees: an existing store's main database file and WAL are
-left exactly as they were (SQLite coordination files, `-shm` and an empty WAL,
-may be created or rebuilt). A failure while initializing a store that did not
-exist can leave an empty but valid `store.db` on disk — the migration
-transaction rolls back, so there is no schema or row — and a retry initializes
-it. A hot-journal store is never reopened writable.
+What a **preflight refusal** guarantees — a newer schema or a file that is not
+ours, detected by the read-only checks before any writable handle — is that an
+existing store's main database file and WAL are left exactly as they were
+(SQLite coordination files, `-shm` and an empty WAL, may be created or
+rebuilt).
+
+A failure later is not covered by that guarantee. The journal-mode change,
+pragmas and migration run after the identity checks: a migration step that
+throws rolls its own transaction back, so no schema or row from it survives,
+but the WAL switch and header metadata may already have persisted — a
+rollback-journal store switched to WAL before its first migration failed is
+left as an empty, valid `store.db` in WAL mode, and a retry initializes it. A
+hot-journal store is never reopened writable.
 
 ## Pragmas
 
@@ -158,10 +165,10 @@ its own; everything else is one `rest` JSON column, merged back on read in
 | table | key | columns that exist because code queries them | JSON |
 |---|---|---|---|
 | `threads` | `id` | project, title and source, hidden, modes, model (NOT NULL — a record without one is the importer's to quarantine), env, every timestamp, pending flags, `usage_pause` | research fields, sessions, instruction/mode state, subagents, overrides |
-| `turns` | `seq`, unique `(thread_id, id)` | status, delivery, schedule, `held_at_settle`, queue order/removed/automatic/wake-up/request id, handoff destination, owner | queue conditions, handoff text, model, usage, error, modes, generation |
-| `messages` | `seq`, unique `(thread_id, id)` | turn, role, origin, text + `original_text`, attachments, notification | — |
-| `activities` | `seq`, unique `(thread_id, id)` | turn, kind, summary + `original_summary`, `payload` BLOB + `payload_encoding` | payload JSON text |
-| `checkpoints` | `seq`, unique `(thread_id, id)` | turn, status, ref, base ref, files | — |
+| `turns` | `seq`, indexed `(thread_id, id)` | status, delivery, schedule, `held_at_settle`, queue order/removed/automatic/wake-up/request id, handoff destination, owner | queue conditions, handoff text, model, usage, error, modes, generation |
+| `messages` | `seq`, indexed `(thread_id, id)` | turn, role, origin, text + `original_text`, attachments, notification | — |
+| `activities` | `seq`, indexed `(thread_id, id)` | turn, kind, summary + `original_summary`, `payload` BLOB + `payload_encoding` | payload JSON text |
+| `checkpoints` | `seq`, indexed `(thread_id, id)` | turn, status, ref, base ref, files | — |
 | `delegations` | `seq`, indexed `id` (not unique) | parent, child, status, notify, continue fields, idempotency key, base branch, prompt | model snapshot, review, `originalText` |
 | `meta` | `key` | engine, schema, import state, imported at, source rows | — |
 | `quarantine` | — | at, reason, table, row JSON — rows taken out of the live tables instead of deleted | — |
@@ -173,21 +180,43 @@ turn it summarises, at `order - 0.5`.
 carries a `modelSelection`. A pre-SQLite record without one is the importer's
 problem (step 2): it quarantines the thread rather than inventing a model.
 
-Indexes: `threads_created`, `threads_project`; `turns_id` (unique),
-`turns_thread`, partial `turns_open` (queued/running) and `turns_due`
-(queued with a time); `messages_thread`, `messages_turn`; `activities_thread`,
-`activities_turn`; `checkpoints_thread`; `delegations_parent`,
-`delegations_child`, `delegations_id`, and `delegations_idempotency` on
-`(parent_thread_id, idempotency_key)` — plain lookup indexes, not uniqueness
-constraints. `delegations.id` is not unique: a legacy ledger can hold two
-parseable rows with the same id and different children, and both are preserved
-in append order (`seq`). The existing JSONL store resolves a by-id update with
-`findIndex` — the **first** row with that id — while `updateDelegations` patches
-every row with it and the idempotency replay scans from the end; a SQLite
-by-id read must match the JSONL choice (first) unless the design changes it.
-The same applies to a replay key: two unrelated parents may use one key, and a
-retry whose first child is gone stores a second row for the same parent and
-key.
+Indexes: `threads_created`, `threads_project`; `turns_id` on
+`(thread_id, id)`, `turns_thread`, partial `turns_open` (queued/running) and
+`turns_due` (queued with a time); `messages_id` on `(thread_id, id)`,
+`messages_thread`, `messages_turn`; `activities_id`, `activities_thread`,
+`activities_turn`; `checkpoints_id`, `checkpoints_thread`; `delegations_id`,
+`delegations_parent`, `delegations_child`, and `delegations_idempotency` on
+`(parent_thread_id, idempotency_key)` — all plain lookup indexes, never
+uniqueness constraints on an id a legacy ledger may repeat.
+
+### Duplicate ids in the legacy ledgers
+
+`seq` is the row identity everywhere; uniqueness is kept only where the JSONL
+format guarantees it.
+
+| table | id constraint | does the legacy format guarantee it? | v1 |
+|---|---|---|---|
+| `threads` | `id PRIMARY KEY` | yes — one `thread.json` inside `threads/<id>/`; `threadDir` uses the id as the directory name (`store.ts:442`), so one record per id | keep the primary key |
+| `meta` | `key PRIMARY KEY` | no legacy source; the SQLite-only table, written once by the importer | keep |
+| `turns` | `(thread_id, id)` | no — `appendLedger` appends without an id check (`store.ts:746`) and `readLedger` returns every line (`store.ts:566`) | `seq`, `turns_id` index |
+| `messages` | `(thread_id, id)` | no — real stores hold two rows with one id and different bodies (MXN-378 §7.3) | `seq`, `messages_id` index |
+| `activities` | `(thread_id, id)` | no — same append/read path as turns | `seq`, `activities_id` index |
+| `checkpoints` | `(thread_id, id)` | no — same append/read path | `seq`, `checkpoints_id` index |
+| `delegations` | `id` | no — `appendDelegation` appends (`store.ts:806`) | `seq`, `delegations_id` index |
+| `quarantine` | none | — | — |
+
+**Which occurrence a reference sees.** The JSONL readers return every row
+(`parseLedgerLines` does not deduplicate). A join by id uses `.find` or
+`findIndex`, so it sees the **first** occurrence in append order —
+`store.ts:771` for `updateTurn` and `operations.ts:240`, `:713`, `:1227` for
+message joins. A ledger rewrite builds a `Map` keyed by id, so the last row
+supplied for an id wins and is written onto every occurrence
+(`mergeLedgerLines`, `store.ts:692`), and ids absent from the file are
+appended. The importer therefore inserts every row in file order; a
+single-answer read must order by `seq` and take the first, while a transcript
+returns all rows. A replay key is scoped to the caller's lineage, so two
+unrelated parents may use one key, and a retry whose first child is gone
+stores a second row for the same parent and key.
 
 **Exact scalar keys.** `encodeScalar`/`decodeScalar` are one reversible TEXT
 codec: a well-formed string that does not start with `~` is stored verbatim; a
@@ -266,7 +295,9 @@ forced between each pair of checks — with the database and WAL bytes compared)
 a hot-journal fixture that fails closed with `STORE_RECOVERY_REQUIRED`; and a
 round-trip invariant for every table, including exact scalar keys, a sliced
 emoji kept through the display metadata, a half-step queue order, unicode
-surrogates and nulls.
+surrogates and nulls, and two rows with the same id in append order for each
+table whose uniqueness is not guaranteed (turns, messages, activities,
+checkpoints, delegations).
 
 ## Performance budget
 

@@ -11,9 +11,11 @@ CREATE TABLE activities (
   original_summary TEXT,           -- JSON string: the exact code units when the display summary had to change
   created_at   TEXT NOT NULL,
   payload      BLOB,               -- JSON text (zstd later behind payload_encoding)
-  payload_encoding TEXT NOT NULL DEFAULT 'json',
-  UNIQUE (thread_id, id)
+  payload_encoding TEXT NOT NULL DEFAULT 'json'
 ) STRICT
+
+-- index activities_id
+CREATE INDEX activities_id ON activities(thread_id, id)
 
 -- index activities_thread
 CREATE INDEX activities_thread ON activities(thread_id, seq)
@@ -31,9 +33,11 @@ CREATE TABLE checkpoints (
   ref        TEXT,
   base_ref   TEXT,
   created_at TEXT NOT NULL,
-  files      TEXT,                 -- JSON: CheckpointFileStat[]
-  UNIQUE (thread_id, id)
+  files      TEXT                  -- JSON: CheckpointFileStat[]
 ) STRICT
+
+-- index checkpoints_id
+CREATE INDEX checkpoints_id ON checkpoints(thread_id, id)
 
 -- index checkpoints_thread
 CREATE INDEX checkpoints_thread ON checkpoints(thread_id, seq)
@@ -82,9 +86,13 @@ CREATE TABLE messages (
   text         TEXT NOT NULL,
   original_text TEXT,              -- JSON string: the exact code units when the display text had to change
   attachments  TEXT,               -- JSON array
-  notification TEXT,               -- JSON: task/background notification facts
-  UNIQUE (thread_id, id)
+  notification TEXT                -- JSON: task/background notification facts
+  -- A legacy ledger can hold two parseable rows with the same (thread, id):
+  -- seq is the identity and messages_id is a lookup index, not a constraint.
 ) STRICT
+
+-- index messages_id
+CREATE INDEX messages_id ON messages(thread_id, id)
 
 -- index messages_thread
 CREATE INDEX messages_thread ON messages(thread_id, seq)
@@ -99,15 +107,6 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT
 CREATE TABLE quarantine (
   at TEXT NOT NULL, reason TEXT NOT NULL, table_name TEXT NOT NULL, row_json TEXT NOT NULL
 ) STRICT
-
--- index sqlite_autoindex_activities_1
-(created by a table constraint)
-
--- index sqlite_autoindex_checkpoints_1
-(created by a table constraint)
-
--- index sqlite_autoindex_messages_1
-(created by a table constraint)
 
 -- index sqlite_autoindex_meta_1
 (created by a table constraint)
@@ -187,7 +186,7 @@ CREATE TABLE turns (
 CREATE INDEX turns_due ON turns(scheduled_for) WHERE status = 'queued'
 
 -- index turns_id
-CREATE UNIQUE INDEX turns_id ON turns(thread_id, id)
+CREATE INDEX turns_id ON turns(thread_id, id)
 
 -- index turns_open
 CREATE INDEX turns_open ON turns(status, thread_id) WHERE status IN ('queued','running')

@@ -79,7 +79,7 @@ CREATE TABLE turns (
                                    -- interactionModeExplicit, startedAt, unanswered, generation,
                                    -- turnOutputTokens
 ) STRICT;
-CREATE UNIQUE INDEX turns_id ON turns(thread_id, id);
+CREATE INDEX turns_id ON turns(thread_id, id);
 CREATE INDEX turns_thread ON turns(thread_id, seq);
 CREATE INDEX turns_open ON turns(status, thread_id) WHERE status IN ('queued','running');
 CREATE INDEX turns_due ON turns(scheduled_for) WHERE status = 'queued';
@@ -95,9 +95,11 @@ CREATE TABLE messages (
   text         TEXT NOT NULL,
   original_text TEXT,              -- JSON string: the exact code units when the display text had to change
   attachments  TEXT,               -- JSON array
-  notification TEXT,               -- JSON: task/background notification facts
-  UNIQUE (thread_id, id)
+  notification TEXT                -- JSON: task/background notification facts
+  -- A legacy ledger can hold two parseable rows with the same (thread, id):
+  -- seq is the identity and messages_id is a lookup index, not a constraint.
 ) STRICT;
+CREATE INDEX messages_id ON messages(thread_id, id);
 CREATE INDEX messages_thread ON messages(thread_id, seq);
 CREATE INDEX messages_turn ON messages(thread_id, turn_id);
 
@@ -111,9 +113,9 @@ CREATE TABLE activities (
   original_summary TEXT,           -- JSON string: the exact code units when the display summary had to change
   created_at   TEXT NOT NULL,
   payload      BLOB,               -- JSON text (zstd later behind payload_encoding)
-  payload_encoding TEXT NOT NULL DEFAULT 'json',
-  UNIQUE (thread_id, id)
+  payload_encoding TEXT NOT NULL DEFAULT 'json'
 ) STRICT;
+CREATE INDEX activities_id ON activities(thread_id, id);
 CREATE INDEX activities_thread ON activities(thread_id, seq);
 CREATE INDEX activities_turn ON activities(thread_id, turn_id);
 
@@ -126,9 +128,9 @@ CREATE TABLE checkpoints (
   ref        TEXT,
   base_ref   TEXT,
   created_at TEXT NOT NULL,
-  files      TEXT,                 -- JSON: CheckpointFileStat[]
-  UNIQUE (thread_id, id)
+  files      TEXT                  -- JSON: CheckpointFileStat[]
 ) STRICT;
+CREATE INDEX checkpoints_id ON checkpoints(thread_id, id);
 CREATE INDEX checkpoints_thread ON checkpoints(thread_id, seq);
 
 CREATE TABLE delegations (
