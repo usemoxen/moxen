@@ -553,6 +553,10 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
+                    Message::InstructionsUpdated { .. } => detail_line(
+                        "Runtime instructions",
+                        crate::language::message("timeline.instructionsUpdatedDetail").to_string(),
+                    ),
                     Message::UsageProtection { .. } => detail_line(
                         "Usage protection",
                         "Shared usage is nearly exhausted.".to_string(),

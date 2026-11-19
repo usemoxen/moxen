@@ -1344,6 +1344,8 @@ export const es: Catalog = {
   "timeline.resetAt": "  ·  renovado a las ",
   "timeline.resetsAt": "  ·  se renueva ",
   "timeline.finishingStep": "  Terminando el paso en curso con un poco de margen del límite semanal, para no quedarse a medias en una edición.",
+  "timeline.instructionsUpdated": "Instrucciones de ejecución actualizadas",
+  "timeline.instructionsUpdatedDetail": "Este turno se ejecutó con las instrucciones de ejecución actualizadas de Moxen.",
   "timeline.subagentsSettled": "{count} subagentes cerrados",
   "timeline.tasksSettled": "{count} tareas delegadas cerradas",
   "timeline.tasksUpdated": "{count} actualizaciones de tareas delegadas",

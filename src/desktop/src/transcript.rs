@@ -326,6 +326,19 @@ pub fn project(thread: &Value) -> Vec<Row> {
             ));
             continue;
         }
+        if kind == "instructions.updated" {
+            // Moxen's acknowledgement that this turn carried new runtime
+            // instructions: its own system card, and never their text.
+            rows.push((
+                when,
+                1_000_000 + n,
+                Row {
+                    key: text(activity, &["id"]).unwrap_or_default().to_string(),
+                    message: Message::InstructionsUpdated { at: clock(when) },
+                },
+            ));
+            continue;
+        }
         if kind != "reasoning" && !kind.starts_with("tool-call") {
             // The provider stopped the turn at its usage limit, or is wrapping
             // up before it does: the record of when it happened and when it
@@ -946,6 +959,7 @@ mod tests {
                 Message::Plan { .. } => "plan".into(),
                 Message::UsageLimit { .. } => "usage-limit".into(),
                 Message::TaskNotification { .. } => "task-notification".into(),
+                Message::InstructionsUpdated { .. } => "instructions-updated".into(),
                 Message::UsageProtection { .. } => "usage-protection".into(),
                 Message::Continued { .. } => "continued".into(),
             })
@@ -1111,6 +1125,33 @@ mod tests {
         assert_eq!(
             (label.as_deref(), resets_at.as_deref(), *wrap_up),
             (None, None, true)
+        );
+    }
+
+    #[test]
+    fn an_instructions_update_is_a_card_without_the_instructions() {
+        let value = json!({
+            "messages": [],
+            "activities": [
+                activity(
+                    "iu",
+                    "instructions.updated",
+                    "2026-11-16T10:00:28.000Z",
+                    json!({"provider": "claude"})
+                ),
+            ],
+        });
+        let rows = project(&value);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].message,
+            Message::InstructionsUpdated { .. }
+        ));
+        // The card is the whole row: no user bubble and no instruction text.
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(&row.message, Message::User { .. }))
         );
     }
 

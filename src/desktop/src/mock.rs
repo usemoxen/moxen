@@ -624,6 +624,11 @@ impl MockSource {
             }],
             at: "Thu 09:53".into(),
         });
+        // A turn that carried updated runtime instructions: its own card,
+        // never the instructions' text.
+        source.messages[0].push(Message::InstructionsUpdated {
+            at: "Thu 09:54".into(),
+        });
         source
     }
 

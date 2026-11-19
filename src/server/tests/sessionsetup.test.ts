@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { runProcess } from "../../core/infra/process.js";
 import { testHarness } from "../../core/testing/harness.js";
-import { driverForInstance } from "../../core/threads/execute.js";
+import { driverForInstance, type TurnDriver, type TurnOutcome } from "../../core/threads/execute.js";
 import { settleRuns } from "../../core/testing/turns.js";
 import { runDueScheduledTurn } from "../../core/threads/operations.js";
 import { DirectConnection } from "../connection.js";
@@ -964,6 +964,109 @@ describe("Moxen's skills, no longer shipped (MXN-138)", () => {
       } finally {
         await connection.close();
       }
+    }
+  });
+});
+
+describe("the acknowledgement of a runtime instructions update", () => {
+  const LIMIT: TurnOutcome = {
+    status: "completed",
+    text: "You've hit your 5-hour limit · resets 7:30pm (Europe/Madrid)",
+    usage: { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 },
+    turnOutputTokens: 0,
+    error: null,
+  };
+  const ANSWER: TurnOutcome = {
+    status: "completed",
+    text: "On it.",
+    usage: { input: 12, cacheRead: 98852, cacheCreate: 199340, output: 28, thinking: 0 },
+    turnOutputTokens: 28,
+    error: null,
+  };
+  /** A Claude conversation with its own scripted outcomes and instructions that can change between turns. */
+  async function world(outcomes: TurnOutcome[]) {
+    const prompts: string[] = [];
+    const harness = await testHarness({ onSendTurn: (input) => prompts.push(input.prompt) });
+    const claude = harness.drivers.claude!();
+    const driver = Object.assign(Object.create(claude) as TurnDriver, {
+      awaitTurn: async (): Promise<TurnOutcome> => outcomes.shift() ?? ANSWER,
+    });
+    let instructions = "Rule A.";
+    const open = () =>
+      new DirectConnection({
+        storeRoot: harness.root,
+        drivers: { ...harness.drivers, claude: () => driver },
+        config: async () => ({ ...harness.config, instructions }),
+      });
+    return { harness, prompts, open, setInstructions: (value: string) => (instructions = value) };
+  }
+  const send = (connection: DirectConnection, threadId: string, text: string) =>
+    connection.dispatch({ type: "thread.turn.start", threadId, message: { text }, wait: true });
+  const markers = async (harness: Awaited<ReturnType<typeof world>>["harness"], threadId: string) =>
+    (await harness.store.readActivities(threadId)).filter((activity) => activity.kind === "instructions.updated");
+
+  it("marks the turn that carried it once the provider answers, and never the baseline or a mode change", async () => {
+    const { harness, prompts, open, setInstructions } = await world([ANSWER, ANSWER, ANSWER, ANSWER]);
+    let connection = open();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      const id = created.threadId;
+      // The conversation's first prompt is its baseline, not an update.
+      expect(await markers(harness, id)).toHaveLength(0);
+
+      setInstructions("Rule B.");
+      await send(connection, id, "two");
+      const [marker] = await markers(harness, id);
+      expect(marker).toMatchObject({ turnId: (await harness.store.readTurns(id))[1]!.id, payload: { provider: "claude" } });
+      // The marker names the fact, never the instructions themselves.
+      expect(JSON.stringify(marker)).not.toContain("Rule B.");
+
+      // Acknowledged once: a later turn carries nothing and adds no marker.
+      await send(connection, id, "three");
+      expect(await markers(harness, id)).toHaveLength(1);
+      expect(prompts[2]).toBe("three");
+
+      // A mode change has its own delivery path and is not an instructions update.
+      await connection.dispatch({ type: "thread.interaction-mode.set", threadId: id, interactionMode: "research" });
+      await send(connection, id, "four");
+      expect(prompts[3]).toContain('<moxen-mode key="moxen-research">');
+      expect(await markers(harness, id)).toHaveLength(1);
+
+      // Reload: another connection over the same store reads the same one row.
+      await connection.close();
+      connection = open();
+      const read = await connection.query({ type: "thread.read", threadId: id, view: "turn-items" });
+      const items = read.thread.view === "turn-items" ? read.thread.items : [];
+      expect(items.filter((activity) => activity.kind === "instructions.updated")).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("leaves an unanswered attempt unmarked, and marks the retry once", async () => {
+    const { harness, prompts, open, setInstructions } = await world([ANSWER, LIMIT, ANSWER, ANSWER]);
+    const connection = open();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      const id = created.threadId;
+      setInstructions("Rule B.");
+
+      // The provider accepted the prompt but never answered it: nothing was delivered.
+      await send(connection, id, "two");
+      expect(prompts[1]).toContain("<moxen-instructions-update>");
+      expect(await markers(harness, id)).toHaveLength(0);
+
+      // The next turn carries the update again, and its answer is the acknowledgement.
+      await send(connection, id, "three");
+      expect(prompts[2]).toContain("<moxen-instructions-update>");
+      const [marker] = await markers(harness, id);
+      expect(marker).toMatchObject({ turnId: (await harness.store.readTurns(id))[2]!.id });
+
+      await send(connection, id, "four");
+      expect(prompts[3]).toBe("four");
+      expect(await markers(harness, id)).toHaveLength(1);
+    } finally {
+      await connection.close();
     }
   });
 });

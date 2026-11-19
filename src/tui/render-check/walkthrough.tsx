@@ -76,6 +76,7 @@ import { runResearchRun } from "./scenarios/researchRun.js";
 import { runNewThreadResearch } from "./scenarios/newThreadResearch.js";
 import { runSendGate } from "./scenarios/sendGate.js";
 import { runMemoryManager } from "./scenarios/memoryManager.js";
+import { runInstructionUpdate } from "./scenarios/instructionUpdate.js";
 
 /**
  * Snapshot harness: drives the app with a mock client, scripts input,
@@ -189,5 +190,7 @@ export async function runWalkthrough(): Promise<void> {
   await runMemoryManager();
   await runProtectThread();
   await runThreadAffinity();
-
+  // Its own renderer, last: an extra one earlier perturbs the following
+  // scenarios' timing-sensitive frames.
+  await runInstructionUpdate();
 }
