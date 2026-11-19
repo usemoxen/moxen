@@ -528,7 +528,9 @@ and runs at its time. An immediate message still releases a hold and runs
 first, as on any held thread. A pause notice batched for the source but not
 yet delivered moves to the continuation when it inherits the hold, so the
 parent still hears it naming the live task; without an inherited hold it is
-dropped, and the task's settle report covers it.
+dropped, and the task's settle report covers it. It follows the task's own
+continuation chain to whichever thread owns the task now, so a handoff of the
+parent in between cannot leave it on the dormant thread.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
@@ -940,6 +942,16 @@ on its own. Where Moxen cannot check — no live session here, or a provider
 that cannot report it all (OpenCode reports only the background shells and
 subagents its own server started) — the notification and `task_status` say so
 plainly instead of implying nothing is running.
+
+Each notice carries an identity: its task, its kind (settle, pause,
+cancellation) and the settle generation it reports, so a later settle of the
+same task is a different notice. A batch flush delivers the notices it read
+and acknowledges exactly those, leaving anything a handoff or a later settle
+added meanwhile for the next flush. The identity of each delivered notice is
+recorded on the message that reports it, in the same write that accepts the
+turn, so a flush whose acknowledgement write fails is not replayed as a second
+message after a restart; the check reads the parent's recent notification
+messages, not an open-ended record.
 
 ### A delegated task that runs out of usage
 

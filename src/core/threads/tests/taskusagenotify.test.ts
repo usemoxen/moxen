@@ -93,8 +93,10 @@ async function notificationsIn(w: Awaited<ReturnType<typeof world>>, threadId: s
   return (await w.store.readMessages(threadId)).filter((message) => message.origin === "task-notification").map((message) => message.text);
 }
 
+/** The durable notice batches with each entry's identity dropped: these tests pin which notices wait, not their internal ids. */
 async function batchesOf(w: Awaited<ReturnType<typeof world>>): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, unknown>;
+  const raw = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, { id?: string }[]>;
+  return Object.fromEntries(Object.entries(raw).map(([parent, entries]) => [parent, entries.map(({ id: _id, ...rest }) => rest)]));
 }
 
 describe("a delegated task that pauses for usage", () => {

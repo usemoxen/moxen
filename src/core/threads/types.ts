@@ -312,7 +312,16 @@ export interface StoredMessage {
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: {
+    readonly tasks: readonly TaskNotification[];
+    /**
+     * Identity of each pending task notice this message reports, in the same
+     * ledger write that accepts the turn: a replay after a failed batch
+     * acknowledgement reads it here and sends nothing twice. Internal, never
+     * projected to clients.
+     */
+    readonly notices?: readonly string[];
+  };
 }
 
 /** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */
@@ -445,7 +454,7 @@ export interface SendTurnInput {
   readonly continueAttempt?: number;
   /** A message moxen writes itself (with its facts), rather than the user. */
   readonly origin?: MessageOrigin;
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
 }
 
 export type ReadView = "messages" | "turn-items" | "plans" | "checkpoints" | "transfers";
