@@ -212,11 +212,15 @@ format guarantees it.
 message joins. A ledger rewrite builds a `Map` keyed by id, so the last row
 supplied for an id wins and is written onto every occurrence
 (`mergeLedgerLines`, `store.ts:692`), and ids absent from the file are
-appended. The importer therefore inserts every row in file order; a
-single-answer read must order by `seq` and take the first, while a transcript
-returns all rows. A replay key is scoped to the caller's lineage, so two
-unrelated parents may use one key, and a retry whose first child is gone
-stores a second row for the same parent and key.
+appended. The importer therefore inserts every row in file order, and a
+transcript returns all rows. A single-answer read must match the reader it
+replaces: the cited message joins order by `seq` ascending and take the first;
+delegation replay orders by `seq` descending and takes the newest match,
+because the legacy replay scans the ledger from the end (`operations.ts:4043`)
+and the oldest match could revisit a stale child instead of the task created on
+the retry. A replay key is scoped to the caller's lineage, so two unrelated
+parents may use one key, and a retry whose first child is gone stores a second
+row for the same parent and key.
 
 **Exact scalar keys.** `encodeScalar`/`decodeScalar` are one reversible TEXT
 codec: a well-formed string that does not start with `~` is stored verbatim; a
@@ -327,7 +331,7 @@ resumability, and idempotence. Budget 30–60 s on a loaded Windows runner, once
 | # | Step |
 |---|---|
 | 1 | connection, pragmas, identity, schema v1, migration runner (**this issue**) |
-| 2 | import the JSONL store (per-thread transaction, quarantine, dedupe, counts, crash/resume) |
+| 2 | import the JSONL store (per-thread transaction, quarantine, idempotent re-import, counts, crash/resume) |
 | 3 | read the thread record and transcript from SQLite |
 | 4 | write turns, messages, activities and the thread record through SQLite |
 | 5 | `transaction(fn)` with synchronous callbacks and deferred effects |
@@ -353,6 +357,9 @@ resumability, and idempotence. Budget 30–60 s on a loaded Windows runner, once
 - **A second writer.** Today only `server.lock` prevents it; SQLite serialises
   and detects it, with `busy_timeout` and `BEGIN IMMEDIATE` as the backstop.
   CLI store access is read-only (`query_only`).
-- **The import is one-way.** It can lose data that does not parse (two
-  duplicate message ids already exist in real stores). Counts, `quick_check`,
-  the kept JSONL tree and `store dump` are the answer.
+- **The import is one-way.** It can lose rows that do not parse (a bad line, a
+  record with no id); those are quarantined. Parseable rows with duplicate ids
+  are neither lost nor collapsed: `seq` is the row identity, so the importer
+  preserves every one (an idempotent resume replaces a thread's rows instead
+  of inserting them twice — it is not source-ID deduplication). Counts,
+  `quick_check`, the kept JSONL tree and `store dump` are the answer.
