@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
@@ -25,8 +25,26 @@ import {
 import { taskNotificationText } from "../notify.js";
 import { UsageProtection } from "../../usage/protection.js";
 
+/** One-shot I/O failures for the batch file, to prove a move's single write is the durability point. */
+const batchIo = vi.hoisted(() => ({ failNextBatchWrites: 0 }));
+
+vi.mock("../../infra/atomic.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../infra/atomic.js")>();
+  return {
+    ...actual,
+    writeAtomic: async (file: string, text: string): Promise<void> => {
+      if (batchIo.failNextBatchWrites > 0 && file.endsWith("task-notification-batches.json")) {
+        batchIo.failNextBatchWrites -= 1;
+        throw Object.assign(new Error("injected EIO"), { code: "EIO" });
+      }
+      return actual.writeAtomic(file, text);
+    },
+  };
+});
+
 afterEach(() => {
   vi.useRealTimers();
+  batchIo.failNextBatchWrites = 0;
   resetUsageLimitsForTests();
 });
 
@@ -857,6 +875,173 @@ describe("a task notification across a continued parent", () => {
     const moved = await notificationsIn(w, continued.threadId);
     expect(moved).toHaveLength(1);
     expect(moved[0]).toContain(child.id);
+  });
+
+  it("keeps the old parent's durable copy when the move write fails", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const destination = await w.make("continuation");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+    await hold(w, source.id, "codex");
+    await queueTaskNotification(w.ctx, source.id, child.id);
+    await hold(w, destination.id, "codex");
+
+    batchIo.failNextBatchWrites = 1;
+    await expect(continueThread(w.ctx, { threadId: source.id, destinationThreadId: destination.id })).rejects.toThrow(/injected EIO/);
+    // The move's one write failed, so the only durable copy is still the source's.
+    expect((await batchesOf(w))[source.id]).toEqual([{ child: child.id }]);
+
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(destination.id))!, usagePause: null });
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, destination.id);
+    await flushTurnRunners();
+    const delivered = await notificationsIn(w, destination.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+  });
+
+  it("delivers one notice when a crash left it on both parents", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const destination = await w.make("continuation");
+    const child = await w.make("task");
+    const now = w.store.nowIso();
+    await w.store.appendDelegation({
+      id: "d-crash",
+      parentThreadId: destination.id,
+      childThreadId: child.id,
+      prompt: "Build it",
+      status: "running",
+      notify: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+    // The destination's key comes first, as it would after the move committed
+    // and the source copy was not yet removed.
+    await writeFile(
+      path.join(w.root, "task-notification-batches.json"),
+      `${JSON.stringify({ [destination.id]: [{ child: child.id }], [source.id]: [{ child: child.id }] })}\n`,
+    );
+
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, destination.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, destination.id)).toHaveLength(1);
+    expect(await notificationsIn(w, source.id)).toEqual([]);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
+  it("refuses to continue a thread that is still receiving a handoff", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const adopt = w.store.updateDelegations.bind(w.store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let blocked = false;
+    const spy = vi.spyOn(w.store, "updateDelegations").mockImplementation(async (patches) => {
+      if (!blocked && patches.some((patch) => patch.patch.parentThreadId !== undefined)) {
+        blocked = true;
+        await gate;
+      }
+      return adopt(patches);
+    });
+
+    let destinationId = "";
+    let failure: unknown = null;
+    const handoff = continueThread(w.ctx, { threadId: source.id });
+    try {
+      await vi.waitFor(async () => {
+        for (const id of await w.store.listThreadIds()) {
+          if ((await w.store.readThreadRecord(id))?.continuedFrom === source.id) {
+            destinationId = id;
+            return;
+          }
+        }
+        throw new Error("handoff destination not created yet");
+      }, { timeout: 2_000, interval: 10 });
+      await expect(continueThread(w.ctx, { threadId: destinationId })).rejects.toThrow(/receiving the handoff/);
+    } catch (cause) {
+      failure = cause;
+    } finally {
+      release();
+    }
+    await handoff;
+    spy.mockRestore();
+    await flushTurnRunners();
+    if (failure) throw failure;
+
+    // Once the adoption lands, the second handoff is allowed and takes the task.
+    const next = await continueThread(w.ctx, { threadId: destinationId });
+    const row = (await w.store.readDelegations()).find((entry) => entry.childThreadId === child.id);
+    expect(row?.parentThreadId).toBe(next.threadId);
+  });
+
+  it("does not consume a kept notice while the handoff claim still stands", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    const orphan = await w.make("orphan notice");
+    await delegateNotifying(w, source.id, child.id);
+    for (const thread of [child, orphan]) {
+      const turn = (await sendTurn(w.store, thread.id, { prompt: "Build it" })).turn;
+      await completeTurn(w.store, thread.id, turn.id, { text: "Done." });
+    }
+    await queueTaskNotification(w.ctx, source.id, child.id);
+    await queueTaskNotification(w.ctx, source.id, orphan.id);
+
+    // Pause after the move has re-armed the kept notice and before the
+    // continuation clears its claim: the handoff's next step reads the new
+    // thread's turns while the claim still stands.
+    const readTurns = w.store.readTurns.bind(w.store);
+    let reached!: () => void;
+    const atClaimClear = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = true;
+    const spy = vi.spyOn(w.store, "readTurns").mockImplementation(async (threadId, options) => {
+      const turns = await readTurns(threadId, options);
+      if (armed && threadId !== source.id && turns.length === 0 && (await w.store.readThreadRecord(threadId))?.continuedFrom === source.id) {
+        armed = false;
+        reached();
+        await gate;
+      }
+      return turns;
+    });
+    const handoff = continueThread(w.ctx, { threadId: source.id });
+    await atClaimClear;
+    // Admission would refuse a turn while the claim stands: the flush must
+    // keep the notice and arm another attempt instead of consuming it.
+    await expect(flushTaskNotifications(w.ctx, source.id)).resolves.toBeUndefined();
+    expect((await batchesOf(w))[source.id]).toEqual([{ child: orphan.id }]);
+    release();
+    await handoff;
+    spy.mockRestore();
+
+    await vi.waitFor(async () => {
+      expect(await notificationsIn(w, source.id)).toHaveLength(1);
+    }, { timeout: 3_000, interval: 25 });
+    await flushTurnRunners();
+    const kept = await notificationsIn(w, source.id);
+    expect(kept[0]).toContain(orphan.id);
+    let destinationId = "";
+    for (const id of await w.store.listThreadIds()) {
+      if ((await w.store.readThreadRecord(id))?.continuedFrom === source.id) destinationId = id;
+    }
+    expect(destinationId).not.toBe("");
+    expect(await notificationsIn(w, destinationId)).toHaveLength(1);
   });
 });
 

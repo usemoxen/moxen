@@ -472,10 +472,11 @@ idle, finished and cancelled alike, including tasks that themselves carried
 on (research roles stay with the run): the handoff lists them, and from then
 on steering, `task_status` and completion notifications resolve against the
 new parent while the old one reads `TASK_NOT_FOUND`. Notices already waiting
-for the old thread move with the handoff, and one that arrives afterwards is
-routed before its recipient's allowance is checked, so a spent or held old
-thread never strands it until a restart; the new thread's own hold still
-keeps it waiting there. The re-pointing is one atomic write, so a
+for the old thread move with the handoff once its ownership write lands; a
+notice that arrives afterwards is routed to the live parent before its
+allowance is checked, so the old thread being spent or held does not decide
+where it goes. The new thread's own hold still keeps it waiting there. The
+re-pointing is one atomic write, so a
 notification deciding mid-transfer sees every row before or every row after
 it; a report queued and fully delivered just before the transfer still
 reaches the old thread — the task's next report, and `task_status` on the
@@ -957,13 +958,13 @@ parent is told by default. Either way `task_status` reads `cancelled` from
 then on, until a wake (`task_send` with `wake: true`) revives the task.
 
 A parent that has itself run out of usage does not receive task notices yet:
-they wait, durably — a restart inside the wait loses nothing — and arrive
-together as one message once its usage is back. When its automatic continue
-is switched off, there is no recovery to ride on, so they go out with the
-user's next message instead, all together rather than each on its own.
-Continuing the parent into a new thread moves the wait with it: the live
-thread resolves through `continuedIn`, so the new parent gets the message
-and the old one gets nothing.
+they wait durably and arrive together as one message once its usage is back.
+A crash inside the wait replays them on restart, at least once. When its
+automatic continue is switched off, there is no recovery to ride on, so they
+go out with the user's next message instead, all together rather than each on
+its own. Continuing the parent into a new thread hands the waiting notices to
+the live thread with the handoff; delivery resolves through `continuedIn`, so
+the new parent gets the message and the old one does not.
 
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the

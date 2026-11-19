@@ -1391,6 +1391,20 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
   return await store.withThreadLock(source.id, async () => {
     const current = await store.readThreadRecord(source.id);
     const live = current ?? source;
+    // A thread that is itself still receiving a handoff has not taken over
+    // that handoff's tasks yet: continuing it now would leave them assigned
+    // to a thread that already moved on. Let the incoming adoption commit.
+    if (live.continuedFrom) {
+      const origin = await store.readThreadRecord(live.continuedFrom).catch(() => null);
+      const landing = continuationRuns.has(live.continuedFrom)
+        || (origin !== null && (await continuationInFlight(store, origin)).blocked);
+      if (landing) {
+        throw new CliError("THREAD_BUSY", `Thread ${live.id} is still receiving the handoff from ${live.continuedFrom}. Retry when it lands.`, {
+          exitCode: 4,
+          details: { threadId: live.id, continuedFrom: live.continuedFrom },
+        });
+      }
+    }
     if (manual) {
       // Refuse what a send would refuse: read the turns first — a first
       // sight of corruption is reported by the read itself — then refuse a
@@ -3282,13 +3296,18 @@ async function quarantineTaskNotificationBatches(storeRoot: string, file: string
 /** File writes chain behind each other, so batches queued on different parents cannot drop each other's entries. */
 let batchFileChain: Promise<unknown> = Promise.resolve();
 
-async function updateTaskNotificationBatches(storeRoot: string, update: (batches: Record<string, PendingTaskNotification[]>) => void): Promise<void> {
+async function updateTaskNotificationBatches(
+  storeRoot: string,
+  update: (batches: Record<string, PendingTaskNotification[]>) => void,
+  options: { readonly propagate?: boolean } = {},
+): Promise<void> {
   const run = batchFileChain.then(async () => {
     const batches = await readTaskNotificationBatches(storeRoot);
     update(batches);
     await writeAtomic(taskNotificationBatchesFile(storeRoot), `${JSON.stringify(batches)}\n`);
   });
   batchFileChain = run.catch(() => undefined);
+  if (options.propagate === true) return await run;
   await run.catch(() => undefined);
 }
 
@@ -3369,7 +3388,27 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
         return;
       }
     }
-    await deliverTaskNotifications(ctx, parentThreadId, mine);
+    // A handoff still landing claims this thread: a turn started here would be
+    // refused with THREAD_BUSY, so keep the batch durable and try again rather
+    // than consume it with nothing delivered.
+    if (held !== null && (await continuationInFlight(ctx.store, held)).blocked) {
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        batches[parentThreadId] = mine;
+      });
+      armTaskNotificationFlush(ctx, parentThreadId, mine);
+      return;
+    }
+    try {
+      await deliverTaskNotifications(ctx, parentThreadId, mine);
+    } catch (cause) {
+      // The claim can land between the check and the turn: same outcome.
+      if (!(cause instanceof CliError && cause.code === "THREAD_BUSY")) throw cause;
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        batches[parentThreadId] = mine;
+      });
+      armTaskNotificationFlush(ctx, parentThreadId, mine);
+      return;
+    }
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       delete batches[parentThreadId];
     });
@@ -3380,7 +3419,10 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
  * Deliver notification batches a restarted server inherited: tasks that
  * settled inside the batch window before the previous process died. Called
  * once at startup; each batch is forgotten once delivered, so replaying
- * finds nothing left and delivers nothing twice. No need to wait for the
+ * finds nothing left and delivers nothing twice. Copies a crash left under
+ * both a task's old and new parent are coalesced by live recipient before
+ * anything is delivered, so replaying an old key cannot send a second notice.
+ * No need to wait for the
  * first usage tick: the registry loads its persisted pre-restart windows in
  * the constructor, and exhaustion is only ever concluded from recorded
  * windows — an early snapshot yields "not exhausted" only when no data
@@ -3389,7 +3431,27 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
-  for (const parentThreadId of Object.keys(batches)) {
+  if (Object.keys(batches).length === 0) return;
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const live = new Map(
+    rows.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.parentThreadId] as const),
+  );
+  // A crash can leave the same notice durable under both the old parent and
+  // the one it moved to. Coalesce every copy by its live recipient in one
+  // update before delivering anything, so replaying the old copy cannot queue
+  // a second notice for a batch already delivered.
+  const recipients = new Map<string, PendingTaskNotification[]>();
+  await updateTaskNotificationBatches(ctx.storeRoot, (current) => {
+    for (const [key, entries] of Object.entries(current)) {
+      for (const entry of entries) {
+        const recipient = live.get(entry.child) ?? key;
+        recipients.set(recipient, unionTaskEntries(recipients.get(recipient) ?? [], [entry]));
+      }
+    }
+    for (const key of Object.keys(current)) delete current[key];
+    for (const [recipient, entries] of recipients) current[recipient] = entries;
+  }, { propagate: true });
+  for (const parentThreadId of recipients.keys()) {
     await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
   }
 }
@@ -3490,6 +3552,25 @@ async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: st
 }
 
 /**
+ * Arm a moved notice's flush on the new parent without writing the durable
+ * copy again: a flush that ran as the handoff landed may already have
+ * consumed it, and re-adding it would deliver the same notice twice.
+ */
+async function armMovedTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
+  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
+    const parent = await ctx.store.withThreadLock(parentThreadId, async () => ctx.store.readThreadRecord(parentThreadId));
+    // Held or spent: the durable copy waits for the recovery or next message.
+    if (parent !== null && (await parentMustWaitForUsage(ctx, parent))) return;
+    const durable = (await readTaskNotificationBatches(ctx.storeRoot))[parentThreadId] ?? [];
+    const undeliveredHere = new Set(durable.map((entry) => `${pendingEntryKind(entry)}:${entry.child}`));
+    const undelivered = entries.filter((entry) => undeliveredHere.has(`${pendingEntryKind(entry)}:${entry.child}`));
+    if (undelivered.length === 0) return;
+    const pending = pendingNotifications.get(parentThreadId);
+    armTaskNotificationFlush(ctx, parentThreadId, unionTaskEntries(pending?.entries ?? [], undelivered));
+  });
+}
+
+/**
  * A thread that continued hands its tasks to the new thread: move the notices
  * already waiting on the old parent (held, spent, or inside the batch window)
  * to the conversation that owns them now, so no restart and no flush of the
@@ -3504,6 +3585,7 @@ async function moveTaskNotifications(ctx: OperationContext, sourceId: string): P
     const target = live.get(entry.child);
     return target === undefined || target === sourceId;
   };
+  const moved = new Map<string, PendingTaskNotification[]>();
   await ctx.store.withThreadLock(`\0task-notification:${sourceId}`, async () => {
     const pending = pendingNotifications.get(sourceId);
     if (pending) {
@@ -3512,25 +3594,38 @@ async function moveTaskNotifications(ctx: OperationContext, sourceId: string): P
     }
     const memory = pending?.entries ?? [];
     const stored = (await readTaskNotificationBatches(ctx.storeRoot))[sourceId] ?? [];
-    // Copy to the live parent before forgetting the source copy. A flush that
-    // reaches the destination as the handoff lands may already be reading its
-    // batch; re-enqueueing after that would deliver the same notice twice.
     const carried = unionTaskEntries(
       memory.filter((entry) => !keepHere(entry)),
       stored.filter((entry) => !keepHere(entry)),
     );
-    for (const entry of carried) await enqueueTaskNotification(ctx, live.get(entry.child)!, entry);
-    let remaining: PendingTaskNotification[] = [];
-    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      remaining = (batches[sourceId] ?? []).filter(keepHere);
-      if (remaining.length > 0) batches[sourceId] = remaining;
-      else delete batches[sourceId];
-    });
-    // The notices that stay keep their flush timer: only the moved entries
-    // left the batch, and a kept one must not wait for a restart.
-    const still = unionTaskEntries(memory.filter(keepHere), remaining);
-    if (still.length > 0) armTaskNotificationFlush(ctx, sourceId, still);
+    for (const entry of carried) {
+      const target = live.get(entry.child)!;
+      moved.set(target, unionTaskEntries(moved.get(target) ?? [], [entry]));
+    }
+    const kept = unionTaskEntries(memory.filter(keepHere), stored.filter(keepHere));
+    try {
+      if (moved.size > 0) {
+        // One atomic file update: every destination copy and the source
+        // removal commit together, so a failed write leaves the only durable
+        // copy recoverable on the source instead of deleting it.
+        await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+          const remaining = (batches[sourceId] ?? []).filter(keepHere);
+          if (remaining.length > 0) batches[sourceId] = remaining;
+          else delete batches[sourceId];
+          for (const [target, entries] of moved) {
+            batches[target] = unionTaskEntries(batches[target] ?? [], entries);
+          }
+        }, { propagate: true });
+      }
+    } catch (cause) {
+      // The write failed and the source batch is untouched; the pending copy
+      // was taken above, so give the notices that stay their timer back.
+      if (kept.length > 0) armTaskNotificationFlush(ctx, sourceId, kept);
+      throw cause;
+    }
+    if (kept.length > 0) armTaskNotificationFlush(ctx, sourceId, kept);
   });
+  for (const [target, entries] of moved) await armMovedTaskNotifications(ctx, target, entries);
 }
 
 /**
