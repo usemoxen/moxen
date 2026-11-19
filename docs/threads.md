@@ -809,13 +809,20 @@ so a change on Claude's side does not change it.
   sessions wrote them: they are data, may be out of date, and cannot pass for
   Moxen's own instructions or message blocks.
 - **Startup snapshot:** the notes and index are a conversation's opening
-  context, not live guidance. Memory changed while a conversation lives is not
-  pushed into it, and a resumed conversation keeps the system prompt it began
-  with, so the provider's cached prefix stays intact. `memory_read` with no
-  name is the live index and reading a memory by name is current. A change to
-  the memory gate (off, or back on) sends an instruction update without
-  memory content; a new conversation picks up the current notes and index and
-  pays their cost once.
+  context, not live guidance. They are stored with the conversation's
+  instruction state already bounded and escaped, so a provider session that
+  restarts or expires resumes with the same prompt and keeps its cached
+  prefix. Memory changed while a conversation lives is not pushed into it, and
+  a new conversation picks up the current notes and index and pays their cost
+  once. `memory_read` with no name is the live index and reading a memory by
+  name is current, so a stale snapshot never hides a change.
+- **Turning memory off:** the next session setup drops the stored opening and
+  sends the change-tracked instructions without it, so neither a restarting
+  provider session nor a later instruction update is sent the old snapshot.
+  Earlier provider history still holds what was said while memory was on;
+  Moxen does not claim to erase it. Turning memory back on does not restore a
+  dropped snapshot to an existing conversation: a new conversation is what
+  gets the notes.
 - **Searching:** `memory_search` searches names, descriptions and bodies in
   the current project and global memory, including entries omitted from the
   capped index. An optional `scope` restricts it to `project` or `global`.

@@ -478,8 +478,17 @@ export async function projectMemorySetting(workspaceRoot: string | null, key: "m
 
 /** What one provider's conversation has been given of the runtime instructions (see `StoredThread.instructionState`). */
 export interface InstructionState {
+  /** Change-tracked instructions, without any conversation-only context. */
   readonly baseline: string;
   readonly delivered: string;
+  /**
+   * What the conversation actually began with, when that carried a snapshot
+   * the baseline does not (memory's `main` notes and index). Absent when it
+   * began with the baseline, and dropped when memory is turned off: a stored
+   * snapshot must never be sent to a session that restarts after the gate is
+   * off. Only this build can have written one, so older threads have none.
+   */
+  readonly opening?: string;
 }
 
 /**
@@ -498,10 +507,13 @@ export interface InstructionState {
  *
  * `current` is both what a conversation would start with today and what an
  * update says. `startup` is only what a conversation actually begins with
- * when it is recording its baseline: memory's snapshot belongs there and
- * nowhere else, because it is context from when the conversation started,
- * not guidance that changed. `delivered` starts at `current`, so a snapshot
- * baseline does not make every later turn look like a change.
+ * when it is starting, not guidance that changes: memory's snapshot belongs
+ * there and nowhere else, and it is recorded as `opening`. A resumed
+ * conversation reuses its recorded `opening`, so the cached prefix is stable;
+ * a caller that drops the opening (memory was turned off) passes a state
+ * without it, so the snapshot is not sent again and `next` stops carrying it.
+ * `delivered` starts at `current`, so an opening does not make every later
+ * turn look like a change.
  */
 export function planInstructions(
   state: InstructionState | undefined,
@@ -509,11 +521,16 @@ export function planInstructions(
   threadId?: string,
   startup?: string,
 ): { systemPrompt: string; update: string | null; next: InstructionState } {
-  const baseline = state?.baseline ?? startup ?? current;
+  const baseline = state?.baseline ?? current;
   const delivered = state?.delivered ?? current;
+  const opening = state?.opening ?? (state === undefined ? startup : undefined);
   // Thread identity is immutable session context, not shared, change-tracked guidance.
-  const systemPrompt = threadId === undefined ? baseline : `${baseline}\n\nYour Moxen thread id is ${threadId}.`;
-  return { systemPrompt, update: current === delivered ? null : current, next: { baseline, delivered } };
+  const systemPrompt = threadId === undefined ? (opening ?? baseline) : `${opening ?? baseline}\n\nYour Moxen thread id is ${threadId}.`;
+  return {
+    systemPrompt,
+    update: current === delivered ? null : current,
+    next: { baseline, delivered, ...(opening === undefined ? {} : { opening }) },
+  };
 }
 
 /** A prompt with the instruction update ahead of it, for the provider only — the transcript keeps what was typed. */

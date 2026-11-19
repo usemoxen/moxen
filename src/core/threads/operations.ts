@@ -396,8 +396,15 @@ async function sessionSetup(
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
   } as const;
   const current = buildRuntimeInstructions(instructions);
-  const startup = memoryStartup === null ? current : buildRuntimeInstructions({ ...instructions, memoryStartup });
-  const plan = planInstructions(state, current, thread.id, startup);
+  // No memory content: the conversation begins with the change-tracked text itself, so it records no opening.
+  const startup = memoryStartup === null ? undefined : buildRuntimeInstructions({ ...instructions, memoryStartup });
+  // Memory turned off after this conversation began: its stored opening holds a snapshot that must not be
+  // sent to a provider session that restarts (or to one that applies its instructions again). Drop it here;
+  // the recorded state below stops carrying it, so turning memory back on cannot resurface it either.
+  const planningState = state !== undefined && memoryAccess === null && state.opening !== undefined
+    ? { baseline: state.baseline, delivered: state.delivered }
+    : state;
+  const plan = planInstructions(planningState, current, thread.id, startup);
   const next: InstructionState = plan.next;
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {
@@ -407,7 +414,7 @@ async function sessionSetup(
     });
   };
   const recorded = thread.instructionState?.[key];
-  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
+  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered || recorded?.opening !== next.opening) await record(next);
   const baseDisabledTools =
     nativeKind === null
       ? []

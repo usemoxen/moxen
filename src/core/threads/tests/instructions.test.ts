@@ -229,15 +229,18 @@ describe("runtime instructions", () => {
     expect(planInstructions({ baseline: "A", delivered: "B" }, "A")).toMatchObject({ systemPrompt: "A", update: "A" });
   });
 
-  it("records a startup-only snapshot in the baseline without making it a change on later turns", () => {
+  it("records a startup-only opening without making it a change on later turns", () => {
     // A conversation starts with A (memory's snapshot) while the change-tracked text is B.
     const first = planInstructions(undefined, "B", undefined, "A");
-    expect(first).toEqual({ systemPrompt: "A", update: null, next: { baseline: "A", delivered: "B" } });
+    expect(first).toEqual({ systemPrompt: "A", update: null, next: { baseline: "B", delivered: "B", opening: "A" } });
     // Warm turns compare B with what the model was given, so the snapshot never comes back as an update.
     expect(planInstructions(first.next, "B")).toEqual({ systemPrompt: "A", update: null, next: first.next });
-    expect(planInstructions(first.next, "C")).toMatchObject({ systemPrompt: "A", update: "C" });
+    expect(planInstructions(first.next, "C")).toMatchObject({ systemPrompt: "A", update: "C", next: { baseline: "B", delivered: "B", opening: "A" } });
     // A different thread id changes the immutable context line, not the recorded instructions.
     expect(planInstructions(first.next, "B", "child").systemPrompt).toBe("A\n\nYour Moxen thread id is child.");
+    // Dropping the opening (memory was turned off) sends the plain baseline from then on, and records no opening.
+    const dropped = planInstructions({ baseline: "B", delivered: "B" }, "B");
+    expect(dropped).toEqual({ systemPrompt: "B", update: null, next: { baseline: "B", delivered: "B" } });
   });
 
   it("tells every session what a <moxen-mode> block is, in the words the block itself opens with", () => {
