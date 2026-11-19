@@ -3,8 +3,8 @@ import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vitest";
 
 import { testHarness } from "../../testing/harness.js";
-import type { TurnDriver } from "../execute.js";
-import { prepareQueuedHandoff, revertThread, type OperationContext } from "../operations.js";
+import { flushTurnRunners, type TurnDriver } from "../execute.js";
+import { editWorkQueue, prepareQueuedHandoff, revertThread, runWorkQueue, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { completeTurn, createThread, interruptTurn, promoteDueScheduledTurn, sendTurn } from "../threads.js";
 
@@ -35,6 +35,41 @@ async function world() {
   // A provider handle makes the revert roll the provider back without a live session.
   await harness.store.writeThreadRecord({ ...thread, providerSessions: { codex: "cursor-1" } });
   return { ...harness, ctx, thread, rollbacks };
+}
+
+/**
+ * First, an entry queued for a stored handoff, then a later turn that runs.
+ * The queue pass then fails the entry at its destination's first turn, which
+ * is the state the review found: `status: "failed"` with a handoff record and
+ * no start of its own.
+ */
+async function failedPreparation() {
+  const w = await world();
+  const first = (await sendTurn(w.store, w.thread.id, { prompt: "first" })).turn;
+  await completeTurn(w.store, w.thread.id, first.id, { text: "one" });
+
+  const handedOff = (await sendTurn(w.store, w.thread.id, { prompt: "carry on elsewhere", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+  const second = (await sendTurn(w.store, w.thread.id, { prompt: "second" })).turn;
+  await completeTurn(w.store, w.thread.id, second.id, { text: "two" });
+
+  // The destination's first turn cannot be written: the real queue pass fails
+  // the entry, exactly as a failing continuation does.
+  const realAppend = w.store.appendLedger.bind(w.store);
+  w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+    if (name === "turns" && threadId !== w.thread.id) throw new Error("injected destination failure");
+    return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+  };
+  try {
+    await runWorkQueue(w.ctx);
+  } finally {
+    w.store.appendLedger = realAppend;
+  }
+
+  const failed = (await w.store.readTurns(w.thread.id)).find((turn) => turn.id === handedOff.id)!;
+  expect(failed).toMatchObject({ status: "failed", delivery: "queued" });
+  expect(failed.handoff).toBeDefined();
+  expect(failed.startedAt).toBeUndefined();
+  return { ...w, first, second, handedOff };
 }
 
 describe("revertThread numbering", () => {
@@ -124,5 +159,58 @@ describe("revertThread numbering", () => {
     const messages = await w.store.readMessages(w.thread.id);
     expect(messages.some((message) => message.turnId === second.id)).toBe(false);
     expect(messages.some((message) => message.turnId === handedOff.id)).toBe(true);
+  });
+
+  /**
+   * MXN-382: the queue policy is editable, so it cannot say whether an entry
+   * ran. Editing a failed handoff entry back to this thread used to make it
+   * count again: keepTurns then kept it and dropped the real second turn, and
+   * `restoreFiles` looked for a snapshot of a turn that never ran.
+   */
+  it("does not count a failed handoff entry edited back to this thread", async () => {
+    const w = await failedPreparation();
+    await editWorkQueue(w.ctx, w.thread.id, w.handedOff.id, "edit", parseQueuePolicy({ conditions: [], continuation: "same-thread", order: w.handedOff.queue!.order }));
+    const edited = (await w.store.readTurns(w.thread.id)).find((turn) => turn.id === w.handedOff.id)!;
+    expect(edited.queue?.continuation).toBe("same-thread");
+    expect(edited.status).toBe("failed");
+    expect(edited.handoff).toBeDefined();
+
+    // Two turns ran here: keeping both drops nothing, and asks for no files.
+    const kept = await revertThread(w.ctx, w.thread.id, 2, { restoreFiles: true });
+    expect(kept).toMatchObject({ keptTurns: 2, removedTurns: 0, providers: [] });
+    expect(w.rollbacks).toEqual([]);
+
+    // Keeping one drops the second turn, and only the prompt its provider saw.
+    const cut = await revertThread(w.ctx, w.thread.id, 1);
+    expect(cut).toMatchObject({ keptTurns: 1, removedTurns: 1, providers: ["codex"] });
+    expect(w.rollbacks).toEqual([{ threadId: w.thread.id, numTurns: 1 }]);
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.id)).toEqual([w.first.id, w.handedOff.id]);
+  });
+
+  /**
+   * The start record is what decides: an entry that was taken back to this
+   * thread and then ran is a turn again, at the point it ran.
+   */
+  it("counts a failed handoff entry again once it is restored and runs", async () => {
+    const w = await failedPreparation();
+    await editWorkQueue(w.ctx, w.thread.id, w.handedOff.id, "edit", parseQueuePolicy({ conditions: [], continuation: "same-thread", order: w.handedOff.queue!.order }));
+    await editWorkQueue(w.ctx, w.thread.id, w.handedOff.id, "restore");
+    await editWorkQueue(w.ctx, w.thread.id, w.handedOff.id, "release");
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+
+    const ran = (await w.store.readTurns(w.thread.id)).find((turn) => turn.id === w.handedOff.id)!;
+    expect(ran).toMatchObject({ status: "completed" });
+    expect(ran.startedAt).toBeDefined();
+
+    // Three turns ran here now: all three are kept, none dropped.
+    const kept = await revertThread(w.ctx, w.thread.id, 3);
+    expect(kept).toMatchObject({ keptTurns: 3, removedTurns: 0, providers: [] });
+
+    // It ran after the second turn, so keeping two drops it, not the second.
+    const cut = await revertThread(w.ctx, w.thread.id, 2);
+    expect(cut).toMatchObject({ keptTurns: 2, removedTurns: 1, providers: ["codex"] });
+    expect(w.rollbacks).toEqual([{ threadId: w.thread.id, numTurns: 1 }]);
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.id)).toEqual([w.first.id, w.second.id]);
   });
 });

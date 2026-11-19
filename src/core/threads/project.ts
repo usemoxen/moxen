@@ -45,14 +45,18 @@ import type {
  * `startedAt` is set whenever a queued turn is promoted; a turn that ran at
  * once started at its `createdAt`, and a queued turn that reached a terminal
  * status (completed or failed) ran even if an old row did not record when.
- * The exception is an entry whose queue policy continues it in another
- * thread: admission never starts one, so handoff preparation settles its row
- * (completed, or failed preparing) without a start. `startedAt` still wins
- * over the policy, in case an old row was edited back to this thread and ran.
+ * The exception is an entry carrying a handoff record: the queue pass leaves
+ * this thread by preparing one, and settles the row (completed, or failed
+ * preparing) without a start. Preparation writes that record first, and it
+ * survives an edit, unlike the queue policy's `continuation` (an entry edited
+ * back to `same-thread` still never ran). The record and
+ * `prepareQueuedHandoff` arrived together in 644a414d, before the 2026-11-06
+ * baseline, so every row preparation ever settled carries it.
+ * `startedAt` still wins: an entry restored here and then run is a turn.
  */
 function turnRan(turn: StoredTurn): boolean {
   if (turn.status === "queued") return false;
-  if (turn.startedAt === undefined && (turn.queue?.continuation ?? "same-thread") !== "same-thread") return false;
+  if (turn.startedAt === undefined && turn.handoff !== undefined) return false;
   return !(turn.status === "interrupted" && turn.startedAt === undefined && turn.delivery === "queued");
 }
 

@@ -171,6 +171,37 @@ describe("toThreadEnvelope", () => {
     expect(projected.latestTurn).toMatchObject({ turnId: second.id, state: "completed" });
   });
 
+  /**
+   * MXN-382: the handoff record is the durable evidence, and a recorded start
+   * still wins over it. A terminal row that ran before promotion recorded a
+   * start has no handoff and stays a turn.
+   */
+  it("counts a terminal row that ran without a recorded start, and not a handoff row that never did", () => {
+    const projected = toThreadEnvelope(
+      thread(),
+      [
+        turn({ id: "legacy", status: "completed", delivery: "queued", createdAt: "2026-09-01T00:00:00.000Z" }),
+        turn({ id: "prepared", status: "failed", delivery: "queued", handoff: { requestId: "r", destinationThreadId: "d" }, createdAt: "2026-09-02T00:00:00.000Z" }),
+        turn({
+          id: "ran-after-restore",
+          status: "completed",
+          delivery: "queued",
+          handoff: { requestId: "r2", destinationThreadId: "d2" },
+          startedAt: "2026-09-03T00:00:00.000Z",
+          createdAt: "2026-09-02T12:00:00.000Z",
+        }),
+      ],
+      {
+        checkpoints: [
+          { id: "c1", threadId: "thread-1", turnId: "legacy", status: "available", ref: "a", baseRef: "b", createdAt: "2026-09-01T00:00:00.000Z" },
+          { id: "c2", threadId: "thread-1", turnId: "ran-after-restore", status: "available", ref: "c", baseRef: "d", createdAt: "2026-09-03T00:00:00.000Z" },
+        ],
+      },
+    );
+    expect(projected.checkpoints?.map((row) => [row.turnId, row.checkpointTurnCount])).toEqual([["legacy", 1], ["ran-after-restore", 2]]);
+    expect(projected.latestTurn).toMatchObject({ turnId: "ran-after-restore", state: "completed" });
+  });
+
   it("attaches ledgers with checkpoint turn counts", () => {
     const projected = toThreadEnvelope(
       thread(),
