@@ -124,7 +124,8 @@ impl Tooltip {
             .text_size(px(12.))
             .line_height(px(16.))
             .text_color(color("ink"))
-            .child(self.0.clone())
+            // A shrinkable box, so a tip in a narrow slot wraps its text.
+            .child(div().min_w_0().child(self.0.clone()))
             .when_some(self.1, |s, key| s.child(kbd(key)))
     }
 }

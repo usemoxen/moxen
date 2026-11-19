@@ -2,11 +2,11 @@ pub use crate::catalog::{CatalogState, Selection};
 pub use crate::git::{Git, Patch, TurnDiff};
 pub use crate::research::{
     AgentRef, AgentState, PickerRow, PickerState, ResearchProposal, ResearchRole, ResearchSize,
-    RunAgent, RunPhase, RunSummary,
+    RoleModel, RunAgent, RunPhase, RunSummary,
 };
 pub use crate::research::{
-    ROLES, column_widths, default_agent_index, focus_role_of, initial_picker, move_row,
-    run_elapsed_ms, set_critics, set_researchers, step_agent, step_picker, step_role, thread_count,
+    ROLES, default_agent_index, focus_role_of, initial_picker, move_row, run_elapsed_ms,
+    set_critics, set_researchers, step_agent, step_picker, step_role, thread_count,
 };
 pub use crate::search::{SearchHit, SearchResult, SearchResults, SearchState};
 pub use crate::settings::{

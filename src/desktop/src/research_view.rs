@@ -6,15 +6,17 @@
 //! `src/tui/model/researchrun.ts`); the words are the TUI's
 //! (`src/tui/i18n/en.ts`).
 
+use crate::catalog::OptionValue;
 use crate::{
+    attachments::Picture,
     language::{capitalized, fill, message},
     model::{
         AgentRef, AgentState, Message, PickerRow, PickerState, ROLES, ResearchProposal,
-        ResearchRole, RunAgent, RunPhase, RunSummary, Selection, ThreadId, column_widths,
+        ResearchRole, RoleModel, RunAgent, RunPhase, RunSummary, Selection, ThreadId,
         default_agent_index, focus_role_of, initial_picker, move_row, run_elapsed_ms, set_critics,
         set_researchers, step_agent, step_picker, step_role, thread_count,
     },
-    research::MAX_RESEARCHERS,
+    research::{MAX_RESEARCHERS, NARROW_BELOW},
     theme::{self, color},
     ui::{self, Control},
     workspace::Workspace,
@@ -92,16 +94,45 @@ impl Workspace {
         let Some(request) = proposal.role_model(role) else {
             return String::new();
         };
-        let selection = Selection {
-            instance: request.provider.clone(),
-            model: request.model.clone(),
-            options: vec![],
-        };
-        let name = self.model_label(Some(&selection)).0;
+        let name = self.role_model_name(request);
         match &request.effort {
             Some(effort) => format!("{name} · {}", capitalized(effort)),
             None => name,
         }
+    }
+
+    /// A role model's display name through the catalog.
+    fn role_model_name(&self, model: &RoleModel) -> String {
+        let selection = Selection {
+            instance: model.provider.clone(),
+            model: model.model.clone(),
+            options: vec![],
+        };
+        self.model_label(Some(&selection)).0
+    }
+
+    /// The model a column runs on: the run's own per-role model, else the
+    /// lead thread's, named through the catalog.
+    fn column_model(
+        &self,
+        summary: &RunSummary,
+        lead: ThreadId,
+        role: ResearchRole,
+    ) -> (String, &'static str) {
+        if let Some(model) = &summary.models[role as usize] {
+            let selection = Selection {
+                instance: model.provider.clone(),
+                model: model.model.clone(),
+                options: model
+                    .effort
+                    .clone()
+                    .map(|effort| ("effort".to_string(), OptionValue::Text(effort)))
+                    .into_iter()
+                    .collect(),
+            };
+            return self.model_label(Some(&selection));
+        }
+        self.model_label(self.source.selection(lead).as_ref())
     }
 
     /// The provider each role draws on, deduplicated.
@@ -609,36 +640,48 @@ pub fn role_full(
         .id("role-full-scroll")
         .flex_1()
         .min_h_0()
+        .h_full()
         .overflow_y_scroll()
         .px(px(28.))
         .py(px(12.))
         .flex()
         .flex_col()
-        .gap(px(8.))
+        .items_center()
         .child(
             div()
+                .w_full()
+                .max_w(px(theme::READING))
                 .flex()
-                .items_baseline()
-                .justify_between()
+                .flex_col()
+                .gap(px(8.))
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(15.))
-                        .child(title),
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(15.))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(12.))
+                                .text_color(color("ink-2"))
+                                .child(state),
+                        ),
                 )
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .text_color(color("ink-2"))
-                        .child(state),
-                ),
+                .child(body),
         )
-        .child(body)
         .into_any_element()
 }
 
-/// One role thread's transcript, as the run view's column draws it.
+/// One role thread's transcript, as the run view's columns and the full role
+/// view draw it: the prompt, the step rows and the replies, the way the
+/// thread view draws them (`thread_view::prompt_bubble`,
+/// `thread_view::assistant_message`, `steps::render`).
 fn role_rows(
     w: &Workspace,
     lead: ThreadId,
@@ -647,9 +690,9 @@ fn role_rows(
     messages: &[Message],
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let key = (lead, role, agent);
-    let expanded = w.run_expanded.contains(&key);
-    div()
+    let entity = cx.entity();
+    let mut missing: Vec<Picture> = vec![];
+    let body = div()
         .flex()
         .flex_col()
         .gap(px(8.))
@@ -666,27 +709,29 @@ fn role_rows(
                     .flex()
                     .flex_col()
                     .items_end()
-                    .child(
-                        div()
-                            .max_w(relative(0.9))
-                            .px(px(10.))
-                            .py(px(8.))
-                            .rounded(px(12.))
-                            .bg(color("sunk"))
-                            .text_size(px(theme::BODY))
-                            .line_height(px(theme::LINE))
-                            .child(text),
+                    .child(crate::thread_view::prompt_bubble(text))
+                    .into_any_element(),
+                Message::Assistant { text, at } => {
+                    // The run is what opened this transcript, but a render
+                    // must not panic if it vanished mid-frame.
+                    let (model, tone) = match w.source.run_summary(lead) {
+                        Some(summary) => w.column_model(&summary, lead, role),
+                        None => w.model_label(w.source.selection(lead).as_ref()),
+                    };
+                    crate::thread_view::assistant_message(
+                        crate::thread_view::AssistantHead {
+                            model: &model,
+                            tone,
+                            at: &at,
+                            live: None,
+                        },
+                        &text,
+                        lead,
+                        w,
+                        entity.clone(),
+                        &mut missing,
                     )
-                    .into_any_element(),
-                Message::Assistant { text, .. } => div()
-                    .text_size(px(theme::BODY))
-                    .line_height(px(theme::LINE))
-                    .child(if text.is_empty() {
-                        message("timeline.thinking").into()
-                    } else {
-                        text
-                    })
-                    .into_any_element(),
+                }
                 Message::Plan {
                     text, implemented, ..
                 } => div()
@@ -746,60 +791,107 @@ fn role_rows(
                     output,
                     meta,
                     failed,
-                    ..
+                    running,
                 } => {
-                    let toggle = (lead, role, agent);
-                    div()
-                        .id(("role-step", at))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .text_size(px(13.))
-                                .child(ui::icon("wrench", if failed { "broken" } else { "ink-2" }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(summary)
-                                        .when(name == "thought", |s| s.text_color(color("ink-2"))),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme::MONO)
-                                        .text_size(px(11.5))
-                                        .text_color(color("ink-2"))
-                                        .child(meta),
-                                ),
-                        )
-                        .when(expanded, |s| {
-                            s.child(
-                                div()
-                                    .pl(px(14.))
-                                    .border_l_2()
-                                    .border_color(color("rule"))
-                                    .font_family(theme::MONO)
-                                    .text_size(px(12.))
-                                    .text_color(color("ink-2"))
-                                    .child(output),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.run_expanded.remove(&toggle) {
-                            } else {
-                                this.run_expanded.insert(toggle);
-                            }
-                            cx.notify();
-                        }))
-                        .into_any_element()
+                    let key = (lead, role, agent, at);
+                    let open = w.run_expanded.contains(&key).then_some(1.);
+                    let toggle = entity.clone();
+                    crate::steps::render(
+                        crate::steps::Step {
+                            name,
+                            summary,
+                            output,
+                            meta,
+                            failed,
+                            running,
+                            index: at,
+                            verb_width: None,
+                            shown: 1.,
+                            open,
+                        },
+                        move |cx: &mut App| {
+                            toggle.update(cx, |this, cx| {
+                                if this.run_expanded.remove(&key) {
+                                } else {
+                                    this.run_expanded.insert(key);
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )
+                    .into_any_element()
                 }
             }
-        }))
+        }));
+    if !missing.is_empty() {
+        let weak = entity.downgrade();
+        cx.defer(move |cx| {
+            weak.update(cx, |this, _| {
+                for picture in &missing {
+                    this.source.read_image(picture);
+                }
+            })
+            .ok();
+        });
+    }
+    body.into_any_element()
+}
+
+/// The run view's top padding, the title row's height and the gaps around it.
+/// A roster chip's tip sits in the padding above the title, so it covers
+/// neither the switcher nor the title and phase label.
+const RUN_PAD_TOP: f32 = 34.;
+const RUN_TITLE_HEIGHT: f32 = 20.;
+const RUN_GAP: f32 = 10.;
+const RUN_TIP_GAP: f32 = 2.;
+/// A column header's height (its tip opens right under it).
+const RUN_COLUMN_HEAD: f32 = 22.;
+
+/// What the pointer is over in a run view, by lead thread: the tip it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RunHover {
+    /// A roster chip: role and agent index.
+    Chip(ThreadId, ResearchRole, usize),
+    /// A column header.
+    Column(ThreadId, ResearchRole),
+}
+
+/// The tip's own box, in the tooltip's look: a window tooltip opens at the
+/// pointer and hangs over the text under it, so the run view draws its own
+/// where nothing is underneath.
+fn tip_box(text: SharedString) -> Div {
+    div()
+        .absolute()
+        .flex()
+        .child(ui::Tooltip(text, None).body())
+}
+
+/// A roster chip's tip: above the title row, in the view's top padding,
+/// aligned with the chip's left edge, or its right edge for the chips toward
+/// the row's end (`from_right`) so the tip never runs under the inspector.
+/// `lift` is the chip's offset from the roster's top.
+fn chip_tip(text: SharedString, lift: f32, from_right: bool) -> AnyElement {
+    let tip = tip_box(text);
+    if from_right {
+        tip.right_0()
+    } else {
+        tip.left_0()
+    }
+    .bottom(relative(1.))
+    .mb(px(lift + RUN_GAP + RUN_TITLE_HEIGHT + RUN_TIP_GAP))
+    .into_any_element()
+}
+
+/// A column header's key hints: under the header, inside the column's own
+/// width (the text wraps there), so it never reaches the next column.
+fn column_tip(text: SharedString) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(RUN_COLUMN_HEAD))
+        .left(px(8.))
+        .right(px(8.))
+        .flex()
+        .child(ui::Tooltip(text, None).body().w_full())
         .into_any_element()
 }
 
@@ -808,16 +900,21 @@ fn column_title(summary: &RunSummary, agent: &RunAgent) -> String {
 }
 
 /// The research run in place of the lead's chat: a header, a roster with one
-/// glyph per agent, and the researcher, critic and finalizer columns. Narrow
-/// panes draw the focused column under a switcher.
+/// glyph per agent, and the researcher, critic and finalizer columns. The
+/// columns share the reading column's width equally, divided by rules, and
+/// fill its height; the key hints show in a tip under the hovered column header. At
+/// narrow widths the stage strip is the column switcher and only the focused
+/// column draws.
 pub fn run_view(
     w: &Workspace,
     lead: ThreadId,
     summary: &RunSummary,
+    width: f32,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let focus = w.run_focus(lead);
-    let widths = column_widths(summary, theme::READING - 56.0);
+    let inner = (width - 56.).min(theme::READING);
+    let narrow = inner < NARROW_BELOW;
     let phase_color = match summary.phase() {
         RunPhase::Failed => "broken",
         RunPhase::Finished => "added",
@@ -834,10 +931,28 @@ pub fn run_view(
                 .flex()
                 .items_center()
                 .gap(px(4.))
+                // At narrow widths the stage strip is the column switcher:
+                // the focused group is highlighted and every group focuses
+                // its column, so no second chip row is needed.
+                .when(narrow, |s| {
+                    s.px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .when(focus == role, |s| s.bg(color("sunk")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.run_role.insert(lead, focus_role);
+                                cx.notify();
+                            }),
+                        )
+                })
                 .child(
                     div()
                         .id(("run-role", role as usize))
-                        .control(format!("Show the {} column", role.label()))
+                        // The label says what it does; a tooltip would only
+                        // hang over the switcher row and the column header.
+                        .plain_control()
                         .text_size(px(13.))
                         .text_color(if focus == role {
                             color("ink")
@@ -853,7 +968,27 @@ pub fn run_view(
                 .children(agents.iter().enumerate().map(|(at, agent)| {
                     div()
                         .id(("run-agent", role as usize * 16 + at))
-                        .control(format!("Show {}", agent_title(summary, agent)))
+                        .plain_control()
+                        .relative()
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            let here = RunHover::Chip(lead, focus_role, at);
+                            if *hovered {
+                                this.run_hover = Some(here);
+                            } else if this.run_hover == Some(here) {
+                                this.run_hover = None;
+                            }
+                            cx.notify();
+                        }))
+                        .when(
+                            w.run_hover == Some(RunHover::Chip(lead, focus_role, at)),
+                            |s| {
+                                s.child(chip_tip(
+                                    format!("Show {}", agent_title(summary, agent)).into(),
+                                    if narrow { 2. } else { 0. },
+                                    narrow && focus_role != ResearchRole::Researcher,
+                                ))
+                            },
+                        )
                         .px(px(3.))
                         .text_size(px(13.))
                         .text_color(if shown == at {
@@ -870,9 +1005,9 @@ pub fn run_view(
                 })),
         );
     }
-    let roles: Vec<ResearchRole> = match widths {
-        None => vec![focus],
-        Some(_) => vec![
+    let roles: Vec<ResearchRole> = match narrow {
+        true => vec![focus],
+        false => vec![
             ResearchRole::Researcher,
             ResearchRole::Critic,
             ResearchRole::Finalizer,
@@ -889,184 +1024,209 @@ pub fn run_view(
         )
         .flex_1()
         .min_h_0()
+        .h_full()
         .flex()
         .flex_col()
-        .gap(px(8.))
+        .items_center()
+        .px(px(28.))
+        .pt(px(RUN_PAD_TOP))
+        .pb(px(18.))
         .child(
             div()
-                .flex()
-                .items_baseline()
-                .justify_between()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(15.))
-                        .child(if summary.title.is_empty() {
-                            message("run.title").into()
-                        } else {
-                            format!("{} · {}", message("run.title"), summary.title)
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(color(phase_color))
-                        .child(format!(
-                            "{} · {}",
-                            summary.phase().label(),
-                            elapsed(summary)
-                        )),
-                ),
-        )
-        .child(roster)
-        .when(widths.is_none(), |s| {
-            s.child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .children(ROLES.into_iter().map(|role| {
-                        let active = role == focus;
-                        div()
-                            .id(("run-chip", role as usize))
-                            .control(format!("Show the {} column", role.label()))
-                            .px(px(8.))
-                            .py(px(2.))
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .text_color(if active { color("ink") } else { color("ink-2") })
-                            .when(active, |s| s.bg(color("sunk")))
-                            .child(role.label())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_role.insert(lead, role);
-                                cx.notify();
-                            }))
-                    })),
-            )
-        })
-        .child(
-            div()
+                .w_full()
+                .max_w(px(theme::READING))
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .gap(px(8.))
-                .children(roles.into_iter().map(|role| {
-                    let summary = summary.clone();
-                    let shown = w
-                        .run_shown(lead, role)
-                        .min(summary.agents[role as usize].len().saturating_sub(1));
-                    let agent = summary.agents[role as usize][shown].clone();
-                    let width = widths
-                        .map(|widths| widths[role as usize])
-                        .unwrap_or(theme::READING - 56.0);
-                    let focused = role == focus;
-                    let state = agent.state.label().to_string();
-                    let body: AnyElement = match &agent.thread_id {
-                        None => div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .p(px(10.))
-                            .text_size(px(13.))
-                            .text_color(color("ink-2"))
-                            .child(if summary.ended {
-                                match role {
-                                    ResearchRole::Researcher => message("run.never.researcher"),
-                                    ResearchRole::Critic => message("run.never.critic"),
-                                    ResearchRole::Finalizer => message("run.never.finalizer"),
-                                }
-                            } else {
-                                match role {
-                                    ResearchRole::Researcher => message("run.waiting.researcher"),
-                                    ResearchRole::Critic => message("run.waiting.critic"),
-                                    ResearchRole::Finalizer => message("run.waiting.finalizer"),
-                                }
-                            })
-                            .into_any_element(),
-                        Some(thread) => match w.source.role_messages(thread) {
-                            None => div()
-                                .p(px(10.))
-                                .text_size(px(13.))
-                                .text_color(color("ink-2"))
-                                .child(message("git.reading_f65c").trim_start())
-                                .into_any_element(),
-                            Some(messages) => role_rows(w, lead, role, shown, &messages, cx),
-                        },
-                    };
+                .flex_col()
+                .gap(px(RUN_GAP))
+                .child(
                     div()
-                        .id(("run-column", role as usize))
                         .flex()
-                        .flex_col()
-                        .w(px(width))
-                        .min_h_0()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(color(if focused { "live" } else { "rule" }))
-                        .bg(color("ground"))
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(16.))
+                        .h(px(RUN_TITLE_HEIGHT))
                         .child(
                             div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(15.))
+                                .child(if summary.title.is_empty() {
+                                    message("run.title").into()
+                                } else {
+                                    format!("{} · {}", message("run.title"), summary.title)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_size(px(13.))
+                                .text_color(color(phase_color))
+                                .child(format!(
+                                    "{} · {}",
+                                    summary.phase().label(),
+                                    elapsed(summary)
+                                )),
+                        ),
+                )
+                .child(roster)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .children(roles.into_iter().enumerate().map(|(at, role)| {
+                            let summary = summary.clone();
+                            let shown = w
+                                .run_shown(lead, role)
+                                .min(summary.agents[role as usize].len().saturating_sub(1));
+                            let agent = summary.agents[role as usize][shown].clone();
+                            let focused = role == focus;
+                            let (model, _) = w.column_model(&summary, lead, role);
+                            // Settled columns read as the TUI's footer does
+                            // (`done · <model>`); a working column carries the
+                            // run's elapsed time with it (`working… <time>`).
+                            let footer = if agent.state == AgentState::Working {
+                                format!("{}… {} · {model}", agent.state.label(), elapsed(&summary))
+                            } else {
+                                format!("{} · {model}", agent.state.label())
+                            };
+                            let body: AnyElement = match &agent.thread_id {
+                                None => div()
+                                    .text_size(px(13.))
+                                    .text_color(color("ink-2"))
+                                    .child(if summary.ended {
+                                        match role {
+                                            ResearchRole::Researcher => {
+                                                message("run.never.researcher")
+                                            }
+                                            ResearchRole::Critic => message("run.never.critic"),
+                                            ResearchRole::Finalizer => {
+                                                message("run.never.finalizer")
+                                            }
+                                        }
+                                    } else {
+                                        match role {
+                                            ResearchRole::Researcher => {
+                                                message("run.waiting.researcher")
+                                            }
+                                            ResearchRole::Critic => message("run.waiting.critic"),
+                                            ResearchRole::Finalizer => {
+                                                message("run.waiting.finalizer")
+                                            }
+                                        }
+                                    })
+                                    .into_any_element(),
+                                Some(thread) => match w.source.role_messages(thread) {
+                                    None => div()
+                                        .text_size(px(13.))
+                                        .text_color(color("ink-2"))
+                                        .child(message("git.reading_f65c").trim_start())
+                                        .into_any_element(),
+                                    Some(messages) => {
+                                        role_rows(w, lead, role, shown, &messages, cx)
+                                    }
+                                },
+                            };
+                            div()
+                                .id(("run-column", role as usize))
                                 .flex()
-                                .items_baseline()
-                                .flex_wrap()
-                                .justify_between()
-                                .gap(px(4.))
-                                .px(px(10.))
-                                .pt(px(8.))
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .relative()
+                                .when(at > 0, |s| s.border_l_1().border_color(color("rule")))
                                 .child(
                                     div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(column_title(&summary, &agent)),
+                                        .id(("run-column-head", role as usize))
+                                        .flex()
+                                        .items_baseline()
+                                        .justify_between()
+                                        .gap(px(8.))
+                                        .pl(px(12.))
+                                        .pr(px(12.))
+                                        .pt(px(2.))
+                                        // The run's key hints show in a tip under
+                                        // the header, inside the column.
+                                        .h(px(RUN_COLUMN_HEAD))
+                                        .on_hover(cx.listener(
+                                            move |this, hovered: &bool, _, cx| {
+                                                let here = RunHover::Column(lead, role);
+                                                if *hovered {
+                                                    this.run_hover = Some(here);
+                                                } else if this.run_hover == Some(here) {
+                                                    this.run_hover = None;
+                                                }
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.run_role.insert(lead, role);
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(13.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(color(if focused {
+                                                    "ink"
+                                                } else {
+                                                    "ink-2"
+                                                }))
+                                                .child(column_title(&summary, &agent)),
+                                        ),
                                 )
                                 .child(
                                     div()
+                                        .id(("run-column-scroll", role as usize))
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .px(px(12.))
+                                        .py(px(8.))
+                                        .child(body),
+                                )
+                                .child(
+                                    div()
+                                        .pl(px(12.))
+                                        .pr(px(12.))
+                                        .pb(px(2.))
                                         .font_family(theme::MONO)
-                                        .text_size(px(11.5))
+                                        .text_size(px(12.))
                                         .text_color(color("ink-2"))
-                                        .child(state),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(("run-column-scroll", role as usize))
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .px(px(10.))
-                                .py(px(8.))
-                                .child(body),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.run_role.insert(lead, role);
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                })),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(color("ink-2"))
-                        .child(message("run.keys")),
+                                        .child(footer),
+                                )
+                                .when(w.run_hover == Some(RunHover::Column(lead, role)), |s| {
+                                    s.child(column_tip(message("run.keys").into()))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.run_role.insert(lead, role);
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        })),
                 )
                 .child(
-                    div()
-                        .id("open-lead")
-                        .control("Open the lead thread")
-                        .text_size(px(13.))
-                        .text_color(color("live"))
-                        .child(message("run.lead"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.lead_full = Some(lead);
-                            cx.notify();
-                        })),
+                    div().flex().items_center().justify_end().child(
+                        div()
+                            .id("open-lead")
+                            .control("Open the lead thread")
+                            .text_size(px(13.))
+                            .text_color(color("live"))
+                            .child(message("run.lead"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.lead_full = Some(lead);
+                                cx.notify();
+                            })),
+                    ),
                 ),
         )
         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {

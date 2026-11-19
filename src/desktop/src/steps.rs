@@ -1,8 +1,5 @@
+use crate::theme::{self, color};
 use crate::ui::{self, Control};
-use crate::{
-    theme::{self, color},
-    workspace::Workspace,
-};
 use gpui::{prelude::*, *};
 
 /// A step row's height (`.b-row` in the mockup: min-height 32px).
@@ -18,15 +15,18 @@ pub struct Step {
     pub meta: String,
     pub failed: bool,
     pub running: bool,
-    pub id: usize,
     pub index: usize,
+    /// Fixed width of the verb column, as in the thread view (58pt). None
+    /// lets the verb take its natural width so the target keeps the rest of
+    /// a narrow column.
+    pub verb_width: Option<f32>,
     /// How far the row itself has appeared, 0 to 1 (the fold opening).
     pub shown: f32,
     /// How far its output has opened, 0 to 1, or `None` when closed.
     pub open: Option<f32>,
 }
 
-pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
+pub fn render(step: Step, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoElement {
     let Step {
         name,
         summary,
@@ -34,8 +34,8 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
         meta,
         failed,
         running,
-        id,
         index,
+        verb_width,
         shown,
         open,
     } = step;
@@ -111,8 +111,8 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .w(px(58.))
                         .flex_shrink_0()
+                        .when_some(verb_width, |s, width| s.w(px(width)))
                         .font_family(theme::FONT)
                         .text_size(px(14.))
                         .text_color(color("ink-2"))
@@ -147,13 +147,7 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                         .child(meta),
                 )
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        if this.expanded.remove(&(id, index)).is_none() {
-                            this.expanded.insert((id, index), std::time::Instant::now());
-                        }
-                        this.lists[id].splice(index..index + 1, 1);
-                        cx.notify();
-                    });
+                    on_toggle(cx);
                 }),
         )
         .when_some(open, |s, p| {

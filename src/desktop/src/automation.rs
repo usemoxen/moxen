@@ -17,6 +17,8 @@
 //! # move, press and release the left button
 //! click X Y
 //! rightclick X Y
+//! # press the left button at X1,Y1, move to X2,Y2 and release
+//! drag X1 Y1 X2 Y2
 //! # a scroll of DX,DY points at X,Y
 //! scroll X Y DX DY
 //! # drop one local fixture path at X,Y without an OS drag
@@ -48,6 +50,7 @@ pub enum Command {
     Wait(u64),
     Move(f32, f32),
     Click(f32, f32, MouseButton),
+    Drag(f32, f32, f32, f32),
     Scroll(f32, f32, f32, f32),
     DropFile(f32, f32, PathBuf),
     Key(String),
@@ -90,6 +93,10 @@ pub fn parse(script: &str) -> Result<Vec<Command>, String> {
             "click" => {
                 let n = numbers(2)?;
                 Command::Click(n[0], n[1], MouseButton::Left)
+            }
+            "drag" => {
+                let n = numbers(4)?;
+                Command::Drag(n[0], n[1], n[2], n[3])
             }
             "rightclick" => {
                 let n = numbers(2)?;
@@ -221,6 +228,34 @@ async fn execute(
                 }),
             ],
         )?,
+        Command::Drag(x1, y1, x2, y2) => {
+            let mut events = vec![
+                moved(x1, y1),
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at(x1, y1),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+            ];
+            // The resize answers to the moves, not only to the release.
+            for step in 1..=8 {
+                let t = step as f32 / 8.;
+                events.push(PlatformInput::MouseMove(MouseMoveEvent {
+                    position: at(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                }));
+            }
+            events.push(PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at(x2, y2),
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            }));
+            dispatch(cx, window, events)?;
+        }
         Command::Scroll(x, y, dx, dy) => dispatch(
             cx,
             window,
@@ -317,7 +352,7 @@ mod tests {
     #[test]
     fn reads_a_script() {
         let commands = parse(
-            "# open the palette\nkey cmd-k\ntype  two  words # kept as typed\nclick 10 20.5\nscroll 5 5 0 -40\nscreenshot a/b.png\nwait 100\nquit\n",
+            "# open the palette\nkey cmd-k\ntype  two  words # kept as typed\nclick 10 20.5\ndrag 10 20 30 40\nscroll 5 5 0 -40\nscreenshot a/b.png\nwait 100\nquit\n",
         )
         .expect("script");
         assert_eq!(
@@ -326,6 +361,7 @@ mod tests {
                 Command::Key("cmd-k".into()),
                 Command::Type(" two  words # kept as typed".into()),
                 Command::Click(10., 20.5, MouseButton::Left),
+                Command::Drag(10., 20., 30., 40.),
                 Command::Scroll(5., 5., 0., -40.),
                 Command::Screenshot("a/b.png".into()),
                 Command::Wait(100),

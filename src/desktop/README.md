@@ -283,7 +283,9 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
   (`research.run` plus each role's thread subscription, refreshed while shown;
   narrow panes show the focused column under a switcher). Keys: arrows walk
   the roster, Tab changes column, Enter opens the agent in full, Esc goes
-  back. An open agent shows its transcript with "← back to the run"; the
+  back. A roster chip's name and a column header's key hints show in tips the
+  view draws itself, where nothing is underneath (above the title, or inside
+  the column), not as window tooltips at the pointer. An open agent shows its transcript with "← back to the run"; the
   lead opens the same way ("Lead thread" back). The mock fixtures hold a run
   in review on Recover partial frame headers.
 - Settling a thread also settles its tasks. If the family has running or

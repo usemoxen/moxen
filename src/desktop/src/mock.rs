@@ -179,6 +179,15 @@ fn future_iso(hours: i64) -> String {
         .to_string()
 }
 
+/// An ISO instant `seconds` ago, in UTC: the mock run reads as minutes old,
+/// the way the TUI's fixtures do, instead of dating from a fixed day.
+fn past_iso(seconds_ago: i64) -> String {
+    use chrono::{TimeDelta, Utc};
+    (Utc::now() - TimeDelta::seconds(seconds_ago))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
 /// The protection fixture: a forecast that says to wrap up, and one thread
 /// waiting on its allowance.
 fn fixture_protection() -> ProtectionData {
@@ -1722,7 +1731,12 @@ impl ThreadSource for MockSource {
         let run = serde_json::json!({
             "leadThreadId": lead, "state": "running",
             "size": {"researchers": size.researchers, "critics": size.critics},
-            "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:01:00Z",
+            "models": {
+                "researcher": {"provider": "claudeAgent", "model": "opus-5-5", "thinkingEffort": "medium"},
+                "critic": {"provider": "claudeAgent", "model": "opus-5-5", "thinkingEffort": "high"},
+                "finalizer": {"provider": "claudeAgent", "model": "opus-5-5", "thinkingEffort": "medium"}
+            },
+            "createdAt": past_iso(252), "updatedAt": past_iso(5),
             "roles": roles,
         });
         let titles = |uuid: &str| {
@@ -1764,31 +1778,72 @@ impl ThreadSource for MockSource {
         }
         self.role_rows.insert(
             format!("{lead}-researcher-0"),
-            vec![
-                Message::User {
-                    text: "Survey how the picker keeps focus while it lists.".into(),
-                    images: vec![],
-                },
-                Message::Assistant {
-                    text: "Traced the event from the control to its view state. Drafts survive switching threads; checking the keyboard path next.".into(),
-                    at: "Thu 09:41".into(),
-                },
-            ],
+            Self::role_transcript(
+                "Survey how the picker keeps focus while it lists.",
+                "Traced the event from the control to its view state. Drafts survive switching threads; checking the keyboard path next.",
+                vec![
+                    Self::tool_call(
+                        "read-1",
+                        "2026-11-16T10:00:10Z",
+                        "2026-11-16T10:00:11Z",
+                        json!({"itemType": "tool_call", "status": "completed",
+                            "toolCallId": "read-1", "title": "Read",
+                            "data": {"tool": "Read",
+                                "state": {
+                                    "input": {"file_path": "src/model_picker.rs"},
+                                    "output": Self::numbered_lines(30),
+                                }}}),
+                    ),
+                    Self::tool_call(
+                        "command-1",
+                        "2026-11-16T10:00:20Z",
+                        "2026-11-16T10:00:23.400Z",
+                        json!({"itemType": "command_execution", "status": "completed",
+                            "toolCallId": "command-1", "title": "Bash",
+                            "data": {"tool": "Bash",
+                                "state": {
+                                    "input": {"command": "cargo test model_picker", "workdir": "/repo"},
+                                    "output": "running 3 tests\ntest opens_with_search_focus ... ok\ntest escape_restores_trigger ... ok\ntest selection_preserves_draft ... ok\n\n3 passed; 0 failed",
+                                    "metadata": {"exit": 0},
+                                }}}),
+                    ),
+                ],
+            ),
+        );
+        self.role_rows.insert(
+            format!("{lead}-researcher-1"),
+            Self::role_transcript(
+                "Survey the reconnect path for lost drafts.",
+                "Reading the reconnect path in three threads, looking for the place a draft is dropped.",
+                vec![
+                    vec![
+                    json!({"id": "thought-1", "kind": "reasoning", "tone": "info",
+                        "createdAt": "2026-11-16T10:01:00Z", "turnId": "t", "summary": "",
+                        "payload": {"itemType": "reasoning", "status": "inProgress",
+                            "toolCallId": "thought-1",
+                            "text": "Trace the send path first, then the reconnect handler."}}),
+                    ],
+                ],
+            ),
         );
         self.role_rows.insert(
             format!("{lead}-critic-0"),
-            vec![
-                Message::User {
-                    text: "Review the survey for gaps.".into(),
-                    images: vec![],
-                },
-                Message::Assistant {
-                    text:
-                        "The evidence holds for the common path; the empty list still needs a look."
-                            .into(),
-                    at: "Thu 09:42".into(),
-                },
-            ],
+            Self::role_transcript(
+                "Review the survey for gaps.",
+                "The evidence holds for the common path; the empty list still needs a look.",
+                vec![Self::tool_call(
+                    "read-2",
+                    "2026-11-16T10:00:40Z",
+                    "2026-11-16T10:00:41Z",
+                    json!({"itemType": "tool_call", "status": "completed",
+                    "toolCallId": "read-2", "title": "Read",
+                    "data": {"tool": "Read",
+                        "state": {
+                            "input": {"file_path": "research/report-2.md"},
+                            "output": Self::numbered_lines(12),
+                        }}}),
+                )],
+            ),
         );
     }
     fn read_run(&mut self, _id: ThreadId) {}
@@ -1834,14 +1889,67 @@ impl MockSource {
                     model: "opus-5-5".into(),
                     effort: Some("medium".into()),
                 }),
-                None,
-                None,
+                Some(crate::research::RoleModel {
+                    provider: "claudeAgent".into(),
+                    model: "opus-5-5".into(),
+                    effort: Some("high".into()),
+                }),
+                Some(crate::research::RoleModel {
+                    provider: "claudeAgent".into(),
+                    model: "opus-5-5".into(),
+                    effort: Some("medium".into()),
+                }),
             ],
             models_raw: None,
             lead_provider: "claudeAgent".into(),
             lead_model: "opus-5-5".into(),
         }
     }
+    /// A role thread's transcript the way the live source reads one: the
+    /// server's messages and tool calls projected by `transcript::project`,
+    /// so the run view's columns draw the same steps with times as the thread
+    /// view. Each call is its own group of activities, oldest first.
+    fn role_transcript(question: &str, reply: &str, calls: Vec<Vec<Value>>) -> Vec<Message> {
+        let thread = json!({
+            "messages": [
+                {"id": "m-user", "role": "user", "text": question,
+                    "createdAt": "2026-11-16T10:00:00Z"},
+                {"id": "m-reply", "role": "assistant", "text": reply, "streaming": false,
+                    "createdAt": "2026-11-16T10:02:00Z"},
+            ],
+            "activities": calls.into_iter().flatten().collect::<Vec<_>>(),
+        });
+        crate::transcript::project(&thread)
+            .into_iter()
+            .map(|row| row.message)
+            .collect()
+    }
+
+    /// One finished tool call of a mock role transcript: its started and
+    /// completed halves, so the projected step reads with its time.
+    fn tool_call(id: &str, started: &str, completed: &str, payload: Value) -> Vec<Value> {
+        let mut running = payload.clone();
+        running["status"] = Value::from("inProgress");
+        let mut done = payload;
+        done["status"] = Value::from("completed");
+        vec![
+            json!({"id": format!("{id}-started"), "kind": "tool-call.started", "tone": "info",
+                "createdAt": started, "turnId": "t", "summary": "",
+                "payload": running}),
+            json!({"id": format!("{id}-completed"), "kind": "tool-call.completed", "tone": "info",
+                "createdAt": completed, "turnId": "t", "summary": "",
+                "payload": done}),
+        ]
+    }
+
+    /// Numbered lines of filler output, so a mock read step counts its lines.
+    fn numbered_lines(lines: usize) -> String {
+        (1..=lines)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn user_message(&mut self, prompt: Prompt) -> Message {
         let text = prompt.wire()["text"]
             .as_str()
@@ -1873,11 +1981,29 @@ mod tests {
         let summary = source.run_summary(4).expect("run");
         assert_eq!(summary.phase(), crate::model::RunPhase::Reviewing);
         assert_eq!(summary.agents[0].len(), 2);
+        // The run carries each role's model, as a `research.run` answer does.
+        assert_eq!(
+            summary.models[0].as_ref().map(|model| model.effort.clone()),
+            Some(Some("medium".to_string()))
+        );
+        assert_eq!(
+            summary.models[1].as_ref().map(|model| model.effort.clone()),
+            Some(Some("high".to_string()))
+        );
         let rows = source
             .role_messages("mock-4-researcher-0")
             .expect("role transcript");
+        // The prompt, the steps with their times, and the reply: the same
+        // projection the thread view draws.
+        assert!(matches!(&rows[0], Message::User { .. }));
         assert!(
-            matches!(&rows[1], Message::Assistant { text, .. } if text.contains("Traced the event"))
+            matches!(&rows[1], Message::Tool { name, meta, .. } if name == "read" && meta == "30 lines")
+        );
+        assert!(
+            matches!(&rows[2], Message::Tool { name, meta, .. } if name == "command" && meta == "3.4s")
+        );
+        assert!(
+            matches!(&rows[3], Message::Assistant { text, .. } if text.contains("Traced the event"))
         );
     }
     #[test]

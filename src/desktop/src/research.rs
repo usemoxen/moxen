@@ -303,6 +303,10 @@ pub struct RunSummary {
     pub updated_at: String,
     pub ended_at: Option<String>,
     pub size: ResearchSize,
+    /// The user-approved model each role runs on, as the run record carries
+    /// it (`models` on a `research.run` answer). A role the plan leaves to
+    /// the lead's model has none.
+    pub models: [Option<RoleModel>; 3],
     pub agents: [Vec<RunAgent>; 3],
 }
 
@@ -464,6 +468,11 @@ pub fn summarize_run(
             at => Some(at.to_string()),
         },
         size,
+        models: [
+            decode_role_model(&run["models"]["researcher"]),
+            decode_role_model(&run["models"]["critic"]),
+            decode_role_model(&run["models"]["finalizer"]),
+        ],
         agents,
     })
 }
@@ -552,76 +561,16 @@ pub fn step_role(role: ResearchRole, direction: i32) -> ResearchRole {
     ROLES[(at + direction).rem_euclid(ROLES.len() as i32) as usize]
 }
 
-/// A column with nothing happening in it, in points.
-pub const SLIVER_WIDTH: f32 = 112.0;
-/// The least a column with something to read gets, in points.
-pub const MIN_COLUMN_WIDTH: f32 = 192.0;
-/// Below this width the view shows one column at a time.
-pub const NARROW_BELOW: f32 = SLIVER_WIDTH * 2.0 + MIN_COLUMN_WIDTH + 64.0;
-
-pub type ColumnWidths = [f32; 3];
-
-/// Column widths for `total` points: the phase's column is wide, the others
-/// share what is left by how much they are doing, and a column nothing has
-/// started in shrinks to a sliver. Null when the columns do not fit (narrow).
-pub fn column_widths(summary: &RunSummary, total: f32) -> Option<ColumnWidths> {
-    if total < NARROW_BELOW {
-        return None;
-    }
-    let focus = focus_role_of(summary);
-    let started = |role: ResearchRole| {
-        summary.agents[role as usize]
-            .iter()
-            .any(|agent| agent.state != AgentState::Waiting)
-    };
-    let weight = |role: ResearchRole| {
-        if role == focus {
-            5.0
-        } else if started(role) {
-            3.0
-        } else {
-            0.0
-        }
-    };
-    let roles: Vec<ResearchRole> = ROLES
-        .iter()
-        .copied()
-        .filter(|role| weight(*role) > 0.0)
-        .collect();
-    let slivers = (ROLES.len() - roles.len()) as f32;
-    let room = total - slivers * SLIVER_WIDTH;
-    let sum: f32 = roles.iter().map(|role| weight(*role)).sum();
-    let mut widths = [SLIVER_WIDTH, SLIVER_WIDTH, SLIVER_WIDTH];
-    let mut left = room;
-    for (at, role) in roles.iter().enumerate() {
-        let share = if at == roles.len() - 1 {
-            left
-        } else {
-            MIN_COLUMN_WIDTH.max(room * weight(*role) / sum)
-        };
-        widths[*role as usize] = share;
-        left -= share;
-    }
-    // Minimums can overdraw the last column: take it back from the widest.
-    let over: f32 = widths.iter().sum::<f32>() - total;
-    if over > 0.0
-        && let Some(widest) = roles
-            .iter()
-            .max_by(|left, right| widths[**left as usize].total_cmp(&widths[**right as usize]))
-    {
-        widths[*widest as usize] -= over;
-    }
-    Some(widths)
-}
+/// Below this width the run view shows one column at a time under a switcher.
+pub const NARROW_BELOW: f32 = 480.0;
 
 #[cfg(test)]
 mod tests {
     // Not a glob: `gpui::test` would shadow `#[test]`.
     use super::{
         AgentRef, MAX_RESEARCHERS, PickerRow, ResearchRole, ResearchSize, RunSummary,
-        agent_state_of, column_widths, focus_role_of, initial_picker, lens_of, move_row,
-        set_critics, set_researchers, step_agent, step_picker, step_role, summarize_run,
-        thread_count,
+        agent_state_of, focus_role_of, initial_picker, lens_of, move_row, set_critics,
+        set_researchers, step_agent, step_picker, step_role, summarize_run, thread_count,
     };
     use serde_json::json;
 
@@ -730,13 +679,38 @@ mod tests {
     }
 
     #[test]
-    fn the_phase_names_the_column_that_is_wide() {
+    fn the_phase_names_the_column_in_focus() {
         let summary = summary_for_test();
         assert_eq!(summary.phase(), super::RunPhase::Reviewing);
         assert_eq!(focus_role_of(&summary), ResearchRole::Critic);
-        let widths = column_widths(&summary, 800.0).expect("widths");
-        assert!(widths[ResearchRole::Critic as usize] > widths[ResearchRole::Researcher as usize]);
-        assert!(column_widths(&summary, 100.0).is_none());
+    }
+
+    #[test]
+    fn the_run_carries_each_role_model() {
+        let mut run = serde_json::json!({
+            "leadThreadId": "lead", "state": "running",
+            "size": { "researchers": 1, "critics": 1 },
+            "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:01:00Z",
+            "models": {
+                "researcher": {"provider": "claude", "model": "opus", "thinkingEffort": "medium"},
+                "critic": {"provider": "claude", "model": "opus", "thinkingEffort": "high"},
+            },
+            "roles": [],
+        });
+        let summary = summarize_run(&run, "Lead", vec![], &|_| None).expect("summary");
+        assert_eq!(
+            summary.models[0].as_ref().map(|model| model.effort.clone()),
+            Some(Some("medium".to_string()))
+        );
+        assert_eq!(
+            summary.models[1].as_ref().map(|model| model.effort.clone()),
+            Some(Some("high".to_string()))
+        );
+        assert_eq!(summary.models[2], None);
+        // A run that names no models leaves every role on the lead's.
+        run.as_object_mut().expect("run").remove("models");
+        let summary = summarize_run(&run, "Lead", vec![], &|_| None).expect("summary");
+        assert_eq!(summary.models, [None, None, None]);
     }
 
     #[test]

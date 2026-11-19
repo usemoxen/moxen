@@ -121,8 +121,12 @@ pub struct Workspace {
     /// shows, by lead thread.
     pub run_role: HashMap<ThreadId, ResearchRole>,
     pub run_picks: HashMap<(ThreadId, ResearchRole), usize>,
-    /// Role transcript tool rows opened in the run view, by lead, role and agent.
-    pub run_expanded: HashSet<(ThreadId, ResearchRole, usize)>,
+    /// Role transcript tool rows opened in the run view, by lead, role,
+    /// agent and step.
+    pub run_expanded: HashSet<(ThreadId, ResearchRole, usize, usize)>,
+    /// The run view's chip or column header the pointer is over, whose tip
+    /// shows (`research_view::run_tip`).
+    pub run_hover: Option<crate::research_view::RunHover>,
     /// The size picker's state, by thread: the proposal it answers and its state.
     pub picker: HashMap<ThreadId, (String, PickerState)>,
     /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
@@ -560,6 +564,7 @@ impl Workspace {
             run_role: HashMap::new(),
             run_picks: HashMap::new(),
             run_expanded: HashSet::new(),
+            run_hover: None,
             picker: HashMap::new(),
             action_model: None,
             action_input,
@@ -946,6 +951,18 @@ impl Workspace {
             && self.lead_full != Some(self.selected)
             && self.source.leads_run(self.selected)
             && self.source.run_summary(self.selected).is_some()
+    }
+    /// How wide the reading column is now: the window past the sidebar and
+    /// the inspector, never below what the turn needs.
+    pub fn turn_width(&self, window: &Window) -> f32 {
+        let viewport = f32::from(window.viewport_size().width);
+        let taken = theme::SIDEBAR
+            + if self.inspector_open {
+                self.inspector_width
+            } else {
+                0.
+            };
+        (viewport - taken).max(MIN_TURN)
     }
     /// The lead a role thread (or a lead opened in full) goes back to.
     pub fn run_back_to(&self) -> Option<ThreadId> {
