@@ -552,6 +552,8 @@ export async function sendTurn(
         role: "user",
         text: prompt,
         createdAt: now,
+        ...(input.automatic === true ? { automatic: true as const } : {}),
+        ...(input.control === true ? { control: true as const } : {}),
         ...withAttachments,
         ...withOrigin,
       });
@@ -649,6 +651,7 @@ export async function sendTurn(
       runtimeMode,
       interactionMode,
       ...(input.automatic === true ? { automatic: true as const } : {}),
+      ...(input.control === true ? { control: true as const } : {}),
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
@@ -676,6 +679,8 @@ export async function sendTurn(
       role: "user",
       text: prompt,
       createdAt: now,
+      ...(input.automatic === true ? { automatic: true as const } : {}),
+      ...(input.control === true ? { control: true as const } : {}),
       ...withAttachments,
       ...withOrigin,
     });

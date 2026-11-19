@@ -74,22 +74,23 @@ class HarnessDriver implements TurnDriver {
     }
     if (sideQuestion) this.sideQuestion = sideQuestion;
     if (notice) {
-      this.injectNotice = (threadId, payload) =>
+      this.reconcileNotice = (threadId, payload) =>
         notice.mode === "fails"
-          ? Effect.fail(new CliError("NOTICE_FAILED", "Harness driver could not inject the notice."))
+          ? Effect.fail(new CliError("NOTICE_FAILED", "Harness driver could not reconcile the notice."))
           : Effect.sync(() => {
+            if (payload === null) {
+              notice.onClear?.(threadId);
+              return "cleared" as const;
+            }
             notice.onNotice?.(threadId, payload.text);
-            return notice.mode === "queued" ? "queued" as const : "delivered" as const;
+            return notice.mode === "queued" ? "armed" as const : "issued" as const;
           });
-      this.clearNotice = (threadId) => Effect.sync(() => notice.onClear?.(threadId));
     }
   }
 
   steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
 
-  injectNotice?: (threadId: string, notice: { readonly key: string; readonly text: string }) => Effect.Effect<"delivered" | "queued", CliError>;
-
-  clearNotice?: (threadId: string) => Effect.Effect<void, CliError>;
+  reconcileNotice?: (threadId: string, notice: { readonly key: string; readonly attemptId: string; readonly text: string } | null) => Effect.Effect<"armed" | "issued" | "cleared", CliError>;
 
   /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
   sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;

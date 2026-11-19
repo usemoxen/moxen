@@ -2575,25 +2575,25 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     });
 
   /**
-   * A usage warning as a session instruction entry: OpenCode attaches it to
-   * the session's next request, outside the conversation's user messages.
+   * Reconcile the `moxen-usage-notice` instruction entry for future requests:
+   * set it when the plan calls for it, otherwise remove it. Called after a
+   * cold session is attached and before its first prompt. A required removal
+   * that fails fails the dispatch rather than leaving a stale stop block.
    */
-  readonly injectNotice = (threadId: ThreadId, notice: { key: string; text: string }): Effect.Effect<"delivered" | "queued", CliError> =>
-    this.attempt("OPENCODE_NOTICE_FAILED", `Could not inject a usage notice on thread ${threadId}`, async () => {
+  readonly reconcileNotice = (
+    threadId: ThreadId,
+    notice: { key: string; attemptId: string; text: string } | null,
+  ): Effect.Effect<"armed" | "issued" | "cleared", CliError> =>
+    this.attempt("OPENCODE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       if (session.closed) throw new CliError("OPENCODE_NOT_STARTED", `No live OpenCode session exists for thread ${threadId}.`, { details: { threadId } });
       const connection = await this.connectionFor(session);
+      if (notice === null) {
+        await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null);
+        return "cleared" as const;
+      }
       await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, notice.text);
-      return "delivered" as const;
-    });
-
-  /** Remove the warning entry: the user has authorized continuing, or its window reset. */
-  readonly clearNotice = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("OPENCODE_NOTICE_FAILED", `Could not clear a usage notice on thread ${threadId}`, async () => {
-      const session = this.sessions.get(threadId);
-      if (!session || session.closed) return;
-      const connection = await this.connectionFor(session);
-      await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null).catch(() => undefined);
+      return "issued" as const;
     });
 
   /** Fail every open turn on one server: a fault with no session to blame. */

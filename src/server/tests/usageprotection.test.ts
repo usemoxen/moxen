@@ -2,7 +2,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { testHarness } from "../../core/testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn } from "../../core/threads/threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn } from "../../core/threads/threads.js";
+import { startTurn, type OperationContext } from "../../core/threads/operations.js";
+import { flushTurnRunners, runPromotedTurn } from "../../core/threads/execute.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import { callMoxenTool, availableMoxenTools } from "../mcp/tools.js";
 import type { ClientApi } from "../api.js";
@@ -13,6 +15,44 @@ import { decodeCommand, decodeQuery, type ThreadFrame } from "../protocol.js";
 import type { UsageProtection } from "../../core/usage/protection.js";
 
 afterEach(resetUsageLimitsForTests);
+
+it("reads the live usage mode at promotion through the server's config loader", async () => {
+  const prompts: string[] = [];
+  const w = await testHarness({ leaveTurnsRunning: true, onSendTurn: (turn) => prompts.push(turn.prompt) });
+  let mode: "notify" | "notify-user" = "notify";
+  const api = new DirectConnection({
+    storeRoot: w.root, drivers: w.drivers, builtinMcpServers: null,
+    config: async () => ({ ...w.config, usageProtection: mode }),
+  });
+  const ctx = await (Reflect.get(api, "context") as () => Promise<OperationContext>).call(api);
+  const thread = await createThread(w.store, {
+    projectId: "p", title: "gated promotion", modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    env: { mode: "local", path: w.work, branch: null },
+  });
+  const running = await startTurn(ctx, { threadId: thread.id, prompt: "First" });
+  await sendTurn(w.store, thread.id, { prompt: "task report", origin: "task-notification", automatic: true, delivery: "queue" });
+  const reset = new Date(Date.now() + 3_600_000).toISOString();
+  recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+  await w.store.writeThreadRecord({
+    ...(await w.store.readThreadRecord(thread.id))!,
+    usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+  });
+  try {
+    await expect.poll(() => prompts.length, { timeout: 10_000 }).toBe(1);
+    mode = "notify-user";
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runPromotedTurn({
+      store: w.store, driver: ctx.driverFor("codex"), threadId: thread.id, storeTurnId: running.turn.id, prompt: "",
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, usageNoticeMode: ctx.usageProtectionMode!,
+    });
+    await expect.poll(() => prompts.length, { timeout: 10_000 }).toBe(2);
+    expect(prompts.at(-1)).toBe("task report");
+  } finally {
+    await interruptTurn(w.store, thread.id).catch(() => undefined);
+    await flushTurnRunners();
+    await api.close();
+  }
+});
 
 it("exposes forced protection and its durable waiting count through the server after reconnection", async () => {
   const w = await testHarness();

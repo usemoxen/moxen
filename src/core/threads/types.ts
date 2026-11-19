@@ -224,6 +224,8 @@ export interface StoredTurn {
   readonly delivery: TurnDelivery;
   /** True for an input Moxen dispatched itself (compaction, handoff, a background wake), never the user's. */
   readonly automatic?: boolean;
+  /** A provider control command (`/compact`) or a usage-control prompt: not an ordinary message. */
+  readonly control?: boolean;
   readonly messageId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: InteractionMode;
@@ -316,6 +318,10 @@ export interface StoredMessage {
   readonly attachments?: readonly StoredAttachment[];
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
+  /** Moxen's own dispatch, not the user's: used for notice provenance in a batch. */
+  readonly automatic?: boolean;
+  /** A provider control command (`/compact`): never decorated with a usage prefix and never an authorization. */
+  readonly control?: boolean;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
 }
@@ -435,6 +441,8 @@ export interface SendTurnInput {
    * knows an automatic input from an explicit one.
    */
   readonly automatic?: boolean;
+  /** A provider control command or usage-control prompt: never decorated, never an authorization. */
+  readonly control?: boolean;
   readonly prompt: string;
   readonly ifBusy?: SendIfBusy;
   readonly delivery?: SendDelivery;

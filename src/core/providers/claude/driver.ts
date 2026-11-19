@@ -214,10 +214,12 @@ interface ClaudeSession {
   closed: boolean;
   /**
    * A usage warning waiting to reach the next request through a hook's
-   * `additionalContext`, outside the user's messages. Replaced by a newer
+   * `additionalContext`, keyed by its delivery attempt. Replaced by a newer
    * warning and cleared when the user authorizes continuing.
    */
-  runtimeNotice: { key: string; text: string } | null;
+  runtimeNotice: { key: string; attemptId: string; text: string } | null;
+  /** Attempts this session already issued: a retry of the same attempt must not deliver twice. */
+  consumedNoticeAttempts: Set<string>;
   resumeSessionId: string | null;
   account: { subscriptionType?: string; tokenSource?: string; apiProvider?: string } | null;
   model: string | null;
@@ -549,6 +551,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         input: new PromptQueue(),
         closed: false,
         runtimeNotice: null,
+        consumedNoticeAttempts: new Set(),
         resumeSessionId: null,
         account: null,
         model: input.modelSelection?.model ?? null,
@@ -640,25 +643,29 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     });
 
   /**
-   * A usage warning into the runtime context: the next `UserPromptSubmit` or
-   * `PostToolBatch` hook returns it as `additionalContext`, which the CLI
-   * injects into the request outside the user's messages. It is never pushed
-   * into `session.input`, so it cannot be mistaken for a user turn or become
-   * an unconfirmed steer.
+   * A usage warning into the runtime context: the next parent
+   * `UserPromptSubmit` or `PostToolBatch` hook returns it as
+   * `additionalContext`. It is never pushed into `session.input`, so it
+   * cannot be mistaken for a user turn or become an unconfirmed steer. An
+   * attempt the session already issued is not armed again.
    */
-  readonly injectNotice = (threadId: ThreadId, notice: { key: string; text: string }): Effect.Effect<"delivered" | "queued", CliError> =>
-    this.attempt("CLAUDE_NOTICE_FAILED", `Could not inject a usage notice on thread ${threadId}`, async () => {
+  readonly reconcileNotice = (
+    threadId: ThreadId,
+    notice: { key: string; attemptId: string; text: string } | null,
+  ): Effect.Effect<"armed" | "issued" | "cleared", CliError> =>
+    this.attempt("CLAUDE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       if (session.closed) throw new CliError("CLAUDE_NOT_STARTED", `No live Claude session exists for thread ${threadId}.`, { details: { threadId } });
-      session.runtimeNotice = { key: notice.key, text: notice.text };
-      return "queued" as const;
-    });
-
-  /** Remove a queued runtime warning: the user has authorized continuing, or its window reset. */
-  readonly clearNotice = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    this.attempt("CLAUDE_NOTICE_FAILED", `Could not clear a usage notice on thread ${threadId}`, async () => {
-      const session = this.sessions.get(threadId);
-      if (session) session.runtimeNotice = null;
+      if (notice === null) {
+        session.runtimeNotice = null;
+        return "cleared" as const;
+      }
+      if (session.consumedNoticeAttempts.has(notice.attemptId)) {
+        session.runtimeNotice = null;
+        return "issued" as const;
+      }
+      session.runtimeNotice = { key: notice.key, attemptId: notice.attemptId, text: notice.text };
+      return "armed" as const;
     });
 
   /**
@@ -2191,11 +2198,20 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     const runtimeNotice = (event: "UserPromptSubmit" | "PostToolBatch"): HookCallbackMatcher[] => [
       {
         hooks: [
-          async () => {
+          async (input) => {
+            // A subagent's request is not the parent conversation: never let
+            // a child's callback consume the parent's warning.
+            const agentId = (input as unknown as { agent_id?: unknown }).agent_id;
+            if (typeof agentId === "string" && agentId.length > 0) return {};
             const notice = session.runtimeNotice;
             if (notice === null) return {};
             session.runtimeNotice = null;
-            this.publish({ type: "usage.notice.delivered", provider: "claude", threadId: session.threadId, key: notice.key });
+            if (session.consumedNoticeAttempts.has(notice.attemptId)) return {};
+            session.consumedNoticeAttempts.add(notice.attemptId);
+            this.publish({
+              type: "usage.notice.issued", provider: "claude", threadId: session.threadId,
+              key: notice.key, attemptId: notice.attemptId,
+            });
             return { hookSpecificOutput: { hookEventName: event, additionalContext: notice.text } };
           },
         ],

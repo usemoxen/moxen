@@ -65,8 +65,8 @@ import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, 
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
-import { automaticTurn } from "../usage/notice.js";
-import { authorizeUsageNoticeForTurn, driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, withUsageNoticeForTurn, type TurnDriver } from "./execute.js";
+import { controlPrompt, turnKind, turnProvenance } from "../usage/notice.js";
+import { commitUsageAuthorization, dispatchUsageNotice, driverKey, ensureDriverSession, executeTurn, imagesOf, reconcileUsageNotice, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
@@ -150,6 +150,12 @@ export interface OperationContext {
   readonly store: ThreadStore;
   readonly storeRoot: string;
   readonly config: CliConfig;
+  /**
+   * The current usage-protection mode, reloaded at dispatch. The server
+   * supplies a live reader so a queued turn promoted after a config switch
+   * sees the new value; contexts without one use their config snapshot.
+   */
+  readonly usageProtectionMode?: () => Promise<CliConfig["usageProtection"] | undefined>;
   /** The driver for a model-selection instance id, shared per context. */
   readonly driverFor: (instanceId: string) => TurnDriver;
   /**
@@ -221,6 +227,11 @@ async function withUsageProtectionContext(ctx: OperationContext, thread: StoredT
   if (!tasks.length) return prompt;
   const notes = tasks.map(({ payload }) => ({ taskId: payload!.taskId, description: payload!.description, status: payload!.status, output: Array.isArray(payload!.output) ? payload!.output.slice(-40) : null }));
   return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
+}
+
+/** The live mode reader for a dispatch, falling back to the context's snapshot. */
+function liveUsageMode(ctx: OperationContext): () => Promise<CliConfig["usageProtection"] | undefined> {
+  return ctx.usageProtectionMode ?? (async () => ctx.config.usageProtection);
 }
 
 /** What to record once the provider answered a prompt `promptWithUpdate` built. */
@@ -480,15 +491,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       return;
     }
     const selection = turn.modelSelection ?? thread.modelSelection;
-    const automatic = automaticTurn(messages, turn);
-    if (!automatic) {
-      // Resolving the driver may fail (the provider is gone): the record
-      // still ends its wait, and the failed run is the caller's to report.
-      let noticeDriver: TurnDriver | null = null;
-      try { noticeDriver = ctx.driverFor(selection.instanceId); } catch { noticeDriver = null; }
-      await authorizeUsageNoticeForTurn(store, noticeDriver, threadId, selection.instanceId);
-    }
     const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
+    const mode = liveUsageMode(ctx);
     let driver: TurnDriver;
     let setup: Awaited<ReturnType<typeof sessionSetup>>;
     try {
@@ -497,7 +501,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
       setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId), usageNoticeMode: mode });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
       // takes them now, like a fresh send does — never a reason to fail the resume.
@@ -514,11 +518,22 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     const images = await imagesOf(message.attachments);
-    const notice = await withUsageNoticeForTurn({
-      store, driver, thread, instanceId: selection.instanceId, automatic,
-      mode: ctx.config.usageProtection,
-      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
-    });
+    // The cold session is attached; reconcile its warning slot before the
+    // first prompt and decide provenance from every message in the batch.
+    let notice;
+    try {
+      notice = await dispatchUsageNotice({
+        store, driver, threadId, instanceId: selection.instanceId,
+        prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
+        provenance: turnProvenance(messages, turn), kind: turnKind(messages, turn), trigger: "dispatch", mode,
+      });
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
     const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : []), ...(notice.afterAnswer ? [notice.afterAnswer] : [])];
     void executeTurn({
       store,
@@ -527,12 +542,18 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       storeTurnId: turn.id,
       prompt: notice.prompt,
       ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+      ...(notice.authorize
+        ? {
+          afterDispatch: async () => await commitUsageAuthorization(store, threadId, notice.authorize!),
+          onDispatchFailure: async () => await reconcileUsageNotice({ store, driver, threadId, instanceId: selection.instanceId, mode }),
+        }
+        : {}),
+      usageNoticeMode: mode,
       ...(setup.fresh ? { freshConversation: true } : {}),
       interactionMode: turn.interactionMode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       workingDirectory: thread.env.path,
-      usageNoticeMode: () => ctx.config.usageProtection,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
     })
@@ -2242,24 +2263,30 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Resolved before the ledger is touched: an unknown provider fails
   // without recording a turn.
   const driver = ctx.driverFor(sendSelection.instanceId);
-  // Only a user's own message ends a usage wait; an internal origin, a
-  // usage-control turn or an explicitly marked dispatch is automatic.
-  const automatic = input.automatic === true || input.origin !== undefined || input.usageControl === true;
+  // Only a user's own message ends a usage wait: an internal origin, a
+  // usage-control turn, a reset continuation, a provider control or an
+  // explicitly marked dispatch is automatic.
+  const automatic = input.automatic === true || input.origin !== undefined || input.usageControl === true || input.scheduleReason === "usage-reset";
+  const control = input.control === true || input.usageControl === true || controlPrompt(input.prompt);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
   const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(input.queue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : undefined;
-  const sent = await sendTurn(store, thread.id, { ...send, automatic, ...(automaticQueue ? { queue: automaticQueue } : {}) });
-  // Only a user message the thread accepted ends the wait; a refused send did not reach the model.
-  if (!automatic) await authorizeUsageNoticeForTurn(store, driver, thread.id, sendSelection.instanceId);
+  const sent = await sendTurn(store, thread.id, { ...send, automatic, control, ...(automaticQueue ? { queue: automaticQueue } : {}) });
+  const mode = liveUsageMode(ctx);
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    const notice = await withUsageNoticeForTurn({
-      store, driver, thread: sent.thread, instanceId: sendSelection.instanceId, automatic,
-      mode: ctx.config.usageProtection, prompt: text,
+    const notice = await dispatchUsageNotice({
+      store, driver, threadId: thread.id, instanceId: sendSelection.instanceId, prompt: text,
+      provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
     });
     const steered = await deliverSteer(driver, thread.id, notice.prompt, providerImages(uploads), sent.messageId);
-    if (steered) await notice.afterAnswer?.().catch(() => undefined);
+    if (steered) {
+      await notice.afterAnswer?.().catch(() => undefined);
+      if (notice.authorize) await commitUsageAuthorization(store, thread.id, notice.authorize);
+    } else if (notice.authorize) {
+      await reconcileUsageNotice({ store, driver, threadId: thread.id, instanceId: sendSelection.instanceId, mode });
+    }
     return { ...sent, run: null, steerDelivered: steered };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
@@ -2297,7 +2324,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   let startFailure: unknown = null;
   try {
     setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id) });
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), usageNoticeMode: mode });
   } catch (cause) {
     startFailure = cause;
   }
@@ -2342,7 +2369,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       modelSelection: turnModel,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
-      usageNoticeMode: () => ctx.config.usageProtection,
+      usageNoticeMode: mode,
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
@@ -2357,11 +2384,19 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   await driver.updateNativeTools?.(sent.thread.id, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
-  const notice = await withUsageNoticeForTurn({
-    store, driver, thread: sent.thread, instanceId: turnModel.instanceId, automatic,
-    mode: ctx.config.usageProtection,
-    prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
-  });
+  let notice;
+  try {
+    notice = await dispatchUsageNotice({
+      store, driver, threadId: sent.thread.id, instanceId: turnModel.instanceId,
+      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
+    });
+  } catch (cause) {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    if (claimed) store.untrackRunning(sent.turn.id);
+    await failTurn(store, thread.id, sent.turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+    throw cause;
+  }
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : []), ...(notice.afterAnswer ? [notice.afterAnswer] : [])];
   let run: Promise<void>;
   try {
@@ -2372,6 +2407,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       storeTurnId: sent.turn.id,
       prompt: notice.prompt,
       ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
+      ...(notice.authorize
+        ? {
+          afterDispatch: async () => await commitUsageAuthorization(store, thread.id, notice.authorize!),
+          onDispatchFailure: async () => await reconcileUsageNotice({ store, driver, threadId: thread.id, instanceId: turnModel.instanceId, mode }),
+        }
+        : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       ...(images.length > 0 ? { images } : {}),
       // Always the turn's own model, so a live session switches when the
@@ -2379,7 +2420,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       modelSelection: turnModel,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
-      usageNoticeMode: () => ctx.config.usageProtection,
+      usageNoticeMode: mode,
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
@@ -2388,6 +2429,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     // The prompt never reached a runner (a ledger read failed while building
     // it): release the claim rather than leaving the turn tracked forever.
     if (claimed) store.untrackRunning(sent.turn.id);
+    if (notice.authorize) await reconcileUsageNotice({ store, driver, threadId: thread.id, instanceId: turnModel.instanceId, mode });
     throw cause;
   }
   // The user's own message spends fresh allowance and ends a usage hold, so

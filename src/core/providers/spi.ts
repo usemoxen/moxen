@@ -519,11 +519,12 @@ export type ProviderRuntimeEvent =
       readonly raw?: unknown;
     }
   | {
-      /** A usage warning reached the provider's runtime context (a hook's additional context). */
-      readonly type: "usage.notice.delivered";
+      /** A usage warning was issued into the provider's runtime context (a hook took it). Not proof the model read it. */
+      readonly type: "usage.notice.issued";
       readonly provider: ProviderDriverKind;
       readonly threadId: ThreadId;
       readonly key: string;
+      readonly attemptId: string;
     };
 
 /** A live background task, as a driver reports it. */
@@ -608,20 +609,18 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
   readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[], steerId?: string) => Effect.Effect<void, TError>;
 
   /**
-   * Hand a usage warning to the provider's runtime context, outside the
-   * user's messages: Claude an in-process hook's `additionalContext`,
-   * OpenCode a session instruction entry. `"delivered"` means the provider
-   * took it now; `"queued"` means it will put it into the next request and
-   * publish `usage.notice.delivered` once it does. Omitted by Codex, whose
-   * app-server protocol has no such channel; its warning is ordinary text.
+   * Reconcile the provider's runtime-context warning slot for future
+   * requests: arm `notice` (Claude's next hook attempt, OpenCode's
+   * `moxen-usage-notice` instruction entry via `setInstructions`), or clear
+   * it with null. Called after a cold session is attached and before its
+   * first send, and at each dispatch. The return says what the provider
+   * accepted, never that the model read it. Omitted by Codex and the
+   * Harness: their warning is ordinary text.
    */
-  readonly injectNotice?: (
+  readonly reconcileNotice?: (
     threadId: ThreadId,
-    notice: { readonly key: string; readonly text: string },
-  ) => Effect.Effect<"delivered" | "queued", TError>;
-
-  /** Remove a runtime-context warning, when the user authorizes continuing or the window resets. */
-  readonly clearNotice?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+    notice: { readonly key: string; readonly attemptId: string; readonly text: string } | null,
+  ) => Effect.Effect<"armed" | "issued" | "cleared", TError>;
 
   /**
    * A steer handed to the provider's running turn that the provider has not

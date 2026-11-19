@@ -2,29 +2,33 @@
  * The model-facing usage notice: what a conversation is told when the
  * account's shared allowance is nearly exhausted.
  *
- * The block never authorizes work, and its provenance is the runtime channel,
- * not its text: Claude takes it through an in-process hook's `additionalContext`
- * and OpenCode through a session instruction entry, both outside the user's
- * messages. Codex has no such channel in its app-server protocol, so there the
- * block arrives as ordinary text and its tag is the only marker — the docs and
- * instructions say so instead of calling it trusted.
+ * The warning follows the same convention as Moxen's other tagged runtime
+ * blocks. Claude takes it through an in-process hook's `additionalContext`,
+ * OpenCode through a session instruction entry outside the user's messages,
+ * and Codex and the Moxen Harness as ordinary text. Only Moxen's dispatch
+ * state ends the wait, never the text of a block.
  *
- * One record per account lives on the thread: `delivered` is how the block
- * reached the conversation (null while it still owes one), and `waiting` is
- * whether the conversation is still under the warning. Only an explicit user
- * message ends the wait; automatic inputs keep receiving the block so they stay
- * acknowledgement-only.
+ * The durable per-account record is history: the window key, its facts,
+ * whether the warning was ever issued, and whether it still waits. The
+ * provider's armed slot/entry is separate state, reconciled at each dispatch.
+ * A record answers "did we already raise this warning?"; the provider slot
+ * answers "what will the next request see?".
  */
 import type { ProviderUsageWindow } from "../catalog/summary.js";
 import type { StoredMessage, StoredThread, StoredTurn } from "../threads/types.js";
 import type { UsageForecast } from "./forecast.js";
 import { usageKeyForInstance, usageLimitsSnapshot } from "./limits.js";
 
-/** The tag the block opens with. Trusted-runtime vocabulary, shared with `threads/instructions.ts`. */
+/** The tag the block opens with, shared with `threads/instructions.ts`. */
 export const USAGE_NOTICE_TAG = "moxen-usage-notice";
 
-/** How the block reached the provider: a runtime channel outside the user's messages, or plain text. */
+/** The channel a provider actually has: runtime context, or ordinary text. */
 export type UsageNoticeChannel = "runtime" | "text";
+
+/** How the provider state is set for a dispatch. */
+export type UsageNoticeProvenance = "explicit" | "automatic";
+export type UsageNoticeKind = "message" | "control" | "native-wake";
+export type UsageNoticeTrigger = "dispatch" | "forecast" | "reconcile";
 
 /** One window's facts as the notice reports them. */
 export interface UsageNoticeWindow {
@@ -34,23 +38,105 @@ export interface UsageNoticeWindow {
   readonly resetsAt: string | null;
 }
 
-/**
- * What one account's conversation was told about usage. Kept per account on
- * the thread so a server restart, a reconnect, a provider switch or the next
- * input cannot deliver the same warning twice, and so switching back to an
- * account does not warn again.
- */
+/** What one account's conversation was told about usage, and whether it still waits. */
 export interface UsageNoticeState {
   readonly key: string;
   readonly provider: string;
   readonly windows: readonly UsageNoticeWindow[];
-  /** Null while the warning still owes the conversation; otherwise how it arrived. */
+  /** Null while the warning still owes the conversation; otherwise how it was issued. */
   readonly delivered: UsageNoticeChannel | null;
   /** True until an explicit user message ends the wait. */
   readonly waiting: boolean;
   readonly raisedAt: string;
   readonly deliveredAt?: string;
   readonly authorizedAt?: string;
+  /** The forecast/dispatch attempt currently armed, reused by retries of the same forecast. */
+  readonly attemptId?: string;
+}
+
+/** The exact wait a successful provider dispatch may authorize. */
+export interface UsageNoticeAuthorization {
+  readonly provider: string;
+  readonly key: string;
+}
+
+export interface UsageNoticeDispatchInput {
+  readonly mode: "off" | "notify-user" | "notify" | "auto" | undefined;
+  readonly provenance: UsageNoticeProvenance;
+  readonly kind: UsageNoticeKind;
+  readonly trigger: UsageNoticeTrigger;
+  readonly record: UsageNoticeState | null;
+  readonly channel: UsageNoticeChannel | null;
+  readonly attemptId?: string;
+  readonly now?: number;
+}
+
+export interface UsageNoticeDispatchPlan {
+  /** What to reconcile on the provider: clear its slot/entry, arm runtime context, prefix text, or leave it. */
+  readonly delivery: "clear" | "runtime" | "text" | "unchanged";
+  /** The block to arm or steer with. */
+  readonly text: string | null;
+  /** The block to put ahead of a provider prompt (dispatch text channel only; null for controls/native wakes). */
+  readonly prefix: string | null;
+  /** For explicit input only: the wait this successful dispatch may end. */
+  readonly authorize: UsageNoticeAuthorization | null;
+  /** The attempt a runtime arm uses. */
+  readonly attemptId: string | null;
+  /** An automatic input under a waiting warning. */
+  readonly reminder: boolean;
+}
+
+/**
+ * The single planning decision. It never calls a provider; the executor applies
+ * the plan under the per-thread dispatch serialization after re-reading the
+ * mode and record.
+ */
+export function planUsageNoticeDispatch(input: UsageNoticeDispatchInput): UsageNoticeDispatchPlan {
+  const now = input.now ?? Date.now();
+  const record = input.record;
+  const stale = record !== null && usageNoticeStale(record, now);
+  const base: UsageNoticeDispatchPlan = {
+    delivery: "unchanged", text: null, prefix: null, authorize: null, attemptId: null, reminder: false,
+  };
+
+  // A genuine user message ends the wait under any mode, but only after the
+  // provider accepts the dispatch. Controls are never a user authorization.
+  if (input.provenance === "explicit" && input.kind !== "control") {
+    if (record !== null && record.waiting !== false && !stale) {
+      return { ...base, delivery: "clear", authorize: { provider: record.provider, key: record.key } };
+    }
+    return base;
+  }
+
+  // Off, Notify (you only) and Automatic disarm the provider, but keep the
+  // history: toggling back does not raise the same warning again.
+  if (input.mode !== "notify") {
+    return record !== null && record.waiting !== false && !stale ? { ...base, delivery: "clear" } : base;
+  }
+
+  if (record === null || record.waiting === false || stale) {
+    return record !== null && (record.waiting === false || stale) ? { ...base, delivery: "clear" } : base;
+  }
+
+  // A provider control (/compact and the like) is not decorated: disarm it and
+  // carry the wait to the next ordinary automatic input.
+  if (input.kind === "control") return { ...base, delivery: "clear" };
+  if (input.channel === null) return base;
+
+  const attemptId = input.attemptId ?? record.attemptId ?? null;
+  const text = usageNoticeText(record, { automatic: true });
+  if (input.kind === "native-wake") {
+    // The request is already issued; reconcile the slot for the next
+    // controllable boundary without pretending to change this one.
+    return input.channel === "runtime"
+      ? { ...base, delivery: "runtime", text, attemptId, reminder: true }
+      : { ...base, reminder: true };
+  }
+  if (input.channel === "runtime") return { ...base, delivery: "runtime", text, attemptId, reminder: true };
+  return {
+    ...base, delivery: "text", text, reminder: true,
+    ...(input.trigger === "dispatch" ? { prefix: text } : {}),
+  };
 }
 
 /** The account a thread's conversation uses, keyed like the usage windows. */
@@ -137,14 +223,29 @@ export function withUsageNotice(prompt: string, notice: UsageNoticeState, option
 }
 
 /**
- * Whether a queued turn came from an automatic input. New turns record the
- * flag at dispatch; older ones fall back to their messages' origins, where any
- * message without an internal origin is the user's.
+ * The provenance of a queued turn, from every message folded into it: any
+ * genuine user message makes the batch explicit, while originless internal
+ * controls are automatic. New messages record the flag at dispatch; older
+ * ones fall back to their internal origin.
  */
-export function automaticTurn(messages: readonly StoredMessage[], turn: Pick<StoredTurn, "id" | "automatic">): boolean {
-  if (turn.automatic !== undefined) return turn.automatic;
+export function turnProvenance(messages: readonly StoredMessage[], turn: Pick<StoredTurn, "id" | "automatic">): UsageNoticeProvenance {
   const own = messages.filter((message) => message.turnId === turn.id && message.role === "user");
-  return own.length > 0 && own.every((message) => message.origin !== undefined);
+  if (own.length === 0) return turn.automatic === true ? "automatic" : "explicit";
+  const automatic = own.every((message) => message.automatic === true || (message.automatic === undefined && message.origin !== undefined));
+  return automatic ? "automatic" : "explicit";
+}
+
+/** The kind of a queued turn: a provider control, a native wake, or an ordinary message. */
+export function turnKind(messages: readonly StoredMessage[], turn: Pick<StoredTurn, "id" | "control" | "delivery">): UsageNoticeKind {
+  if (turn.delivery === "background") return "native-wake";
+  const own = messages.filter((message) => message.turnId === turn.id && message.role === "user");
+  if (own.some((message) => message.control === true)) return "control";
+  return turn.control === true ? "control" : "message";
+}
+
+/** Whether a prompt is a provider control command that must never be decorated. */
+export function controlPrompt(text: string): boolean {
+  return text.trimStart().startsWith("/");
 }
 
 /** The part of the thread store the notice state is written through. */
@@ -155,18 +256,36 @@ export interface UsageNoticeStore {
   readonly nowIso: () => string;
 }
 
-/** Record how the conversation received the warning. Re-read under the lock so a newer state wins. */
+/** Remember the attempt a runtime arm will carry, before the provider sees it. */
+export async function recordUsageNoticeAttempt(
+  store: UsageNoticeStore, threadId: string, provider: string, key: string, attemptId: string,
+): Promise<void> {
+  await store.withThreadLock(threadId, async () => {
+    const thread = await store.readThreadRecord(threadId);
+    const notice = thread?.usageNotices?.[provider];
+    if (!thread || !notice || notice.key !== key || notice.attemptId === attemptId) return;
+    await store.writeThreadRecord({
+      ...thread,
+      usageNotices: { ...thread.usageNotices, [provider]: { ...notice, attemptId } },
+      updatedAt: store.nowIso(),
+    });
+  });
+}
+
+/** Record that the provider issued the warning (for Claude, when its hook took the attempt). */
 export async function markUsageNoticeDelivered(
   store: UsageNoticeStore,
   threadId: string,
   provider: string,
   key: string,
   via: UsageNoticeChannel,
+  attemptId?: string,
 ): Promise<void> {
   await store.withThreadLock(threadId, async () => {
     const thread = await store.readThreadRecord(threadId);
     const notice = thread?.usageNotices?.[provider];
     if (!thread || !notice || notice.key !== key || notice.delivered !== null) return;
+    if (attemptId !== undefined && notice.attemptId !== undefined && notice.attemptId !== attemptId) return;
     await store.writeThreadRecord({
       ...thread,
       usageNotices: { ...thread.usageNotices, [provider]: { ...notice, delivered: via, deliveredAt: store.nowIso() } },
@@ -196,7 +315,7 @@ export async function authorizeUsageNotice(store: UsageNoticeStore, threadId: st
   return ended;
 }
 
-/** Drop one account's warning (a reset or a mode change). */
+/** Drop one account's warning (a reset). Mode changes keep the history; they only disarm. */
 export async function clearUsageNotice(store: UsageNoticeStore, threadId: string, provider: string): Promise<void> {
   await store.withThreadLock(threadId, async () => {
     const thread = await store.readThreadRecord(threadId);

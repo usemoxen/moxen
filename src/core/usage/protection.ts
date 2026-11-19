@@ -4,12 +4,13 @@ import { readStatus } from "../git/history.js";
 import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js";
 import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCancelled, queueTaskPauseNotification, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
+import { dispatchUsageNotice } from "../threads/execute.js";
 import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
-import { clearUsageNotice, markUsageNoticeDelivered, usageNoticeAccount, usageNoticeKey, usageNoticeStale, usageNoticeText, usageNoticeWindows, type UsageNoticeState } from "./notice.js";
+import { clearUsageNotice, markUsageNoticeDelivered, usageNoticeAccount, usageNoticeFor, usageNoticeKey, usageNoticeStale, usageNoticeWindows, type UsageNoticeState } from "./notice.js";
 import { modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
@@ -29,8 +30,8 @@ export class UsageProtection {
   private readonly forecaster = new UsageForecaster();
   private readonly live = new Map<string, TokenUsageDelta>();
   private readonly nativeWrap = new Set<string>();
-  /** Warnings a provider's runtime channel confirmed, by thread: applied to the thread record on the next tick. */
-  private readonly noticeConfirmed = new Map<string, string>();
+  /** Warnings a provider's runtime channel issued, by thread: applied to the thread record on the next tick. */
+  private readonly noticeConfirmed = new Map<string, { key: string; attemptId: string }>();
   private readonly activeMs = new Map<string, number>();
   private readonly activeCounts = new Map<string, number>();
   private readonly candidates = new Map<string, UsageRow>();
@@ -56,8 +57,8 @@ export class UsageProtection {
       this.nativeWrap.add(event.threadId);
       this.dirty.add(event.threadId);
     }
-    if (event.type === "usage.notice.delivered") {
-      this.noticeConfirmed.set(event.threadId, event.key);
+    if (event.type === "usage.notice.issued") {
+      this.noticeConfirmed.set(event.threadId, { key: event.key, attemptId: event.attemptId });
       this.dirty.add(event.threadId);
     }
     if (event.type === "turn.completed" || event.type === "turn.interrupted" || event.type === "turn.failed") {
@@ -482,36 +483,36 @@ export class UsageProtection {
   }
 
   /**
-   * Warn the model where Notify says to. A running conversation gets the
-   * trusted block at its next step (a steer), and a provider that cannot take
-   * one owes it to the next input instead — never a turn of its own just to
-   * deliver a warning. The record on the thread makes the warning one per
-   * provider and window reset, across later input, reconnect and restart.
+   * Arm one running turn through the shared executor. The coordinator never
+   * starts a turn: it raises the durable record, then reconciles the provider
+   * slot or steers a text channel. A retry of the same forecast reuses the
+   * attempt ID; a new automatic input gets a new one from its dispatch.
    */
   private async notifyModel(ctx: OperationContext, rows: UsageRow[], now: number): Promise<void> {
-    const notify = ctx.config.usageProtection === "notify";
+    const live = ctx.usageProtectionMode ?? (async () => ctx.config.usageProtection);
+    const mode = await live().catch(() => ctx.config.usageProtection);
     for (const row of rows) {
       const thread = row.thread;
       const notices: Record<string, UsageNoticeState> = { ...(thread.usageNotices ?? {}) };
-      if (!notify) {
-        // Off, Notify (you only) and Automatic do not carry a model notice:
-        // drop what was raised before the setting changed, so no later input does.
-        for (const provider of Object.keys(notices)) await this.dropNotice(ctx, thread.id, provider);
-        continue;
-      }
       const confirmed = this.noticeConfirmed.get(thread.id);
       if (confirmed !== undefined) {
-        const account = Object.entries(notices).find(([, notice]) => notice.key === confirmed)?.[0];
         this.noticeConfirmed.delete(thread.id);
-        if (account !== undefined) {
-          await markUsageNoticeDelivered(ctx.store, thread.id, account, confirmed, "runtime").catch(() => undefined);
-          notices[account] = { ...notices[account]!, delivered: "runtime", deliveredAt: ctx.store.nowIso() };
+        for (const [provider, notice] of Object.entries(notices)) {
+          if (notice.key !== confirmed.key) continue;
+          await markUsageNoticeDelivered(ctx.store, thread.id, provider, notice.key, "runtime", confirmed.attemptId).catch(() => undefined);
+          notices[provider] = { ...notice, delivered: "runtime", deliveredAt: ctx.store.nowIso() };
         }
       }
       for (const [provider, notice] of Object.entries(notices)) {
         if (!usageNoticeStale(notice, now)) continue;
-        await this.dropNotice(ctx, thread.id, provider);
+        await this.dropNotice(ctx, thread.id, provider, live);
         delete notices[provider];
+      }
+      if (mode !== "notify") {
+        // Off, Notify (you only) and Automatic disarm the provider but keep
+        // the history: re-enabling does not raise the same warning again.
+        for (const provider of Object.keys(notices)) await this.reconcileNotice(ctx, row, provider, live);
+        continue;
       }
       if (thread.archivedAt || thread.deletedAt || thread.settledAt || thread.usagePause) continue;
       const turn = openTurn(row.turns);
@@ -522,17 +523,23 @@ export class UsageProtection {
       if (hot.length === 0) continue;
       const windows = usageNoticeWindows(hot);
       const key = usageNoticeKey(provider, windows);
-      const current = notices[provider];
+      let current = notices[provider];
       if (current && current.key === key) {
-        // The user's own explicit message ended the wait for this window:
-        // never warn again until a reset or another window runs hot.
-        if (current.waiting === false) continue;
-        if (current.delivered === null) await this.deliverNotice(ctx, row, selection, current);
-        continue;
+        // Already warned, the user authorized this window, or the warning is
+        // already issued: the coordinator never raises it again.
+        if (current.waiting === false || current.delivered !== null) continue;
+      } else {
+        current = { key, provider, windows, delivered: null, waiting: true, raisedAt: ctx.store.nowIso() };
+        await this.writeNotice(ctx, thread.id, provider, current);
       }
-      const notice: UsageNoticeState = { key, provider, windows, delivered: null, waiting: true, raisedAt: ctx.store.nowIso() };
-      await this.writeNotice(ctx, thread.id, provider, notice);
-      await this.deliverNotice(ctx, row, selection, notice);
+      if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) continue;
+      await dispatchUsageNotice({
+        store: ctx.store, driver: ctx.driverFor(selection.instanceId), threadId: thread.id,
+        instanceId: selection.instanceId, prompt: "", provenance: "automatic", kind: "message",
+        trigger: "forecast", mode: live, ...(current.attemptId !== undefined ? { attemptId: current.attemptId } : {}),
+      }).catch(() => undefined);
+      // The attempt/delivery write must be visible to the next tick.
+      this.dirty.add(thread.id);
     }
   }
 
@@ -540,8 +547,6 @@ export class UsageProtection {
     await ctx.store.withThreadLock(threadId, async () => {
       const thread = await ctx.store.readThreadRecord(threadId);
       if (!thread || thread.deletedAt || thread.archivedAt) return;
-      const current = thread.usageNotices?.[provider];
-      if (current?.key === notice.key && current.delivered === notice.delivered && current.waiting === notice.waiting) return;
       await ctx.store.writeThreadRecord({
         ...thread,
         usageNotices: { ...thread.usageNotices, [provider]: notice },
@@ -550,46 +555,20 @@ export class UsageProtection {
     });
   }
 
-  /** Drop one account's warning from the thread and from the provider's runtime context. */
-  private async dropNotice(ctx: OperationContext, threadId: string, provider: string): Promise<void> {
+  /** Drop one account's warning (a reset) and disarm the provider through the executor. */
+  private async dropNotice(ctx: OperationContext, threadId: string, provider: string, live: () => Promise<"off" | "notify-user" | "notify" | "auto" | undefined>): Promise<void> {
     await clearUsageNotice(ctx.store, threadId, provider).catch(() => undefined);
-    try {
-      await Effect.runPromise(ctx.driverFor(provider).clearNotice?.(threadId) ?? Effect.void);
-    } catch {
-      // The provider may be gone; the record is already clear, which is what
-      // decides later delivery.
-    }
+    await dispatchUsageNotice({
+      store: ctx.store, driver: ctx.driverFor(provider), threadId, instanceId: provider,
+      prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
+    }).catch(() => undefined);
   }
 
-  private async deliverNotice(ctx: OperationContext, row: UsageRow, selection: { instanceId: string }, notice: UsageNoticeState): Promise<void> {
-    // The person is answering an approval or a question: their message is
-    // the next input, and the notice rides it rather than interrupting.
-    if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) return;
-    const driver = ctx.driverFor(selection.instanceId);
-    if (usageNoticeStale(notice, Date.now())) {
-      await this.dropNotice(ctx, row.thread.id, notice.provider);
-      return;
-    }
-    if (driver.injectNotice) {
-      // A runtime-context channel: the provider puts it outside the user's
-      // messages. "queued" confirms later through `usage.notice.delivered`;
-      // a failure leaves it pending for the next input rather than falling
-      // back to user text on a provider that has a trusted channel.
-      const accepted = await Effect.runPromise(driver.injectNotice(row.thread.id, { key: notice.key, text: usageNoticeText(notice) })).catch(() => null);
-      if (accepted === "delivered") await markUsageNoticeDelivered(ctx.store, row.thread.id, notice.provider, notice.key, "runtime").catch(() => undefined);
-      return;
-    }
-    if (!driver.steerTurn) return;
-    const live = await Effect.runPromise(driver.hasSession(row.thread.id)).catch(() => false);
-    if (!live) return;
-    // Codex has no runtime-context channel: its warning is ordinary text.
-    // A resolved steer is the handoff; there is no ledger message to confirm
-    // or redeliver, so a warning can never become a provider turn of its own.
-    const accepted = await Effect.runPromise(driver.steerTurn(row.thread.id, usageNoticeText(notice))).then(
-      () => true,
-      () => false,
-    );
-    if (accepted) await markUsageNoticeDelivered(ctx.store, row.thread.id, notice.provider, notice.key, "text").catch(() => undefined);
+  private async reconcileNotice(ctx: OperationContext, row: UsageRow, provider: string, live: () => Promise<"off" | "notify-user" | "notify" | "auto" | undefined>): Promise<void> {
+    await dispatchUsageNotice({
+      store: ctx.store, driver: ctx.driverFor(provider), threadId: row.thread.id,
+      instanceId: provider, prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
+    }).catch(() => undefined);
   }
 
   private async step(now: number): Promise<void> {

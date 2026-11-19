@@ -77,22 +77,27 @@ describe("claude driver turns", () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
     await Effect.runPromise(driver.startSession(START));
-    const result = await Effect.runPromise(driver.injectNotice(START.threadId, { key: "codex:session@x", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
-    expect(result).toBe("queued");
+    const result = await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a1", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
+    expect(result).toBe("armed");
     // Nothing entered the conversation as a user message, so there is no unconfirmed steer to turn into a warning-only turn.
     expect(transport.created[0]!.prompts).toEqual([]);
     expect(driver.takeUnconfirmedSteers(START.threadId)).toEqual([]);
     const hook = transport.created[0]!.options.hooks?.UserPromptSubmit?.[0]?.hooks?.[0] as unknown as ((input: unknown) => Promise<unknown>) | undefined;
     expect(hook).toBeDefined();
     const hookInput = { hook_event_name: "UserPromptSubmit", session_id: "s", transcript_path: "", cwd: "/repo" };
+    // A subagent's callback is not the parent conversation: it takes nothing.
+    expect(await hook!({ ...hookInput, agent_id: "child-1" })).toEqual({});
     expect(await hook!(hookInput)).toMatchObject({
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<moxen-usage-notice>stop safely</moxen-usage-notice>" },
     });
-    // Confirmed once: the next request boundary carries nothing.
+    // The same attempt is never issued twice; a new attempt is.
+    expect(await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a1", text: "again" }))).toBe("issued");
     expect(await hook!(hookInput)).toEqual({});
+    await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a2", text: "second" }));
+    expect(await hook!(hookInput)).toMatchObject({ hookSpecificOutput: { additionalContext: "second" } });
     // A cleared warning never reaches a request either.
-    await Effect.runPromise(driver.injectNotice(START.threadId, { key: "codex:session@y", text: "second" }));
-    await Effect.runPromise(driver.clearNotice(START.threadId));
+    await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@y", attemptId: "a3", text: "third" }));
+    await Effect.runPromise(driver.reconcileNotice(START.threadId, null));
     expect(await hook!(hookInput)).toEqual({});
   });
 

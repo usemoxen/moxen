@@ -59,7 +59,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Notify (you only)": "Avisar (solo a ti)",
   "Show the warning above the composer; the running model is not told.": "Muestra el aviso sobre el compositor; al modelo en marcha no se le dice nada.",
   "Notify": "Avisar",
-  "Show the warning and tell the running model to stop safely through its provider's runtime context, where it has one.": "Muestra el aviso y pide al modelo en marcha que se detenga de forma segura mediante el contexto de ejecución de su proveedor, cuando lo tiene.",
+  "Show the warning and tell the running model to stop safely through its provider's runtime context, or as text where it has none.": "Muestra el aviso y pide al modelo en marcha que se detenga de forma segura mediante el contexto de ejecución de su proveedor, o como texto cuando no lo tiene.",
   "Usage recovery": "Recuperación del uso",
   "Resume protected threads together or one at a time after all blocking windows reset. Recovery runs work while nobody is watching.": "Reanuda los hilos protegidos juntos o uno a uno tras restablecerse todas las ventanas que los bloquean. La recuperación ejecuta trabajo sin supervisión.",
   "All at once": "Todos a la vez",

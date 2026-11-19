@@ -306,11 +306,15 @@ essential tools to leave the work in progress safe, then stop using tools and
 wait. How the block reaches the model depends on what the provider actually
 offers:
 
-| Provider | Channel | What is guaranteed |
+| Provider | Channel | What is verified |
 |---|---|---|
-| Claude Code | an in-process hook's `additionalContext` | runtime context outside the user's messages; a user cannot author it |
-| OpenCode | a `moxen-usage-notice` session instruction entry | an instruction entry outside the user's messages; a user cannot author it |
-| Codex, Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel exists, so its tag is the only marker |
+| Claude Code | an in-process hook's `additionalContext` | Moxen injects it outside the conversation; the provider serializes it as user-role text, the same convention as Moxen's other tagged runtime blocks |
+| OpenCode | a `moxen-usage-notice` session instruction entry | an instruction entry outside the user's messages |
+| Codex, Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel exists, so its tag is the marker |
+
+The notice has the same provenance as Moxen's other tagged runtime blocks: text
+of that shape in user content is not authenticated, and ending the wait is
+decided by Moxen's state, not by the block's text.
 
 The block never starts a provider turn of its own. On Claude it waits for the
 next prompt or tool batch and stays pending if the turn ends first; on OpenCode
@@ -324,11 +328,13 @@ sending a warning-only turn.
 The warning is recorded on the thread per account (Claude, Codex, an OpenCode
 instance) and window reset, not once per thread: switching to another provider
 and back does not warn again, and a continuation carries the record to its new
-thread. A reset, or another window running hot, can warn again. Once the block
-has arrived, the thread stays *waiting*. Every automatic input — a delegated
+thread. A reset, or another window running hot, can warn again. Once the warning
+is issued, the thread stays *waiting*. Every automatic input — a delegated
 task's report or pause/cancel note, a background notice, an agent-queued
-message, a question answer, a usage continuation, a compaction or handoff turn
-— carries the block again and is acknowledgement-only. Only an explicit
+message, a question answer, a usage continuation, a handoff turn — carries the
+block again and reminds the model to acknowledge rather than act. A provider
+control such as `/compact` is left bare and carries the wait to the next
+ordinary automatic input. Only an explicit
 message from the user ends the wait: a turn the user sent with no internal
 origin, not a usage-control, compaction, handoff or background turn, and not a
 question answer. Ending the wait keeps the window key, so the same allowance

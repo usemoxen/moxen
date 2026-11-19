@@ -147,14 +147,26 @@ describe("opencode driver", () => {
     const { transport, driver } = start();
     await startSession(driver);
     const server = transport.servers[0]!;
-    const result = await Effect.runPromise(driver.injectNotice("thread-1", { key: "codex:session@x", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
-    expect(result).toBe("delivered");
+    const result = await Effect.runPromise(driver.reconcileNotice("thread-1", { key: "codex:session@x", attemptId: "a1", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
+    expect(result).toBe("issued");
     expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({
       sessionID: "opencode-session-1", key: "moxen-usage-notice", value: "<moxen-usage-notice>stop safely</moxen-usage-notice>",
     });
     // A runtime instruction entry, never the conversation's user messages.
     expect(server.callsTo("session.prompt")).toEqual([]);
-    await Effect.runPromise(driver.clearNotice("thread-1"));
+    await Effect.runPromise(driver.reconcileNotice("thread-1", null));
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
+  });
+
+  it("clears a stale notice entry on a cold attach before the resumed prompt", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    await Effect.runPromise(driver.reconcileNotice("thread-1", null));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "resume" }));
+    const methods = server.calls.map((call) => call.method);
+    expect(methods.indexOf("session.instructions")).toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf("session.instructions")).toBeLessThan(methods.indexOf("session.prompt"));
     expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
   });
 

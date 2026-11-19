@@ -773,7 +773,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
       choices: [
         choice("off", "Off"),
         choice("notify-user", "Notify (you only)", "Show the warning above the composer; the running model is not told."),
-        choice("notify", "Notify", "Show the warning and tell the running model to stop safely through its provider's runtime context, where it has one."),
+        choice("notify", "Notify", "Show the warning and tell the running model to stop safely through its provider's runtime context, or as text where it has none."),
         choice("auto", "Automatic"),
       ],
     },

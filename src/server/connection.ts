@@ -692,6 +692,9 @@ export class DirectConnection implements ClientApi {
       store,
       storeRoot: this.storeRoot,
       config,
+      // A dispatch serializes behind a queued turn: reload the setting so the
+      // mode at promotion is today's, not the one captured when the turn queued.
+      usageProtectionMode: async () => (await this.loadConfig()).usageProtection,
       driverFor: (instanceId: string) => this.driverFor(instanceId),
       ...(this.builtinMcpServers ? { builtinMcpServers: this.builtinMcpServers } : {}),
     };

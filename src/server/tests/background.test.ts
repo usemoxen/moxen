@@ -14,6 +14,9 @@ import type { ProviderRuntimeEvent } from "../../core/providers/spi.js";
 import { testHarness } from "../../core/testing/harness.js";
 import type { TurnDriver, TurnOutcome } from "../../core/threads/execute.js";
 import { noteMessageId } from "../../core/threads/views.js";
+import { createThread, sendTurn, openTurn } from "../../core/threads/threads.js";
+import { startTurn, type OperationContext } from "../../core/threads/operations.js";
+import { recordUsageWindows } from "../../core/usage/limits.js";
 import { DirectConnection } from "../connection.js";
 
 const USAGE = { input: 1, cacheRead: 0, cacheCreate: 0, output: 1, thinking: 0 };
@@ -45,8 +48,10 @@ class BackgroundDriver implements TurnDriver {
   startSession(input: { threadId: string }) {
     return Effect.sync(() => void this.sessions.add(input.threadId));
   }
-  sendTurn(input: { threadId: string }) {
+  readonly prompts: string[] = [];
+  sendTurn(input: { threadId: string; prompt: string }) {
     return Effect.sync(() => {
+      this.prompts.push(input.prompt);
       const turnId = `driver-${++this.turn}`;
       const threadId = input.threadId;
       setTimeout(() => {
@@ -105,6 +110,51 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 }
 
 describe("background work through ClientApi", () => {
+  async function adoptedWake(mode: "notify" | "notify-user"): Promise<{ prompts: string[]; providerTurns: number }> {
+    const driver = new BackgroundDriver();
+    const w = await testHarness({ drivers: { claude: () => driver } });
+    const api = new DirectConnection({
+      storeRoot: w.root, drivers: w.drivers, builtinMcpServers: null,
+      config: async () => ({ ...w.config, usageProtection: mode }),
+    });
+    const ctx = await (Reflect.get(api, "context") as () => Promise<OperationContext>).call(api);
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "wake", modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" },
+      env: { mode: "local", path: w.work, branch: null },
+    });
+    try {
+      await startTurn(ctx, { threadId: thread.id, prompt: "First" });
+      await expect.poll(() => driver.prompts.length, { timeout: 10_000 }).toBe(1);
+      await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)) === null, { timeout: 10_000 }).toBe(true);
+      const reset = new Date(Date.now() + 3_600_000).toISOString();
+      recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(thread.id))!,
+        usageNotices: { claude: { key: `claude:session@${reset}`, provider: "claude", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+      });
+      driver.wake(thread.id);
+      await expect.poll(async () => (await w.store.readTurns(thread.id)).some((turn) => turn.status === "running" && turn.delivery === "background"), { timeout: 10_000 }).toBe(true);
+      await sendTurn(w.store, thread.id, { prompt: "task report", origin: "task-notification", automatic: true, delivery: "queue" });
+      await expect.poll(() => driver.prompts.length, { timeout: 10_000 }).toBe(2);
+      return { prompts: [...driver.prompts], providerTurns: driver.prompts.length };
+    } finally {
+      await api.close();
+    }
+  }
+
+  it("adopts a provider-native wake without a second turn and reminds at the next boundary in Notify", async () => {
+    const { prompts, providerTurns } = await adoptedWake("notify");
+    // First turn plus the promoted queued turn: no provider turn for the wake or the warning.
+    expect(providerTurns).toBe(2);
+    expect(prompts.at(-1)).toContain("<moxen-usage-notice>");
+    expect(prompts.at(-1)).toContain("task report");
+  });
+
+  it("does not remind after a wake when the mode is Notify (you only)", async () => {
+    const { prompts } = await adoptedWake("notify-user");
+    expect(prompts.at(-1)).toBe("task report");
+  });
+
   it("keeps notes, records a self-started turn, and lists and stops background tasks", async () => {
     const driver = new BackgroundDriver();
     const harness = await testHarness({ drivers: { claude: () => driver, opencode: () => driver } });

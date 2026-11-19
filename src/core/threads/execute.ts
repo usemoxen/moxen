@@ -23,7 +23,21 @@ import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
-import { authorizeUsageNotice, automaticTurn, markUsageNoticeDelivered, usageNoticeAccount, usageNoticeText, waitingUsageNotice, withUsageNotice } from "../usage/notice.js";
+import {
+  authorizeUsageNotice,
+  markUsageNoticeDelivered,
+  planUsageNoticeDispatch,
+  recordUsageNoticeAttempt,
+  turnKind,
+  turnProvenance,
+  usageNoticeFor,
+  withUsageNotice,
+  type UsageNoticeAuthorization,
+  type UsageNoticeChannel,
+  type UsageNoticeKind,
+  type UsageNoticeProvenance,
+  type UsageNoticeTrigger,
+} from "../usage/notice.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { CodexDriver } from "../providers/codex/driver.js";
@@ -111,14 +125,8 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
-  /**
-   * A usage warning through the provider's runtime context, outside the
-   * user's messages (see `ProviderAdapter.injectNotice`). Omitted where the
-   * provider has no such channel.
-   */
-  injectNotice?(threadId: string, notice: { readonly key: string; readonly text: string }): Effect.Effect<"delivered" | "queued", CliError>;
-  /** Remove a runtime-context warning after the user authorizes or the window resets. */
-  clearNotice?(threadId: string): Effect.Effect<void, CliError>;
+  /** Reconcile the provider's runtime-context warning slot (see `ProviderAdapter.reconcileNotice`). */
+  reconcileNotice?(threadId: string, notice: { readonly key: string; readonly attemptId: string; readonly text: string } | null): Effect.Effect<"armed" | "issued" | "cleared", CliError>;
   /**
    * Steers pushed to the running turn that the provider never confirmed
    * reaching the conversation (see `ProviderAdapter.takeUnconfirmedSteers`).
@@ -520,11 +528,16 @@ export interface ExecuteTurnArgs {
   /** Each live context reading the turn records while it runs: where the server compacts a thread that crosses its line mid-turn. */
   readonly onContextReading?: (usage: ContextWindowUsage) => void;
   /**
-   * The usage-protection mode as it stands when a promoted turn is dispatched,
-   * not when the turn before it started: a setting switched to Off or Notify
-   * (you only) mid-turn must not let the promotion warn the model.
+   * The usage-protection mode as it stands when a promoted turn is
+   * dispatched, not when the turn before it started. Supplied by the server
+   * and reloaded at dispatch: a setting switched to Off or Notify (you only)
+   * mid-turn must not let the promotion warn the model.
    */
-  readonly usageNoticeMode?: () => CliConfig["usageProtection"];
+  readonly usageNoticeMode?: () => Promise<CliConfig["usageProtection"] | undefined>;
+  /** Run after the provider accepts this turn's prompt: commit an explicit usage authorization. */
+  readonly afterDispatch?: () => Promise<void>;
+  /** The provider rejected the dispatch: reconcile an explicit warning's provider slot again. */
+  readonly onDispatchFailure?: () => Promise<void>;
 }
 
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -537,57 +550,119 @@ export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
 }
 
 /**
- * The one usage-notice delivery decision, for every dispatch: a fresh turn,
- * a steer into a running one, a recovered turn, or a queued turn being
- * promoted. An automatic input under a waiting warning carries it again
- * (runtime context where the provider has one, plain text otherwise) so it
- * stays acknowledgement-only; an explicit user input was authorized before
- * this is called and carries nothing.
+ * Per-thread dispatch serialization for usage notices. A plan is decided,
+ * the mode and record are re-read, and the provider is reconciled inside one
+ * chain, so a coordinator tick and a turn dispatch cannot interleave their
+ * provider changes. Ledger locks are taken only for reads/writes here, never
+ * held across a provider call.
  */
-export async function withUsageNoticeForTurn(input: {
-  readonly store: ThreadStore;
-  readonly driver: TurnDriver;
-  readonly thread: StoredThread;
-  readonly instanceId: string;
+const usageDispatchChains = new Map<string, Promise<unknown>>();
+
+function serializeUsageDispatch<T>(threadId: string, run: () => Promise<T>): Promise<T> {
+  const next = (usageDispatchChains.get(threadId) ?? Promise.resolve()).then(run);
+  usageDispatchChains.set(threadId, next.catch(() => undefined));
+  return next;
+}
+
+export interface UsageNoticeDispatchResult {
+  /** The provider prompt, with a text-channel block ahead of it when the plan says so. */
   readonly prompt: string;
-  readonly mode: CliConfig["usageProtection"] | undefined;
-  readonly automatic: boolean;
-}): Promise<{ readonly prompt: string; readonly afterAnswer: (() => Promise<void>) | null }> {
-  const unchanged = { prompt: input.prompt, afterAnswer: null };
-  if (input.mode !== "notify" || !input.automatic) return unchanged;
-  const notice = waitingUsageNotice(input.thread, input.instanceId);
-  if (notice === null) return unchanged;
-  if (input.driver.injectNotice) {
-    const accepted = await Effect.runPromise(input.driver.injectNotice(input.thread.id, {
-      key: notice.key,
-      text: usageNoticeText(notice, { automatic: true }),
-    })).catch(() => null);
-    if (accepted === "delivered") await markUsageNoticeDelivered(input.store, input.thread.id, notice.provider, notice.key, "runtime").catch(() => undefined);
-    // "queued" confirms through `usage.notice.delivered`; a failure stays
-    // pending for the next input instead of falling back to user text.
-    return unchanged;
-  }
-  return {
-    prompt: withUsageNotice(input.prompt, notice, { automatic: true }),
-    afterAnswer: notice.delivered === null
-      ? () => markUsageNoticeDelivered(input.store, input.thread.id, notice.provider, notice.key, "text")
-      : null,
-  };
+  /** For explicit input: the wait a successful provider dispatch may end. */
+  readonly authorize: UsageNoticeAuthorization | null;
+  /** Record a text-channel prefix as issued once the provider answers. */
+  readonly afterAnswer: (() => Promise<void>) | null;
 }
 
 /**
- * An explicit user message ends the wait for this account, on every dispatch
- * path. The key stays, so the same window never warns again, and a queued
- * runtime-context warning is removed before it could reach the request.
+ * The one usage-notice executor, for fresh, steered, promoted, recovered,
+ * compaction and background-adopted turns, and for the coordinator's forecast.
+ * It re-reads the live mode and the account record under the per-thread
+ * dispatch chain, plans, reconciles the provider slot, and never starts a
+ * turn. An explicit input gets an authorization to commit only after the
+ * provider accepts its dispatch.
  */
-export async function authorizeUsageNoticeForTurn(
-  store: ThreadStore,
-  driver: TurnDriver | null,
-  threadId: string,
-  instanceId: string,
-): Promise<void> {
-  await authorizeUsageNotice(store, threadId, usageNoticeAccount(instanceId)).catch(() => undefined);
-  if (driver !== null) await Effect.runPromise(driver.clearNotice?.(threadId) ?? Effect.void).catch(() => undefined);
+export async function dispatchUsageNotice(input: {
+  readonly store: ThreadStore;
+  readonly driver: TurnDriver;
+  readonly threadId: string;
+  readonly instanceId: string;
+  readonly prompt: string;
+  readonly provenance: UsageNoticeProvenance;
+  readonly kind: UsageNoticeKind;
+  readonly trigger: UsageNoticeTrigger;
+  readonly mode: () => Promise<CliConfig["usageProtection"] | undefined>;
+  readonly attemptId?: string;
+}): Promise<UsageNoticeDispatchResult> {
+  return await serializeUsageDispatch(input.threadId, async () => {
+    const unchanged: UsageNoticeDispatchResult = { prompt: input.prompt, authorize: null, afterAnswer: null };
+    const mode = await input.mode().catch(() => undefined);
+    const thread = await input.store.readThreadRecord(input.threadId);
+    if (!thread) return unchanged;
+    const record = usageNoticeFor(thread, input.instanceId);
+    const channel: UsageNoticeChannel | null = input.driver.reconcileNotice ? "runtime" : "text";
+    // A forecast retry reuses its attempt; each distinct automatic dispatch
+    // gets a new one, so a consumed forecast attempt cannot swallow a reminder.
+    const attemptId = input.attemptId
+      ?? (input.trigger === "forecast" ? record?.attemptId : undefined)
+      ?? input.store.newId();
+    const plan = planUsageNoticeDispatch({
+      mode, provenance: input.provenance, kind: input.kind, trigger: input.trigger,
+      record, channel, ...(attemptId !== undefined ? { attemptId } : {}),
+    });
+
+    // Reconcile the provider slot to exactly what the plan wants. For a
+    // runtime channel this arms or clears; for a text channel there is no
+    // slot to touch.
+    if (input.driver.reconcileNotice) {
+      const armed = plan.delivery === "runtime" && record !== null && plan.text !== null && plan.attemptId !== null
+        ? { record, state: { key: record.key, attemptId: plan.attemptId, text: plan.text } }
+        : null;
+      if (armed !== null) await recordUsageNoticeAttempt(input.store, input.threadId, armed.record.provider, armed.record.key, armed.state.attemptId);
+      const issued = await Effect.runPromise(input.driver.reconcileNotice(input.threadId, armed?.state ?? null));
+      if (armed !== null && issued === "issued") {
+        await markUsageNoticeDelivered(input.store, input.threadId, armed.record.provider, armed.record.key, "runtime", armed.state.attemptId).catch(() => undefined);
+      }
+    }
+
+    if (plan.delivery === "text" && plan.text !== null && record !== null) {
+      if (input.trigger === "dispatch") {
+        return {
+          prompt: plan.prefix !== null ? withUsageNotice(input.prompt, record, { automatic: true }) : input.prompt,
+          authorize: plan.authorize,
+          afterAnswer: record.delivered === null
+            ? () => markUsageNoticeDelivered(input.store, input.threadId, record.provider, record.key, "text")
+            : null,
+        };
+      }
+      if (input.trigger === "forecast" && input.driver.steerTurn) {
+        const live = await Effect.runPromise(input.driver.hasSession(input.threadId)).catch(() => false);
+        const accepted = live
+          ? await Effect.runPromise(input.driver.steerTurn(input.threadId, plan.text)).then(() => true, () => false)
+          : false;
+        if (accepted) await markUsageNoticeDelivered(input.store, input.threadId, record.provider, record.key, "text").catch(() => undefined);
+      }
+    }
+    return { prompt: input.prompt, authorize: plan.authorize, afterAnswer: null };
+  });
+}
+
+/** Commit an explicit dispatch's authorization after the provider accepted it. */
+export async function commitUsageAuthorization(store: ThreadStore, threadId: string, authorization: UsageNoticeAuthorization): Promise<void> {
+  await authorizeUsageNotice(store, threadId, authorization.provider).catch(() => undefined);
+}
+
+/** Reconcile a waiting warning's provider slot after a failed dispatch, best effort. */
+export async function reconcileUsageNotice(input: {
+  readonly store: ThreadStore;
+  readonly driver: TurnDriver;
+  readonly threadId: string;
+  readonly instanceId: string;
+  readonly mode: () => Promise<CliConfig["usageProtection"] | undefined>;
+}): Promise<void> {
+  await dispatchUsageNotice({
+    store: input.store, driver: input.driver, threadId: input.threadId, instanceId: input.instanceId,
+    prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: input.mode,
+  }).catch(() => undefined);
 }
 
 /** Saved attachments as provider images; a file gone from disk is skipped. */
@@ -677,8 +752,6 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const messages = await store.readMessages(threadId);
     const prompt = turnPrompt(messages, next);
     if (prompt === null) return;
-    const automatic = automaticTurn(messages, next);
-    if (!automatic) await authorizeUsageNoticeForTurn(store, driver, threadId, selection.instanceId);
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
@@ -696,10 +769,21 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     // The mode is read now, at promotion, so a setting changed after this turn
     // was queued decides whether it warns.
-    const notice = await withUsageNoticeForTurn({
-      store, driver, thread, instanceId: selection.instanceId, prompt: prompt.text,
-      mode: args.usageNoticeMode?.() ?? "off", automatic,
-    });
+    const mode = args.usageNoticeMode ?? (async () => undefined);
+    let notice;
+    try {
+      notice = await dispatchUsageNotice({
+        store, driver, threadId, instanceId: selection.instanceId, prompt: prompt.text,
+        provenance: turnProvenance(messages, next), kind: turnKind(messages, next),
+        trigger: "dispatch", mode,
+      });
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      await failTurn(store, threadId, next.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      store.untrackRunning(next.id);
+      claimed = null;
+      return;
+    }
     claimed = null;
     void executeTurn({
       store,
@@ -713,6 +797,13 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
           await notice.afterAnswer?.();
         } }
         : {}),
+      ...(notice.authorize
+        ? {
+          afterDispatch: async () => await commitUsageAuthorization(store, threadId, notice.authorize!),
+          onDispatchFailure: async () => await reconcileUsageNotice({ store, driver, threadId, instanceId: selection.instanceId, mode }),
+        }
+        : {}),
+      usageNoticeMode: mode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       interactionMode: next.interactionMode,
@@ -764,6 +855,8 @@ export async function ensureDriverSession(
     readonly afterSettle?: () => Promise<void>;
     /** End the session after this long with nothing happening on it (`idle.ts`); null or absent: never. */
     readonly idleTtlMs?: number | null;
+    /** Live usage mode for a provider-native turn's later promotion. */
+    readonly usageNoticeMode?: () => Promise<CliConfig["usageProtection"] | undefined>;
   } = {},
 ): Promise<void> {
   const hasSession = await Effect.runPromise(driver.hasSession(thread.id)).catch(() => false);
@@ -799,7 +892,7 @@ export async function ensureDriverSession(
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.usageNoticeMode);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
@@ -833,7 +926,15 @@ function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.
  * - background tasks starting and ending, and the live set of them, become
  *   activity rows the transcript and the tasks panel read.
  */
-export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threadId: string, cwd: string, afterSettle?: () => Promise<void>, idleTtlMs: number | null = null): void {
+export function watchDriverSession(
+  store: ThreadStore,
+  driver: TurnDriver,
+  threadId: string,
+  cwd: string,
+  afterSettle?: () => Promise<void>,
+  idleTtlMs: number | null = null,
+  usageNoticeMode?: () => Promise<CliConfig["usageProtection"] | undefined>,
+): void {
   let byThread = watching.get(driver);
   if (!byThread) {
     byThread = new Map();
@@ -892,6 +993,17 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
         capturedWakeUp = false;
         const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt).catch(() => null);
         if (turn !== null) {
+          // The provider already issued this request: reconcile the warning
+          // slot for the next controllable boundary, never a second turn. Its
+          // promotion gets the live mode reader.
+          const mode = usageNoticeMode ?? (async () => undefined);
+          const current = await store.readThreadRecord(threadId).catch(() => null);
+          if (current) {
+            await dispatchUsageNotice({
+              store, driver, threadId, instanceId: (turn.modelSelection ?? current.modelSelection).instanceId,
+              prompt: "", provenance: "automatic", kind: "native-wake", trigger: "dispatch", mode,
+            }).catch(() => undefined);
+          }
           void executeTurn({
             store,
             driver,
@@ -901,6 +1013,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
             driverTurnId: event.turnId,
             ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
             workingDirectory: cwd,
+            usageNoticeMode: mode,
             ...(afterSettle ? { afterSettle } : {}),
           }).catch(() => undefined);
         }
@@ -1478,17 +1591,27 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       }
       return;
     }
-    const sent = args.driverTurnId
-      ? { turnId: args.driverTurnId }
-      : await Effect.runPromise(
-          driver.sendTurn({
-            threadId,
-            prompt: args.prompt,
-            ...(args.images?.length ? { images: args.images } : {}),
-            ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
-            ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
-          }),
-        );
+    let sent: { turnId: string };
+    try {
+      sent = args.driverTurnId
+        ? { turnId: args.driverTurnId }
+        : await Effect.runPromise(
+            driver.sendTurn({
+              threadId,
+              prompt: args.prompt,
+              ...(args.images?.length ? { images: args.images } : {}),
+              ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+              ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
+            }),
+          );
+    } catch (cause) {
+      await args.onDispatchFailure?.().catch(() => undefined);
+      throw cause;
+    }
+    // The provider accepted the prompt: an explicit user message has now
+    // reached its dispatch, so the wait may end. Never for a provider-started
+    // turn, which Moxen did not dispatch.
+    if (!args.driverTurnId) await args.afterDispatch?.().catch(() => undefined);
     if (!args.driverTurnId && controller.signal.aborted) {
       // The stop landed while the prompt was going out: `onAbort`'s
       // interrupt found no open turn yet. Stop the run that just started —
