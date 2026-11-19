@@ -47,6 +47,24 @@ function shortTurnId(turnId: string | null): string {
 }
 
 /**
+ * The turn numbers every other reader shows: the checkpoint ordinal the server
+ * records when a turn settles, the same sequence `thread_read`, `turnDiff` and
+ * revert use. A transcript group without one never ran here (a handoff entry,
+ * a prompt taken back) or is system activity, and stays unnumbered.
+ */
+function turnNumberFor(thread: ThreadEnvelope | null): (turnId: string | null) => number | null {
+  const ordinals = new Map<string, number>();
+  for (const row of thread?.checkpoints ?? []) {
+    if (typeof row.turnId !== "string" || typeof row.checkpointTurnCount !== "number") continue;
+    ordinals.set(row.turnId, row.checkpointTurnCount);
+  }
+  // The running turn has settled no checkpoint yet; it is the last to have run.
+  const active = thread?.session?.activeTurnId ?? null;
+  const activeNumber = (ordinals.size === 0 ? 0 : Math.max(...ordinals.values())) + 1;
+  return (turnId) => (turnId === null ? null : (ordinals.get(turnId) ?? (turnId === active ? activeNumber : null)));
+}
+
+/**
  * One tool call on one line: the verb plus the complete identifying detail
  * (full command, path, pattern, query), with exit/duration/counts where
  * known. Never a payload or output dump — but nothing is cut either:
@@ -195,6 +213,11 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
   const { thread, threadId, project, groups, plan, pending, contextUsage } = options;
   const exportedAt = options.exportedAt ?? new Date().toISOString();
   const title = thread?.title ?? "(untitled thread)";
+  const turnNumber = turnNumberFor(thread);
+  const turnCount = new Set(groups.flatMap((group) => {
+    const number = turnNumber(group.turnId);
+    return number === null ? [] : [number];
+  })).size;
   const modelSelection = thread?.modelSelection;
   const model = modelSelection === undefined ? null : `${modelSelection.instanceId}/${modelSelection.model}`;
   const session = thread?.session;
@@ -240,7 +263,7 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
   }
   lines.push(`- exported: ${exportedAt}`);
   lines.push(
-    `- turns: ${groups.length} · messages: ${messageCount} · tool calls: ${toolCount} · files changed: ${fileTurns} turn${fileTurns === 1 ? "" : "s"} (+${fileAdded} −${fileRemoved})`,
+    `- turns: ${turnCount} · messages: ${messageCount} · tool calls: ${toolCount} · files changed: ${fileTurns} turn${fileTurns === 1 ? "" : "s"} (+${fileAdded} −${fileRemoved})`,
   );
   lines.push("");
 
@@ -274,10 +297,11 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
     lines.push("");
   }
 
-  groups.forEach((group, index) => {
+  groups.forEach((group) => {
     const promptHead = group.prompts.length > 0 ? headLine(group.prompts[0]?.text ?? "") : "(no prompt)";
-    const turnNo = index + 1;
-    lines.push(`## T${turnNo} · ${promptHead.length > 0 ? promptHead : "(empty prompt)"} · ${shortTurnId(group.turnId)} · ${group.startedAt} · ${formatDuration(group.durationMs)}`, "");
+    const number = turnNumber(group.turnId);
+    const label = number === null ? "·" : `T${number} ·`;
+    lines.push(`## ${label} ${promptHead.length > 0 ? promptHead : "(empty prompt)"} · ${shortTurnId(group.turnId)} · ${group.startedAt} · ${formatDuration(group.durationMs)}`, "");
     if (group.prompts.length > 0) {
       lines.push("### User", "");
       for (const prompt of group.prompts) {

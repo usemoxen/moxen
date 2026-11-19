@@ -15,6 +15,7 @@
  * for recent turns, where the detail is; older turns shrink to a line each
  * so a long thread still fits a context window.
  */
+import { ranTurns } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 
@@ -117,6 +118,24 @@ export interface HandoffOptions {
   readonly queuedTurnIds?: readonly string[];
 }
 
+/**
+ * The turns this document numbers: the same run order every reader uses
+ * (`ranTurns`), without the model-summary turn — plumbing for the handoff,
+ * not part of the conversation.
+ */
+function countedTurns(turns: readonly StoredTurn[]): StoredTurn[] {
+  return ranTurns(turns).filter((turn) => !turn.queue?.summaryFor);
+}
+
+/**
+ * An entry the handoff path settled here: its request moved to another thread
+ * (prepared, or failed preparing), so it is neither history nor pending work
+ * in this document. An entry still queued has not moved yet and stays pending.
+ */
+function leftForAnotherThread(turn: StoredTurn): boolean {
+  return turn.handoffFailed === true || (turn.handoff !== undefined && turn.status !== "queued");
+}
+
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
   const thread = (await store.readThreadRecord(threadId)) as StoredThread | null;
   if (!thread) throw new Error(`No thread ${threadId}.`);
@@ -127,25 +146,28 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     store.readCheckpoints(threadId),
   ]);
 
-  // A turn has reached the agent once it produced something. One that is
-  // queued, or was promoted to `running` by a settle but never ran (the
-  // runner held it for a usage reset, or its process went away), carries
-  // only the user's message: that is a request still to do, not history.
-  const produced = new Set([
-    ...messages.filter((message) => message.role === "assistant").map((message) => message.turnId),
-    ...activities.filter((activity) => typeof activity.payload?.toolCallId === "string").map((activity) => activity.turnId ?? ""),
-  ]);
-  const terminal = (turn: StoredTurn): boolean => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted";
-  const reached = (turn: StoredTurn): boolean => terminal(turn) || produced.has(turn.id);
-  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor);
-  const blocks: TurnBlock[] = sent.map((turn) => ({
+  // Numbered from the run order, like thread_read, checkpoints and revert: an
+  // entry handed off to a new thread does not take a number from a turn that
+  // ran after it.
+  const history = countedTurns(turns);
+  const counted = new Set(history.map((turn) => turn.id));
+  const blocks: TurnBlock[] = history.map((turn) => ({
     turn,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
+  // What never ran here is a request still to do, not delivered history. The
+  // entry this handoff is carrying is still queued, so it stays listed.
   const unsent = turns
-    .filter((turn) => !reached(turn) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
+    .filter(
+      (turn) =>
+        !counted.has(turn.id) &&
+        !turn.queue?.summaryFor &&
+        !leftForAnotherThread(turn) &&
+        !(options.preferModelSummary && turn.scheduledFor) &&
+        (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)),
+    )
     .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
 
   // Files the thread changed, summed across every turn's checkpoint.

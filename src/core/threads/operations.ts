@@ -787,7 +787,16 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
       if (turn.status !== "queued" || !turn.queue) continue;
       const admission = queueAdmission(row, turn, rows, ctx.config, now);
       if (JSON.stringify(admission.latched) === JSON.stringify(turn.queue.latched ?? []) && JSON.stringify(admission.conditions) === JSON.stringify(turn.queue.conditions)) continue;
-      await ctx.store.withThreadLock(row.thread.id, () => ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...turn.queue!, latched: admission.latched, conditions: admission.conditions } }));
+      await ctx.store.withThreadLock(row.thread.id, async () => {
+        // The snapshot the scheduler passed may predate an edit: latch onto the
+        // policy on disk, never write the snapshot's copy back over it.
+        const current = (await ctx.store.readTurns(row.thread.id)).find((candidate) => candidate.id === turn.id);
+        if (current?.queue === undefined || current.status !== "queued") return;
+        // A condition edit since the snapshot is newer than this admission:
+        // leave it for the next pass rather than persisting stale conditions.
+        if (JSON.stringify(current.queue.conditions) !== JSON.stringify(turn.queue?.conditions)) return;
+        await ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...current.queue, latched: admission.latched, conditions: admission.conditions } });
+      });
     }
     const entries = await readWorkQueue(ctx, rows);
     for (const entry of entries) if (entry.status === "queued" && !entry.policy.removed) {
@@ -803,8 +812,24 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
           // have cleared, and either re-read misclassifies a genuine
           // handoff failure as contention or vice versa.
           if (isContinuationBusy(cause)) continue;
-          await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
-          ctx.store.emit(entry.threadId, "handoff-failed");
+          const failure = cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.";
+          await ctx.store.withThreadLock(entry.threadId, async () => {
+            const current = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId);
+            // Nothing to fail: the entry already settled (the completion write,
+            // or the activity after it, threw), or another pass got there first.
+            if (current === undefined || current.status !== "queued") return;
+            // A reserved destination holding this entry's request means the
+            // handoff landed and only bookkeeping after it failed: reconcile
+            // against it instead of claiming a preparation failure.
+            const handoff = current.handoff;
+            const landed = handoff !== undefined && (await ctx.store.readTurns(handoff.destinationThreadId)).some((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
+            if (landed) {
+              await ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "completed", completedAt: ctx.store.nowIso() });
+              return;
+            }
+            await ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: failure, completedAt: ctx.store.nowIso() });
+            ctx.store.emit(entry.threadId, "handoff-failed");
+          });
           continue;
         }
         const handoff = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId)?.handoff;
@@ -847,7 +872,10 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   const store = ctx.store;
   const source = await store.readThreadRecord(threadId);
   let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
-  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
+  // The persisted policy decides, not any snapshot the pass was given: the
+  // user may have edited this entry back to `same-thread` after the snapshot
+  // was taken, and such an entry must never be handed off.
+  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || (turn.queue.continuation ?? "same-thread") === "same-thread" || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
     await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));

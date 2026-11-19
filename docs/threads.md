@@ -1334,11 +1334,14 @@ the file, and writes its replacement too.
 ## Revert
 
 Revert rolls back every provider that saw a dropped turn, then cuts the
-ledger. Turns are counted in the order they ran, as every other reader
-numbers them; a message that never ran is not counted: an interrupted one
-is left in the ledger, and so is one the handoff path settled for a new
-thread, prepared or failed preparing — neither reached this thread's
-provider, so neither has a prompt or a snapshot to roll back.
+ledger. Turns are counted in the order they ran, and every reader numbers
+them the same way — `thread_read`, checkpoint counts, `turnDiff`, revert,
+the Markdown export and a handoff document. A message that never ran is not
+a turn: an interrupted one is left in the ledger, and so is one the handoff
+path settled for a new thread, prepared or failed preparing — neither
+reached this thread's provider, so neither has a prompt or a snapshot to
+roll back, and an export shows it unnumbered rather than taking a number
+from a turn that ran.
 Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.

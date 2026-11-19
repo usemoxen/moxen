@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, editWorkQueue, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -1031,5 +1031,84 @@ describe("a manual continue with an active turn (MXN-372)", () => {
         if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
       }
     }
+  });
+});
+
+describe("the queue pass's handoff preparation (MXN-382)", () => {
+  /** A queued stored handoff, as the user's send leaves it. */
+  async function queuedHandoff(w: Awaited<ReturnType<typeof world>>, threadId: string) {
+    return (await sendTurn(w.store, threadId, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+  }
+
+  it("does not hand off an entry a newer edit moved back to this thread", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+    // The scheduler's snapshot, taken before the edit below.
+    const snapshot = [{ thread: (await w.store.readThreadRecord(source.id))!, turns: await w.store.readTurns(source.id) }];
+
+    await editWorkQueue(w.ctx, source.id, entry.id, "edit", parseQueuePolicy({ conditions: [], continuation: "same-thread", order: entry.queue!.order }));
+    await runWorkQueue(w.ctx, Date.now(), snapshot);
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("running");
+    expect(after.handoff).toBeUndefined();
+    expect(after.queue?.continuation).toBe("same-thread");
+    // No destination was created from the stale policy; it runs here.
+    expect(await w.store.listThreadIds()).toEqual([source.id]);
+    await flushTurnRunners();
+    const ran = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(ran.status).toBe("completed");
+    expect(ran.startedAt).toBeDefined();
+    expect(await w.store.listThreadIds()).toEqual([source.id]);
+  });
+
+  it("keeps a prepared handoff completed when its activity append fails", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (threadId === source.id && name === "activity" && (row as { kind?: string }).kind === "handoff.prepared") throw new Error("injected activity failure");
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoffFailed).toBeUndefined();
+    expect(after.handoff).toBeDefined();
+    expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
+  });
+
+  it("reconciles a landed handoff instead of failing it when the source completion write fails", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realUpdate = w.store.updateTurn.bind(w.store);
+    let thrown = false;
+    w.store.updateTurn = async (threadId, turnId, patch) => {
+      if (!thrown && threadId === source.id && turnId === entry.id && patch.status === "completed") {
+        thrown = true;
+        throw new Error("injected completion failure");
+      }
+      return await realUpdate(threadId, turnId, patch);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.updateTurn = realUpdate;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoffFailed).toBeUndefined();
+    expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
   });
 });
