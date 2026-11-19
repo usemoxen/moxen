@@ -72,6 +72,8 @@ export interface RuntimeInstructionsInput {
   readonly criticLens?: ResearchLens | "all";
   /** True only while the built-in Moxen MCP server reaches this session. */
   readonly knowledge?: boolean;
+  /** True only while the Moxen MCP server reaches this session with its `settings_read` tool. */
+  readonly settings?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
   readonly web?: WebGuidanceInput;
   /** The shells this machine has, and its platform. Detected when absent; tests and `scripts/system-prompt.ts` pin it. */
@@ -306,6 +308,18 @@ export const KNOWLEDGE_GUIDANCE =
   "Reference defaults are not current settings: inspect live state as documented. Reading grants no permission to make changes; " +
   "follow the user's request and existing approval rules. Never put credentials in tool arguments or files.";
 
+/**
+ * What a session with `settings_read` is told about the redacted half of it.
+ * The instruction shapes what the model does; it cannot constrain another
+ * process the user may run, and says so rather than claiming an enforcement
+ * the prompt does not have.
+ */
+export const AGENT_SETTINGS_GUIDANCE =
+  "The settings_read tool lists Moxen's settings and, for reviewed keys, the live value, where it comes from and when a change applies. " +
+  "A setting it marks redacted stays hidden: do not look for it another way — not with shell commands or Moxen's CLI, not by reading config, store or key files, not through another API, and not by guessing from nearby values or any other workaround. " +
+  "Tell the user which setting they need and that they can change it themselves; use knowledge_search and knowledge_read for how. " +
+  "This is guidance for what you do, not a rule enforced against other programs on the machine.";
+
 /** "Claude Code", "OpenCode", "Moxen Harness": the harness a provider instance runs in, as its users call it. */
 export function harnessName(instanceId: string): string {
   const key = instanceId.trim().toLowerCase();
@@ -344,6 +358,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   add("Environment", environment.join("\n\n"));
   add("Look it up", LOOKUP_GUIDANCE);
   if (input.knowledge === true) add("Moxen knowledge base", KNOWLEDGE_GUIDANCE);
+  if (input.settings === true) add("Agent settings", AGENT_SETTINGS_GUIDANCE);
   add("Progress notes", harness === "OpenCode" ? `${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}` : PROGRESS_GUIDANCE);
   add("Showing images", IMAGE_GUIDANCE);
   // A subagent's final message is a report another agent reads; a layout is for a person.

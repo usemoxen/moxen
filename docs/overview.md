@@ -161,16 +161,28 @@ through the provider's own channel. They say only what Moxen knows — the
 session runs in Moxen, in a worktree, as a delegated task, how its shell and
 tools behave on this machine, how to use Moxen memory and the web tools it
 has — under one heading per subject, and end with the user's own
-instructions. Every top-level thread also gets the `moxen` MCP server
-(`delegate`, `task_status`, `task_cancel`, `task_send`, `task_ask`, `message_queue`,
-`models`, `context_usage`, `usage_status`), so an agent can hand work to a
-subagent thread in a worktree of its own, find and read other threads
-(`thread_search`, `thread_read`), consult the shipped [knowledge base](knowledge.md)
-(`knowledge_search`, `knowledge_read`), keep Moxen memory (`memory_*`, see
+instructions. Every session normally gets the `moxen` MCP server with the
+tools it may use, unless it is removed or excluded. A top-level thread gets
+`delegate`, `task_status`, `task_cancel`,
+`task_send`, `task_ask`, `message_queue`, `models`, `context_usage` and
+`usage_status`, so an agent can hand work to a subagent thread in a worktree of
+its own, find and read other threads (`thread_search`, `thread_read`), consult
+the shipped [knowledge base](knowledge.md) (`knowledge_search`,
+`knowledge_read`), keep Moxen memory (`memory_*`, see
 [threads.md](threads.md#memory)), and see how full its own context window is.
-Delegated threads retain knowledge search/read,
-`web_fetch`, `context_usage`, `usage_status` and memory read/search when enabled, but cannot delegate or write
-memory; `"moxen": null` in project `mcpServers` turns it off.
+Delegated threads retain knowledge search/read, `settings_read`, `web_fetch`,
+`context_usage`, `usage_status` and memory read/search when enabled, but cannot
+delegate or write memory; `"moxen": null` in project `mcpServers` turns it off.
+
+`settings_read` answers with the canonical settings schema: every setting's
+exact key, label, description, choices and when a change applies, paged. For an
+allowlisted set of reviewed keys it also reports the live value, whether it
+comes from the config, what applies instead and when. Secrets, free-form text,
+MCP server entries, Harness profiles, paths, endpoints and other complex values
+are redacted. It remains available to delegated tasks and does not depend on the
+delegation, web or memory switches; removing, replacing or excluding the
+`moxen` server removes it. An agent is told not to look for a redacted value
+another way, and to point the user at the setting instead.
 
 `context_usage` answers with the calling thread's tokens used, window size,
 percent used and the time the reading was taken — the same reading the

@@ -78,7 +78,8 @@ import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js"
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
-import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
+import { redactMcpServers, mcpServerEntryFor, parseNameList, type McpServerSpec } from "../core/mcp.js";
+import { projectAgentSettings, SETTINGS_READ_TOOL, type AgentSettingsResult } from "./settingsagent.js";
 import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
@@ -810,6 +811,42 @@ export class DirectConnection implements ClientApi {
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
     const { config, path, exists } = await this.readConfigFile();
     return { path, exists, settings: describeSettings(config) };
+  }
+
+  /**
+   * The agent-safe settings view. The live values come from the same snapshot
+   * the settings page reads; `projectAgentSettings` is what decides which of
+   * them may leave the server. An explicit server removal, exclusion or hidden
+   * tool is a denial, not a redacted value: the agent has been told not to use
+   * this tool, so it fails plainly instead of pretending the settings are gone.
+   */
+  private async agentSettingsRead(query: Extract<Query, { readonly type: "settings.agent-read" }>): Promise<AgentSettingsResult> {
+    const store = await this.store();
+    const thread = await store.readThreadRecord(query.threadId);
+    if (!thread) throw new CliError("THREAD_NOT_FOUND", `Thread ${query.threadId} was not found.`, { exitCode: 4, details: { threadId: query.threadId } });
+    const config = await this.loadConfig();
+    const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === thread.projectId);
+    const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() === "" ? null : thread.env.path);
+    await this.assertAgentSettingsAllowed(config, thread.modelSelection.instanceId, workspaceRoot);
+    return projectAgentSettings(describeSettings(config), query);
+  }
+
+  /** Whether `settings_read` may run for a thread: its `moxen` server must not be removed, excluded or hiding this tool. */
+  private async assertAgentSettingsAllowed(config: CliConfig, instanceId: string, workspaceRoot: string | null): Promise<void> {
+    const kind = driverKindOfInstance(instanceId);
+    const providerConfig = kind === null ? undefined : config.providers?.[kind];
+    const excluded = kind !== null && parseNameList(providerConfig?.mcpExclude).some((name) => name.toLowerCase() === MOXEN_MCP_SERVER_NAME);
+    let entry;
+    try {
+      entry = await mcpServerEntryFor(config.mcpServers, workspaceRoot, MOXEN_MCP_SERVER_NAME);
+    } catch {
+      throw new CliError("SETTINGS_UNAVAILABLE", "Moxen's MCP server configuration could not be read, so agent settings are unavailable.", { exitCode: 2 });
+    }
+    const hidden = (entry?.disabledTools ?? []).some((name) => name.toLowerCase() === SETTINGS_READ_TOOL);
+    const offeredToOtherProviders = kind !== null && entry?.providers !== undefined && entry.providers.length > 0 && !entry.providers.includes(kind);
+    if (entry === null || entry?.disabled === true || excluded || hidden || offeredToOtherProviders) {
+      throw new CliError("SETTINGS_TOOL_DISABLED", `Moxen's settings tool is switched off for this thread: its server is removed, excluded, or has ${SETTINGS_READ_TOOL} hidden.`, { exitCode: 2 });
+    }
   }
 
   /**
@@ -2400,6 +2437,8 @@ export class DirectConnection implements ClientApi {
       }
       case "experience.read":
         return await readExperience(this.storeRoot);
+      case "settings.agent-read":
+        return await this.agentSettingsRead(query);
       case "settings.read":
         return await this.settingsSnapshot();
       case "config.read": {

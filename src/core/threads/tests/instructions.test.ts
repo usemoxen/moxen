@@ -7,7 +7,7 @@ import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, pars
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { runningModelOf, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { runningModelOf, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, AGENT_SETTINGS_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -53,6 +53,20 @@ describe("runtime instructions", () => {
     expect(text).toContain("consult knowledge_search, then knowledge_read");
     expect(text).toContain("Never put credentials in tool arguments or files");
     expect(text).toContain("Reference defaults are not current settings");
+  });
+
+  it("keeps redacted settings out of reach without claiming the prompt binds another process", () => {
+    const input = { instanceId: CLAUDE, env: LOCAL, shell: LINUX, settings: true };
+    const text = buildRuntimeInstructions(input);
+    expect(text).toContain("# Agent settings");
+    expect(text).toContain(AGENT_SETTINGS_GUIDANCE);
+    expect(text).toContain("settings_read");
+    expect(text).toContain("do not look for it another way");
+    expect(text).toContain("use knowledge_search and knowledge_read for how");
+    expect(text).toContain("not a rule enforced against other programs on the machine");
+    expect(buildRuntimeInstructions({ ...input, settings: false })).not.toContain("# Agent settings");
+    // A delegated reader gets the same section: the tool is available there too.
+    expect(buildRuntimeInstructions({ ...input, delegation: { parentTitle: "Parent", baseBranch: null } })).toContain("# Agent settings");
   });
   it("tells every session it runs in Moxen, leaves the harness to the provider's own prompt, and names no model", () => {
     const text = buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX });
